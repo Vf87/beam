@@ -18,10 +18,19 @@
 package org.apache.beam.sdk.extensions.sql.impl;
 
 import edu.umd.cs.findbugs.annotations.Nullable;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.lang.reflect.TypeVariable;
 import java.util.Iterator;
 import java.util.List;
+import org.apache.beam.sdk.coders.CannotProvideCoderException;
+import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.extensions.sql.udf.AggregateFn;
 import org.apache.beam.sdk.transforms.Combine;
+import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
 
 /**
  * {@link org.apache.beam.sdk.transforms.Combine.CombineFn} that wraps an {@link AggregateFn}. The
@@ -36,6 +45,13 @@ public class LazyAggregateCombineFn<InputT, AccumT, OutputT>
   public LazyAggregateCombineFn(List<String> functionPath, String jarPath) {
     this.functionPath = functionPath;
     this.jarPath = jarPath;
+  }
+
+  @VisibleForTesting
+  LazyAggregateCombineFn(AggregateFn aggregateFn) {
+    this.functionPath = ImmutableList.of();
+    this.jarPath = "";
+    this.aggregateFn = aggregateFn;
   }
 
   private AggregateFn<InputT, AccumT, OutputT> getAggregateFn() {
@@ -58,14 +74,95 @@ public class LazyAggregateCombineFn<InputT, AccumT, OutputT>
 
   @Override
   public AccumT mergeAccumulators(Iterable<AccumT> accumulators) {
-    Iterator<AccumT> it = accumulators.iterator();
-    AccumT first = it.next();
-    it.remove();
-    return getAggregateFn().mergeAccumulators(first, accumulators);
+    AccumT first = accumulators.iterator().next();
+    Iterable<AccumT> rest = new SkipFirstElementIterable<>(accumulators);
+    return getAggregateFn().mergeAccumulators(first, rest);
   }
 
   @Override
   public OutputT extractOutput(AccumT accumulator) {
     return getAggregateFn().extractOutput(accumulator);
+  }
+
+  @Override
+  public Coder<AccumT> getAccumulatorCoder(CoderRegistry registry, Coder<InputT> inputCoder)
+      throws CannotProvideCoderException {
+    // Infer coder based on underlying AggregateFn instance.
+    return registry.getCoder(
+        getAggregateFn().getClass(),
+        AggregateFn.class,
+        ImmutableMap.<Type, Coder<?>>of(getInputTVariable(), inputCoder),
+        getAccumTVariable());
+  }
+
+  @Override
+  public TypeVariable<?> getAccumTVariable() {
+    return AggregateFn.class.getTypeParameters()[1];
+  }
+
+  public UdafImpl getUdafImpl() {
+    return new LazyUdafImpl<>(this);
+  }
+
+  @Override
+  public String toString() {
+    return String.format(
+        "%s %s from jar %s",
+        LazyAggregateCombineFn.class.getSimpleName(), String.join(".", functionPath), jarPath);
+  }
+
+  /** Wrapper {@link Iterable} which always skips its first element. */
+  private static class SkipFirstElementIterable<T> implements Iterable<T> {
+    private final Iterable<T> all;
+
+    SkipFirstElementIterable(Iterable<T> all) {
+      this.all = all;
+    }
+
+    @Override
+    public Iterator<T> iterator() {
+      Iterator<T> it = all.iterator();
+      it.next();
+      return it;
+    }
+  }
+
+  /** {@link UdafImpl} that defers type inference to the underlying {@link AggregateFn}. */
+  private static class LazyUdafImpl<InputT, AccumT, OutputT> extends UdafImpl {
+    private final LazyAggregateCombineFn<InputT, AccumT, OutputT> lazyFn;
+
+    public LazyUdafImpl(LazyAggregateCombineFn lazyFn) {
+      super(lazyFn);
+      this.lazyFn = lazyFn;
+    }
+
+    private Type[] getTypeArguments() {
+      Class clazz = lazyFn.getAggregateFn().getClass();
+      while (clazz != null) {
+        for (Type genericInterface : clazz.getGenericInterfaces()) {
+          if (genericInterface instanceof ParameterizedType) {
+            ParameterizedType parameterizedType = ((ParameterizedType) genericInterface);
+            if (parameterizedType.getRawType().equals(AggregateFn.class)) {
+              return parameterizedType.getActualTypeArguments();
+            }
+          }
+        }
+        clazz = clazz.getSuperclass();
+      }
+      throw new IllegalStateException(
+          String.format(
+              "Cannot get type arguments for %s: must implement parameterized %s",
+              lazyFn, AggregateFn.class.getSimpleName()));
+    }
+
+    @Override
+    protected Type getInputType() {
+      return getTypeArguments()[0];
+    }
+
+    @Override
+    protected Type getOutputType() {
+      return getTypeArguments()[2];
+    }
   }
 }

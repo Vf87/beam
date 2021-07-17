@@ -19,7 +19,8 @@ package org.apache.beam.fn.harness.data;
 
 import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.annotation.concurrent.GuardedBy;
@@ -30,7 +31,7 @@ import org.apache.beam.sdk.fn.data.CloseableFnDataReceiver;
 import org.apache.beam.sdk.fn.data.FnDataReceiver;
 import org.apache.beam.sdk.fn.data.InboundDataClient;
 import org.apache.beam.sdk.fn.data.LogicalEndpoint;
-import org.apache.beam.vendor.grpc.v1p26p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.ByteString;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
 import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -55,11 +56,11 @@ public class QueueingBeamFnDataClient implements BeamFnDataClient {
             },
             new Object());
 
-    private final LinkedBlockingQueue<ConsumerAndData<?>> queue;
+    private final BlockingQueue<ConsumerAndData<?>> queue;
     private final AtomicBoolean closed = new AtomicBoolean();
 
     ClosableQueue(int queueSize) {
-      this.queue = new LinkedBlockingQueue<ConsumerAndData<?>>(queueSize);
+      this.queue = new ArrayBlockingQueue<>(queueSize);
     }
 
     // Closes the queue indicating that no additional elements will be added. May be called
@@ -83,12 +84,22 @@ public class QueueingBeamFnDataClient implements BeamFnDataClient {
     // empty in which case it returns null.
     @Nullable
     ConsumerAndData<?> take() throws InterruptedException {
+      // We first poll without blocking to optimize for the case there is data.
+      // If there is no data we end up blocking on take() and thus the extra
+      // poll doesn't matter.
       @Nullable ConsumerAndData<?> result = queue.poll();
       if (result == null) {
         if (closed.get()) {
-          return null;
+          // Poll again to ensure that there is nothing in the queue. Once we observe closed as true
+          // we are guaranteed no additional elements other than the POISON will be added. However
+          // we can't rely on the previous poll result as it could race with additional offers and
+          // close.
+          result = queue.poll();
+        } else {
+          // We are not closed so we perform a blocking take. We are guaranteed that additional
+          // elements will be offered or the POISON will be added by close to unblock this thread.
+          result = queue.take();
         }
-        result = queue.take();
       }
       if (result == POISON) {
         return null;

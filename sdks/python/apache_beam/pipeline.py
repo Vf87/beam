@@ -47,8 +47,6 @@ Typical usage::
 # pytype: skip-file
 # mypy: disallow-untyped-defs
 
-from __future__ import absolute_import
-
 import abc
 import logging
 import os
@@ -56,8 +54,6 @@ import re
 import shutil
 import tempfile
 import unicodedata
-from builtins import object
-from builtins import zip
 from collections import defaultdict
 from typing import TYPE_CHECKING
 from typing import Any
@@ -72,7 +68,6 @@ from typing import Tuple
 from typing import Type
 from typing import Union
 
-from future.utils import with_metaclass
 from google.protobuf import message
 
 from apache_beam import pvalue
@@ -243,6 +238,11 @@ class Pipeline(object):
     # type: () -> PipelineOptions
     return self._options
 
+  @property
+  def allow_unsafe_triggers(self):
+    # type: () -> bool
+    return self._options.view_as(TypeOptions).allow_unsafe_triggers
+
   def _current_transform(self):
     # type: () -> AppliedPTransform
 
@@ -298,6 +298,9 @@ class Pipeline(object):
               replacement_transform,
               original_transform_node.full_label,
               original_transform_node.inputs)
+
+          replacement_transform_node.resource_hints = (
+              original_transform_node.resource_hints)
 
           # Transform execution could depend on order in which nodes are
           # considered. Hence we insert the replacement transform node to same
@@ -457,10 +460,10 @@ class Pipeline(object):
         transform.replace_output(output, tag=tag)
 
     for transform in input_replacements:
-      transform.inputs = input_replacements[transform]
+      transform.replace_inputs(input_replacements[transform])
 
     for transform in side_input_replacements:
-      transform.side_inputs = side_input_replacements[transform]
+      transform.replace_side_inputs(side_input_replacements[transform])
 
   def _check_replacement(self, override):
     # type: (PTransformOverride) -> None
@@ -1101,6 +1104,27 @@ class AppliedPTransform(object):
     else:
       raise TypeError("Unexpected output type: %s" % output)
 
+    # Importing locally to prevent circular dependency issues.
+    from apache_beam.transforms import external
+    if isinstance(self.transform, external.ExternalTransform):
+      self.transform.replace_named_outputs(self.named_outputs())
+
+  def replace_inputs(self, inputs):
+    self.inputs = inputs
+
+    # Importing locally to prevent circular dependency issues.
+    from apache_beam.transforms import external
+    if isinstance(self.transform, external.ExternalTransform):
+      self.transform.replace_named_inputs(self.named_inputs())
+
+  def replace_side_inputs(self, side_inputs):
+    self.side_inputs = side_inputs
+
+    # Importing locally to prevent circular dependency issues.
+    from apache_beam.transforms import external
+    if isinstance(self.transform, external.ExternalTransform):
+      self.transform.replace_named_inputs(self.named_inputs())
+
   def add_output(
       self,
       output,  # type: Union[pvalue.DoOutputsTuple, pvalue.PValue]
@@ -1350,8 +1374,7 @@ class AppliedPTransform(object):
         part._merge_outer_resource_hints()
 
 
-class PTransformOverride(with_metaclass(abc.ABCMeta,
-                                        object)):  # type: ignore[misc]
+class PTransformOverride(metaclass=abc.ABCMeta):
   """For internal use only; no backwards-compatibility guarantees.
 
   Gives a matcher and replacements for matching PTransforms.
