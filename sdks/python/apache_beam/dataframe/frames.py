@@ -38,17 +38,22 @@ import itertools
 import math
 import re
 import warnings
-from typing import List
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+from pandas._libs import lib
+from pandas.api.types import is_float_dtype
+from pandas.api.types import is_int64_dtype
+from pandas.api.types import is_list_like
 from pandas.core.groupby.generic import DataFrameGroupBy
 
+from apache_beam.dataframe import convert
 from apache_beam.dataframe import expressions
 from apache_beam.dataframe import frame_base
 from apache_beam.dataframe import io
 from apache_beam.dataframe import partitionings
+from apache_beam.transforms import PTransform
 
 __all__ = [
     'DeferredSeries',
@@ -57,6 +62,10 @@ __all__ = [
 
 # Get major, minor version
 PD_VERSION = tuple(map(int, pd.__version__.split('.')[0:2]))
+
+# Find the name pandas uses for the NaN column in get_dummies().
+# Older pandas versions (<2.3.0) use 'nan', whereas newer versions (>=2.3.0) use 'NaN'.
+_DUMMY_NAN_COLUMN = 'NaN' if PD_VERSION >= (2, 3) else 'nan'
 
 
 def populate_not_implemented(pd_type):
@@ -99,7 +108,10 @@ def _fillna_alias(method):
           frame_base.populate_defaults(pd.DataFrame)(wrapper)))
 
 
+# These aggregations are commutative and associative, they can be trivially
+# "lifted" (i.e. we can pre-aggregate on partitions, group, then post-aggregate)
 LIFTABLE_AGGREGATIONS = ['all', 'any', 'max', 'min', 'prod', 'sum']
+# These aggregations can be lifted if post-aggregated with "sum"
 LIFTABLE_WITH_SUM_AGGREGATIONS = ['size', 'count']
 UNLIFTABLE_AGGREGATIONS = [
     'mean',
@@ -107,30 +119,48 @@ UNLIFTABLE_AGGREGATIONS = [
     'quantile',
     'describe',
     'sem',
-    'mad',
     'skew',
     'kurt',
     'kurtosis',
-    # TODO: The below all have specialized distributed
-    # implementations, but they require tracking
-    # multiple intermediate series, which is difficult
-    # to lift in groupby
     'std',
     'var',
     'corr',
     'cov',
     'nunique',
 ]
+# mad was removed in Pandas 2.0.
+if PD_VERSION < (2, 0):
+  UNLIFTABLE_AGGREGATIONS.append('mad')
+
 ALL_AGGREGATIONS = (
     LIFTABLE_AGGREGATIONS + LIFTABLE_WITH_SUM_AGGREGATIONS +
     UNLIFTABLE_AGGREGATIONS)
+
+# These aggregations have specialized distributed implementations on
+# DeferredSeries, which are re-used in DeferredFrame. Note they are *not* used
+# for grouped aggregations, since they generally require tracking multiple
+# intermediate series, which is difficult to lift in groupby.
+HAND_IMPLEMENTED_GLOBAL_AGGREGATIONS = {
+    'quantile',
+    'std',
+    'var',
+    'mean',
+    'nunique',
+    'corr',
+    'cov',
+    'skew',
+    'kurt',
+    'kurtosis'
+}
+UNLIFTABLE_GLOBAL_AGGREGATIONS = (
+    set(UNLIFTABLE_AGGREGATIONS) - set(HAND_IMPLEMENTED_GLOBAL_AGGREGATIONS))
 
 
 def _agg_method(base, func):
   def wrapper(self, *args, **kwargs):
     return self.agg(func, *args, **kwargs)
 
-  if func in UNLIFTABLE_AGGREGATIONS:
+  if func in UNLIFTABLE_GLOBAL_AGGREGATIONS:
     wrapper.__doc__ = (
         f"``{func}`` cannot currently be parallelized. It will "
         "require collecting all data on a single node.")
@@ -206,13 +236,9 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
 
     return frame_base.DeferredFrame.wrap(
         expressions.ComputedExpression(
-            'drop',
-            lambda df: df.drop(
-                axis=axis,
-                index=index,
-                columns=columns,
-                errors=errors,
-                **kwargs), [self._expr],
+            'drop', lambda df: df.drop(
+                axis=axis, index=index, columns=columns, errors=errors, **kwargs
+            ), [self._expr],
             proxy=proxy,
             requires_partition_by=requires))
 
@@ -222,11 +248,20 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
   def droplevel(self, level, axis):
     return frame_base.DeferredFrame.wrap(
         expressions.ComputedExpression(
-            'droplevel',
-            lambda df: df.droplevel(level, axis=axis), [self._expr],
+            'droplevel', lambda df: df.droplevel(level, axis=axis),
+            [self._expr],
             requires_partition_by=partitionings.Arbitrary(),
             preserves_partition_by=partitionings.Arbitrary()
             if axis in (1, 'column') else partitionings.Singleton()))
+
+  @frame_base.with_docs_from(pd.DataFrame)
+  @frame_base.args_to_kwargs(pd.DataFrame)
+  def swaplevel(self, **kwargs):
+    return frame_base.DeferredFrame.wrap(
+        expressions.ComputedExpression(
+            'swaplevel', lambda df: df.swaplevel(**kwargs), [self._expr],
+            requires_partition_by=partitionings.Arbitrary(),
+            preserves_partition_by=partitionings.Arbitrary()))
 
   @frame_base.with_docs_from(pd.DataFrame)
   @frame_base.args_to_kwargs(pd.DataFrame)
@@ -264,8 +299,7 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
 
       with expressions.allow_non_parallel_operations():
         value_expr = expressions.ComputedExpression(
-            'as_scalar',
-            lambda df: AsScalar(df), [value._expr],
+            'as_scalar', lambda df: AsScalar(df), [value._expr],
             requires_partition_by=partitionings.Singleton())
 
       get_value = lambda x: x.value
@@ -286,14 +320,9 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
     return frame_base.DeferredFrame.wrap(
         # yapf: disable
         expressions.ComputedExpression(
-            'fillna',
-            lambda df,
-            value: df.fillna(
-                get_value(value),
-                method=method,
-                axis=axis,
-                limit=limit,
-                **kwargs), [self._expr, value_expr],
+            'fillna', lambda df, value: df.fillna(
+                get_value(value), method=method, axis=axis, limit=limit, **
+                kwargs), [self._expr, value_expr],
             preserves_partition_by=partitionings.Arbitrary(),
             requires_partition_by=requires))
 
@@ -309,30 +338,30 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
   @frame_base.with_docs_from(pd.DataFrame)
   def first(self, offset):
     per_partition = expressions.ComputedExpression(
-        'first-per-partition',
-        lambda df: df.sort_index().first(offset=offset), [self._expr],
+        'first-per-partition', lambda df: df.sort_index().first(offset=offset),
+        [self._expr],
         preserves_partition_by=partitionings.Arbitrary(),
         requires_partition_by=partitionings.Arbitrary())
     with expressions.allow_non_parallel_operations(True):
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
-              'first',
-              lambda df: df.sort_index().first(offset=offset), [per_partition],
+              'first', lambda df: df.sort_index().first(offset=offset),
+              [per_partition],
               preserves_partition_by=partitionings.Arbitrary(),
               requires_partition_by=partitionings.Singleton()))
 
   @frame_base.with_docs_from(pd.DataFrame)
   def last(self, offset):
     per_partition = expressions.ComputedExpression(
-        'last-per-partition',
-        lambda df: df.sort_index().last(offset=offset), [self._expr],
+        'last-per-partition', lambda df: df.sort_index().last(offset=offset),
+        [self._expr],
         preserves_partition_by=partitionings.Arbitrary(),
         requires_partition_by=partitionings.Arbitrary())
     with expressions.allow_non_parallel_operations(True):
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
-              'last',
-              lambda df: df.sort_index().last(offset=offset), [per_partition],
+              'last', lambda df: df.sort_index().last(offset=offset),
+              [per_partition],
               preserves_partition_by=partitionings.Arbitrary(),
               requires_partition_by=partitionings.Singleton()))
 
@@ -340,24 +369,23 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
   @frame_base.args_to_kwargs(pd.DataFrame)
   @frame_base.populate_defaults(pd.DataFrame)
   def groupby(self, by, level, axis, as_index, group_keys, **kwargs):
-    """``as_index`` and ``group_keys`` must both be ``True``.
+    """``as_index`` must be ``True``.
 
     Aggregations grouping by a categorical column with ``observed=False`` set
     are not currently parallelizable
-    (`BEAM-11190 <https://issues.apache.org/jira/browse/BEAM-11190>`_).
+    (`Issue 21827 <https://github.com/apache/beam/issues/21827>`_).
     """
     if not as_index:
       raise NotImplementedError('groupby(as_index=False)')
-    if not group_keys:
-      raise NotImplementedError('groupby(group_keys=False)')
 
     if axis in (1, 'columns'):
       return _DeferredGroupByCols(
           expressions.ComputedExpression(
-              'groupbycols',
-              lambda df: df.groupby(by, axis=axis, **kwargs), [self._expr],
+              'groupbycols', lambda df: df.groupby(
+                  by, axis=axis, group_keys=group_keys, **kwargs), [self._expr],
               requires_partition_by=partitionings.Arbitrary(),
-              preserves_partition_by=partitionings.Arbitrary()))
+              preserves_partition_by=partitionings.Arbitrary()),
+          group_keys=group_keys)
 
     if level is None and by is None:
       raise TypeError("You have to supply one of 'by' and 'level'")
@@ -505,8 +533,9 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
         to_group = self.set_index(by)._expr
 
       if grouping_columns:
-        # TODO(BEAM-11711): It should be possible to do this without creating an
-        # expression manually, by using DeferredDataFrame.set_index, i.e.:
+        # TODO(https://github.com/apache/beam/issues/20759):
+        # It should be possible to do this without creating
+        # an expression manually, by using DeferredDataFrame.set_index, i.e.:
         #   to_group_with_index = self.set_index([self.index] +
         #                                        grouping_columns)._expr
         to_group_with_index = expressions.ComputedExpression(
@@ -524,16 +553,17 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
 
     return DeferredGroupBy(
         expressions.ComputedExpression(
-            'groupbyindex',
-            lambda df: df.groupby(
-                level=list(range(df.index.nlevels)), **kwargs), [to_group],
+            'groupbyindex', lambda df: df.groupby(
+                level=list(range(df.index.nlevels)), group_keys=group_keys, **
+                kwargs), [to_group],
             requires_partition_by=partitionings.Index(),
             preserves_partition_by=partitionings.Arbitrary()),
         kwargs,
         to_group,
         to_group_with_index,
         grouping_columns=grouping_columns,
-        grouping_indexes=grouping_indexes)
+        grouping_indexes=grouping_indexes,
+        group_keys=group_keys)
 
   @property  # type: ignore
   @frame_base.with_docs_from(pd.DataFrame)
@@ -561,18 +591,19 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
     if level is not None and not isinstance(level, (tuple, list)):
       level = [level]
     if level is None or len(level) == self._expr.proxy().index.nlevels:
-      # TODO(BEAM-12182): Could do distributed re-index with offsets.
+      # TODO(https://github.com/apache/beam/issues/20859):
+      # Could do distributed re-index with offsets.
       requires_partition_by = partitionings.Singleton(
           reason=(
               f"reset_index(level={level!r}) drops the entire index and "
               "creates a new one, so it cannot currently be parallelized "
-              "(BEAM-12182)."))
+              "(https://github.com/apache/beam/issues/20859)."))
     else:
       requires_partition_by = partitionings.Arbitrary()
     return frame_base.DeferredFrame.wrap(
         expressions.ComputedExpression(
-            'reset_index',
-            lambda df: df.reset_index(level=level, **kwargs), [self._expr],
+            'reset_index', lambda df: df.reset_index(level=level, **kwargs),
+            [self._expr],
             preserves_partition_by=partitionings.Singleton(),
             requires_partition_by=requires_partition_by))
 
@@ -608,7 +639,11 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
           "memory-sharing semantics that are not compatible with the Beam "
           "model.")
 
-    if dtype == 'category':
+    # An instance of CategoricalDtype is actualy considered equal to the string
+    # 'category', so we have to explicitly check if dtype is an instance of
+    # CategoricalDtype, and allow it.
+    # See https://github.com/apache/beam/issues/23276
+    if dtype == 'category' and not isinstance(dtype, pd.CategoricalDtype):
       raise frame_base.WontImplementError(
           "astype(dtype='category') is not supported because the type of the "
           "output column depends on the data. Please use pd.CategoricalDtype "
@@ -638,10 +673,14 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
     order-sensitive. It cannot be specified.
 
     If ``limit`` is specified this operation is not parallelizable."""
+    # pylint: disable-next=c-extension-no-member
+    value_compare = None if PD_VERSION < (1, 4) else lib.no_default
     if method is not None and not isinstance(to_replace,
-                                             dict) and value is None:
+                                             dict) and value is value_compare:
       # pandas only relies on method if to_replace is not a dictionary, and
-      # value is None
+      # value is the <no_default> value. This is different than
+      # if ``None`` is explicitly passed for ``value``. In this case, it will be
+      # respected
       raise frame_base.WontImplementError(
           f"replace(method={method!r}) is not supported because it is "
           "order sensitive. Only replace(method=None) is supported.",
@@ -656,12 +695,8 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
               "requires collecting all data on a single node."))
     return frame_base.DeferredFrame.wrap(
         expressions.ComputedExpression(
-            'replace',
-            lambda df: df.replace(
-                to_replace=to_replace,
-                value=value,
-                limit=limit,
-                method=method,
+            'replace', lambda df: df.replace(
+                to_replace=to_replace, value=value, limit=limit, method=method,
                 **kwargs), [self._expr],
             preserves_partition_by=partitionings.Arbitrary(),
             requires_partition_by=requires_partition_by))
@@ -683,10 +718,8 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
     elif isinstance(ambiguous, frame_base.DeferredFrame):
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
-              'tz_localize',
-              lambda df,
-              ambiguous: df.tz_localize(ambiguous=ambiguous, **kwargs),
-              [self._expr, ambiguous._expr],
+              'tz_localize', lambda df, ambiguous: df.tz_localize(
+                  ambiguous=ambiguous, **kwargs), [self._expr, ambiguous._expr],
               requires_partition_by=partitionings.Index(),
               preserves_partition_by=partitionings.Singleton()))
     elif ambiguous == 'infer':
@@ -718,8 +751,7 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
     with expressions.allow_non_parallel_operations(True):
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
-              'sum_sizes',
-              lambda sizes: sizes.sum(), [sizes],
+              'sum_sizes', lambda sizes: sizes.sum(), [sizes],
               requires_partition_by=partitionings.Singleton(),
               preserves_partition_by=partitionings.Singleton()))
 
@@ -738,8 +770,7 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
     with expressions.allow_non_parallel_operations(True):
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
-              'sum_lengths',
-              lambda lengths: lengths.sum(), [lengths],
+              'sum_lengths', lambda lengths: lengths.sum(), [lengths],
               requires_partition_by=partitionings.Singleton(),
               preserves_partition_by=partitionings.Singleton()))
 
@@ -763,8 +794,7 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
     with expressions.allow_non_parallel_operations(True):
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
-              'check_all_empty',
-              lambda empties: empties.all(), [empties],
+              'check_all_empty', lambda empties: empties.all(), [empties],
               requires_partition_by=partitionings.Singleton(),
               preserves_partition_by=partitionings.Singleton()))
 
@@ -785,8 +815,7 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
       # Will throw if overall dataset has != 1 element
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
-              'combine_all_bools',
-              lambda bools: bools.bool(), [bools],
+              'combine_all_bools', lambda bools: bools.bool(), [bools],
               proxy=bool(),
               requires_partition_by=partitionings.Singleton(),
               preserves_partition_by=partitionings.Singleton()))
@@ -796,8 +825,7 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
     intermediate = expressions.ComputedExpression(
         'equals_partitioned',
         # Wrap scalar results in a Series for easier concatenation later
-        lambda df,
-        other: pd.Series(df.equals(other)),
+        lambda df, other: pd.Series(df.equals(other)),
         [self._expr, other._expr],
         requires_partition_by=partitionings.Index(),
         preserves_partition_by=partitionings.Singleton())
@@ -805,8 +833,7 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
     with expressions.allow_non_parallel_operations(True):
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
-              'aggregate_equals',
-              lambda df: df.all(), [intermediate],
+              'aggregate_equals', lambda df: df.all(), [intermediate],
               requires_partition_by=partitionings.Singleton(),
               preserves_partition_by=partitionings.Singleton()))
 
@@ -857,15 +884,17 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
     return frame_base.DeferredFrame.wrap(
         expressions.ComputedExpression(
             'sort_index',
-            lambda df: df.sort_index(axis, **kwargs),
+            lambda df: df.sort_index(axis=axis, **kwargs),
             [self._expr],
             requires_partition_by=partitionings.Arbitrary(),
             preserves_partition_by=partitionings.Arbitrary(),
         ))
 
   @frame_base.with_docs_from(pd.DataFrame)
-  @frame_base.args_to_kwargs(pd.DataFrame)
-  @frame_base.populate_defaults(pd.DataFrame)
+  @frame_base.args_to_kwargs(
+      pd.DataFrame, removed_args=["errors"] if PD_VERSION >= (2, 0) else None)
+  @frame_base.populate_defaults(
+      pd.DataFrame, removed_args=["errors"] if PD_VERSION >= (2, 0) else None)
   @frame_base.maybe_inplace
   def where(self, cond, other, errors, **kwargs):
     """where is not parallelizable when ``errors="ignore"`` is specified."""
@@ -887,16 +916,19 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
     else:
       actual_args['other'] = other
 
-    if errors == "ignore":
-      # We need all data in order to ignore errors and propagate the original
-      # data.
-      requires = partitionings.Singleton(
-          reason=(
-              f"where(errors={errors!r}) is currently not parallelizable, "
-              "because all data must be collected on one node to determine if "
-              "the original data should be propagated instead."))
+    # For Pandas 2.0, errors was removed as an argument.
+    if PD_VERSION < (2, 0):
+      if "errors" in kwargs and kwargs['errors'] == "ignore":
+        # We need all data in order to ignore errors and propagate the original
+        # data.
+        requires = partitionings.Singleton(
+            reason=(
+                f"where(errors={kwargs['errors']!r}) is currently not "
+                "parallelizable, because all data must be collected on one "
+                "node to determine if the original data should be propagated "
+                "instead."))
 
-    actual_args['errors'] = errors
+      actual_args['errors'] = kwargs['errors'] if 'errors' in kwargs else None
 
     def where_execution(df, *args):
       runtime_values = {
@@ -925,6 +957,96 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
   @frame_base.with_docs_from(pd.DataFrame)
   @frame_base.args_to_kwargs(pd.DataFrame)
   @frame_base.populate_defaults(pd.DataFrame)
+  def truncate(self, before, after, axis):
+
+    if axis in (None, 0, 'index'):
+
+      def truncate(df):
+        return df.sort_index().truncate(before=before, after=after, axis=axis)
+    else:
+
+      def truncate(df):
+        return df.truncate(before=before, after=after, axis=axis)
+
+    return frame_base.DeferredFrame.wrap(
+        expressions.ComputedExpression(
+            'truncate',
+            truncate, [self._expr],
+            requires_partition_by=partitionings.Arbitrary(),
+            preserves_partition_by=partitionings.Arbitrary()))
+
+  @frame_base.with_docs_from(pd.DataFrame)
+  @frame_base.args_to_kwargs(pd.DataFrame)
+  @frame_base.populate_defaults(pd.DataFrame)
+  def unstack(self, **kwargs):
+    level = kwargs.get('level', -1)
+
+    if self._expr.proxy().index.nlevels == 1:
+      if PD_VERSION < (1, 2):
+        raise frame_base.WontImplementError(
+            "unstack() is not supported when using pandas < 1.2.0\n"
+            "Please upgrade to pandas 1.2.0 or higher to use this operation.")
+      return frame_base.DeferredFrame.wrap(
+          expressions.ComputedExpression(
+              'unstack', lambda s: s.unstack(**kwargs), [self._expr],
+              requires_partition_by=partitionings.Index()))
+    else:
+      # Unstacking MultiIndex objects
+      idx = self._expr.proxy().index
+
+      # Converting level (int, str, or combination) to a list of number levels
+      level_list = level if isinstance(level, list) else [level]
+      level_number_list = [idx._get_level_number(l) for l in level_list]
+
+      # Checking if levels provided are of CategoricalDtype
+      if not all(isinstance(idx.levels[l].dtype, (pd.CategoricalDtype,
+                                                  pd.BooleanDtype))
+                 for l in level_number_list):
+        raise frame_base.WontImplementError(
+            "unstack() is only supported on DataFrames if unstacked level "
+            "is a categorical or boolean column",
+            reason="non-deferred-columns")
+      else:
+        tmp = self._expr.proxy().unstack(**kwargs)
+        if isinstance(tmp.columns, pd.MultiIndex):
+          levels = []
+          for i in range(tmp.columns.nlevels):
+            level = tmp.columns.levels[i]
+            levels.append(level)
+          col_idx = pd.MultiIndex.from_product(levels)
+        else:
+          if tmp.columns.dtype == 'boolean':
+            col_idx = pd.Index([False, True], dtype='boolean')
+          else:
+            col_idx = pd.CategoricalIndex(tmp.columns.categories)
+
+        if isinstance(self._expr.proxy(), pd.Series):
+          proxy_dtype = self._expr.proxy().dtypes
+        else:
+          # Set dtype to object if more than one value
+          dtypes = [d for d in self._expr.proxy().dtypes]
+          proxy_dtype = object
+          if np.int64 in dtypes:
+            proxy_dtype = np.int64
+          if np.float64 in dtypes:
+            proxy_dtype = np.float64
+          if object in dtypes:
+            proxy_dtype = object
+
+        proxy = pd.DataFrame(
+            columns=col_idx, dtype=proxy_dtype, index=tmp.index)
+
+        with expressions.allow_non_parallel_operations(True):
+          return frame_base.DeferredFrame.wrap(
+              expressions.ComputedExpression(
+                  'unstack', lambda s: pd.concat([proxy, s.unstack(**kwargs)]),
+                  [self._expr],
+                  proxy=proxy,
+                  requires_partition_by=partitionings.Singleton()))
+
+  @frame_base.with_docs_from(pd.DataFrame)
+  @frame_base.args_to_kwargs(pd.DataFrame)
+  @frame_base.populate_defaults(pd.DataFrame)
   def xs(self, key, axis, level, **kwargs):
     """Note that ``xs(axis='index')`` will raise a ``KeyError`` at execution
     time if the key does not exist in the index."""
@@ -934,8 +1056,7 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
       # KeyError at construction time for missing columns.
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
-              'xs',
-              lambda df: df.xs(key, axis=axis, **kwargs), [self._expr],
+              'xs', lambda df: df.xs(key, axis=axis, **kwargs), [self._expr],
               requires_partition_by=partitionings.Arbitrary(),
               preserves_partition_by=partitionings.Arbitrary()))
     elif axis not in ('index', 0):
@@ -945,10 +1066,12 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
           f"got {axis!r}.")
 
     if not isinstance(key, tuple):
-      key = (key, )
+      key_size = 1
+      key_series = pd.Series([key], index=[key])
+    else:
+      key_size = len(key)
+      key_series = pd.Series([key], pd.MultiIndex.from_tuples([key]))
 
-    key_size = len(key)
-    key_series = pd.Series([key], pd.MultiIndex.from_tuples([key]))
     key_expr = expressions.ConstantExpression(
         key_series, proxy=key_series.iloc[:0])
 
@@ -968,23 +1091,81 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
       reindexed = self.reorder_levels(
           level + [i for i in range(self.index.nlevels) if i not in level])
 
-    def xs_partitioned(frame, key):
-      if not len(key):
-        # key is not in this partition, return empty dataframe
-        return frame.iloc[:0].droplevel(list(range(key_size)))
+    if key_size < reindexed.index.nlevels:
 
-      # key should be in this partition, call xs. Will raise KeyError if not
-      # present.
-      return frame.xs(key.item())
+      def xs_partitioned(frame, key):
+        if not len(key):
+          # key is not in this partition, return empty dataframe/series
+          result = frame.iloc[:0]
+          return result.droplevel(list(range(key_size)))
+        return frame.xs(key.item(), **kwargs)
 
-    return frame_base.DeferredFrame.wrap(
-        expressions.ComputedExpression(
-            'xs',
-            xs_partitioned,
-            [reindexed._expr, key_expr],
-            requires_partition_by=partitionings.Index(list(range(key_size))),
-            # Drops index levels, so partitioning is not preserved
-            preserves_partition_by=partitionings.Singleton()))
+      return frame_base.DeferredFrame.wrap(
+          expressions.ComputedExpression(
+              'xs',
+              xs_partitioned, [reindexed._expr, key_expr],
+              requires_partition_by=partitionings.Index(list(range(key_size))),
+              preserves_partition_by=partitionings.Singleton()))
+    else:
+      # When all index levels are matched (key_size >= nlevels), pandas .xs()
+      # return type is data-dependent:
+      #   - Single match: reduces dimensionality (DataFrame -> Series, Series -> scalar)
+      #   - Duplicate matches: preserves container type (DataFrame -> DataFrame, Series -> Series)
+      # Because proxy schemas are 0-row templates evaluated at graph construction time
+      # without knowledge of dataset contents or key frequencies, the proxy always assumes
+      # a single match (dimensionality-reduced type). At runtime, the Singleton unwrap stage
+      # correctly produces whichever type pandas returns. Tests with multi-matching keys
+      # therefore specify check_proxy=False.
+      def xs_partitioned_wrapped(frame, key):
+        if not len(key):
+          return pd.Series([], dtype=object)
+        k = key.item()
+        try:
+          res = frame.xs(k, **kwargs)
+          return pd.Series([res], dtype=object)
+        except KeyError:
+          return pd.Series([], dtype=object)
+
+      intermediate = expressions.ComputedExpression(
+          'xs_partitioned_wrapped',
+          xs_partitioned_wrapped, [reindexed._expr, key_expr],
+          proxy=pd.Series([], dtype=object),
+          requires_partition_by=partitionings.Index(list(range(key_size))),
+          preserves_partition_by=partitionings.Singleton())
+
+      proxy_frame = reindexed._expr.proxy().iloc[:0]
+      if not proxy_frame.index.is_unique:
+        proxy_frame.index = proxy_frame.index.drop_duplicates()
+      k_val = key_series.iloc[0]
+      dummy_index = (
+          pd.MultiIndex.from_tuples([k_val], names=proxy_frame.index.names) if
+          isinstance(k_val, tuple) else pd.Index([k_val],
+                                                 name=proxy_frame.index.name))
+
+      if isinstance(proxy_frame, pd.DataFrame):
+        dummy_obj = proxy_frame.reindex(dummy_index)
+        xs_proxy = dummy_obj.xs(k_val, **kwargs)
+        if isinstance(xs_proxy, (pd.DataFrame, pd.Series)):
+          xs_proxy = xs_proxy.iloc[:0]
+      else:
+        try:
+          xs_proxy = proxy_frame.dtype.type()
+        except TypeError:
+          xs_proxy = proxy_frame.reindex(dummy_index).iloc[0]
+
+      def unwrap_xs(ser):
+        if ser.empty:
+          raise KeyError(k_val)
+        return ser.iloc[0]
+
+      with expressions.allow_non_parallel_operations(True):
+        return frame_base.DeferredFrame.wrap(
+            expressions.ComputedExpression(
+                'xs',
+                unwrap_xs, [intermediate],
+                proxy=xs_proxy,
+                requires_partition_by=partitionings.Singleton(),
+                preserves_partition_by=partitionings.Singleton()))
 
   @property
   def dtype(self):
@@ -1028,8 +1209,11 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
       pd.DataFrame, 'hist', reason="plotting-tools")
 
   attrs = property(
-      frame_base.wont_implement_method(
-          pd.DataFrame, 'attrs', reason='experimental'))
+      fget=frame_base.wont_implement_method(
+          pd.DataFrame, 'attrs', reason='experimental'),
+      fset=frame_base.wont_implement_method(
+          pd.DataFrame, 'attrs', reason='experimental'),
+  )
 
   reorder_levels = frame_base._proxy_method(
       'reorder_levels',
@@ -1060,7 +1244,7 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
 
   sparse = property(
       frame_base.not_implemented_method(
-          'sparse', 'BEAM-12425', base_type=pd.DataFrame))
+          'sparse', '20902', base_type=pd.DataFrame))
 
   transform = frame_base._elementwise_method('transform', base=pd.DataFrame)
 
@@ -1070,6 +1254,15 @@ class DeferredDataFrameOrSeries(frame_base.DeferredFrame):
       requires_partition_by=partitionings.Arbitrary(),
       # Manipulates index, partitioning is not preserved
       preserves_partition_by=partitionings.Singleton())
+
+  @frame_base.with_docs_from(pd.DataFrame)
+  def pipe(self, func, *args, **kwargs):
+    if isinstance(func, tuple):
+      func, data = func
+      kwargs[data] = self
+      return func(*args, **kwargs)
+
+    return func(self, *args, **kwargs)
 
 
 @populate_not_implemented(pd.Series)
@@ -1097,6 +1290,21 @@ class DeferredSeries(DeferredDataFrameOrSeries):
         fn, [self._expr],
         requires_partition_by=partitionings.Arbitrary(),
         preserves_partition_by=partitionings.Arbitrary())
+
+  @property  # type: ignore
+  @frame_base.with_docs_from(pd.Series)
+  def hasnans(self):
+    has_nans = expressions.ComputedExpression(
+        'hasnans', lambda s: pd.Series(s.hasnans), [self._expr],
+        requires_partition_by=partitionings.Arbitrary(),
+        preserves_partition_by=partitionings.Singleton())
+
+    with expressions.allow_non_parallel_operations():
+      return frame_base.DeferredFrame.wrap(
+          expressions.ComputedExpression(
+              'combine_hasnans', lambda s: s.any(), [has_nans],
+              requires_partition_by=partitionings.Singleton(),
+              preserves_partition_by=partitionings.Singleton()))
 
   @property  # type: ignore
   @frame_base.with_docs_from(pd.Series)
@@ -1131,8 +1339,7 @@ class DeferredSeries(DeferredDataFrameOrSeries):
           expressions.ComputedExpression(
               # yapf: disable
               'getitem',
-              lambda df,
-              indexer: df[indexer],
+              lambda df, indexer: df[indexer],
               [self._expr, key._expr],
               requires_partition_by=partitionings.Index(),
               preserves_partition_by=partitionings.Arbitrary()))
@@ -1162,12 +1369,14 @@ class DeferredSeries(DeferredDataFrameOrSeries):
       frame_base.wont_implement_method(
           pd.Series, 'shape', reason="non-deferred-result"))
 
-  @frame_base.with_docs_from(pd.Series)
-  @frame_base.args_to_kwargs(pd.Series)
-  @frame_base.populate_defaults(pd.Series)
+  @frame_base.with_docs_from(pd.Series, removed_method=PD_VERSION >= (2, 0))
+  @frame_base.args_to_kwargs(pd.Series, removed_method=PD_VERSION >= (2, 0))
+  @frame_base.populate_defaults(pd.Series, removed_method=PD_VERSION >= (2, 0))
   def append(self, to_append, ignore_index, verify_integrity, **kwargs):
     """``ignore_index=True`` is not supported, because it requires generating an
     order-sensitive index."""
+    if PD_VERSION >= (2, 0):
+      raise frame_base.WontImplementError('append() was removed in Pandas 2.0.')
     if not isinstance(to_append, DeferredSeries):
       raise frame_base.WontImplementError(
           "append() only accepts DeferredSeries instances, received " +
@@ -1186,9 +1395,7 @@ class DeferredSeries(DeferredDataFrameOrSeries):
 
     return frame_base.DeferredFrame.wrap(
         expressions.ComputedExpression(
-            'append',
-            lambda s,
-            to_append: s.append(
+            'append', lambda s, to_append: s.append(
                 to_append, verify_integrity=verify_integrity, **kwargs),
             [self._expr, to_append._expr],
             requires_partition_by=requires,
@@ -1207,7 +1414,7 @@ class DeferredSeries(DeferredDataFrameOrSeries):
     Only the default, ``method=None``, is allowed."""
     if level is not None:
       raise NotImplementedError('per-level align')
-    if method is not None:
+    if method is not None and method != lib.no_default:
       raise frame_base.WontImplementError(
           f"align(method={method!r}) is not supported because it is "
           "order sensitive. Only align(method=None) is supported.",
@@ -1216,9 +1423,7 @@ class DeferredSeries(DeferredDataFrameOrSeries):
     # multiple return values.
     aligned = frame_base.DeferredFrame.wrap(
         expressions.ComputedExpression(
-            'align',
-            lambda x,
-            y: pd.concat([x, y], axis=1, join='inner'),
+            'align', lambda x, y: pd.concat([x, y], axis=1, join='inner'),
             [self._expr, other._expr],
             requires_partition_by=partitionings.Index(),
             preserves_partition_by=partitionings.Arbitrary()))
@@ -1246,7 +1451,12 @@ class DeferredSeries(DeferredDataFrameOrSeries):
   tshift = frame_base.wont_implement_method(
       pd.Series, 'tshift', reason="deprecated")
 
-  rename = frame_base._elementwise_method('rename', base=pd.Series)
+  rename = frame_base._proxy_method(
+      'rename',
+      base=pd.Series,
+      requires_partition_by=partitionings.Arbitrary(),
+      preserves_partition_by=partitionings.Singleton())
+
   between = frame_base._elementwise_method('between', base=pd.Series)
 
   add_suffix = frame_base._proxy_method(
@@ -1260,6 +1470,62 @@ class DeferredSeries(DeferredDataFrameOrSeries):
       requires_partition_by=partitionings.Arbitrary(),
       preserves_partition_by=partitionings.Singleton())
 
+  info = frame_base.wont_implement_method(
+      pd.Series, 'info', reason="non-deferred-result")
+
+  def _idxmaxmin_helper(self, op, **kwargs):
+    if op == 'idxmax':
+      func = pd.Series.idxmax
+    elif op == 'idxmin':
+      func = pd.Series.idxmin
+    else:
+      raise ValueError(
+          "op must be one of ('idxmax', 'idxmin'). "
+          f"got {op!r}.")
+
+    def compute_idx(s):
+      index = func(s, **kwargs)
+      if pd.isna(index):
+        return s
+      else:
+        return s.loc[[index]]
+
+    # Avoids empty Series error when evaluating proxy
+    index_dtype = self._expr.proxy().index.dtype
+    index = pd.Index([], dtype=index_dtype)
+    proxy = self._expr.proxy().copy()
+    proxy.index = index
+    proxy = pd.concat([
+        proxy,
+        pd.Series([1], index=np.asarray(['0']).astype(proxy.index.dtype))
+    ])
+
+    idx_func = expressions.ComputedExpression(
+        'idx_func',
+        compute_idx, [self._expr],
+        proxy=proxy,
+        requires_partition_by=partitionings.Arbitrary(),
+        preserves_partition_by=partitionings.Arbitrary())
+
+    with expressions.allow_non_parallel_operations(True):
+      return frame_base.DeferredFrame.wrap(
+          expressions.ComputedExpression(
+              'idx_combine', lambda s: func(s, **kwargs), [idx_func],
+              requires_partition_by=partitionings.Singleton(),
+              preserves_partition_by=partitionings.Singleton()))
+
+  @frame_base.with_docs_from(pd.Series)
+  @frame_base.args_to_kwargs(pd.Series)
+  @frame_base.populate_defaults(pd.Series)
+  def idxmin(self, **kwargs):
+    return self._idxmaxmin_helper('idxmin', **kwargs)
+
+  @frame_base.with_docs_from(pd.Series)
+  @frame_base.args_to_kwargs(pd.Series)
+  @frame_base.populate_defaults(pd.Series)
+  def idxmax(self, **kwargs):
+    return self._idxmaxmin_helper('idxmax', **kwargs)
+
   @frame_base.with_docs_from(pd.Series)
   @frame_base.args_to_kwargs(pd.Series)
   @frame_base.populate_defaults(pd.Series)
@@ -1269,8 +1535,7 @@ class DeferredSeries(DeferredDataFrameOrSeries):
         partitionings.Singleton() if ignore_index else partitionings.Index())
     return frame_base.DeferredFrame.wrap(
         expressions.ComputedExpression(
-            'explode',
-            lambda s: s.explode(ignore_index), [self._expr],
+            'explode', lambda s: s.explode(ignore_index), [self._expr],
             preserves_partition_by=preserves,
             requires_partition_by=partitionings.Arbitrary()))
 
@@ -1313,8 +1578,7 @@ class DeferredSeries(DeferredDataFrameOrSeries):
 
       if right_is_series:
         result = expressions.ComputedExpression(
-            'extract',
-            lambda df: df[0], [sums],
+            'extract', lambda df: df[0], [sums],
             requires_partition_by=partitionings.Singleton())
       else:
         result = sums
@@ -1325,7 +1589,9 @@ class DeferredSeries(DeferredDataFrameOrSeries):
   @frame_base.with_docs_from(pd.Series)
   @frame_base.args_to_kwargs(pd.Series)
   @frame_base.populate_defaults(pd.Series)
-  def nunique(self, **kwargs):
+  def nunique(self, dropna, **kwargs):
+    if dropna:
+      self = self.dropna()  # pylint: disable=self-cls-assignment
     return self.drop_duplicates(keep="any").size
 
   @frame_base.with_docs_from(pd.Series)
@@ -1333,21 +1599,21 @@ class DeferredSeries(DeferredDataFrameOrSeries):
   @frame_base.populate_defaults(pd.Series)
   def quantile(self, q, **kwargs):
     """quantile is not parallelizable. See
-    `BEAM-12167 <https://issues.apache.org/jira/browse/BEAM-12167>`_ tracking
+    `Issue 20933 <https://github.com/apache/beam/issues/20933>`_ tracking
     the possible addition of an approximate, parallelizable implementation of
     quantile."""
-    # TODO(BEAM-12167): Provide an option for approximate distributed
-    # quantiles
+    # TODO(https://github.com/apache/beam/issues/20933): Provide an option for
+    #  approximate distributed quantiles
     requires = partitionings.Singleton(
         reason=(
             "Computing quantiles across index cannot currently be "
-            "parallelized. See BEAM-12167 tracking the possible addition of an "
-            "approximate, parallelizable implementation of quantile."))
+            "parallelized. See https://github.com/apache/beam/issues/20933 "
+            "tracking the possible addition of an approximate, parallelizable "
+            "implementation of quantile."))
 
     return frame_base.DeferredFrame.wrap(
         expressions.ComputedExpression(
-            'quantile',
-            lambda df: df.quantile(q=q, **kwargs), [self._expr],
+            'quantile', lambda df: df.quantile(q=q, **kwargs), [self._expr],
             requires_partition_by=requires,
             preserves_partition_by=partitionings.Singleton()))
 
@@ -1359,11 +1625,20 @@ class DeferredSeries(DeferredDataFrameOrSeries):
   @frame_base.with_docs_from(pd.Series)
   @frame_base.args_to_kwargs(pd.Series)
   @frame_base.populate_defaults(pd.Series)
+  def mean(self, skipna, **kwargs):
+    if skipna:
+      size = self.count()
+    else:
+      size = self.length()
+
+    return self.sum(skipna=skipna, **kwargs) / size
+
+  @frame_base.with_docs_from(pd.Series)
+  @frame_base.args_to_kwargs(
+      pd.Series, removed_args=["level"] if PD_VERSION >= (2, 0) else None)
+  @frame_base.populate_defaults(
+      pd.Series, removed_args=["level"] if PD_VERSION >= (2, 0) else None)
   def var(self, axis, skipna, level, ddof, **kwargs):
-    """Per-level aggregation is not yet supported (BEAM-11777). Only the
-    default, ``level=None``, is allowed."""
-    if level is not None:
-      raise NotImplementedError("per-level aggregation")
     if skipna is None or skipna:
       self = self.dropna()  # pylint: disable=self-cls-assignment
 
@@ -1424,11 +1699,156 @@ class DeferredSeries(DeferredDataFrameOrSeries):
       # and custom partitioning.
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
-              'corr',
-              lambda df,
-              other: df.corr(other, method=method, min_periods=min_periods),
+              'corr', lambda df, other: df.corr(
+                  other, method=method, min_periods=min_periods),
               [self._expr, other._expr],
               requires_partition_by=partitionings.Singleton(reason=reason)))
+
+  @frame_base.with_docs_from(pd.Series)
+  @frame_base.args_to_kwargs(
+      pd.Series, removed_args=["level"] if PD_VERSION >= (2, 0) else None)
+  @frame_base.populate_defaults(
+      pd.Series, removed_args=["level"] if PD_VERSION >= (2, 0) else None)
+  def skew(self, axis, skipna, level, numeric_only, **kwargs):
+    if skipna is None or skipna:
+      self = self.dropna()  # pylint: disable=self-cls-assignment
+    # See the online, numerically stable formulae at
+    # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Higher-order_statistics
+    # Note that we are calculating the unbias (sample) version of skew here.
+    # See https://en.wikipedia.org/wiki/Skewness#Sample_skewness
+    # for more details.
+    def compute_moments(x):
+      n = len(x)
+      if n == 0:
+        m2, sum, m3 = 0, 0, 0
+      else:
+        m2 = x.std(ddof=0)**2 * n
+        sum = x.sum()
+        m3 = (((x - x.mean())**3).sum())
+      return pd.DataFrame(dict(m2=[m2], sum=[sum], n=[n], m3=[m3]))
+
+    def combine_moments(data):
+      m2 = sum = n = m3 = 0.0
+      for datum in data.itertuples():
+        if datum.n == 0:
+          continue
+        elif n == 0:
+          m2, sum, n, m3 = datum.m2, datum.sum, datum.n, datum.m3
+        else:
+          n_a, n_b = datum.n, n
+          sum_a, sum_b = datum.sum, sum
+          m2_a, m2_b = datum.m2, m2
+          mean_a, mean_b = sum_a / n_a, sum_b / n_b
+          delta = mean_b - mean_a
+          combined_n = n_a + n_b
+          m3 += datum.m3 + (
+              (delta**3 * ((n_a * n_b) * (n_a - n_b)) / ((combined_n)**2)) +
+              ((3 * delta) * ((n_a * m2_b) - (n_b * m2_a)) / (combined_n)))
+          m2 += datum.m2 + delta**2 * n_b * n_a / combined_n
+          sum += datum.sum
+          n += datum.n
+
+      if n < 3:
+        return float('nan')
+      elif m2 == 0:
+        return float(0)
+      else:
+        return combined_n * math.sqrt(combined_n - 1) / (combined_n -
+                                                         2) * m3 / (
+                                                             m2**(3 / 2))
+
+    moments = expressions.ComputedExpression(
+        'compute_moments',
+        compute_moments, [self._expr],
+        requires_partition_by=partitionings.Arbitrary())
+    with expressions.allow_non_parallel_operations(True):
+      return frame_base.DeferredFrame.wrap(
+          expressions.ComputedExpression(
+              'combine_moments',
+              combine_moments, [moments],
+              requires_partition_by=partitionings.Singleton()))
+
+  @frame_base.with_docs_from(pd.Series)
+  @frame_base.args_to_kwargs(
+      pd.Series, removed_args=["level"] if PD_VERSION >= (2, 0) else None)
+  @frame_base.populate_defaults(
+      pd.Series, removed_args=["level"] if PD_VERSION >= (2, 0) else None)
+  def kurtosis(self, axis, skipna, level, numeric_only, **kwargs):
+    if skipna is None or skipna:
+      self = self.dropna()  # pylint: disable=self-cls-assignment
+
+    # See the online, numerically stable formulae at
+    # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Higher-order_statistics
+    # kurtosis here calculated as sample kurtosis
+    # https://en.wikipedia.org/wiki/Kurtosis#Sample_kurtosis
+    def compute_moments(x):
+      n = len(x)
+      if n == 0:
+        m2, sum, m3, m4 = 0, 0, 0, 0
+      else:
+        m2 = x.std(ddof=0)**2 * n
+        sum = x.sum()
+        m3 = (((x - x.mean())**3).sum())
+        m4 = (((x - x.mean())**4).sum())
+      return pd.DataFrame(dict(m2=[m2], sum=[sum], n=[n], m3=[m3], m4=[m4]))
+
+    def combine_moments(data):
+      m2 = sum = n = m3 = m4 = 0.0
+      for datum in data.itertuples():
+        if datum.n == 0:
+          continue
+        elif n == 0:
+          m2, sum, n, m3, m4 = datum.m2, datum.sum, datum.n, datum.m3, datum.m4
+        else:
+          n_a, n_b = datum.n, n
+          m2_a, m2_b = datum.m2, m2
+          m3_a, m3_b = datum.m3, m3
+          sum_a, sum_b = datum.sum, sum
+          mean_a, mean_b = sum_a / n_a, sum_b / n_b
+          delta = mean_b - mean_a
+          combined_n = n_a + n_b
+          m4 += datum.m4 + ((delta**4) * (n_a * n_b) * (
+              (n_a**2) - (n_a * n_b) +
+              (n_b**2)) / combined_n**3) + ((6 * delta**2) * ((n_a**2 * m2_b) +
+                                                              (n_b**2 * m2_a)) /
+                                            (combined_n**2)) + ((4 * delta) *
+                                                                ((n_a * m3_b) -
+                                                                 (n_b * m3_a)) /
+                                                                (combined_n))
+          m3 += datum.m3 + (
+              (delta**3 * ((n_a * n_b) * (n_a - n_b)) / ((combined_n)**2)) +
+              ((3 * delta) * ((n_a * m2_b) - (n_b * m2_a)) / (combined_n)))
+          m2 += datum.m2 + delta**2 * n_b * n_a / combined_n
+          sum += datum.sum
+          n += datum.n
+
+      if n < 4:
+        return float('nan')
+      elif m2 == 0:
+        return float(0)
+      else:
+        return (((combined_n + 1) * (combined_n) * (combined_n - 1)) /
+                ((combined_n - 2) *
+                 (combined_n - 3))) * (m4 /
+                                       (m2)**2) - ((3 * (combined_n - 1)**2) /
+                                                   ((combined_n - 2) *
+                                                    (combined_n - 3)))
+
+    moments = expressions.ComputedExpression(
+        'compute_moments',
+        compute_moments, [self._expr],
+        requires_partition_by=partitionings.Arbitrary())
+    with expressions.allow_non_parallel_operations(True):
+      return frame_base.DeferredFrame.wrap(
+          expressions.ComputedExpression(
+              'combine_moments',
+              combine_moments, [moments],
+              requires_partition_by=partitionings.Singleton()))
+
+  @frame_base.with_docs_from(pd.Series)
+  def kurt(self, *args, **kwargs):
+    # Compute Kurtosis as kurt is an alias for kurtosis.
+    return self.kurtosis(*args, **kwargs)
 
   def _corr_aligned(self, other, min_periods):
     std_x = self.std()
@@ -1495,10 +1915,22 @@ class DeferredSeries(DeferredDataFrameOrSeries):
   def dropna(self, **kwargs):
     return frame_base.DeferredFrame.wrap(
         expressions.ComputedExpression(
-            'dropna',
-            lambda df: df.dropna(**kwargs), [self._expr],
+            'dropna', lambda df: df.dropna(**kwargs), [self._expr],
             preserves_partition_by=partitionings.Arbitrary(),
             requires_partition_by=partitionings.Arbitrary()))
+
+  @frame_base.with_docs_from(pd.Series)
+  @frame_base.args_to_kwargs(pd.Series)
+  @frame_base.populate_defaults(
+      pd.Series, removed_args=['inplace'] if PD_VERSION >= (2, 0) else None)
+  @frame_base.maybe_inplace
+  def set_axis(self, labels, **kwargs):
+    # TODO: assigning the index is generally order-sensitive, but we could
+    # support it in some rare cases, e.g. when assigning the index from one
+    # of a DataFrame's columns
+    raise NotImplementedError(
+        "Assigning an index is not yet supported. "
+        "Consider using set_index() instead.")
 
   isnull = isna = frame_base._elementwise_method('isna', base=pd.Series)
   notnull = notna = frame_base._elementwise_method('notna', base=pd.Series)
@@ -1534,10 +1966,12 @@ class DeferredSeries(DeferredDataFrameOrSeries):
     a Beam-specific option that guarantees only one duplicate will be kept, but
     unlike ``"first"`` and ``"last"`` it makes no guarantees about _which_
     duplicate element is kept."""
-    # Re-use the DataFrame based duplcated, extract the series back out
+    # Re-use the DataFrame based duplicated
     df = self._wrap_in_df()
-
-    return df.duplicated(keep=keep)[df.columns[0]]
+    result = df.duplicated(keep=keep)
+    if self.name is not None:
+      return result.rename(self.name)
+    return result
 
   @frame_base.with_docs_from(pd.Series)
   @frame_base.args_to_kwargs(pd.Series)
@@ -1551,8 +1985,10 @@ class DeferredSeries(DeferredDataFrameOrSeries):
     duplicate element is kept."""
     # Re-use the DataFrame based drop_duplicates, extract the series back out
     df = self._wrap_in_df()
-
-    return df.drop_duplicates(keep=keep)[df.columns[0]]
+    result = df.drop_duplicates(keep=keep)[df.columns[0]]
+    if self.name is None:
+      return result.rename(None)
+    return result
 
   @frame_base.with_docs_from(pd.Series)
   @frame_base.args_to_kwargs(pd.Series)
@@ -1561,7 +1997,7 @@ class DeferredSeries(DeferredDataFrameOrSeries):
   def sample(self, **kwargs):
     """Only ``n`` and/or ``weights`` may be specified.  ``frac``,
     ``random_state``, and ``replace=True`` are not yet supported.
-    See `BEAM-12476 <https://issues.apache.org/jira/BEAM-12476>`_.
+    See `Issue 21010 <https://github.com/apache/beam/issues/21010>`_.
 
     Note that pandas will raise an error if ``n`` is larger than the length
     of the dataset, while the Beam DataFrame API will simply return the full
@@ -1592,8 +2028,8 @@ class DeferredSeries(DeferredDataFrameOrSeries):
       rows = [self.agg([f], *args, **kwargs) for f in func]
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
-              'join_aggregate',
-              lambda *rows: pd.concat(rows), [row._expr for row in rows]))
+              'join_aggregate', lambda *rows: pd.concat(rows),
+              [row._expr for row in rows]))
     else:
       # We're only handling a single column. It could be 'func' or ['func'],
       # which produce different results. 'func' produces a scalar, ['func']
@@ -1624,14 +2060,16 @@ class DeferredSeries(DeferredDataFrameOrSeries):
             "single node.")
 
       # We have specialized distributed implementations for these
-      if base_func in ('quantile', 'std', 'var', 'nunique', 'corr', 'cov'):
+      if base_func in HAND_IMPLEMENTED_GLOBAL_AGGREGATIONS:
         result = getattr(self, base_func)(*args, **kwargs)
         if isinstance(func, list):
+          name = self._expr.proxy().name
           with expressions.allow_non_parallel_operations(True):
             return frame_base.DeferredFrame.wrap(
                 expressions.ComputedExpression(
                     f'wrap_aggregate_{base_func}',
-                    lambda x: pd.Series(x, index=[base_func]), [result._expr],
+                    lambda x: pd.Series(x, index=[base_func], name=name),
+                    [result._expr],
                     requires_partition_by=partitionings.Singleton(),
                     preserves_partition_by=partitionings.Singleton()))
         else:
@@ -1651,8 +2089,12 @@ class DeferredSeries(DeferredDataFrameOrSeries):
         allow_nonparallel_final = True
         if _is_associative(base_func):
           agg_func = func
+        elif isinstance(func, list):
+          # Post-aggregate with sum, but keep the original label (e.g. 'count')
+          # in the result's index.
+          agg_func = {base_func: 'sum'}
         else:
-          agg_func = ['sum'] if isinstance(func, list) else 'sum'
+          agg_func = 'sum'
       else:
         intermediate = self._expr
         allow_nonparallel_final = None  # i.e. don't change the value
@@ -1688,13 +2130,11 @@ class DeferredSeries(DeferredDataFrameOrSeries):
   max = _agg_method(pd.Series, 'max')
   prod = product = _agg_method(pd.Series, 'prod')
   sum = _agg_method(pd.Series, 'sum')
-  mean = _agg_method(pd.Series, 'mean')
   median = _agg_method(pd.Series, 'median')
   sem = _agg_method(pd.Series, 'sem')
-  mad = _agg_method(pd.Series, 'mad')
-  skew = _agg_method(pd.Series, 'skew')
-  kurt = _agg_method(pd.Series, 'kurt')
-  kurtosis = _agg_method(pd.Series, 'kurtosis')
+  # mad was removed in Pandas 2.0.
+  if PD_VERSION < (2, 0):
+    mad = _agg_method(pd.Series, 'mad')
 
   argmax = frame_base.wont_implement_method(
       pd.Series, 'argmax', reason='order-sensitive')
@@ -1778,15 +2218,14 @@ class DeferredSeries(DeferredDataFrameOrSeries):
           reason="order-sensitive")
     kwargs['keep'] = keep
     per_partition = expressions.ComputedExpression(
-        'nlargest-per-partition',
-        lambda df: df.nlargest(**kwargs), [self._expr],
+        'nlargest-per-partition', lambda df: df.nlargest(**kwargs),
+        [self._expr],
         preserves_partition_by=partitionings.Arbitrary(),
         requires_partition_by=partitionings.Arbitrary())
     with expressions.allow_non_parallel_operations(True):
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
-              'nlargest',
-              lambda df: df.nlargest(**kwargs), [per_partition],
+              'nlargest', lambda df: df.nlargest(**kwargs), [per_partition],
               preserves_partition_by=partitionings.Arbitrary(),
               requires_partition_by=partitionings.Singleton()))
 
@@ -1808,15 +2247,14 @@ class DeferredSeries(DeferredDataFrameOrSeries):
           reason="order-sensitive")
     kwargs['keep'] = keep
     per_partition = expressions.ComputedExpression(
-        'nsmallest-per-partition',
-        lambda df: df.nsmallest(**kwargs), [self._expr],
+        'nsmallest-per-partition', lambda df: df.nsmallest(**kwargs),
+        [self._expr],
         preserves_partition_by=partitionings.Arbitrary(),
         requires_partition_by=partitionings.Arbitrary())
     with expressions.allow_non_parallel_operations(True):
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
-              'nsmallest',
-              lambda df: df.nsmallest(**kwargs), [per_partition],
+              'nsmallest', lambda df: df.nsmallest(**kwargs), [per_partition],
               preserves_partition_by=partitionings.Arbitrary(),
               requires_partition_by=partitionings.Singleton()))
 
@@ -1835,16 +2273,14 @@ class DeferredSeries(DeferredDataFrameOrSeries):
         preserves_partition_by=partitionings.Singleton())
 
     is_unique_distributed = expressions.ComputedExpression(
-        'is_unique_distributed',
-        lambda s: pd.Series(s.is_unique), [self_index],
+        'is_unique_distributed', lambda s: pd.Series(s.is_unique), [self_index],
         requires_partition_by=partitionings.Index(),
         preserves_partition_by=partitionings.Singleton())
 
     with expressions.allow_non_parallel_operations():
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
-              'combine',
-              lambda s: s.all(), [is_unique_distributed],
+              'combine', lambda s: s.all(), [is_unique_distributed],
               requires_partition_by=partitionings.Singleton(),
               preserves_partition_by=partitionings.Singleton()))
 
@@ -1881,8 +2317,7 @@ class DeferredSeries(DeferredDataFrameOrSeries):
           reason="non-deferred-result")
     return frame_base.DeferredFrame.wrap(
         expressions.ComputedExpression(
-            'unique',
-            lambda df: pd.Series(df.unique()), [self._expr],
+            'unique', lambda df: pd.Series(df.unique()), [self._expr],
             preserves_partition_by=partitionings.Singleton(),
             requires_partition_by=partitionings.Singleton(
                 reason="unique() cannot currently be parallelized.")))
@@ -1890,14 +2325,10 @@ class DeferredSeries(DeferredDataFrameOrSeries):
   @frame_base.with_docs_from(pd.Series)
   def update(self, other):
     self._expr = expressions.ComputedExpression(
-        'update',
-        lambda df,
-        other: df.update(other) or df, [self._expr, other._expr],
+        'update', lambda df, other: df.update(other) or df,
+        [self._expr, other._expr],
         preserves_partition_by=partitionings.Arbitrary(),
         requires_partition_by=partitionings.Index())
-
-  unstack = frame_base.wont_implement_method(
-      pd.Series, 'unstack', reason='non-deferred-columns')
 
   @frame_base.with_docs_from(pd.Series)
   def value_counts(
@@ -1912,7 +2343,7 @@ class DeferredSeries(DeferredDataFrameOrSeries):
     preserved.
 
     When ``bin`` is specified this operation is not parallelizable. See
-    [BEAM-12441](https://issues.apache.org/jira/browse/BEAM-12441) tracking the
+    [Issue 20903](https://github.com/apache/beam/issues/20903) tracking the
     possible addition of a distributed implementation."""
 
     if sort:
@@ -1922,11 +2353,18 @@ class DeferredSeries(DeferredDataFrameOrSeries):
           reason="order-sensitive")
 
     if bins is not None:
+      # pandas can't compute bins for the empty proxy, so make the proxy from
+      # a single element of the same type.
+      proxy = self._expr.proxy()
+      proxy = pd.Series([0], dtype=proxy.dtype, name=proxy.name).value_counts(
+          normalize=normalize, bins=bins, dropna=dropna)[:0]
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
               'value_counts',
               lambda s: s.value_counts(
-                  normalize=normalize, bins=bins, dropna=dropna)[self._expr],
+                  normalize=normalize, bins=bins, dropna=dropna),
+              [self._expr],
+              proxy=proxy,
               requires_partition_by=partitionings.Singleton(
                   reason=(
                       "value_counts with bin specified requires collecting "
@@ -1941,8 +2379,13 @@ class DeferredSeries(DeferredDataFrameOrSeries):
 
     result = column.groupby(column, dropna=dropna).size()
 
-    # groupby.size() names the index, which we don't need
-    result.index.name = None
+    # Pandas 2 introduces new naming for the results.
+    if PD_VERSION >= (2, 0):
+      result.index.name = getattr(self, "name", None)
+      result.name = "proportion" if normalize else "count"
+    else:
+      # groupby.size() names the index, which we don't need
+      result.index.name = None
 
     if normalize:
       return result / column.length()
@@ -1979,24 +2422,26 @@ class DeferredSeries(DeferredDataFrameOrSeries):
   def mode(self, *args, **kwargs):
     """mode is not currently parallelizable. An approximate,
     parallelizable implementation of mode may be added in the future
-    (`BEAM-12181 <https://issues.apache.org/jira/BEAM-12181>`_)."""
+    (`Issue 20946 <https://github.com/apache/beam/issues/20946>`_)."""
     return frame_base.DeferredFrame.wrap(
         expressions.ComputedExpression(
             'mode',
             lambda df: df.mode(*args, **kwargs),
             [self._expr],
-            #TODO(BEAM-12181): Can we add an approximate implementation?
+            #TODO(https://github.com/apache/beam/issues/20946):
+            # Can we add an approximate implementation?
             requires_partition_by=partitionings.Singleton(
                 reason=(
                     "mode cannot currently be parallelized. See "
-                    "BEAM-12181 tracking the possble addition of "
-                    "an approximate, parallelizable implementation of mode.")),
+                    "https://github.com/apache/beam/issues/20946 tracking the "
+                    "possble addition of an approximate, parallelizable "
+                    "implementation of mode.")),
             preserves_partition_by=partitionings.Singleton()))
 
   apply = frame_base._elementwise_method('apply', base=pd.Series)
   map = frame_base._elementwise_method('map', base=pd.Series)
-  # TODO(BEAM-11636): Implement transform using type inference to determine the
-  # proxy
+  # TODO(https://github.com/apache/beam/issues/20764): Implement transform
+  # using type inference to determine the proxy
   #transform = frame_base._elementwise_method('transform', base=pd.Series)
 
   @frame_base.with_docs_from(pd.Series)
@@ -2008,16 +2453,14 @@ class DeferredSeries(DeferredDataFrameOrSeries):
     if isinstance(repeats, int):
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
-              'repeat',
-              lambda series: series.repeat(repeats), [self._expr],
+              'repeat', lambda series: series.repeat(repeats), [self._expr],
               requires_partition_by=partitionings.Arbitrary(),
               preserves_partition_by=partitionings.Arbitrary()))
     elif isinstance(repeats, frame_base.DeferredBase):
       return frame_base.DeferredFrame.wrap(
           expressions.ComputedExpression(
               'repeat',
-              lambda series,
-              repeats_series: series.repeat(repeats_series),
+              lambda series, repeats_series: series.repeat(repeats_series),
               [self._expr, repeats._expr],
               requires_partition_by=partitionings.Index(),
               preserves_partition_by=partitionings.Arbitrary()))
@@ -2031,6 +2474,30 @@ class DeferredSeries(DeferredDataFrameOrSeries):
       raise TypeError(
           "repeat(repeats=) value must be an int or a "
           f"DeferredSeries (encountered {type(repeats)}).")
+
+  if hasattr(pd.Series, 'compare'):
+
+    @frame_base.with_docs_from(pd.Series)
+    @frame_base.args_to_kwargs(pd.Series)
+    @frame_base.populate_defaults(pd.Series)
+    def compare(self, other, align_axis, **kwargs):
+
+      if align_axis in ('index', 0):
+        preserves_partition = partitionings.Singleton()
+      elif align_axis in ('columns', 1):
+        preserves_partition = partitionings.Arbitrary()
+      else:
+        raise ValueError(
+            "align_axis must be one of ('index', 0, 'columns', 1). "
+            f"got {align_axis!r}.")
+
+      return frame_base.DeferredFrame.wrap(
+          expressions.ComputedExpression(
+              'compare',
+              lambda s, other: s.compare(other, align_axis, **kwargs),
+              [self._expr, other._expr],
+              requires_partition_by=partitionings.Index(),
+              preserves_partition_by=preserves_partition))
 
 
 @populate_not_implemented(pd.DataFrame)
@@ -2141,7 +2608,7 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
           "align(copy=False) is not supported because it might be an inplace "
           "operation depending on the data. Please prefer the default "
           "align(copy=True).")
-    if method is not None:
+    if method is not None and method != lib.no_default:
       raise frame_base.WontImplementError(
           f"align(method={method!r}) is not supported because it is "
           "order sensitive. Only align(method=None) is supported.",
@@ -2149,7 +2616,8 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
     if kwargs:
       raise NotImplementedError('align(%s)' % ', '.join(kwargs.keys()))
 
-    if level is not None:
+    # In Pandas 2.0, all aggregations lost the level keyword.
+    if PD_VERSION < (2, 0) and level is not None:
       # Could probably get by partitioning on the used levels.
       requires_partition_by = partitionings.Singleton(reason=(
           f"align(level={level}) is not currently parallelizable. Only "
@@ -2166,12 +2634,15 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
             requires_partition_by=requires_partition_by,
             preserves_partition_by=partitionings.Arbitrary()))
 
-  @frame_base.with_docs_from(pd.DataFrame)
-  @frame_base.args_to_kwargs(pd.DataFrame)
-  @frame_base.populate_defaults(pd.DataFrame)
+  @frame_base.with_docs_from(pd.DataFrame, removed_method=PD_VERSION >= (2, 0))
+  @frame_base.args_to_kwargs(pd.DataFrame, removed_method=PD_VERSION >= (2, 0))
+  @frame_base.populate_defaults(pd.DataFrame,
+                                removed_method=PD_VERSION >= (2, 0))
   def append(self, other, ignore_index, verify_integrity, sort, **kwargs):
     """``ignore_index=True`` is not supported, because it requires generating an
     order-sensitive index."""
+    if PD_VERSION >= (2, 0):
+      raise frame_base.WontImplementError('append() was removed in Pandas 2.0.')
     if not isinstance(other, DeferredDataFrame):
       raise frame_base.WontImplementError(
           "append() only accepts DeferredDataFrame instances, received " +
@@ -2214,16 +2685,18 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
   @frame_base.populate_defaults(pd.DataFrame)
   @frame_base.maybe_inplace
   def set_index(self, keys, **kwargs):
-    """``keys`` must be a ``str`` or ``List[str]``. Passing an Index or Series
-    is not yet supported (`BEAM-11711
-    <https://issues.apache.org/jira/browse/BEAM-11711>`_)."""
+    """``keys`` must be a ``str`` or ``list[str]``. Passing an Index or Series
+    is not yet supported (`Issue 20759
+    <https://github.com/apache/beam/issues/20759>`_)."""
     if isinstance(keys, str):
       keys = [keys]
 
     if any(isinstance(k, (_DeferredIndex, frame_base.DeferredFrame))
            for k in keys):
       raise NotImplementedError("set_index with Index or Series instances is "
-                                "not yet supported (BEAM-11711).")
+                                "not yet supported "
+                                "(https://github.com/apache/beam/issues/20759)"
+                                ".")
 
     return frame_base.DeferredFrame.wrap(
       expressions.ComputedExpression(
@@ -2232,6 +2705,31 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
           [self._expr],
           requires_partition_by=partitionings.Arbitrary(),
           preserves_partition_by=partitionings.Singleton()))
+
+
+  @frame_base.with_docs_from(pd.DataFrame)
+  @frame_base.args_to_kwargs(pd.DataFrame)
+  @frame_base.populate_defaults(
+      pd.DataFrame,
+      removed_args=['inplace'] if PD_VERSION >= (2, 0) else None)
+  @frame_base.maybe_inplace
+  def set_axis(self, labels, axis, **kwargs):
+    if axis in ('index', 0):
+      # TODO: assigning the index is generally order-sensitive, but we could
+      # support it in some rare cases, e.g. when assigning the index from one
+      # of a DataFrame's columns
+      raise NotImplementedError(
+          "Assigning an index is not yet supported. "
+          "Consider using set_index() instead.")
+    else:
+      return frame_base.DeferredFrame.wrap(
+          expressions.ComputedExpression(
+              'set_axis',
+              lambda df: df.set_axis(labels, axis=axis, **kwargs),
+              [self._expr],
+              requires_partition_by=partitionings.Arbitrary(),
+              preserves_partition_by=partitionings.Arbitrary()))
+
 
   @property  # type: ignore
   @frame_base.with_docs_from(pd.DataFrame)
@@ -2351,13 +2849,12 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
           "keep=\"any\" are supported.",
           reason="order-sensitive")
 
-    by = subset or list(self.columns)
-
-    # Workaround a bug where groupby.apply() that returns a single-element
-    # Series moves index label to column
-    return self.groupby(by).apply(
-        lambda df: pd.DataFrame(df.duplicated(keep=keep, subset=subset),
-                                columns=[None]))[None]
+    return self._apply_with_duplicates_colocated(
+        'duplicated',
+        # set_axis keeps the index when df is empty (e.g. for the proxy),
+        # pandas returns a default index in that case.
+        lambda df: df.duplicated(keep=keep, subset=subset).set_axis(df.index),
+        subset)
 
   @frame_base.with_docs_from(pd.DataFrame)
   @frame_base.args_to_kwargs(pd.DataFrame)
@@ -2386,10 +2883,42 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
           "the data.",
           reason="order-sensitive")
 
-    by = subset or list(self.columns)
+    return self._apply_with_duplicates_colocated(
+        'drop_duplicates',
+        lambda df: df.drop_duplicates(keep=keep, subset=subset),
+        subset)
 
-    return self.groupby(by).apply(
-        lambda df: df.drop_duplicates(keep=keep, subset=subset)).droplevel(by)
+  def _apply_with_duplicates_colocated(self, name, func, subset):
+    """Applies ``func`` to partitions in which all duplicate rows (considering
+    only the columns in ``subset``) are colocated.
+
+    Rows are colocated by a hash of their values instead of with groupby,
+    which drops rows with NaN values and fails on unobserved categories."""
+    by = subset or list(self.columns)
+    hash_level = '__apache_beam_duplicates_hash'
+
+    def add_hash_level(df):
+      key = df[by].copy()
+      for col in key.columns:
+        if key[col].dtype.kind in 'fc':
+          # -0.0 and 0.0 hash differently but are duplicates in pandas
+          key[col] = key[col] + 0
+      hashes = pd.util.hash_pandas_object(key, index=False)
+      return df.set_index(
+          pd.Index(hashes.to_numpy(), name=hash_level), append=True)
+
+    with_hash = expressions.ComputedExpression(
+        'add_hash_level',
+        add_hash_level, [self._expr],
+        requires_partition_by=partitionings.Arbitrary(),
+        preserves_partition_by=partitionings.Singleton())
+
+    return frame_base.DeferredFrame.wrap(
+        expressions.ComputedExpression(
+            name,
+            lambda df: func(df.droplevel(hash_level)), [with_hash],
+            requires_partition_by=partitionings.Index([hash_level]),
+            preserves_partition_by=partitionings.Singleton()))
 
   @frame_base.with_docs_from(pd.DataFrame)
   @frame_base.args_to_kwargs(pd.DataFrame)
@@ -2510,6 +3039,8 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
   agg = aggregate
 
   applymap = frame_base._elementwise_method('applymap', base=pd.DataFrame)
+  if PD_VERSION >= (2, 1):
+    map = frame_base._elementwise_method('map', base=pd.DataFrame)
   add_prefix = frame_base._elementwise_method('add_prefix', base=pd.DataFrame)
   add_suffix = frame_base._elementwise_method('add_suffix', base=pd.DataFrame)
 
@@ -2713,7 +3244,7 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
   def sample(self, n, frac, replace, weights, random_state, axis):
     """When ``axis='index'``, only ``n`` and/or ``weights`` may be specified.
     ``frac``, ``random_state``, and ``replace=True`` are not yet supported.
-    See `BEAM-12476 <https://issues.apache.org/jira/BEAM-12476>`_.
+    See `Issue 21010 <https://github.com/apache/beam/issues/21010>`_.
 
     Note that pandas will raise an error if ``n`` is larger than the length
     of the dataset, while the Beam DataFrame API will simply return the full
@@ -2736,7 +3267,8 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
           f"When axis={axis!r}, only n and/or weights may be specified. "
           "frac, random_state, and replace=True are not yet supported "
           f"(got frac={frac!r}, random_state={random_state!r}, "
-          f"replace={replace!r}). See BEAM-12476.")
+          f"replace={replace!r}). See "
+          "https://github.com/apache/beam/issues/21010.")
 
     if n is None:
       n = 1
@@ -2753,7 +3285,7 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
           lambda df: df.assign(**{tmp_weight_column_name:
                                   np.random.rand(len(df))}),
           [self._expr],
-          requires_partition_by=partitionings.Index(),
+          requires_partition_by=partitionings.Arbitrary(),
           preserves_partition_by=partitionings.Arbitrary()))
     else:
       # See "Fast Parallel Weighted Random Sampling" by Efraimidis and Spirakis
@@ -2815,7 +3347,7 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
 
     mode with axis="index" is not currently parallelizable. An approximate,
     parallelizable implementation of mode may be added in the future
-    (`BEAM-12181 <https://issues.apache.org/jira/BEAM-12181>`_)."""
+    (`Issue 20946 <https://github.com/apache/beam/issues/20946>`_)."""
 
     if axis == 1 or axis == 'columns':
       # Number of columns is max(number mode values for each row), so we can't
@@ -2829,11 +3361,13 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
             'mode',
             lambda df: df.mode(*args, **kwargs),
             [self._expr],
-            #TODO(BEAM-12181): Can we add an approximate implementation?
+            #TODO(https://github.com/apache/beam/issues/20946):
+            # Can we add an approximate implementation?
             requires_partition_by=partitionings.Singleton(reason=(
                 "mode(axis='index') cannot currently be parallelized. See "
-                "BEAM-12181 tracking the possble addition of an approximate, "
-                "parallelizable implementation of mode."
+                "https://github.com/apache/beam/issues/20946 tracking the "
+                "possble addition of an approximate, parallelizable "
+                "implementation of mode."
             )),
             preserves_partition_by=partitionings.Singleton()))
 
@@ -2868,7 +3402,8 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
     # look for '@<py identifier>'
     if re.search(r'\@[^\d\W]\w*', expr, re.UNICODE):
       raise NotImplementedError("Accessing locals with @ is not yet supported "
-                                "(BEAM-11202)")
+                                "(https://github.com/apache/beam/issues/20626)"
+                                )
 
     result_expr = expressions.ComputedExpression(
         name,
@@ -2888,7 +3423,7 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
   @frame_base.populate_defaults(pd.DataFrame)
   def eval(self, expr, inplace, **kwargs):
     """Accessing local variables with ``@<varname>`` is not yet supported
-    (`BEAM-11202 <https://issues.apache.org/jira/browse/BEAM-11202>`_).
+    (`Issue 20626 <https://github.com/apache/beam/issues/20626>`_).
 
     Arguments ``local_dict``, ``global_dict``, ``level``, ``target``, and
     ``resolvers`` are not yet supported."""
@@ -2899,7 +3434,7 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
   @frame_base.populate_defaults(pd.DataFrame)
   def query(self, expr, inplace, **kwargs):
     """Accessing local variables with ``@<varname>`` is not yet supported
-    (`BEAM-11202 <https://issues.apache.org/jira/browse/BEAM-11202>`_).
+    (`Issue 20626 <https://github.com/apache/beam/issues/20626>`_).
 
     Arguments ``local_dict``, ``global_dict``, ``level``, ``target``, and
     ``resolvers`` are not yet supported."""
@@ -3013,7 +3548,9 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
         right_index=right_index,
         **kwargs)
     if kwargs.get('how', None) == 'cross':
-      raise NotImplementedError("cross join is not yet implemented (BEAM-9547)")
+      raise NotImplementedError(
+        "cross join is not yet implemented "
+        "(https://github.com/apache/beam/issues/20318)")
     if not any([on, left_on, right_on, left_index, right_index]):
       on = [col for col in self_proxy.columns if col in right_proxy.columns]
     if not left_on:
@@ -3147,7 +3684,7 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
   @frame_base.populate_defaults(pd.DataFrame)
   def quantile(self, q, axis, **kwargs):
     """``quantile(axis="index")`` is not parallelizable. See
-    `BEAM-12167 <https://issues.apache.org/jira/browse/BEAM-12167>`_ tracking
+    `Issue 20933 <https://github.com/apache/beam/issues/20933>`_ tracking
     the possible addition of an approximate, parallelizable implementation of
     quantile.
 
@@ -3164,12 +3701,13 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
       else:
         requires = partitionings.Arbitrary()
     else: # axis='index'
-      # TODO(BEAM-12167): Provide an option for approximate distributed
-      # quantiles
+      # TODO(https://github.com/apache/beam/issues/20933): Provide an option
+      # for approximate distributed quantiles
       requires = partitionings.Singleton(reason=(
           "Computing quantiles across index cannot currently be parallelized. "
-          "See BEAM-12167 tracking the possible addition of an approximate, "
-          "parallelizable implementation of quantile."
+          "See https://github.com/apache/beam/issues/20933 tracking the "
+          "possible addition of an approximate, parallelizable implementation "
+          "of quantile."
       ))
 
     return frame_base.DeferredFrame.wrap(
@@ -3290,6 +3828,7 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
       # Fortunately the proxy should be identical to the input.
       proxy = self._expr.proxy().copy()
 
+
       # index is modified, so no partitioning is preserved.
       preserves = partitionings.Singleton()
 
@@ -3302,10 +3841,15 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
             preserves_partition_by=preserves,
             requires_partition_by=partitionings.Arbitrary()))
 
+
   shape = property(frame_base.wont_implement_method(
       pd.DataFrame, 'shape', reason="non-deferred-result"))
 
-  stack = frame_base._elementwise_method('stack', base=pd.DataFrame)
+  stack = frame_base._proxy_method(
+      'stack',
+      base=pd.DataFrame,
+      requires_partition_by=partitionings.Arbitrary(),
+      preserves_partition_by=partitionings.Singleton())
 
   all = _agg_method(pd.DataFrame, 'all')
   any = _agg_method(pd.DataFrame, 'any')
@@ -3313,6 +3857,141 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
   describe = _agg_method(pd.DataFrame, 'describe')
   max = _agg_method(pd.DataFrame, 'max')
   min = _agg_method(pd.DataFrame, 'min')
+
+  @frame_base.with_docs_from(pd.DataFrame)
+  @frame_base.args_to_kwargs(pd.DataFrame)
+  @frame_base.populate_defaults(pd.DataFrame)
+  def pivot(self, index=None, columns=None, values=None, **kwargs):
+    """Because pivot is a non-deferred method, any columns specified in
+    ``columns`` must be CategoricalDType so we can determine the output column
+    names."""
+
+    def verify_all_categorical(all_cols_are_categorical):
+      if not all_cols_are_categorical:
+        message = "pivot() of non-categorical type is not supported because " \
+            "the type of the output column depends on the data. Please use " \
+            "pd.CategoricalDtype with explicit categories."
+        raise frame_base.WontImplementError(
+          message, reason="non-deferred-columns")
+
+    # If values not provided, take all remaining columns of dataframe
+    if not values:
+      tmp = self._expr.proxy()
+      if index:
+        tmp = tmp.drop(index, axis=1)
+      if columns:
+        tmp = tmp.drop(columns, axis=1)
+      values = tmp.columns.values
+
+    # Construct column index
+    if is_list_like(columns) and len(columns) <= 1:
+      columns = columns[0]
+    selected_cols = self._expr.proxy()[columns]
+    if isinstance(selected_cols, pd.Series):
+      all_cols_are_categorical = isinstance(
+        selected_cols.dtype, pd.CategoricalDtype
+      )
+      verify_all_categorical(all_cols_are_categorical)
+
+      if is_list_like(values) and len(values) > 1:
+        # If more than one value provided, don't create a None level
+        values_in_col_index = values
+        names = [None, columns]
+        col_index = pd.MultiIndex.from_product(
+          [values_in_col_index,
+          selected_cols.dtypes.categories.astype('category')],
+          names=names
+        )
+      else:
+        col_index = pd.CategoricalIndex(
+          selected_cols.dtype.categories,
+          name=columns
+        )
+    else:
+      all_cols_are_categorical = all(
+        isinstance(c, pd.CategoricalDtype) for c in selected_cols.dtypes
+      )
+      verify_all_categorical(all_cols_are_categorical)
+
+      if is_list_like(values) and len(values) > 1:
+        # If more than one value provided, don't create a None level
+        values_in_col_index = values
+        names = [None, *columns]
+        categories = [
+          c.categories.astype('category') for c in selected_cols.dtypes
+        ]
+        col_index = pd.MultiIndex.from_product(
+          [values_in_col_index, *categories],
+          names=names
+        )
+      else:
+        # If one value provided, don't create a None level
+        names = columns
+        categories = [
+          c.categories.astype('category') for c in selected_cols.dtypes
+        ]
+        col_index = pd.MultiIndex.from_product(
+          categories,
+          names=names
+        )
+
+    # Construct row index
+    if index:
+      if PD_VERSION < (1, 4) and is_list_like(index) and len(index) > 1:
+        raise frame_base.WontImplementError(
+          "pivot() is not supported when pandas<1.4 and index is a MultiIndex")
+      per_partition = expressions.ComputedExpression(
+          'pivot-per-partition',
+          lambda df: df.set_index(keys=index), [self._expr],
+          preserves_partition_by=partitionings.Singleton(),
+          requires_partition_by=partitionings.Arbitrary()
+      )
+      tmp = per_partition.proxy().pivot(
+        columns=columns, values=values, **kwargs)
+      row_index = tmp.index
+    else:
+      per_partition = self._expr
+      row_index = self._expr.proxy().index
+    if PD_VERSION < (1, 4) and isinstance(row_index, pd.MultiIndex):
+      raise frame_base.WontImplementError(
+        "pivot() is not supported when pandas<1.4 and index is a MultiIndex")
+
+    selected_values = self._expr.proxy()[values]
+    if isinstance(selected_values, pd.Series):
+      value_dtype = selected_values.dtype
+    else:
+      # Set dtype to object if more than one value
+      dtypes = [d for d in selected_values.dtypes]
+      value_dtype = object
+      if any((is_int64_dtype(x) for x in dtypes)):
+        value_dtype = np.int64
+      if any((is_float_dtype(x) for x in dtypes)):
+        value_dtype = np.float64
+      if object in dtypes:
+        value_dtype = object
+
+    # Construct proxy
+    proxy = pd.DataFrame(
+      columns=col_index, dtype=value_dtype, index=row_index
+    )
+
+    def pivot_helper(df):
+      result = pd.concat(
+        [proxy, df.pivot(columns=columns, values=values, **kwargs)]
+      )
+      result.columns = col_index
+      result = result.astype(value_dtype)
+      return result
+
+    return frame_base.DeferredFrame.wrap(
+        expressions.ComputedExpression(
+            'pivot',
+            pivot_helper,
+            [per_partition],
+            proxy=proxy,
+            preserves_partition_by=partitionings.Index(),
+            requires_partition_by=partitionings.Index()))
+
   prod = product = _agg_method(pd.DataFrame, 'prod')
   sum = _agg_method(pd.DataFrame, 'sum')
   mean = _agg_method(pd.DataFrame, 'mean')
@@ -3321,10 +4000,12 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
   std = _agg_method(pd.DataFrame, 'std')
   var = _agg_method(pd.DataFrame, 'var')
   sem = _agg_method(pd.DataFrame, 'sem')
-  mad = _agg_method(pd.DataFrame, 'mad')
   skew = _agg_method(pd.DataFrame, 'skew')
   kurt = _agg_method(pd.DataFrame, 'kurt')
   kurtosis = _agg_method(pd.DataFrame, 'kurtosis')
+  # mad was removed in Pandas 2.0.
+  if PD_VERSION < (2, 0):
+    mad = _agg_method(pd.DataFrame, 'mad')
 
   take = frame_base.wont_implement_method(pd.DataFrame, 'take',
                                           reason='deprecated')
@@ -3345,25 +4026,6 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
       pd.DataFrame, 'transpose', reason='non-deferred-columns')
   T = property(frame_base.wont_implement_method(
       pd.DataFrame, 'T', reason='non-deferred-columns'))
-
-
-  @frame_base.with_docs_from(pd.DataFrame)
-  def unstack(self, *args, **kwargs):
-    """unstack cannot be used on :class:`DeferredDataFrame` instances with
-    multiple index levels, because the columns in the output depend on the
-    data."""
-    if self._expr.proxy().index.nlevels == 1:
-      return frame_base.DeferredFrame.wrap(
-        expressions.ComputedExpression(
-            'unstack',
-            lambda df: df.unstack(*args, **kwargs),
-            [self._expr],
-            requires_partition_by=partitionings.Index()))
-    else:
-      raise frame_base.WontImplementError(
-          "unstack() is not supported on DataFrames with a multiple indexes, "
-          "because the columns in the output depend on the input data.",
-          reason="non-deferred-columns")
 
   update = frame_base._proxy_method(
       'update',
@@ -3413,16 +4075,134 @@ class DeferredDataFrame(DeferredDataFrameOrSeries):
       columns = subset or list(self.columns)
 
       if dropna:
-        dropped = self.dropna()
+        # Must include subset here because otherwise we spuriously drop NAs due
+        # to columns outside our subset.
+        dropped = self.dropna(subset=subset)
       else:
         dropped = self
 
       result = dropped.groupby(columns, dropna=dropna).size()
 
+      # Pandas 2 introduces new naming for the results.
+      if PD_VERSION >= (2,0):
+        result.name = "proportion" if normalize else "count"
+
       if normalize:
         return result/dropped.length()
       else:
         return result
+
+  if hasattr(pd.DataFrame, 'compare'):
+
+    @frame_base.with_docs_from(pd.DataFrame)
+    @frame_base.args_to_kwargs(pd.DataFrame)
+    @frame_base.populate_defaults(pd.DataFrame)
+    def compare(self, other, align_axis, keep_shape, **kwargs):
+      """The default values ``align_axis=1 and ``keep_shape=False``
+       are not supported, because the output columns depend on the data.
+       To use ``align_axis=1``, please specify ``keep_shape=True``."""
+
+      preserve_partition = None
+
+      if align_axis in (1, 'columns') and not keep_shape:
+        raise frame_base.WontImplementError(
+          f"compare(align_axis={align_axis!r}, keep_shape={keep_shape!r}) "
+          "is not allowed because the output columns depend on the data, "
+          "please specify keep_shape=True.",
+        reason='non-deferred-columns'
+        )
+
+      if align_axis in (1, 'columns'):
+        preserve_partition = partitionings.Arbitrary()
+      elif align_axis in (0, 'index'):
+        preserve_partition = partitionings.Singleton()
+      else:
+        raise ValueError(
+          "align_axis must be one of ('index', 0, 'columns', 1). "
+          f"got {align_axis!r}.")
+
+
+      return frame_base.DeferredFrame.wrap(
+        expressions.ComputedExpression(
+          'compare',
+          lambda df, other: df.compare(other, align_axis, keep_shape, **kwargs),
+          [self._expr, other._expr],
+          requires_partition_by=partitionings.Index(),
+          preserves_partition_by=preserve_partition
+        )
+      )
+
+  def _idxmaxmin_helper(self, op, **kwargs):
+    if op == 'idxmax':
+      func = pd.DataFrame.idxmax
+    elif op == 'idxmin':
+      func = pd.DataFrame.idxmin
+    else:
+      raise ValueError("op must be one of ('idxmax', 'idxmin'). "
+                       f"got {op!r}.")
+
+    axis = kwargs.get('axis', 0)
+
+    index_dtype = self._expr.proxy().index.dtype
+    columns_dtype = self._expr.proxy().columns.dtype
+
+    def compute_idx(df):
+      indexes = func(df, **kwargs).unique()
+      if pd.isna(indexes).any():
+        return df
+      else:
+        return df.loc[indexes]
+
+    if axis in ('index', 0):
+      requires_partition = partitionings.Singleton()
+
+      proxy_index = pd.Index([], dtype=columns_dtype)
+      proxy = pd.Series([], index=proxy_index, dtype=index_dtype)
+      partition_proxy = self._expr.proxy().copy()
+
+      idx_per_partition = expressions.ComputedExpression(
+        'idx-per-partition',
+        compute_idx, [self._expr],
+        proxy=partition_proxy,
+        requires_partition_by=partitionings.Arbitrary(),
+        preserves_partition_by=partitionings.Arbitrary()
+      )
+
+    elif axis in ('columns', 1):
+      requires_partition = partitionings.Index()
+
+      proxy_index = pd.Index([], dtype=index_dtype)
+      proxy = pd.Series([], index=proxy_index, dtype=columns_dtype)
+
+      idx_per_partition = self._expr
+
+    else:
+      raise ValueError("axis must be one of ('index', 0, 'columns', 1). "
+                       f"got {axis!r}.")
+
+    with expressions.allow_non_parallel_operations(True):
+      return frame_base.DeferredFrame.wrap(
+        expressions.ComputedExpression(
+          'idx',
+          lambda df: func(df, **kwargs), [idx_per_partition],
+          proxy=proxy,
+          requires_partition_by=requires_partition,
+          preserves_partition_by=partitionings.Singleton()
+        )
+      )
+
+
+  @frame_base.with_docs_from(pd.DataFrame)
+  @frame_base.args_to_kwargs(pd.DataFrame)
+  @frame_base.populate_defaults(pd.DataFrame)
+  def idxmin(self, **kwargs):
+    return self._idxmaxmin_helper('idxmin', **kwargs)
+
+  @frame_base.with_docs_from(pd.DataFrame)
+  @frame_base.args_to_kwargs(pd.DataFrame)
+  @frame_base.populate_defaults(pd.DataFrame)
+  def idxmax(self, **kwargs):
+    return self._idxmaxmin_helper('idxmax', **kwargs)
 
 
 for io_func in dir(io):
@@ -3443,6 +4223,7 @@ class DeferredGroupBy(frame_base.DeferredFrame):
                ungrouped_with_index: expressions.Expression[pd.core.generic.NDFrame], # pylint: disable=line-too-long
                grouping_columns,
                grouping_indexes,
+               group_keys,
                projection=None):
     """This object represents the result of::
 
@@ -3469,13 +4250,15 @@ class DeferredGroupBy(frame_base.DeferredFrame):
     self._projection = projection
     self._grouping_columns = grouping_columns
     self._grouping_indexes = grouping_indexes
+    self._group_keys = group_keys
     self._kwargs = kwargs
 
     if (self._kwargs.get('dropna', True) is False and
         self._ungrouped.proxy().index.nlevels > 1):
       raise NotImplementedError(
           "dropna=False does not work as intended in the Beam DataFrame API "
-          "when grouping on multiple columns or indexes (See BEAM-12495).")
+          "when grouping on multiple columns or indexes (See "
+          "https://github.com/apache/beam/issues/21014).")
 
   def __getattr__(self, name):
     return DeferredGroupBy(
@@ -3489,6 +4272,7 @@ class DeferredGroupBy(frame_base.DeferredFrame):
         self._ungrouped_with_index,
         self._grouping_columns,
         self._grouping_indexes,
+        self._group_keys,
         projection=name)
 
   def __getitem__(self, name):
@@ -3503,25 +4287,15 @@ class DeferredGroupBy(frame_base.DeferredFrame):
         self._ungrouped_with_index,
         self._grouping_columns,
         self._grouping_indexes,
+        self._group_keys,
         projection=name)
 
   @frame_base.with_docs_from(DataFrameGroupBy)
-  def agg(self, fn, *args, **kwargs):
-    if _is_associative(fn):
-      return _liftable_agg(fn)(self, *args, **kwargs)
-    elif _is_liftable_with_sum(fn):
-      return _liftable_agg(fn, postagg_meth='sum')(self, *args, **kwargs)
-    elif _is_unliftable(fn):
-      return _unliftable_agg(fn)(self, *args, **kwargs)
-    elif callable(fn):
-      return DeferredDataFrame(
-          expressions.ComputedExpression(
-              'agg',
-              lambda gb: gb.agg(fn, *args, **kwargs), [self._expr],
-              requires_partition_by=partitionings.Index(),
-              preserves_partition_by=partitionings.Singleton()))
+  def agg(self, fn=None, *args, **kwargs):
+    if fn is None:
+      return _agg_with_no_function(self, *args, **kwargs)
     else:
-      raise NotImplementedError(f"GroupBy.agg(func={fn!r})")
+      return _handle_agg_function(self, fn, "agg", *args, **kwargs)
 
   @property
   def ndim(self):
@@ -3536,10 +4310,23 @@ class DeferredGroupBy(frame_base.DeferredFrame):
     object of the same type as what will be returned when the pipeline is
     processing actual data. If the result is a pandas object it should have the
     same type and name (for a Series) or column types and names (for
-    a DataFrame) as the actual results."""
+    a DataFrame) as the actual results.
+
+    Note that in pandas, ``apply`` attempts to detect if the index is unmodified
+    in ``func`` (indicating ``func`` is a transform) and drops the duplicate
+    index in the output. To determine this, pandas tests the indexes for
+    equality. However, Beam cannot do this since it is sensitive to the input
+    data; instead this implementation tests if the indexes are equivalent
+    with ``is``. See the `pandas 1.4.0 release notes
+    <https://pandas.pydata.org/docs/dev/whatsnew/v1.4.0.html#groupby-apply-consistent-transform-detection>`_
+    for a good explanation of the distinction between these approaches. In
+    practice, this just means that in some cases the Beam result will have
+    a duplicate index, whereas pandas would have dropped it."""
+
     project = _maybe_project_func(self._projection)
     grouping_indexes = self._grouping_indexes
     grouping_columns = self._grouping_columns
+    group_keys = self._group_keys
 
     # Unfortunately pandas does not execute func to determine the right proxy.
     # We run user func on a proxy here to detect the return type and generate
@@ -3547,38 +4334,93 @@ class DeferredGroupBy(frame_base.DeferredFrame):
     fn_input = project(self._ungrouped_with_index.proxy().reset_index(
         grouping_columns, drop=True))
     result = func(fn_input)
-    if isinstance(result, pd.core.generic.NDFrame):
-      if result.index is fn_input.index:
-        proxy = result
+    def index_to_arrays(index):
+      return [index.get_level_values(level)
+              for level in range(index.nlevels)]
+
+
+    # By default do_apply will just call pandas apply()
+    # We override it below if necessary
+    do_apply = lambda gb: gb.apply(func, *args, **kwargs)
+
+    if (isinstance(result, pd.core.generic.NDFrame) and
+        result.index is fn_input.index):
+      # Special case where apply fn is a transform
+      # Note we trust that if the user fn produces a proxy with the identical
+      # index, it will produce results with identical indexes at execution
+      # time too
+      proxy = result
+    elif isinstance(result, pd.DataFrame):
+      # apply fn is not a transform, we need to make sure the original index
+      # values are prepended to the result's index
+      proxy = result[:0]
+
+      # First adjust proxy
+      proxy.index = pd.MultiIndex.from_arrays(
+          index_to_arrays(self._ungrouped.proxy().index) +
+          index_to_arrays(proxy.index),
+          names=self._ungrouped.proxy().index.names + proxy.index.names)
+
+      # Then override do_apply function
+      new_index_names = self._ungrouped.proxy().index.names
+      if len(new_index_names) > 1:
+        def add_key_index(key, df):
+          # df is a dataframe or Series representing the result of func for
+          # a single key
+          # key is a tuple with the MultiIndex values for this key
+          df.index = pd.MultiIndex.from_arrays(
+              [[key[i]] * len(df) for i in range(len(new_index_names))] +
+              index_to_arrays(df.index),
+              names=new_index_names + df.index.names)
+          return df
       else:
-        proxy = result[:0]
+        def add_key_index(key, df):
+          # df is a dataframe or Series representing the result of func for
+          # a single key
+          df.index = pd.MultiIndex.from_arrays(
+              [[key] * len(df)] + index_to_arrays(df.index),
+              names=new_index_names + df.index.names)
+          return df
 
-        def index_to_arrays(index):
-          return [index.get_level_values(level)
-                  for level in range(index.nlevels)]
 
-        # The final result will have the grouped indexes + the indexes from the
-        # result
-        proxy.index = pd.MultiIndex.from_arrays(
-            index_to_arrays(self._ungrouped.proxy().index) +
-            index_to_arrays(proxy.index),
-            names=self._ungrouped.proxy().index.names + proxy.index.names)
+      do_apply = lambda gb: pd.concat([
+          add_key_index(k, func(gb.get_group(k), *args, **kwargs))
+          for k in gb.groups.keys()])
+    elif isinstance(result, pd.Series):
+      if isinstance(fn_input, pd.DataFrame):
+        # DataFrameGroupBy
+        # In this case pandas transposes the Series result, s.t. the Series
+        # index values are the columns, and the grouping keys are the new index
+        # values.
+        dtype = pd.Series([result]).dtype
+        proxy = pd.DataFrame(columns=result.index,
+                             dtype=result.dtype,
+                             index=self._ungrouped.proxy().index)
+      elif isinstance(fn_input, pd.Series):
+        # SeriesGroupBy
+        # In this case the output is still a Series, but with an additional
+        # index with the grouping keys.
+        proxy = pd.Series(dtype=result.dtype,
+                          name=result.name,
+                          index=index_to_arrays(self._ungrouped.proxy().index) +
+                                index_to_arrays(result[:0].index))
     else:
       # The user fn returns some non-pandas type. The expected result is a
       # Series where each element is the result of one user fn call.
       dtype = pd.Series([result]).dtype
       proxy = pd.Series([], dtype=dtype, index=self._ungrouped.proxy().index)
 
-
     def do_partition_apply(df):
       # Remove columns from index, we only needed them there for partitioning
       df = df.reset_index(grouping_columns, drop=True)
 
       gb = df.groupby(level=grouping_indexes or None,
-                      by=grouping_columns or None)
+                      by=grouping_columns or None,
+                      group_keys=group_keys)
 
       gb = project(gb)
-      return gb.apply(func, *args, **kwargs)
+
+      return do_apply(gb)
 
     return DeferredDataFrame(
         expressions.ComputedExpression(
@@ -3614,6 +4456,7 @@ class DeferredGroupBy(frame_base.DeferredFrame):
       fn_wrapper = fn
 
     project = _maybe_project_func(self._projection)
+    group_keys = self._group_keys
 
     # pandas cannot execute fn to determine the right proxy.
     # We run user fn on a proxy here to detect the return type and generate the
@@ -3640,14 +4483,25 @@ class DeferredGroupBy(frame_base.DeferredFrame):
     return DeferredDataFrame(
         expressions.ComputedExpression(
             'transform',
-            lambda df: project(df.groupby(level=levels)).transform(
-                fn_wrapper,
-                *args,
-                **kwargs).droplevel(self._grouping_columns),
+            lambda df: project(
+              df.groupby(level=levels, group_keys=group_keys)
+            ).transform(
+              fn_wrapper,
+              *args,
+              **kwargs).droplevel(self._grouping_columns),
             [self._ungrouped_with_index],
             proxy=proxy,
             requires_partition_by=partitionings.Index(levels),
             preserves_partition_by=partitionings.Index(self._grouping_indexes)))
+
+  @frame_base.with_docs_from(DataFrameGroupBy)
+  def pipe(self, func, *args, **kwargs):
+    if isinstance(func, tuple):
+      func, data = func
+      kwargs[data] = self
+      return func(*args, **kwargs)
+
+    return func(self, *args, **kwargs)
 
   @frame_base.with_docs_from(DataFrameGroupBy)
   def filter(self, func=None, dropna=True):
@@ -3669,8 +4523,29 @@ class DeferredGroupBy(frame_base.DeferredFrame):
   @property  # type: ignore
   @frame_base.with_docs_from(DataFrameGroupBy)
   def dtypes(self):
-    grouping_columns = self._grouping_columns
-    return self.apply(lambda df: df.drop(grouping_columns, axis=1).dtypes)
+    return frame_base.DeferredFrame.wrap(
+        expressions.ComputedExpression(
+            'dtypes',
+            lambda gb: gb.dtypes,
+            [self._expr],
+            requires_partition_by=partitionings.Arbitrary(),
+            preserves_partition_by=partitionings.Arbitrary()
+        )
+    )
+
+  if hasattr(DataFrameGroupBy, 'value_counts'):
+    @frame_base.with_docs_from(DataFrameGroupBy)
+    def value_counts(self, **kwargs):
+      """
+      DataFrameGroupBy.value_counts() is the same as DataFrame.value_counts()
+      """
+      return frame_base.DeferredFrame.wrap(
+          expressions.ComputedExpression(
+              'value_counts',
+              lambda df: df.value_counts(**kwargs), [self._expr],
+              preserves_partition_by=partitionings.Arbitrary(),
+              requires_partition_by=partitionings.Arbitrary())
+      )
 
   fillna = frame_base.wont_implement_method(
       DataFrameGroupBy, 'fillna', explanation=(
@@ -3703,8 +4578,8 @@ class DeferredGroupBy(frame_base.DeferredFrame):
 
   first = frame_base.not_implemented_method('first', base_type=DataFrameGroupBy)
   last = frame_base.not_implemented_method('last', base_type=DataFrameGroupBy)
-  nth = frame_base.wont_implement_method(
-      DataFrameGroupBy, 'nth', reason='order-sensitive')
+  nth = property(frame_base.wont_implement_method(
+      DataFrameGroupBy, 'nth', reason='order-sensitive'))
   cumcount = frame_base.wont_implement_method(
       DataFrameGroupBy, 'cumcount', reason='order-sensitive')
   cummax = frame_base.wont_implement_method(
@@ -3725,7 +4600,8 @@ class DeferredGroupBy(frame_base.DeferredFrame):
   ohlc = frame_base.wont_implement_method(DataFrameGroupBy, 'ohlc',
                                           reason='order-sensitive')
 
-  # TODO(BEAM-12169): Consider allowing this for categorical keys.
+  # TODO(https://github.com/apache/beam/issues/20958): Consider allowing this
+  # for categorical keys.
   __len__ = frame_base.wont_implement_method(
       DataFrameGroupBy, '__len__', reason="non-deferred-result")
   groups = property(frame_base.wont_implement_method(
@@ -3745,7 +4621,7 @@ class DeferredGroupBy(frame_base.DeferredFrame):
   tshift = frame_base.wont_implement_method(
       DataFrameGroupBy, 'tshift', reason="deprecated")
 
-def _maybe_project_func(projection: Optional[List[str]]):
+def _maybe_project_func(projection: Optional[list[str]]):
   """ Returns identity func if projection is empty or None, else returns
   a function that projects the specified columns. """
   if projection:
@@ -3770,9 +4646,11 @@ def _liftable_agg(meth, postagg_meth=None):
       return _unliftable_agg(meth)(self, *args, **kwargs)
 
     to_group = self._ungrouped.proxy().index
-    is_categorical_grouping = any(to_group.get_level_values(i).is_categorical()
-                                  for i in self._grouping_indexes)
+    is_categorical_grouping = any(
+        isinstance(to_group.get_level_values(i).dtype, pd.CategoricalDtype)
+        for i in self._grouping_indexes)
     groupby_kwargs = self._kwargs
+    group_keys = self._group_keys
 
     # Don't include un-observed categorical values in the preagg
     preagg_groupby_kwargs = groupby_kwargs.copy()
@@ -3784,6 +4662,7 @@ def _liftable_agg(meth, postagg_meth=None):
         lambda df: getattr(
             project(
                 df.groupby(level=list(range(df.index.nlevels)),
+                           group_keys=group_keys,
                            **preagg_groupby_kwargs)
             ),
             agg_name)(**kwargs),
@@ -3796,12 +4675,13 @@ def _liftable_agg(meth, postagg_meth=None):
         'post_combine_' + post_agg_name,
         lambda df: getattr(
             df.groupby(level=list(range(df.index.nlevels)),
+                       group_keys=group_keys,
                        **groupby_kwargs),
             post_agg_name)(**kwargs),
         [pre_agg],
         requires_partition_by=(partitionings.Singleton(reason=(
             "Aggregations grouped by a categorical column are not currently "
-            "parallelizable (BEAM-11190)."
+            "parallelizable (https://github.com/apache/beam/issues/21827)."
         ))
                                if is_categorical_grouping
                                else partitionings.Index()),
@@ -3819,8 +4699,10 @@ def _unliftable_agg(meth):
     assert isinstance(self, DeferredGroupBy)
 
     to_group = self._ungrouped.proxy().index
-    is_categorical_grouping = any(to_group.get_level_values(i).is_categorical()
-                                  for i in self._grouping_indexes)
+    group_keys = self._group_keys
+    is_categorical_grouping = any(
+        isinstance(to_group.get_level_values(i).dtype, pd.CategoricalDtype)
+        for i in self._grouping_indexes)
 
     groupby_kwargs = self._kwargs
     project = _maybe_project_func(self._projection)
@@ -3828,12 +4710,13 @@ def _unliftable_agg(meth):
         agg_name,
         lambda df: getattr(project(
             df.groupby(level=list(range(df.index.nlevels)),
+                       group_keys=group_keys,
                        **groupby_kwargs),
         ), agg_name)(**kwargs),
         [self._ungrouped],
         requires_partition_by=(partitionings.Singleton(reason=(
             "Aggregations grouped by a categorical column are not currently "
-            "parallelizable (BEAM-11190)."
+            "parallelizable (https://github.com/apache/beam/issues/21827)."
         ))
                                if is_categorical_grouping
                                else partitionings.Index()),
@@ -3861,6 +4744,82 @@ def _check_str_or_np_builtin(agg_func, func_list):
       getattr(agg_func, '__name__', None) in func_list
       and agg_func.__module__ in ('numpy', 'builtins'))
 
+def _agg_with_no_function(gb, *args, **kwargs):
+  """
+  Applies aggregation functions to the grouped data based on the provided
+  keyword arguments and combines the results into a single DataFrame.
+
+  Args:
+      gb: The groupby instance (DeferredGroupBy).
+      *args: Additional positional arguments passed to the aggregation funcs.
+      **kwargs: A dictionary where each key is the column name to aggregate,
+                the value is a tuple containing the input column name and
+                the aggregation function to apply.
+
+  Returns:
+      DeferredDataFrame: A DataFrame that contains the aggregated results of
+                          all specified columns.
+
+  Raises:
+      ValueError: If no aggregation functions are provided in the `kwargs`.
+      NotImplementedError: If the aggregation function type is unsupported.
+  """
+  if not kwargs:
+    raise ValueError("No aggregation functions specified")
+
+  # Handle dictionary-like input for aggregation.
+  result_columns, result_frames = [], []
+  for col_name, (input_col, agg_fn) in kwargs.items():
+    frame = _handle_agg_function(
+      gb[input_col], agg_fn, f"agg_{col_name}", *args
+    )
+    result_frames.append(frame)
+    result_columns.append(col_name)
+
+  # Combine all the resulting DeferredDataFrames into a single DataFrame.
+  return DeferredDataFrame(
+      expressions.ComputedExpression(
+          "agg",
+          lambda *results: pd.concat(results, axis=1, keys=result_columns),
+          [frame._expr for frame in result_frames],
+          requires_partition_by=partitionings.Index(),
+          preserves_partition_by=partitionings.Singleton(),
+      )
+  )
+
+def _handle_agg_function(gb, agg_func, agg_name, *args, **kwargs):
+  """
+  Handles the aggregation logic based on the function type passed.
+
+  Args:
+      gb: The groupby instance (DeferredGroupBy).
+      agg_name: The name/label of the aggregation function.
+      fn: The aggregation function to apply.
+      *args: Additional arguments to pass to the aggregation function.
+      **kwargs: Keyword arguments to pass to the aggregation function.
+
+  Returns:
+      A DeferredDataFrame or the result of the aggregation function.
+
+  Raises:
+      NotImplementedError: If the aggregation function type is unsupported.
+  """
+  if _is_associative(agg_func):
+    return _liftable_agg(agg_func)(gb, *args, **kwargs)
+  elif _is_liftable_with_sum(agg_func):
+    return _liftable_agg(agg_func, postagg_meth='sum')(gb, *args, **kwargs)
+  elif _is_unliftable(agg_func):
+    return _unliftable_agg(agg_func)(gb, *args, **kwargs)
+  elif callable(agg_func):
+    return DeferredDataFrame(
+        expressions.ComputedExpression(
+            agg_name,
+            lambda gb_val: gb_val.agg(agg_func, *args, **kwargs),
+            [gb._expr],
+            requires_partition_by=partitionings.Index(),
+            preserves_partition_by=partitionings.Singleton()))
+  else:
+    raise NotImplementedError(f"GroupBy.agg(func={agg_func!r})")
 
 def _is_associative(agg_func):
   return _check_str_or_np_builtin(agg_func, LIFTABLE_AGGREGATIONS)
@@ -3872,7 +4831,10 @@ def _is_unliftable(agg_func):
   return _check_str_or_np_builtin(agg_func, UNLIFTABLE_AGGREGATIONS)
 
 NUMERIC_AGGREGATIONS = ['max', 'min', 'prod', 'sum', 'mean', 'median', 'std',
-                        'var', 'sem', 'mad', 'skew', 'kurt', 'kurtosis']
+                        'var', 'sem', 'skew', 'kurt', 'kurtosis']
+# mad was removed in Pandas 2.0.
+if PD_VERSION < (2, 0):
+  NUMERIC_AGGREGATIONS.append('mad')
 
 def _is_numeric(agg_func):
   return _check_str_or_np_builtin(agg_func, NUMERIC_AGGREGATIONS)
@@ -3900,7 +4862,6 @@ class _DeferredGroupByCols(frame_base.DeferredFrame):
   idxmax = frame_base._elementwise_method('idxmax', base=DataFrameGroupBy)
   idxmin = frame_base._elementwise_method('idxmin', base=DataFrameGroupBy)
   last = frame_base._elementwise_method('last', base=DataFrameGroupBy)
-  mad = frame_base._elementwise_method('mad', base=DataFrameGroupBy)
   max = frame_base._elementwise_method('max', base=DataFrameGroupBy)
   mean = frame_base._elementwise_method('mean', base=DataFrameGroupBy)
   median = frame_base._elementwise_method('median', base=DataFrameGroupBy)
@@ -3919,8 +4880,11 @@ class _DeferredGroupByCols(frame_base.DeferredFrame):
       DataFrameGroupBy, 'tail', explanation=_PEEK_METHOD_EXPLANATION)
   take = frame_base.wont_implement_method(
       DataFrameGroupBy, 'take', reason='deprecated')
-  tshift = frame_base._elementwise_method('tshift', base=DataFrameGroupBy)
   var = frame_base._elementwise_method('var', base=DataFrameGroupBy)
+  # These already deprecated methods were removed in Pandas 2.0
+  if PD_VERSION < (2, 0):
+    mad = frame_base._elementwise_method('mad', base=DataFrameGroupBy)
+    tshift = frame_base._elementwise_method('tshift', base=DataFrameGroupBy)
 
   @property # type: ignore
   @frame_base.with_docs_from(DataFrameGroupBy)
@@ -4055,7 +5019,7 @@ class _DeferredLoc(object):
             func,
             args,
             requires_partition_by=(
-                partitionings.Index()
+                partitionings.JoinIndex()
                 if len(args) > 1
                 else partitionings.Arbitrary()),
             preserves_partition_by=partitionings.Arbitrary()))
@@ -4097,9 +5061,9 @@ class _DeferredILoc(object):
 
 
 class _DeferredStringMethods(frame_base.DeferredBase):
-  @frame_base.with_docs_from(pd.core.strings.StringMethods)
-  @frame_base.args_to_kwargs(pd.core.strings.StringMethods)
-  @frame_base.populate_defaults(pd.core.strings.StringMethods)
+  @frame_base.with_docs_from(pd.Series.str)
+  @frame_base.args_to_kwargs(pd.Series.str)
+  @frame_base.populate_defaults(pd.Series.str)
   def cat(self, others, join, **kwargs):
     """If defined, ``others`` must be a :class:`DeferredSeries` or a ``list`` of
     ``DeferredSeries``."""
@@ -4126,7 +5090,7 @@ class _DeferredStringMethods(frame_base.DeferredBase):
 
     else:
       raise frame_base.WontImplementError(
-          "others must be None, DeferredSeries, or List[DeferredSeries] "
+          "others must be None, DeferredSeries, or list[DeferredSeries] "
           f"(encountered {type(others)}). Other types are not supported "
           "because they make this operation sensitive to the order of the "
           "data.", reason="order-sensitive")
@@ -4139,8 +5103,8 @@ class _DeferredStringMethods(frame_base.DeferredBase):
             requires_partition_by=requires,
             preserves_partition_by=partitionings.Arbitrary()))
 
-  @frame_base.with_docs_from(pd.core.strings.StringMethods)
-  @frame_base.args_to_kwargs(pd.core.strings.StringMethods)
+  @frame_base.with_docs_from(pd.Series.str)
+  @frame_base.args_to_kwargs(pd.Series.str)
   def repeat(self, repeats):
     """``repeats`` must be an ``int`` or a :class:`DeferredSeries`. Lists are
     not supported because they make this operation order-sensitive."""
@@ -4150,9 +5114,9 @@ class _DeferredStringMethods(frame_base.DeferredBase):
               'repeat',
               lambda series: series.str.repeat(repeats),
               [self._expr],
-              # TODO(BEAM-11155): Defer to pandas to compute this proxy.
-              # Currently it incorrectly infers dtype bool, may require upstream
-              # fix.
+              # TODO(https://github.com/apache/beam/issues/20573): Defer to
+              # pandas to compute this proxy. Currently it incorrectly infers
+              # dtype bool, may require upstream fix.
               proxy=self._expr.proxy(),
               requires_partition_by=partitionings.Arbitrary(),
               preserves_partition_by=partitionings.Arbitrary()))
@@ -4162,9 +5126,9 @@ class _DeferredStringMethods(frame_base.DeferredBase):
               'repeat',
               lambda series, repeats_series: series.str.repeat(repeats_series),
               [self._expr, repeats._expr],
-              # TODO(BEAM-11155): Defer to pandas to compute this proxy.
-              # Currently it incorrectly infers dtype bool, may require upstream
-              # fix.
+              # TODO(https://github.com/apache/beam/issues/20573): Defer to
+              # pandas to compute this proxy. Currently it incorrectly infers
+              # dtype bool, may require upstream fix.
               proxy=self._expr.proxy(),
               requires_partition_by=partitionings.Index(),
               preserves_partition_by=partitionings.Arbitrary()))
@@ -4177,30 +5141,128 @@ class _DeferredStringMethods(frame_base.DeferredBase):
       raise TypeError("str.repeat(repeats=) value must be an int or a "
                       f"DeferredSeries (encountered {type(repeats)}).")
 
-  get_dummies = frame_base.wont_implement_method(
-      pd.core.strings.StringMethods, 'get_dummies',
-      reason='non-deferred-columns')
+  @frame_base.with_docs_from(pd.Series.str)
+  @frame_base.args_to_kwargs(pd.Series.str)
+  def get_dummies(self, **kwargs):
+    """
+    Series must be categorical dtype. Please cast to ``CategoricalDtype``
+    to ensure correct categories.
+    """
+    dtype = self._expr.proxy().dtype
+    if not isinstance(dtype, pd.CategoricalDtype):
+      raise frame_base.WontImplementError(
+          "get_dummies() of non-categorical type is not supported because "
+          "the type of the output column depends on the data. Please use "
+          "pd.CategoricalDtype with explicit categories.",
+          reason="non-deferred-columns")
 
-  split = frame_base.wont_implement_method(
-      pd.core.strings.StringMethods, 'split',
-      reason='non-deferred-columns')
+    split_cats = [
+      cat.split(sep=kwargs.get('sep', '|')) for cat in dtype.categories
+    ]
 
-  rsplit = frame_base.wont_implement_method(
-      pd.core.strings.StringMethods, 'rsplit',
-      reason='non-deferred-columns')
+    # Adding the nan category because there could be the case that
+    # the data includes NaNs, which is not valid to be casted as a Category,
+    # but nevertheless would be broadcasted as a column in get_dummies()
+    columns = sorted(set().union(*split_cats))
+    if _DUMMY_NAN_COLUMN not in columns:
+      columns = columns + [_DUMMY_NAN_COLUMN]
+
+    proxy = pd.DataFrame(columns=columns).astype(int)
+
+    return frame_base.DeferredFrame.wrap(
+        expressions.ComputedExpression(
+            'get_dummies',
+            lambda series: pd.concat(
+              [proxy, series.str.get_dummies(**kwargs)]
+              ).fillna(value=0, method=None).astype('int64'),
+            [self._expr],
+            proxy=proxy,
+            requires_partition_by=partitionings.Arbitrary(),
+            preserves_partition_by=partitionings.Arbitrary()))
+
+  def _split_helper(self, rsplit=False, **kwargs):
+    expand = kwargs.get('expand', False)
+
+    if not expand:
+      # Not creating separate columns
+      proxy = self._expr.proxy()
+      if not rsplit:
+        func = lambda s: pd.concat([proxy, s.str.split(**kwargs)])
+      else:
+        func = lambda s: pd.concat([proxy, s.str.rsplit(**kwargs)])
+    else:
+      # Creating separate columns, so must be more strict on dtype
+      dtype = self._expr.proxy().dtype
+      if not isinstance(dtype, pd.CategoricalDtype):
+        method_name = 'rsplit' if rsplit else 'split'
+        raise frame_base.WontImplementError(
+            f"{method_name}() of non-categorical type is not supported because "
+            "the type of the output column depends on the data. Please use "
+            "pd.CategoricalDtype with explicit categories.",
+            reason="non-deferred-columns")
+
+      # Split the categories
+      split_cats = dtype.categories.str.split(**kwargs)
+
+      # Count the number of new columns to create for proxy
+      max_splits = len(max(split_cats, key=len))
+      proxy = pd.DataFrame(columns=range(max_splits))
+
+      def func(s):
+        if not rsplit:
+          result = s.str.split(**kwargs)
+        else:
+          result = s.str.rsplit(**kwargs)
+        result[~result.isna()].replace(np.nan, value=None)
+        return result
+
+    return frame_base.DeferredFrame.wrap(
+        expressions.ComputedExpression(
+            'split',
+            func,
+            [self._expr],
+            proxy=proxy,
+            requires_partition_by=partitionings.Arbitrary(),
+            preserves_partition_by=partitionings.Arbitrary()))
+
+  @frame_base.with_docs_from(pd.Series.str)
+  @frame_base.args_to_kwargs(pd.Series.str)
+  @frame_base.populate_defaults(pd.Series.str)
+  def split(self, **kwargs):
+    """
+    Like other non-deferred methods, dtype must be CategoricalDtype.
+    One exception is when ``expand`` is ``False``. Because we are not
+    creating new columns at construction time, dtype can be `str`.
+    """
+    return self._split_helper(rsplit=False, **kwargs)
+
+  @frame_base.with_docs_from(pd.Series.str)
+  @frame_base.args_to_kwargs(pd.Series.str)
+  @frame_base.populate_defaults(pd.Series.str)
+  def rsplit(self, **kwargs):
+    """
+    Like other non-deferred methods, dtype must be CategoricalDtype.
+    One exception is when ``expand`` is ``False``. Because we are not
+    creating new columns at construction time, dtype can be `str`.
+    """
+    return self._split_helper(rsplit=True, **kwargs)
 
 
 ELEMENTWISE_STRING_METHODS = [
             'capitalize',
             'casefold',
+            'center',
             'contains',
             'count',
+            'decode',
+            'encode',
             'endswith',
             'extract',
-            'extractall',
+            'find',
             'findall',
             'fullmatch',
             'get',
+            'index',
             'isalnum',
             'isalpha',
             'isdecimal',
@@ -4212,13 +5274,21 @@ ELEMENTWISE_STRING_METHODS = [
             'isupper',
             'join',
             'len',
+            'lfind',
+            'ljust',
             'lower',
             'lstrip',
             'match',
+            'normalize',
             'pad',
             'partition',
+            'removeprefix',
+            'removesuffix',
             'replace',
             'rpartition',
+            'rfind',
+            'rindex',
+            'rjust',
             'rstrip',
             'slice',
             'slice_replace',
@@ -4226,10 +5296,15 @@ ELEMENTWISE_STRING_METHODS = [
             'strip',
             'swapcase',
             'title',
+            'translate',
             'upper',
             'wrap',
             'zfill',
             '__getitem__',
+]
+
+NON_ELEMENTWISE_STRING_METHODS = [
+            'extractall',
 ]
 
 def make_str_func(method):
@@ -4253,14 +5328,27 @@ def make_str_func(method):
   return func
 
 for method in ELEMENTWISE_STRING_METHODS:
-  if not hasattr(pd.core.strings.StringMethods, method):
+  if not hasattr(pd.Series.str, method):
     # older versions (1.0.x) don't support some of these methods
     continue
   setattr(_DeferredStringMethods,
           method,
           frame_base._elementwise_method(make_str_func(method),
                                          name=method,
-                                         base=pd.core.strings.StringMethods))
+                                         base=pd.Series.str))
+
+for method in NON_ELEMENTWISE_STRING_METHODS:
+  if not hasattr(pd.Series.str, method):
+    # older versions (1.0.x) don't support some of these methods
+    continue
+  setattr(_DeferredStringMethods,
+          method,
+          frame_base._proxy_method(
+              make_str_func(method),
+              name=method,
+              base=pd.Series.str,
+              requires_partition_by=partitionings.Arbitrary(),
+              preserves_partition_by=partitionings.Singleton()))
 
 
 def make_cat_func(method):
@@ -4432,11 +5520,12 @@ ELEMENTWISE_DATETIME_PROPERTIES = [
   'second',
   'time',
   'timetz',
-  'week',
   'weekday',
-  'weekofyear',
   'year',
 ]
+# Pandas 2 removed these.
+if PD_VERSION < (2, 0):
+  ELEMENTWISE_DATETIME_PROPERTIES += ['week', 'weekofyear']
 
 for method in ELEMENTWISE_DATETIME_PROPERTIES:
   setattr(_DeferredDatetimeMethods,
@@ -4467,6 +5556,7 @@ for base in ['add',
           name,
           frame_base._elementwise_method(name, restrictions={'level': None},
                                          base=pd.Series))
+
     if hasattr(pd.DataFrame, name):
       setattr(
           DeferredDataFrame,
@@ -4486,6 +5576,24 @@ for base in ['add',
         inplace_name,
         frame_base._elementwise_method(inplace_name, inplace=True,
                                        base=pd.DataFrame))
+
+# Allow dataframe | SchemaTransform
+def _create_maybe_elementwise_or(base):
+  elementwise = frame_base._elementwise_method(
+      '__or__', restrictions={'level': None}, base=base)
+
+  def _maybe_elementwise_or(self, right):
+    if isinstance(right, PTransform):
+      return convert.to_dataframe(convert.to_pcollection(self) | right)
+    else:
+      return elementwise(self, right)
+
+  return _maybe_elementwise_or
+
+
+DeferredSeries.__or__ = _create_maybe_elementwise_or(pd.Series)  # type: ignore
+DeferredDataFrame.__or__ = _create_maybe_elementwise_or(pd.DataFrame)  # type: ignore
+
 
 for name in ['lt', 'le', 'gt', 'ge', 'eq', 'ne']:
   for p in '%s', '__%s__':

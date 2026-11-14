@@ -102,6 +102,10 @@ class BackgroundCachingJob(object):
     with self._result_lock:
       return self._pipeline_result.state is PipelineState.RUNNING
 
+  def is_done_or_running(self):
+    with self._result_lock:
+      return self.is_done() or self.is_running()
+
   def cancel(self):
     """Cancels this background source recording job.
     """
@@ -184,18 +188,14 @@ def is_background_caching_job_needed(user_pipeline):
           # Or checks if there is no previous job.
           # DONE means a previous job has completed successfully and the
           # cached events might still be valid.
-          not (
-              job.is_done() or
-              # RUNNING means a previous job has been started and is still
-              # running.
-              job.is_running()) or
+          # RUNNING means a previous job has been started and is still
+          # running.
+          not job.is_done_or_running() or
           # Or checks if we can invalidate the previous job.
           cache_changed))
 
 
-def is_cache_complete(pipeline_id):
-  # type: (str) -> bool
-
+def is_cache_complete(pipeline_id: str) -> bool:
   """Returns True if the backgrond cache for the given pipeline is done.
   """
   user_pipeline = ie.current_env().pipeline_id_to_pipeline(pipeline_id)
@@ -231,9 +231,17 @@ def has_source_to_cache(user_pipeline):
                       streaming_cache.StreamingCache):
 
       file_based_cm = ie.current_env().get_cache_manager(user_pipeline)
+      cache_dir = file_based_cm._cache_dir
+      cache_root = ie.current_env().options.cache_root
+      if cache_root:
+        if cache_root.startswith('gs://'):
+          raise ValueError(
+              'GCS cache paths are not currently supported for '
+              'streaming pipelines.')
+        cache_dir = cache_root
       ie.current_env().set_cache_manager(
           streaming_cache.StreamingCache(
-              file_based_cm._cache_dir,
+              cache_dir,
               is_cache_complete=is_cache_complete,
               sample_resolution_sec=1.0,
               saved_pcoders=file_based_cm._saved_pcoders),

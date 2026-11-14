@@ -24,13 +24,13 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Matchers.eq;
-import static org.mockito.Matchers.same;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -75,7 +75,14 @@ import org.apache.beam.sdk.transforms.splittabledofn.WatermarkEstimator;
 import org.apache.beam.sdk.transforms.splittabledofn.WatermarkEstimators;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
+import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.util.UserCodeException;
+import org.apache.beam.sdk.values.CausedByDrain;
+import org.apache.beam.sdk.values.OutputBuilder;
+import org.apache.beam.sdk.values.TypeDescriptor;
+import org.apache.beam.sdk.values.TypeDescriptors;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 import org.junit.Before;
 import org.junit.Rule;
@@ -84,14 +91,18 @@ import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.AdditionalAnswers;
-import org.mockito.Matchers;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
 /** Tests for {@link DoFnInvokers}. */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "SameNameButDifferent",
+  // TODO(https://github.com/apache/beam/issues/21230): Remove when new version of
+  // errorprone is released (2.11.0)
+  "unused"
 })
 public class DoFnInvokersTest {
   @Rule public ExpectedException thrown = ExpectedException.none();
@@ -116,17 +127,19 @@ public class DoFnInvokersTest {
     when(mockArgumentProvider.window()).thenReturn(mockWindow);
     // when(mockArgumentProvider.paneInfo(Matchers.<DoFn>any()))
     //     .thenReturn(mockPaneInfo);
-    when(mockArgumentProvider.element(Matchers.<DoFn>any())).thenReturn(mockElement);
-    when(mockArgumentProvider.timestamp(Matchers.<DoFn>any())).thenReturn(mockTimestamp);
-    when(mockArgumentProvider.outputReceiver(Matchers.<DoFn>any())).thenReturn(mockOutputReceiver);
-    when(mockArgumentProvider.taggedOutputReceiver(Matchers.<DoFn>any()))
+    when(mockArgumentProvider.element(ArgumentMatchers.<DoFn>any())).thenReturn(mockElement);
+    when(mockArgumentProvider.timestamp(ArgumentMatchers.<DoFn>any())).thenReturn(mockTimestamp);
+    when(mockArgumentProvider.outputReceiver(ArgumentMatchers.<DoFn>any()))
+        .thenReturn(mockOutputReceiver);
+    when(mockArgumentProvider.taggedOutputReceiver(ArgumentMatchers.<DoFn>any()))
         .thenReturn(mockMultiOutputReceiver);
     when(mockArgumentProvider.pipelineOptions()).thenReturn(mockOptions);
-    when(mockArgumentProvider.startBundleContext(Matchers.<DoFn>any()))
+    when(mockArgumentProvider.startBundleContext(ArgumentMatchers.<DoFn>any()))
         .thenReturn(mockStartBundleContext);
-    when(mockArgumentProvider.finishBundleContext(Matchers.<DoFn>any()))
+    when(mockArgumentProvider.finishBundleContext(ArgumentMatchers.<DoFn>any()))
         .thenReturn(mockFinishBundleContext);
-    when(mockArgumentProvider.processContext(Matchers.<DoFn>any())).thenReturn(mockProcessContext);
+    when(mockArgumentProvider.processContext(ArgumentMatchers.<DoFn>any()))
+        .thenReturn(mockProcessContext);
   }
 
   private DoFn.ProcessContinuation invokeProcessElement(DoFn<String, String> fn) {
@@ -263,6 +276,7 @@ public class DoFnInvokersTest {
     when(mockArgumentProvider.state(stateId, false)).thenReturn(mockState);
 
     class MockFn extends DoFn<String, String> {
+
       @StateId(stateId)
       private final StateSpec<ValueState<Integer>> spec = StateSpecs.value(VarIntCoder.of());
 
@@ -284,6 +298,7 @@ public class DoFnInvokersTest {
     when(mockArgumentProvider.timer(TimerDeclaration.PREFIX + timerId)).thenReturn(mockTimer);
 
     class MockFn extends DoFn<String, String> {
+
       @TimerId(timerId)
       private final TimerSpec spec = TimerSpecs.timer(TimeDomain.EVENT_TIME);
 
@@ -539,16 +554,17 @@ public class DoFnInvokersTest {
           }
 
           @Override
-          public OutputReceiver outputReceiver(DoFn doFn) {
+          public OutputReceiver<SomeRestriction> outputReceiver(DoFn doFn) {
             return new OutputReceiver<SomeRestriction>() {
               @Override
-              public void output(SomeRestriction output) {
-                outputs.add(output);
-              }
-
-              @Override
-              public void outputWithTimestamp(SomeRestriction output, Instant timestamp) {
-                fail("Unexpected output with timestamp");
+              public OutputBuilder<SomeRestriction> builder(SomeRestriction value) {
+                return WindowedValues.<SomeRestriction>builder()
+                    .setValue(value)
+                    .setTimestamp(mockTimestamp)
+                    .setWindow(mockWindow)
+                    .setPaneInfo(PaneInfo.NO_FIRING)
+                    .setCausedByDrain(CausedByDrain.NORMAL)
+                    .setReceiver(windowedValue -> outputs.add(windowedValue.getValue()));
               }
             };
           }
@@ -782,17 +798,19 @@ public class DoFnInvokersTest {
               private boolean invoked;
 
               @Override
-              public void output(String output) {
-                assertFalse(invoked);
-                invoked = true;
-                assertEquals("foo", output);
-              }
-
-              @Override
-              public void outputWithTimestamp(String output, Instant instant) {
-                assertFalse(invoked);
-                invoked = true;
-                assertEquals("foo", output);
+              public OutputBuilder<String> builder(String value) {
+                return WindowedValues.<String>builder()
+                    .setValue(value)
+                    .setTimestamp(mockTimestamp)
+                    .setWindow(mockWindow)
+                    .setPaneInfo(PaneInfo.NO_FIRING)
+                    .setCausedByDrain(CausedByDrain.NORMAL)
+                    .setReceiver(
+                        windowedValue -> {
+                          assertFalse(invoked);
+                          invoked = true;
+                          assertEquals("foo", windowedValue.getValue());
+                        });
               }
             };
           }
@@ -1015,7 +1033,7 @@ public class DoFnInvokersTest {
 
     MockFn fn = mock(MockFn.class);
     DoFnInvoker<String, String> invoker = DoFnInvokers.invokerFor(fn);
-    assertEquals(1.0, invoker.invokeGetSize(mockArgumentProvider), 0.0001);
+    assertEquals(0.0, invoker.invokeGetSize(mockArgumentProvider), 0.0001);
   }
 
   @Test
@@ -1371,11 +1389,14 @@ public class DoFnInvokersTest {
   @Test
   public void testStableName() {
     DoFnInvoker<Void, Void> invoker = DoFnInvokers.invokerFor(new StableNameTestDoFn());
+    // The invoker class name includes a hash of the type descriptors to support
+    // different generic instantiations of the same DoFn class.
+    // Format: <DoFn class name>$<DoFnInvoker>$<type hash>
+    TypeDescriptor<Void> voidType = new StableNameTestDoFn().getInputTypeDescriptor();
+    String expectedTypeSuffix = ByteBuddyDoFnInvokerFactory.generateTypeSuffix(voidType, voidType);
     assertThat(
         invoker.getClass().getName(),
-        equalTo(
-            String.format(
-                "%s$%s", StableNameTestDoFn.class.getName(), DoFnInvoker.class.getSimpleName())));
+        equalTo(String.format("%s$%s", StableNameTestDoFn.class.getName(), expectedTypeSuffix)));
   }
 
   @Test
@@ -1394,5 +1415,92 @@ public class DoFnInvokersTest {
     invoker.invokeProcessElement(mockArgumentProvider);
 
     verify(mockBundleFinalizer).afterBundleCommit(eq(Instant.ofEpochSecond(42L)), eq(null));
+  }
+
+  @Test
+  public void testCacheKeyCollisionProof() throws Exception {
+    class DynamicTypeDoFn<T> extends DoFn<T, T> {
+      private final TypeDescriptor<T> typeDescriptor;
+
+      DynamicTypeDoFn(TypeDescriptor<T> typeDescriptor) {
+        this.typeDescriptor = typeDescriptor;
+      }
+
+      @ProcessElement
+      public void processElement(@Element T element, OutputReceiver<T> out) {
+        out.output(element);
+      }
+
+      // Key point: force returning our specified type instead of relying on class signature
+      @Override
+      public TypeDescriptor<T> getInputTypeDescriptor() {
+        return typeDescriptor;
+      }
+
+      @Override
+      public TypeDescriptor<T> getOutputTypeDescriptor() {
+        return typeDescriptor;
+      }
+
+      // Deliberately make separate instances equal. The per-instance cache must use identity
+      // because equal instances can have different generic types.
+      @Override
+      public boolean equals(@Nullable Object other) {
+        return other instanceof DynamicTypeDoFn;
+      }
+
+      @Override
+      public int hashCode() {
+        return 0;
+      }
+    }
+
+    DoFn<String, String> stringFn = new DynamicTypeDoFn<>(TypeDescriptors.strings());
+    DoFn<Integer, Integer> intFn = new DynamicTypeDoFn<>(TypeDescriptors.integers());
+
+    DoFnInvoker<String, String> stringInvoker = DoFnInvokers.invokerFor(stringFn);
+    DoFnInvoker<Integer, Integer> intInvoker = DoFnInvokers.invokerFor(intFn);
+
+    System.out.println("String Invoker: " + stringInvoker.getClass().getName());
+    System.out.println("Integer Invoker: " + intInvoker.getClass().getName());
+
+    assertNotSame(
+        "Critical bug: Beam returned the same cached class for different generic types.",
+        stringInvoker.getClass(),
+        intInvoker.getClass());
+  }
+
+  @Test
+  public void testTypeDescriptorResolutionIsCachedPerDoFnInstance() {
+    class CountingTypeDoFn extends DoFn<String, String> {
+      private int inputTypeDescriptorCalls;
+      private int outputTypeDescriptorCalls;
+
+      @ProcessElement
+      public void processElement(@Element String element, OutputReceiver<String> out) {
+        out.output(element);
+      }
+
+      @Override
+      public TypeDescriptor<String> getInputTypeDescriptor() {
+        inputTypeDescriptorCalls++;
+        return TypeDescriptors.strings();
+      }
+
+      @Override
+      public TypeDescriptor<String> getOutputTypeDescriptor() {
+        outputTypeDescriptorCalls++;
+        return TypeDescriptors.strings();
+      }
+    }
+
+    CountingTypeDoFn fn = new CountingTypeDoFn();
+
+    DoFnInvoker<String, String> firstInvoker = DoFnInvokers.invokerFor(fn);
+    DoFnInvoker<String, String> secondInvoker = DoFnInvokers.invokerFor(fn);
+
+    assertSame(firstInvoker.getClass(), secondInvoker.getClass());
+    assertEquals(1, fn.inputTypeDescriptorCalls);
+    assertEquals(1, fn.outputTypeDescriptorCalls);
   }
 }

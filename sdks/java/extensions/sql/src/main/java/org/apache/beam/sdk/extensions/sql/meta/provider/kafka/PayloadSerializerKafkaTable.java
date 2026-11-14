@@ -19,6 +19,7 @@ package org.apache.beam.sdk.extensions.sql.meta.provider.kafka;
 
 import java.util.List;
 import org.apache.beam.sdk.io.kafka.KafkaRecord;
+import org.apache.beam.sdk.io.kafka.TimestampPolicyFactory;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.io.payloads.PayloadSerializer;
 import org.apache.beam.sdk.transforms.MapElements;
@@ -26,7 +27,7 @@ import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.apache.kafka.clients.producer.ProducerRecord;
 
 public class PayloadSerializerKafkaTable extends BeamKafkaTable {
@@ -36,8 +37,9 @@ public class PayloadSerializerKafkaTable extends BeamKafkaTable {
       Schema requiredSchema,
       String bootstrapServers,
       List<String> topics,
-      PayloadSerializer serializer) {
-    super(requiredSchema, bootstrapServers, topics);
+      PayloadSerializer serializer,
+      TimestampPolicyFactory timestampPolicyFactory) {
+    super(requiredSchema, bootstrapServers, topics, timestampPolicyFactory);
     this.serializer = serializer;
   }
 

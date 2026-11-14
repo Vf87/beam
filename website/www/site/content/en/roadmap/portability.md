@@ -85,7 +85,7 @@ There is also a Python Universal Local Runner and shared java runners library.
 Performance is good and multi-language pipelines are supported.
 Currently, the Flink and Spark runners support portable pipeline execution
 (which is used by default for SDKs other than Java),
-as does Dataflow when using the [Dataflow Runner v2](https://cloud.google.com/dataflow/docs/guides/deploying-a-pipeline#dataflow-runner-v2).
+as does Dataflow when using the [Dataflow Portable Runner](https://docs.cloud.google.com/dataflow/docs/portable-runner).
 See the
 [Portability support table](https://s.apache.org/apache-beam-portability-support-table)
 for details.
@@ -100,7 +100,7 @@ common pattern for new portability features is that the overall
 feature is in "beam-model" with subtasks for each SDK and runner in
 their respective components.
 
-**JIRA:** [query](https://issues.apache.org/jira/issues/?jql=project%20%3D%20BEAM%20AND%20resolution%20%3D%20Unresolved%20AND%20labels%20%3D%20portability%20order%20by%20priority%20DESC%2Cupdated%20DESC)
+**Issues:** [query](https://github.com/apache/beam/issues?q=is%3Aopen+is%3Aissue+label%3Aportability)
 
 Prerequisites: [Docker](https://docs.docker.com/compose/install/), [Python](https://docs.python-guide.org/starting/install3/linux/), [Java 8](https://openjdk.java.net/install/)
 

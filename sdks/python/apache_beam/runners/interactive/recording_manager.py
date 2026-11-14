@@ -15,37 +15,227 @@
 # limitations under the License.
 #
 
+import collections
 import logging
+import os
 import threading
 import time
+import uuid
 import warnings
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+from typing import Iterable
+from typing import Optional
+from typing import Union
 
 import pandas as pd
 
 import apache_beam as beam
 from apache_beam.dataframe.frame_base import DeferredBase
-from apache_beam.portability.api.beam_runner_api_pb2 import TestStreamPayload
+from apache_beam.options import pipeline_options
+from apache_beam.portability.api import beam_runner_api_pb2
+from apache_beam.runners import runner
 from apache_beam.runners.interactive import background_caching_job as bcj
 from apache_beam.runners.interactive import interactive_environment as ie
 from apache_beam.runners.interactive import interactive_runner as ir
 from apache_beam.runners.interactive import pipeline_fragment as pf
 from apache_beam.runners.interactive import utils
 from apache_beam.runners.interactive.caching.cacheable import CacheKey
+from apache_beam.runners.interactive.display.pipeline_graph import PipelineGraph
+from apache_beam.runners.interactive.options import capture_control
 from apache_beam.runners.runner import PipelineState
 
 _LOGGER = logging.getLogger(__name__)
+
+try:
+  import ipywidgets as widgets
+  from IPython.display import HTML
+  from IPython.display import clear_output
+  from IPython.display import display
+
+  IS_IPYTHON = True
+except ImportError:
+  IS_IPYTHON = False
+
+
+class AsyncComputationResult:
+  """Represents the result of an asynchronous computation."""
+  def __init__(
+      self,
+      future: Future,
+      pcolls: set[beam.pvalue.PCollection],
+      user_pipeline: beam.Pipeline,
+      recording_manager: 'RecordingManager',
+  ):
+    self._future = future
+    self._pcolls = pcolls
+    self._user_pipeline = user_pipeline
+    self._env = ie.current_env()
+    self._recording_manager = recording_manager
+    self._pipeline_result: Optional[beam.runners.runner.PipelineResult] = None
+    self._display_id = str(uuid.uuid4())
+    self._output_widget = widgets.Output() if IS_IPYTHON else None
+    self._cancel_button = (
+        widgets.Button(description='Cancel') if IS_IPYTHON else None)
+    self._progress_bar = (
+        widgets.FloatProgress(
+            value=0.0,
+            min=0.0,
+            max=1.0,
+            description='Running:',
+            bar_style='info',
+        ) if IS_IPYTHON else None)
+    self._cancel_requested = False
+    self._completed_event = threading.Event()
+
+    if IS_IPYTHON:
+      self._cancel_button.on_click(self._cancel_clicked)
+      controls = widgets.VBox([
+          widgets.HBox([self._cancel_button, self._progress_bar]),
+          self._output_widget,
+      ])
+      display(controls, display_id=self._display_id)
+      self.update_display('Initializing...')
+
+    self._future.add_done_callback(self._on_done)
+
+  def _cancel_clicked(self, b):
+    self._cancel_requested = True
+    self._cancel_button.disabled = True
+    self.update_display('Cancel requested...')
+    self.cancel()
+
+  def update_display(self, msg: str, progress: Optional[float] = None):
+    if not IS_IPYTHON or self._output_widget is None:
+      print(f'AsyncCompute: {msg}')
+      return
+
+    with self._output_widget:
+      clear_output(wait=True)
+      display(HTML(f'<p>{msg}</p>'))
+
+    if progress is not None:
+      self._progress_bar.value = progress
+
+    if self.done():
+      self._cancel_button.disabled = True
+      if self.exception():
+        self._progress_bar.bar_style = 'danger'
+        self._progress_bar.description = 'Failed'
+      elif self._future.cancelled():
+        self._progress_bar.bar_style = 'warning'
+        self._progress_bar.description = 'Cancelled'
+      else:
+        self._progress_bar.bar_style = 'success'
+        self._progress_bar.description = 'Done'
+    elif self._cancel_requested:
+      self._cancel_button.disabled = True
+      self._progress_bar.description = 'Cancelling...'
+    else:
+      self._cancel_button.disabled = False
+
+  def set_pipeline_result(
+      self, pipeline_result: beam.runners.runner.PipelineResult):
+    self._pipeline_result = pipeline_result
+    if self._cancel_requested:
+      self.cancel()
+
+  def result(self, timeout=None):
+    return self._future.result(timeout=timeout)
+
+  def done(self):
+    return self._future.done()
+
+  def exception(self, timeout=None):
+    try:
+      return self._future.exception(timeout=timeout)
+    except TimeoutError:
+      return None
+
+  def wait_for_completion(self, timeout=None):
+    if not self._completed_event.wait(timeout=timeout):
+      raise TimeoutError(
+          'Timeout waiting for asynchronous computation completion.')
+    if self._future.cancelled():
+      raise RuntimeError('Asynchronous computation was cancelled.')
+    exc = self.exception()
+    if exc:
+      raise exc
+
+  def _on_done(self, future: Future):
+    try:
+      if future.cancelled():
+        self.update_display('Computation Cancelled.', 1.0)
+        return
+
+      exc = future.exception()
+      if exc:
+        self.update_display(f'Error: {exc}', 1.0)
+        _LOGGER.error('Asynchronous computation failed: %s', exc, exc_info=exc)
+      else:
+        self.update_display('Computation Finished Successfully.', 1.0)
+        res = future.result()
+        if res and res.state == PipelineState.DONE:
+          self._env.mark_pcollection_computed(self._pcolls)
+        else:
+          _LOGGER.warning(
+              'Async computation finished but state is not DONE: %s',
+              res.state if res else 'Unknown')
+    finally:
+      self._env.unmark_pcollection_computing(self._pcolls)
+      with self._recording_manager._lock:
+        self._recording_manager._async_computations.pop(self._display_id, None)
+      self._completed_event.set()
+
+  def cancel(self):
+    if self._future.done():
+      self.update_display('Cannot cancel: Computation already finished.')
+      return False
+
+    self._cancel_requested = True
+    self._cancel_button.disabled = True
+    self.update_display('Attempting to cancel...')
+
+    if self._pipeline_result:
+      try:
+        # Check pipeline state before cancelling
+        current_state = self._pipeline_result.state
+        if PipelineState.is_terminal(current_state):
+          self.update_display(
+              'Cannot cancel: Pipeline already in terminal state'
+              f' {current_state}.')
+          return False
+
+        self._pipeline_result.cancel()
+        self.update_display('Cancel signal sent to pipeline.')
+        # The future will be cancelled by the runner if successful
+        return True
+      except Exception as e:
+        self.update_display('Error sending cancel signal: %s', e)
+        _LOGGER.warning('Error during pipeline cancel(): %s', e, exc_info=e)
+        # Still try to cancel the future as a fallback
+        return self._future.cancel()
+    else:
+      self.update_display('Pipeline not yet fully started, cancelling future.')
+      return self._future.cancel()
+
+  def __repr__(self):
+    return (
+        f'<AsyncComputationResult({self._display_id}) for'
+        f' {len(self._pcolls)} PCollections, status:'
+        f" {'done' if self.done() else 'running'}>")
 
 
 class ElementStream:
   """A stream of elements from a given PCollection."""
   def __init__(
       self,
-      pcoll,  # type: beam.pvalue.PCollection
-      var,  # type: str
-      cache_key,  # type: str
-      max_n,  # type: int
-      max_duration_secs  # type: float
-      ):
+      pcoll: beam.pvalue.PCollection,
+      var: str,
+      cache_key: str,
+      max_n: int,
+      max_duration_secs: float):
     self._pcoll = pcoll
     self._cache_key = cache_key
     self._pipeline = ie.current_env().user_pipeline(pcoll.pipeline)
@@ -58,47 +248,37 @@ class ElementStream:
     self._done = False
 
   @property
-  def var(self):
-    # type: () -> str
-
+  def var(self) -> str:
     """Returns the variable named that defined this PCollection."""
     return self._var
 
   @property
-  def pcoll(self):
-    # type: () -> beam.pvalue.PCollection
-
+  def pcoll(self) -> beam.pvalue.PCollection:
     """Returns the PCollection that supplies this stream with data."""
     return self._pcoll
 
   @property
-  def cache_key(self):
-    # type: () -> str
-
+  def cache_key(self) -> str:
     """Returns the cache key for this stream."""
     return self._cache_key
 
-  def display_id(self, suffix):
-    # type: (str) -> str
-
+  def display_id(self, suffix: str) -> str:
     """Returns a unique id able to be displayed in a web browser."""
     return utils.obfuscate(self._cache_key, suffix)
 
-  def is_computed(self):
-    # type: () -> boolean
+  def is_computed(self) -> bool:
+    # noqa: F821
 
     """Returns True if no more elements will be recorded."""
     return self._pcoll in ie.current_env().computed_pcollections
 
-  def is_done(self):
-    # type: () -> boolean
+  def is_done(self) -> bool:
+    # noqa: F821
 
     """Returns True if no more new elements will be yielded."""
     return self._done
 
-  def read(self, tail=True):
-    # type: (boolean) -> Any
-
+  def read(self, tail: bool = True) -> Any:
     """Reads the elements currently recorded."""
 
     # Get the cache manager and wait until the file exists.
@@ -133,7 +313,7 @@ class ElementStream:
       # From the to_element_list we either get TestStreamPayload.Events if
       # include_time_events or decoded elements from the reader. Make sure we
       # only count the decoded elements to break early.
-      if isinstance(e, TestStreamPayload.Event):
+      if isinstance(e, beam_runner_api_pb2.TestStreamPayload.Event):
         time_limiter.update(e)
       else:
         count_limiter.update(e)
@@ -154,19 +334,20 @@ class Recording:
   """A group of PCollections from a given pipeline run."""
   def __init__(
       self,
-      user_pipeline,  # type: beam.Pipeline
-      pcolls,  # type: List[beam.pvalue.PCollection]
-      result,  # type: beam.runner.PipelineResult
-      max_n,  # type: int
-      max_duration_secs,  # type: float
-      ):
+      user_pipeline: beam.Pipeline,
+      pcolls: list[beam.pvalue.PCollection],  # noqa: F821
+      result: 'beam.runner.PipelineResult',
+      max_n: int,
+      max_duration_secs: float,
+  ):
     self._user_pipeline = user_pipeline
     self._result = result
     self._result_lock = threading.Lock()
     self._pcolls = pcolls
-    pcoll_var = lambda pcoll: {v: k
-                               for k, v in utils.pcoll_by_name().items()}.get(
-                                   pcoll, None)
+    pcoll_var = lambda pcoll: {
+        v: k
+        for k, v in utils.pcoll_by_name().items()
+    }.get(pcoll, None)
 
     self._streams = {
         pcoll: ElementStream(
@@ -188,9 +369,7 @@ class Recording:
     self._mark_computed.daemon = True
     self._mark_computed.start()
 
-  def _mark_all_computed(self):
-    # type: () -> None
-
+  def _mark_all_computed(self) -> None:
     """Marks all the PCollections upon a successful pipeline run."""
     if not self._result:
       return
@@ -216,40 +395,28 @@ class Recording:
     if self._result.state is PipelineState.DONE and self._set_computed:
       ie.current_env().mark_pcollection_computed(self._pcolls)
 
-  def is_computed(self):
-    # type: () -> boolean
-
+  def is_computed(self) -> bool:
     """Returns True if all PCollections are computed."""
     return all(s.is_computed() for s in self._streams.values())
 
-  def stream(self, pcoll):
-    # type: (beam.pvalue.PCollection) -> ElementStream
-
+  def stream(self, pcoll: beam.pvalue.PCollection) -> ElementStream:
     """Returns an ElementStream for a given PCollection."""
     return self._streams[pcoll]
 
-  def computed(self):
-    # type: () -> None
-
+  def computed(self) -> None:
     """Returns all computed ElementStreams."""
     return {p: s for p, s in self._streams.items() if s.is_computed()}
 
-  def uncomputed(self):
-    # type: () -> None
-
+  def uncomputed(self) -> None:
     """Returns all uncomputed ElementStreams."""
     return {p: s for p, s in self._streams.items() if not s.is_computed()}
 
-  def cancel(self):
-    # type: () -> None
-
+  def cancel(self) -> None:
     """Cancels the recording."""
     with self._result_lock:
       self._result.cancel()
 
-  def wait_until_finish(self):
-    # type: () -> None
-
+  def wait_until_finish(self) -> None:
     """Waits until the pipeline is done and returns the final state.
 
     This also marks any PCollections as computed right away if the pipeline is
@@ -261,9 +428,7 @@ class Recording:
     self._mark_computed.join()
     return self._result.state
 
-  def describe(self):
-    # type: () -> dict[str, int]
-
+  def describe(self) -> dict[str, int]:
     """Returns a dictionary describing the cache and recording."""
     cache_manager = ie.current_env().get_cache_manager(self._user_pipeline)
 
@@ -274,18 +439,89 @@ class Recording:
 
 class RecordingManager:
   """Manages recordings of PCollections for a given pipeline."""
-  def __init__(self, user_pipeline, pipeline_var=None, test_limiters=None):
-    # type: (beam.Pipeline, str, list[Limiter]) -> None
+  def __init__(
+      self,
+      user_pipeline: beam.Pipeline,
+      pipeline_var: str = None,
+      test_limiters: list['Limiter'] = None) -> None:  # noqa: F821
 
-    self.user_pipeline = user_pipeline  # type: beam.Pipeline
-    self.pipeline_var = pipeline_var if pipeline_var else ''  # type: str
-    self._recordings = set()  # type: set[Recording]
-    self._start_time_sec = 0  # type: float
+    self.user_pipeline: beam.Pipeline = user_pipeline
+    self.pipeline_var: str = pipeline_var if pipeline_var else ''
+    self._recordings: set[Recording] = set()
+    self._start_time_sec: float = 0
     self._test_limiters = test_limiters if test_limiters else []
+    self._executor = ThreadPoolExecutor(max_workers=os.cpu_count())
+    self._env = ie.current_env()
+    self._async_computations: dict[str, AsyncComputationResult] = {}
+    self._lock = threading.Lock()
+    self._pipeline_graph = None
+    self._applied_labels_snapshot = set()
 
-  def _watch(self, pcolls):
-    # type: (List[beam.pvalue.PCollection]) -> None
+  def _execute_pipeline_fragment(
+      self,
+      pcolls_to_compute: set[beam.pvalue.PCollection],
+      async_result: Optional['AsyncComputationResult'] = None,
+      runner: runner.PipelineRunner = None,
+      options: pipeline_options.PipelineOptions = None,
+  ) -> beam.runners.runner.PipelineResult:
+    """Synchronously executes a pipeline fragment for the given PCollections."""
+    merged_options = pipeline_options.PipelineOptions(**{
+        **self.user_pipeline.options.get_all_options(
+            drop_default=True, retain_unknown_options=True
+        ),
+        **(
+            options.get_all_options(
+                drop_default=True, retain_unknown_options=True
+            )
+            if options
+            else {}
+        ),
+    })
 
+    fragment = pf.PipelineFragment(
+        list(pcolls_to_compute), merged_options, runner=runner)
+
+    if async_result:
+      async_result.update_display('Building pipeline fragment...', 0.1)
+
+    pipeline_to_run = fragment.deduce_fragment()
+    if async_result:
+      async_result.update_display('"Pipeline running, awaiting finish..."', 0.2)
+
+    pipeline_result = pipeline_to_run.run()
+    if async_result:
+      async_result.set_pipeline_result(pipeline_result)
+
+    pipeline_result.wait_until_finish()
+    return pipeline_result
+
+  def _run_async_computation(
+      self,
+      pcolls_to_compute: set[beam.pvalue.PCollection],
+      async_result: 'AsyncComputationResult',
+      wait_for_inputs: bool,
+      runner: runner.PipelineRunner = None,
+      options: pipeline_options.PipelineOptions = None,
+  ):
+    """The function to be run in the thread pool for async computation."""
+    try:
+      if wait_for_inputs:
+        if not self._wait_for_dependencies(pcolls_to_compute, async_result):
+          raise RuntimeError('Dependency computation failed or was cancelled.')
+
+      _LOGGER.info(
+          'Starting asynchronous computation for %d PCollections.',
+          len(pcolls_to_compute))
+
+      pipeline_result = self._execute_pipeline_fragment(
+          pcolls_to_compute, async_result, runner, options)
+
+      return pipeline_result
+    except Exception as e:
+      _LOGGER.exception('Exception during asynchronous computation: %s', e)
+      raise
+
+  def _watch(self, pcolls: list[beam.pvalue.PCollection]) -> None:
     """Watch any pcollections not being watched.
 
     This allows for the underlying caching layer to identify the PCollection as
@@ -304,8 +540,8 @@ class RecordingManager:
     # Convert them one-by-one to generate a unique label for each. This allows
     # caching at a more fine-grained granularity.
     #
-    # TODO(BEAM-12388): investigate the mixing pcollections in multiple
-    # pipelines error when using the default label.
+    # TODO(https://github.com/apache/beam/issues/20929): investigate the mixing
+    # pcollections in multiple pipelines error when using the default label.
     for df in watched_dataframes:
       pcoll, _ = utils.deferred_df_to_pcollection(df)
       watched_pcollections.add(pcoll)
@@ -314,9 +550,7 @@ class RecordingManager:
         ie.current_env().watch(
             {'anonymous_pcollection_{}'.format(id(pcoll)): pcoll})
 
-  def _clear(self):
-    # type: () -> None
-
+  def _clear(self) -> None:
     """Clears the recording of all non-source PCollections."""
 
     cache_manager = ie.current_env().get_cache_manager(self.user_pipeline)
@@ -338,17 +572,13 @@ class RecordingManager:
     for pc in pcolls:
       cache_manager.clear('full', pc)
 
-  def clear(self):
-    # type: () -> None
-
+  def clear(self) -> None:
     """Clears all cached PCollections for this RecordingManager."""
     cache_manager = ie.current_env().get_cache_manager(self.user_pipeline)
     if cache_manager:
       cache_manager.cleanup()
 
-  def cancel(self):
-    # type: (None) -> None
-
+  def cancel(self) -> None:
     """Cancels the current background recording job."""
 
     bcj.attempt_to_cancel_background_caching_job(self.user_pipeline)
@@ -361,9 +591,7 @@ class RecordingManager:
     # evict the BCJ after they complete.
     ie.current_env().evict_background_caching_job(self.user_pipeline)
 
-  def describe(self):
-    # type: () -> dict[str, int]
-
+  def describe(self) -> dict[str, int]:
     """Returns a dictionary describing the cache and recording."""
 
     cache_manager = ie.current_env().get_cache_manager(self.user_pipeline)
@@ -384,26 +612,25 @@ class RecordingManager:
         'pipeline_var': self.pipeline_var
     }
 
-  def record_pipeline(self):
-    # type: () -> bool
-
+  def record_pipeline(self) -> bool:
     """Starts a background caching job for this RecordingManager's pipeline."""
 
     runner = self.user_pipeline.runner
     if isinstance(runner, ir.InteractiveRunner):
       runner = runner._underlying_runner
+    if hasattr(runner, 'is_interactive'):
+      runner.is_interactive()
 
     # Make sure that sources without a user reference are still cached.
     ie.current_env().add_user_pipeline(self.user_pipeline)
     utils.watch_sources(self.user_pipeline)
 
     # Attempt to run background caching job to record any sources.
-    if ie.current_env().is_in_ipython:
-      warnings.filterwarnings(
-          'ignore',
-          'options is deprecated since First stable release. References to '
-          '<pipeline>.options will not be supported',
-          category=DeprecationWarning)
+    warnings.filterwarnings(
+        'ignore',
+        'options is deprecated since First stable release. References to '
+        '<pipeline>.options will not be supported',
+        category=DeprecationWarning)
     if bcj.attempt_to_run_background_caching_job(
         runner,
         self.user_pipeline,
@@ -413,10 +640,251 @@ class RecordingManager:
       return True
     return False
 
-  def record(self, pcolls, max_n, max_duration):
-    # type: (List[beam.pvalue.PCollection], int, Union[int,str]) -> Recording
+  def compute_async(
+      self,
+      pcolls: set[beam.pvalue.PCollection],
+      wait_for_inputs: bool = True,
+      blocking: bool = False,
+      runner: runner.PipelineRunner = None,
+      options: pipeline_options.PipelineOptions = None,
+      force_compute: bool = False,
+  ) -> Optional[AsyncComputationResult]:
+    """Computes the given PCollections, potentially asynchronously."""
+
+    if force_compute:
+      self._env.evict_computed_pcollections(self.user_pipeline)
+
+    computed_pcolls = {
+        pcoll
+        for pcoll in pcolls if pcoll in self._env.computed_pcollections
+    }
+    computing_pcolls = {
+        pcoll
+        for pcoll in pcolls if self._env.is_pcollection_computing(pcoll)
+    }
+    pcolls_to_compute = pcolls - computed_pcolls - computing_pcolls
+
+    if not pcolls_to_compute:
+      _LOGGER.info(
+          'All requested PCollections are already computed or are being'
+          ' computed.')
+      return None
+
+    self._watch(list(pcolls_to_compute))
+    self.record_pipeline()
+
+    if blocking:
+      self._env.mark_pcollection_computing(pcolls_to_compute)
+      try:
+        if wait_for_inputs:
+          if not self._wait_for_dependencies(pcolls_to_compute):
+            raise RuntimeError(
+                'Dependency computation failed or was cancelled.')
+        pipeline_result = self._execute_pipeline_fragment(
+            pcolls_to_compute, None, runner, options)
+        if pipeline_result.state == PipelineState.DONE:
+          self._env.mark_pcollection_computed(pcolls_to_compute)
+        else:
+          _LOGGER.error(
+              'Blocking computation failed. State: %s', pipeline_result.state)
+          raise RuntimeError(
+              'Blocking computation failed. State: %s', pipeline_result.state)
+      finally:
+        self._env.unmark_pcollection_computing(pcolls_to_compute)
+      return None
+
+    else:  # Asynchronous
+      future = Future()
+      async_result = AsyncComputationResult(
+          future, pcolls_to_compute, self.user_pipeline, self)
+      with self._lock:
+        self._async_computations[async_result._display_id] = async_result
+      self._env.mark_pcollection_computing(pcolls_to_compute)
+
+      def task():
+        try:
+          result = self._run_async_computation(
+              pcolls_to_compute, async_result, wait_for_inputs, runner, options)
+          future.set_result(result)
+        except Exception as e:
+          if not future.cancelled():
+            future.set_exception(e)
+
+      self._executor.submit(task)
+      return async_result
+
+  def _get_pipeline_graph(self):
+    """Lazily initializes and returns the PipelineGraph, rebuilding it
+    only if the pipeline transforms have changed.
+    """
+    if (self._pipeline_graph is None or
+        self._applied_labels_snapshot != self.user_pipeline.applied_labels):
+      try:
+        # Try to create the graph.
+        self._pipeline_graph = PipelineGraph(self.user_pipeline)
+        self._applied_labels_snapshot = set(self.user_pipeline.applied_labels)
+      except (ImportError, NameError, AttributeError):
+        # If pydot is missing, PipelineGraph() might crash.
+        _LOGGER.warning(
+            "Could not create PipelineGraph (pydot missing?). "
+            "Async features disabled.")
+        self._pipeline_graph = None
+        self._applied_labels_snapshot = set()
+    return self._pipeline_graph
+
+  def _get_pcoll_id_map(self):
+    """Creates a map from PCollection object to its ID in the proto."""
+    pcoll_to_id = {}
+    graph = self._get_pipeline_graph()
+    if graph and graph._pipeline_instrument:
+      pcoll_to_id = graph._pipeline_instrument._pcoll_to_pcoll_id
+    return {v: k for k, v in pcoll_to_id.items()}
+
+  def _get_all_dependencies(
+      self,
+      pcolls: set[beam.pvalue.PCollection]) -> set[beam.pvalue.PCollection]:
+    """Gets all upstream PCollection dependencies
+    for the given set of PCollections."""
+    graph = self._get_pipeline_graph()
+    if not graph:
+      return set()
+
+    analyzer = graph._pipeline_instrument
+    if not analyzer:
+      return set()
+
+    pcoll_to_id = analyzer._pcoll_to_pcoll_id
+
+    target_pcoll_ids = {
+        pcoll_to_id.get(str(pcoll))
+        for pcoll in pcolls if str(pcoll) in pcoll_to_id
+    }
+
+    if not target_pcoll_ids:
+      return set()
+
+    # Build a map from PCollection ID to the actual PCollection object
+    id_to_pcoll_obj = {}
+    for _, inspectable in self._env.inspector.inspectables.items():
+      value = inspectable['value']
+      if isinstance(value, beam.pvalue.PCollection):
+        pcoll_id = pcoll_to_id.get(str(value))
+        if pcoll_id:
+          id_to_pcoll_obj[pcoll_id] = value
+
+    dependencies = set()
+    queue = collections.deque(target_pcoll_ids)
+    visited_pcoll_ids = set(target_pcoll_ids)
+
+    producers = graph._producers
+    transforms = graph._pipeline_proto.components.transforms
+
+    while queue:
+      pcoll_id = queue.popleft()
+      if pcoll_id not in producers:
+        continue
+
+      producer_id = producers[pcoll_id]
+      transform_proto = transforms.get(producer_id)
+      if not transform_proto:
+        continue
+
+      for input_pcoll_id in transform_proto.inputs.values():
+        if input_pcoll_id not in visited_pcoll_ids:
+          visited_pcoll_ids.add(input_pcoll_id)
+          queue.append(input_pcoll_id)
+
+          dep_obj = id_to_pcoll_obj.get(input_pcoll_id)
+          if dep_obj and dep_obj not in pcolls:
+            dependencies.add(dep_obj)
+
+    return dependencies
+
+  def _wait_for_dependencies(
+      self,
+      pcolls: set[beam.pvalue.PCollection],
+      async_result: Optional[AsyncComputationResult] = None,
+  ) -> bool:
+    """Waits for any dependencies of the given
+    PCollections that are currently being computed."""
+    dependencies = self._get_all_dependencies(pcolls)
+    if async_result is None:
+      pcolls_to_check = dependencies.union(pcolls)
+    else:
+      pcolls_to_check = dependencies
+    computing_deps: dict[beam.pvalue.PCollection, AsyncComputationResult] = {}
+
+    with self._lock:
+      async_computations_copy = list(self._async_computations.values())
+
+    for dep in pcolls_to_check:
+      is_computing = self._env.is_pcollection_computing(dep)
+      if is_computing:
+        for comp in async_computations_copy:
+          if dep in comp._pcolls:
+            computing_deps[dep] = comp
+            break
+
+    if not computing_deps:
+      return True
+
+    if async_result:
+      async_result.update_display(
+          'Waiting for %d dependencies to finish...', len(computing_deps))
+    _LOGGER.info(
+        'Waiting for %d dependencies: %s',
+        len(computing_deps),
+        computing_deps.keys())
+
+    results_to_wait = list(set(comp for comp in computing_deps.values()))
+
+    try:
+      for i, comp in enumerate(results_to_wait):
+        if async_result:
+          async_result.update_display(
+              f'Waiting for dependency {i + 1}/{len(results_to_wait)}...',
+              progress=0.05 + 0.05 * (i / len(results_to_wait)),
+          )
+        comp.wait_for_completion()
+      if async_result:
+        async_result.update_display('Dependencies finished.', progress=0.1)
+      _LOGGER.info('Dependencies finished successfully.')
+      return True
+    except Exception as e:
+      if async_result:
+        async_result.update_display(f'Dependency failed: {e}')
+      _LOGGER.error('Dependency computation failed: %s', e, exc_info=e)
+      return False
+
+  def _get_uncomputed_pcolls(
+      self,
+      pcolls: Iterable[beam.pvalue.PCollection],
+  ) -> set[beam.pvalue.PCollection]:
+    """Filter out already computed PCollections from the environment."""
+    current_env = ie.current_env()
+    computed = {
+        pcoll
+        for pcoll in pcolls if pcoll in current_env.computed_pcollections
+    }
+    return set(pcolls).difference(computed)
+
+  def record(
+      self,
+      pcolls: list[beam.pvalue.PCollection],
+      *,
+      max_n: int,
+      max_duration: Union[int, str],
+      runner: runner.PipelineRunner = None,
+      options: pipeline_options.PipelineOptions = None,
+      force_compute: bool = False) -> Recording:
+    # noqa: F821
 
     """Records the given PCollections."""
+
+    if not ie.current_env().options.enable_recording_replay:
+      capture_control.evict_captured_data()
+    if force_compute:
+      ie.current_env().evict_computed_pcollections()
 
     # Assert that all PCollection come from the same user_pipeline.
     for pcoll in pcolls:
@@ -437,28 +905,46 @@ class RecordingManager:
     self._watch(pcolls)
     self.record_pipeline()
 
-    # Get the subset of computed PCollections. These do not to be recomputed.
-    computed_pcolls = set(
-        pcoll for pcoll in pcolls
-        if pcoll in ie.current_env().computed_pcollections)
+    # Early check and return if everything is already computed
+    uncomputed_pcolls = self._get_uncomputed_pcolls(pcolls)
+    if not uncomputed_pcolls:
+      recording = Recording(
+          self.user_pipeline, pcolls, None, max_n, max_duration_secs)
+      self._recordings.add(recording)
+      return recording
 
-    # Start a pipeline fragment to start computing the PCollections.
-    uncomputed_pcolls = set(pcolls).difference(computed_pcolls)
-    if uncomputed_pcolls:
-      # Clear the cache of the given uncomputed PCollections because they are
-      # incomplete.
-      self._clear()
+    # Wait for dependencies if there are uncomputed PCollections
+    if not self._wait_for_dependencies(uncomputed_pcolls):
+      raise RuntimeError(
+          'Cannot record because a dependency failed to compute'
+          ' asynchronously.')
 
-      warnings.filterwarnings(
-          'ignore',
-          'options is deprecated since First stable release. References to '
-          '<pipeline>.options will not be supported',
-          category=DeprecationWarning)
-      pf.PipelineFragment(list(uncomputed_pcolls),
-                          self.user_pipeline.options).run()
-      result = ie.current_env().pipeline_result(self.user_pipeline)
-    else:
-      result = None
+    # Re-evaluate uncomputed PCollections
+    uncomputed_pcolls = self._get_uncomputed_pcolls(pcolls)
+    if not uncomputed_pcolls:
+      recording = Recording(
+          self.user_pipeline, pcolls, None, max_n, max_duration_secs)
+      self._recordings.add(recording)
+      return recording
+
+    # Flattened execution path (no indentation needed)
+    self._clear()
+
+    merged_options = pipeline_options.PipelineOptions(
+        **{
+            **self.user_pipeline.options.get_all_options(
+                drop_default=True, retain_unknown_options=True),
+            **options.get_all_options(
+                drop_default=True, retain_unknown_options=True)
+        }) if options else self.user_pipeline.options
+
+    cache_path = ie.current_env().options.cache_root
+    is_remote_run = cache_path and ie.current_env(
+    ).options.cache_root.startswith('gs://')
+    pf.PipelineFragment(
+        list(uncomputed_pcolls), merged_options,
+        runner=runner).run(blocking=is_remote_run)
+    result = ie.current_env().pipeline_result(self.user_pipeline)
 
     recording = Recording(
         self.user_pipeline, pcolls, result, max_n, max_duration_secs)
@@ -466,8 +952,13 @@ class RecordingManager:
 
     return recording
 
-  def read(self, pcoll_name, pcoll, max_n, max_duration_secs):
-    # type: (str, beam.pvalue.PValue, int, float) -> Union[None, ElementStream]
+  def read(
+      self,
+      pcoll_name: str,
+      pcoll: beam.pvalue.PValue,
+      max_n: int,
+      max_duration_secs: float) -> Union[None, ElementStream]:
+    # noqa: F821
 
     """Reads an ElementStream of a computed PCollection.
 

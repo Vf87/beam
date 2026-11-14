@@ -81,12 +81,12 @@ public class AuctionPrice implements KnownSize, Serializable {
     if (this == otherObject) {
       return true;
     }
-    if (otherObject == null || getClass() != otherObject.getClass()) {
+    if (!(otherObject instanceof AuctionPrice)) {
       return false;
     }
 
     AuctionPrice other = (AuctionPrice) otherObject;
-    return Objects.equals(auction, other.auction) && Objects.equals(price, other.price);
+    return auction == other.auction && price == other.price;
   }
 
   @Override

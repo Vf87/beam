@@ -25,8 +25,11 @@ import org.apache.beam.sdk.extensions.euphoria.core.translate.EuphoriaOptions;
 /**
  * Provides access to an accumulator backend service. It is intended to be implemented by third
  * party to support different type of services.
+ *
+ * @deprecated Use Java SDK directly, Euphoria is scheduled for removal in a future release.
  */
 @Audience(Audience.Type.EXECUTOR)
+@Deprecated
 public interface AccumulatorProvider {
 
   static AccumulatorProvider.Factory of(Pipeline pipeline) {
@@ -49,6 +52,7 @@ public interface AccumulatorProvider {
    * @return Instance of a counter.
    */
   Counter getCounter(String namespace, String name);
+
   /**
    * Get an existing instance of a histogram or create a new one.
    *

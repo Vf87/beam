@@ -16,20 +16,25 @@
 #
 # pytype: skip-file
 
+import glob
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import unittest
+from datetime import datetime
 from tempfile import TemporaryDirectory
 
 import hamcrest as hc
 import pandas
 import pytest
+import pytz
 from parameterized import param
 from parameterized import parameterized
 
+import apache_beam as beam
 from apache_beam import Create
 from apache_beam import Map
 from apache_beam.io import filebasedsource
@@ -40,22 +45,25 @@ from apache_beam.io.parquetio import ReadAllFromParquetBatched
 from apache_beam.io.parquetio import ReadFromParquet
 from apache_beam.io.parquetio import ReadFromParquetBatched
 from apache_beam.io.parquetio import WriteToParquet
+from apache_beam.io.parquetio import WriteToParquetBatched
 from apache_beam.io.parquetio import _create_parquet_sink
 from apache_beam.io.parquetio import _create_parquet_source
 from apache_beam.testing.test_pipeline import TestPipeline
+from apache_beam.testing.test_stream import TestStream
 from apache_beam.testing.util import assert_that
 from apache_beam.testing.util import equal_to
 from apache_beam.transforms.display import DisplayData
 from apache_beam.transforms.display_test import DisplayDataItemMatcher
+from apache_beam.transforms.util import LogElements
 
 try:
   import pyarrow as pa
-  import pyarrow.lib as pl
   import pyarrow.parquet as pq
+  ARROW_MAJOR_VERSION, _, _ = map(int, pa.__version__.split('.'))
 except ImportError:
   pa = None
-  pl = None
   pq = None
+  ARROW_MAJOR_VERSION = 0
 
 
 @unittest.skipIf(pa is None, "PyArrow is not installed.")
@@ -108,6 +116,37 @@ class TestParquet(unittest.TestCase):
     self.SCHEMA96 = pa.schema([('name', pa.string(), False),
                                ('favorite_number', pa.timestamp('ns'), False),
                                ('favorite_color', pa.string())])
+
+    self.RECORDS_NESTED = [{
+        'items': [
+            {
+                'name': 'Thomas',
+                'favorite_number': 1,
+                'favorite_color': 'blue'
+            },
+            {
+                'name': 'Henry',
+                'favorite_number': 3,
+                'favorite_color': 'green'
+            },
+        ]
+    },
+                           {
+                               'items': [
+                                   {
+                                       'name': 'Toby',
+                                       'favorite_number': 7,
+                                       'favorite_color': 'brown'
+                                   },
+                               ]
+                           }]
+
+    self.SCHEMA_NESTED = pa.schema([(
+        'items',
+        pa.list_(
+            pa.struct([('name', pa.string(), False),
+                       ('favorite_number', pa.int64(), False),
+                       ('favorite_color', pa.string())])))])
 
   def tearDown(self):
     shutil.rmtree(self.temp_dir)
@@ -251,8 +290,7 @@ class TestParquet(unittest.TestCase):
         file_name,
         self.SCHEMA,
         'none',
-        1024 * 1024,
-        1000,
+        False,
         False,
         '.end',
         0,
@@ -265,7 +303,6 @@ class TestParquet(unittest.TestCase):
             'file_pattern',
             'some_parquet_sink-%(shard_num)05d-of-%(num_shards)05d.end'),
         DisplayDataItemMatcher('codec', 'none'),
-        DisplayDataItemMatcher('row_group_buffer_size', str(1024 * 1024)),
         DisplayDataItemMatcher('compression', 'uncompressed')
     ]
     hc.assert_that(dd.items, hc.contains_inanyorder(*expected_items))
@@ -274,6 +311,7 @@ class TestParquet(unittest.TestCase):
     file_name = 'some_parquet_sink'
     write = WriteToParquet(file_name, self.SCHEMA)
     dd = DisplayData.create_from(write)
+
     expected_items = [
         DisplayDataItemMatcher('codec', 'none'),
         DisplayDataItemMatcher('schema', str(self.SCHEMA)),
@@ -285,18 +323,35 @@ class TestParquet(unittest.TestCase):
     ]
     hc.assert_that(dd.items, hc.contains_inanyorder(*expected_items))
 
+  def test_write_batched_display_data(self):
+    file_name = 'some_parquet_sink'
+    write = WriteToParquetBatched(file_name, self.SCHEMA)
+    dd = DisplayData.create_from(write)
+
+    expected_items = [
+        DisplayDataItemMatcher('codec', 'none'),
+        DisplayDataItemMatcher('schema', str(self.SCHEMA)),
+        DisplayDataItemMatcher(
+            'file_pattern',
+            'some_parquet_sink-%(shard_num)05d-of-%(num_shards)05d'),
+        DisplayDataItemMatcher('compression', 'uncompressed')
+    ]
+    hc.assert_that(dd.items, hc.contains_inanyorder(*expected_items))
+
+  @unittest.skipIf(
+      ARROW_MAJOR_VERSION >= 13,
+      'pyarrow 13.x and above does not throw ArrowInvalid error')
   def test_sink_transform_int96(self):
-    with tempfile.NamedTemporaryFile() as dst:
+    with self.assertRaisesRegex(Exception, 'would lose data'):
+      # Should throw an error "ArrowInvalid: Casting from timestamp[ns] to
+      # timestamp[us] would lose data"
+      dst = tempfile.NamedTemporaryFile()
       path = dst.name
-      # pylint: disable=c-extension-no-member
-      with self.assertRaises(pl.ArrowInvalid):
-        # Should throw an error "ArrowInvalid: Casting from timestamp[ns] to
-        # timestamp[us] would lose data"
-        with TestPipeline() as p:
-          _ = p \
-          | Create(self.RECORDS) \
-          | WriteToParquet(
-              path, self.SCHEMA96, num_shards=1, shard_name_template='')
+      with TestPipeline() as p:
+        _ = p \
+        | Create(self.RECORDS) \
+        | WriteToParquet(
+            path, self.SCHEMA96, num_shards=1, shard_name_template='')
 
   def test_sink_transform(self):
     with TemporaryDirectory() as tmp_dirname:
@@ -313,6 +368,128 @@ class TestParquet(unittest.TestCase):
             | ReadFromParquet(path) \
             | Map(json.dumps)
         assert_that(readback, equal_to([json.dumps(r) for r in self.RECORDS]))
+
+  def test_sink_transform_batched(self):
+    with TemporaryDirectory() as tmp_dirname:
+      path = os.path.join(tmp_dirname + "tmp_filename")
+      with TestPipeline() as p:
+        _ = p \
+        | Create([self._records_as_arrow()]) \
+        | WriteToParquetBatched(
+            path, self.SCHEMA, num_shards=1, shard_name_template='')
+      with TestPipeline() as p:
+        # json used for stable sortability
+        readback = \
+            p \
+            | ReadFromParquet(path) \
+            | Map(json.dumps)
+        assert_that(readback, equal_to([json.dumps(r) for r in self.RECORDS]))
+
+  def test_sink_transform_compliant_nested_type(self):
+    if ARROW_MAJOR_VERSION < 4:
+      return unittest.skip(
+          'Writing with compliant nested type is only '
+          'supported in pyarrow 4.x and above')
+    with TemporaryDirectory() as tmp_dirname:
+      path = os.path.join(tmp_dirname + 'tmp_filename')
+      with TestPipeline() as p:
+        _ = p \
+        | Create(self.RECORDS_NESTED) \
+        | WriteToParquet(
+            path, self.SCHEMA_NESTED, num_shards=1,
+            shard_name_template='', use_compliant_nested_type=True)
+      with TestPipeline() as p:
+        # json used for stable sortability
+        readback = \
+            p \
+            | ReadFromParquet(path) \
+            | Map(json.dumps)
+        assert_that(
+            readback, equal_to([json.dumps(r) for r in self.RECORDS_NESTED]))
+
+  def test_schema_read_write(self):
+    with TemporaryDirectory() as tmp_dirname:
+      path = os.path.join(tmp_dirname, 'tmp_filename')
+      rows = [beam.Row(a=1, b='x'), beam.Row(a=2, b='y')]
+      stable_repr = lambda row: json.dumps(row._asdict())
+      with TestPipeline() as p:
+        _ = p | Create(rows) | WriteToParquet(path)
+      with TestPipeline() as p:
+        readback = (
+            p
+            | ReadFromParquet(path + '*', as_rows=True)
+            | Map(stable_repr))
+        assert_that(readback, equal_to([stable_repr(r) for r in rows]))
+
+  def test_write_with_nullable_fields_missing_data(self):
+    """Test WriteToParquet with nullable fields where some fields are missing.
+    
+    This test addresses the bug reported in:
+    https://github.com/apache/beam/issues/35791
+    where WriteToParquet fails with a KeyError if any nullable 
+    field is missing in the data.
+    """
+    # Define PyArrow schema with all fields nullable
+    schema = pa.schema([
+        pa.field("id", pa.int64(), nullable=True),
+        pa.field("name", pa.string(), nullable=True),
+        pa.field("age", pa.int64(), nullable=True),
+        pa.field("email", pa.string(), nullable=True),
+    ])
+
+    # Sample data with missing nullable fields
+    data = [
+        {
+            'id': 1, 'name': 'Alice', 'age': 30
+        },  # missing 'email'
+        {
+            'id': 2, 'name': 'Bob', 'age': 25, 'email': 'bob@example.com'
+        },  # all fields present
+        {
+            'id': 3, 'name': 'Charlie', 'age': None, 'email': None
+        },  # explicit None values
+        {
+            'id': 4, 'name': 'David'
+        },  # missing 'age' and 'email'
+    ]
+
+    with TemporaryDirectory() as tmp_dirname:
+      path = os.path.join(tmp_dirname, 'nullable_test')
+
+      # Write data with missing nullable fields - this should not raise KeyError
+      with TestPipeline() as p:
+        _ = (
+            p
+            | Create(data)
+            | WriteToParquet(
+                path, schema, num_shards=1, shard_name_template=''))
+
+      # Read back and verify the data
+      with TestPipeline() as p:
+        readback = (
+            p
+            | ReadFromParquet(path + '*')
+            | Map(json.dumps, sort_keys=True))
+
+        # Expected data should have None for missing nullable fields
+        expected_data = [
+            {
+                'id': 1, 'name': 'Alice', 'age': 30, 'email': None
+            },
+            {
+                'id': 2, 'name': 'Bob', 'age': 25, 'email': 'bob@example.com'
+            },
+            {
+                'id': 3, 'name': 'Charlie', 'age': None, 'email': None
+            },
+            {
+                'id': 4, 'name': 'David', 'age': None, 'email': None
+            },
+        ]
+
+        assert_that(
+            readback,
+            equal_to([json.dumps(r, sort_keys=True) for r in expected_data]))
 
   def test_batched_read(self):
     with TemporaryDirectory() as tmp_dirname:
@@ -337,7 +514,7 @@ class TestParquet(unittest.TestCase):
       param(compression_type='zstd')
   ])
   def test_sink_transform_compressed(self, compression_type):
-    if compression_type == 'lz4' and int(pa.__version__.split('.')[0]) == 1:
+    if compression_type == 'lz4' and ARROW_MAJOR_VERSION == 1:
       return unittest.skip(
           "Writing with LZ4 compression is not supported in "
           "pyarrow 1.x")
@@ -368,7 +545,7 @@ class TestParquet(unittest.TestCase):
     # a list of pa.Table instances to model this expecation
     expected_result = [
         pa.Table.from_batches([batch]) for batch in self._records_as_arrow(
-            count=12000).to_batches(chunksize=1000)
+            count=12000).to_batches(max_chunksize=1000)
     ]
     self._run_parquet_test(file_name, None, None, False, expected_result)
 
@@ -378,12 +555,16 @@ class TestParquet(unittest.TestCase):
     # a list of pa.Table instances to model this expecation
     expected_result = [
         pa.Table.from_batches([batch]) for batch in self._records_as_arrow(
-            count=12000).to_batches(chunksize=1000)
+            count=12000).to_batches(max_chunksize=1000)
     ]
     self._run_parquet_test(file_name, None, 10000, True, expected_result)
 
   def test_dynamic_work_rebalancing(self):
-    file_name = self._write_data(count=120, row_group_size=20)
+    # This test depends on count being sufficiently large + the ratio of
+    # count to row_group_size also being sufficiently large (but the required
+    # ratio to pass varies for values of row_group_size and, somehow, the
+    # version of pyarrow being tested against.)
+    file_name = self._write_data(count=320, row_group_size=20)
     source = _create_parquet_source(file_name)
 
     splits = [split for split in source.split(desired_bundle_size=float('inf'))]
@@ -416,7 +597,7 @@ class TestParquet(unittest.TestCase):
     orig = self._records_as_arrow(count=120, schema=self.SCHEMA96)
     expected_result = [
         pa.Table.from_batches([batch], schema=self.SCHEMA96)
-        for batch in orig.to_batches(chunksize=20)
+        for batch in orig.to_batches(max_chunksize=20)
     ]
     self._run_parquet_test(file_name, None, None, False, expected_result)
 
@@ -463,7 +644,8 @@ class TestParquet(unittest.TestCase):
   def test_sink_transform_multiple_row_group(self):
     with TemporaryDirectory() as tmp_dirname:
       path = os.path.join(tmp_dirname + "tmp_filename")
-      with TestPipeline() as p:
+      # Pin to FnApiRunner since test assumes fixed bundle size
+      with TestPipeline('FnApiRunner') as p:
         # writing 623200 bytes of data
         _ = p \
         | Create(self.RECORDS * 4000) \
@@ -546,6 +728,398 @@ class TestParquet(unittest.TestCase):
           | Create([file_pattern]) \
           | ReadAllFromParquet(with_filename=True),
           equal_to(result))
+
+
+class GenerateEvent(beam.PTransform):
+  @staticmethod
+  def sample_data():
+    return GenerateEvent()
+
+  def expand(self, input):
+    elemlist = [{'age': 10}, {'age': 20}, {'age': 30}]
+    elem = elemlist
+    return (
+        input
+        | TestStream().add_elements(
+            elements=elem,
+            event_timestamp=datetime(
+                2021, 3, 1, 0, 0, 1, 0,
+                tzinfo=pytz.UTC).timestamp()).add_elements(
+                    elements=elem,
+                    event_timestamp=datetime(
+                        2021, 3, 1, 0, 0, 2, 0,
+                        tzinfo=pytz.UTC).timestamp()).add_elements(
+                            elements=elem,
+                            event_timestamp=datetime(
+                                2021, 3, 1, 0, 0, 3, 0,
+                                tzinfo=pytz.UTC).timestamp()).add_elements(
+                                    elements=elem,
+                                    event_timestamp=datetime(
+                                        2021, 3, 1, 0, 0, 4, 0,
+                                        tzinfo=pytz.UTC).timestamp()).
+        advance_watermark_to(
+            datetime(2021, 3, 1, 0, 0, 5, 0,
+                     tzinfo=pytz.UTC).timestamp()).add_elements(
+                         elements=elem,
+                         event_timestamp=datetime(
+                             2021, 3, 1, 0, 0, 5, 0,
+                             tzinfo=pytz.UTC).timestamp()).
+        add_elements(
+            elements=elem,
+            event_timestamp=datetime(
+                2021, 3, 1, 0, 0, 6,
+                0, tzinfo=pytz.UTC).timestamp()).add_elements(
+                    elements=elem,
+                    event_timestamp=datetime(
+                        2021, 3, 1, 0, 0, 7, 0,
+                        tzinfo=pytz.UTC).timestamp()).add_elements(
+                            elements=elem,
+                            event_timestamp=datetime(
+                                2021, 3, 1, 0, 0, 8, 0,
+                                tzinfo=pytz.UTC).timestamp()).add_elements(
+                                    elements=elem,
+                                    event_timestamp=datetime(
+                                        2021, 3, 1, 0, 0, 9, 0,
+                                        tzinfo=pytz.UTC).timestamp()).
+        advance_watermark_to(
+            datetime(2021, 3, 1, 0, 0, 10, 0,
+                     tzinfo=pytz.UTC).timestamp()).add_elements(
+                         elements=elem,
+                         event_timestamp=datetime(
+                             2021, 3, 1, 0, 0, 10, 0,
+                             tzinfo=pytz.UTC).timestamp()).add_elements(
+                                 elements=elem,
+                                 event_timestamp=datetime(
+                                     2021, 3, 1, 0, 0, 11, 0,
+                                     tzinfo=pytz.UTC).timestamp()).
+        add_elements(
+            elements=elem,
+            event_timestamp=datetime(
+                2021, 3, 1, 0, 0, 12, 0,
+                tzinfo=pytz.UTC).timestamp()).add_elements(
+                    elements=elem,
+                    event_timestamp=datetime(
+                        2021, 3, 1, 0, 0, 13, 0,
+                        tzinfo=pytz.UTC).timestamp()).add_elements(
+                            elements=elem,
+                            event_timestamp=datetime(
+                                2021, 3, 1, 0, 0, 14, 0,
+                                tzinfo=pytz.UTC).timestamp()).
+        advance_watermark_to(
+            datetime(2021, 3, 1, 0, 0, 15, 0,
+                     tzinfo=pytz.UTC).timestamp()).add_elements(
+                         elements=elem,
+                         event_timestamp=datetime(
+                             2021, 3, 1, 0, 0, 15, 0,
+                             tzinfo=pytz.UTC).timestamp()).add_elements(
+                                 elements=elem,
+                                 event_timestamp=datetime(
+                                     2021, 3, 1, 0, 0, 16, 0,
+                                     tzinfo=pytz.UTC).timestamp()).
+        add_elements(
+            elements=elem,
+            event_timestamp=datetime(
+                2021, 3, 1, 0, 0, 17, 0,
+                tzinfo=pytz.UTC).timestamp()).add_elements(
+                    elements=elem,
+                    event_timestamp=datetime(
+                        2021, 3, 1, 0, 0, 18, 0,
+                        tzinfo=pytz.UTC).timestamp()).add_elements(
+                            elements=elem,
+                            event_timestamp=datetime(
+                                2021, 3, 1, 0, 0, 19, 0,
+                                tzinfo=pytz.UTC).timestamp()).
+        advance_watermark_to(
+            datetime(2021, 3, 1, 0, 0, 20, 0,
+                     tzinfo=pytz.UTC).timestamp()).add_elements(
+                         elements=elem,
+                         event_timestamp=datetime(
+                             2021, 3, 1, 0, 0, 20, 0,
+                             tzinfo=pytz.UTC).timestamp()).advance_watermark_to(
+                                 datetime(
+                                     2021, 3, 1, 0, 0, 25, 0, tzinfo=pytz.UTC).
+                                 timestamp()).advance_watermark_to_infinity())
+
+
+class WriteStreamingTest(unittest.TestCase):
+  def setUp(self):
+    super().setUp()
+    self.tempdir = tempfile.mkdtemp()
+
+  def tearDown(self):
+    if os.path.exists(self.tempdir):
+      shutil.rmtree(self.tempdir)
+
+  def test_write_streaming_2_shards_default_shard_name_template(
+      self, num_shards=2):
+    with TestPipeline() as p:
+      output = (p | GenerateEvent.sample_data())
+      #ParquetIO
+      pyschema = pa.schema([('age', pa.int64())])
+      output2 = output | 'WriteToParquet' >> beam.io.WriteToParquet(
+          file_path_prefix=self.tempdir + "/ouput_WriteToParquet",
+          file_name_suffix=".parquet",
+          num_shards=num_shards,
+          triggering_frequency=60,
+          schema=pyschema)
+      _ = output2 | 'LogElements after WriteToParquet' >> LogElements(
+          prefix='after WriteToParquet ', with_window=True, level=logging.INFO)
+
+    # Regex to match the expected windowed file pattern
+    # Example:
+    # ouput_WriteToParquet-[1614556800.0, 1614556805.0)-00000-of-00002.parquet
+    # It captures: window_interval, shard_num, total_shards
+    pattern_string = (
+        r'.*-\[(?P<window_start>[\d\.]+), '
+        r'(?P<window_end>[\d\.]+|Infinity)\)-'
+        r'(?P<shard_num>\d{5})-of-(?P<total_shards>\d{5})\.parquet$')
+    pattern = re.compile(pattern_string)
+    file_names = []
+    for file_name in glob.glob(self.tempdir + '/ouput_WriteToParquet*'):
+      match = pattern.match(file_name)
+      self.assertIsNotNone(
+          match, f"File name {file_name} did not match expected pattern.")
+      if match:
+        file_names.append(file_name)
+    print("Found files matching expected pattern:", file_names)
+    self.assertEqual(
+        len(file_names),
+        num_shards,
+        "expected %d files, but got: %d" % (num_shards, len(file_names)))
+
+  def test_write_streaming_2_shards_custom_shard_name_template(
+      self, num_shards=2, shard_name_template='-V-SSSSS-of-NNNNN'):
+    with TestPipeline() as p:
+      output = (p | GenerateEvent.sample_data())
+      #ParquetIO
+      pyschema = pa.schema([('age', pa.int64())])
+      output2 = output | 'WriteToParquet' >> beam.io.WriteToParquet(
+          file_path_prefix=self.tempdir + "/ouput_WriteToParquet",
+          file_name_suffix=".parquet",
+          shard_name_template=shard_name_template,
+          num_shards=num_shards,
+          triggering_frequency=60,
+          schema=pyschema)
+      _ = output2 | 'LogElements after WriteToParquet' >> LogElements(
+          prefix='after WriteToParquet ', with_window=True, level=logging.INFO)
+
+    # Regex to match the expected windowed file pattern
+    # Example:
+    # ouput_WriteToParquet-[2021-03-01T00-00-00, 2021-03-01T00-01-00)-
+    #   00000-of-00002.parquet
+    # It captures: window_interval, shard_num, total_shards
+    pattern_string = (
+        r'.*-\[(?P<window_start>\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}), '
+        r'(?P<window_end>\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}|Infinity)\)-'
+        r'(?P<shard_num>\d{5})-of-(?P<total_shards>\d{5})\.parquet$')
+    pattern = re.compile(pattern_string)
+    file_names = []
+    for file_name in glob.glob(self.tempdir + '/ouput_WriteToParquet*'):
+      match = pattern.match(file_name)
+      self.assertIsNotNone(
+          match, f"File name {file_name} did not match expected pattern.")
+      if match:
+        file_names.append(file_name)
+    print("Found files matching expected pattern:", file_names)
+    self.assertEqual(
+        len(file_names),
+        num_shards,
+        "expected %d files, but got: %d" % (num_shards, len(file_names)))
+
+  def test_write_streaming_2_shards_custom_shard_name_template_5s_window(
+      self,
+      num_shards=2,
+      shard_name_template='-V-SSSSS-of-NNNNN',
+      triggering_frequency=5):
+    with TestPipeline() as p:
+      output = (p | GenerateEvent.sample_data())
+      #ParquetIO
+      pyschema = pa.schema([('age', pa.int64())])
+      output2 = output | 'WriteToParquet' >> beam.io.WriteToParquet(
+          file_path_prefix=self.tempdir + "/ouput_WriteToParquet",
+          file_name_suffix=".parquet",
+          shard_name_template=shard_name_template,
+          num_shards=num_shards,
+          triggering_frequency=triggering_frequency,
+          schema=pyschema)
+      _ = output2 | 'LogElements after WriteToParquet' >> LogElements(
+          prefix='after WriteToParquet ', with_window=True, level=logging.INFO)
+
+    # Regex to match the expected windowed file pattern
+    # Example:
+    # ouput_WriteToParquet-[2021-03-01T00-00-00, 2021-03-01T00-01-00)-
+    #   00000-of-00002.parquet
+    # It captures: window_interval, shard_num, total_shards
+    pattern_string = (
+        r'.*-\[(?P<window_start>\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}), '
+        r'(?P<window_end>\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}|Infinity)\)-'
+        r'(?P<shard_num>\d{5})-of-(?P<total_shards>\d{5})\.parquet$')
+    pattern = re.compile(pattern_string)
+    file_names = []
+    for file_name in glob.glob(self.tempdir + '/ouput_WriteToParquet*'):
+      match = pattern.match(file_name)
+      self.assertIsNotNone(
+          match, f"File name {file_name} did not match expected pattern.")
+      if match:
+        file_names.append(file_name)
+    print("Found files matching expected pattern:", file_names)
+    # for 5s window size, the input should be processed by 5 windows with
+    # 2 shards per window
+    self.assertEqual(
+        len(file_names),
+        10,
+        "expected %d files, but got: %d" % (num_shards, len(file_names)))
+
+  def test_write_streaming_undef_shards_default_shard_name_template_windowed_pcoll(  # pylint: disable=line-too-long
+      self):
+    with TestPipeline() as p:
+      output = (
+          p | GenerateEvent.sample_data()
+          | 'User windowing' >> beam.transforms.core.WindowInto(
+              beam.transforms.window.FixedWindows(10),
+              trigger=beam.transforms.trigger.AfterWatermark(),
+              accumulation_mode=beam.transforms.trigger.AccumulationMode.
+              DISCARDING,
+              allowed_lateness=beam.utils.timestamp.Duration(seconds=0)))
+      #ParquetIO
+      pyschema = pa.schema([('age', pa.int64())])
+      output2 = output | 'WriteToParquet' >> beam.io.WriteToParquet(
+          file_path_prefix=self.tempdir + "/ouput_WriteToParquet",
+          file_name_suffix=".parquet",
+          num_shards=0,
+          schema=pyschema)
+      _ = output2 | 'LogElements after WriteToParquet' >> LogElements(
+          prefix='after WriteToParquet ', with_window=True, level=logging.INFO)
+
+    # Regex to match the expected windowed file pattern
+    # Example:
+    # ouput_WriteToParquet-[1614556800.0, 1614556805.0)-00000-of-00002.parquet
+    # It captures: window_interval, shard_num, total_shards
+    pattern_string = (
+        r'.*-\[(?P<window_start>[\d\.]+), '
+        r'(?P<window_end>[\d\.]+|Infinity)\)-'
+        r'(?P<shard_num>\d{5})-of-(?P<total_shards>\d{5})\.parquet$')
+    pattern = re.compile(pattern_string)
+    file_names = []
+    for file_name in glob.glob(self.tempdir + '/ouput_WriteToParquet*'):
+      match = pattern.match(file_name)
+      self.assertIsNotNone(
+          match, f"File name {file_name} did not match expected pattern.")
+      if match:
+        file_names.append(file_name)
+    print("Found files matching expected pattern:", file_names)
+    self.assertGreaterEqual(
+        len(file_names),
+        1 * 3,  #25s of data covered by 3 10s windows
+        "expected %d files, but got: %d" % (1 * 3, len(file_names)))
+
+  def test_write_streaming_rows_land_in_their_own_window(self):
+    # One add_elements call is delivered as one bundle spanning 3 windows.
+    # Regression test for the _ParquetSink file-handle bug: several writers
+    # may be open on the sink at once (one per window), so each writer must
+    # close its own file handle or the windowed files come out corrupted.
+    base = datetime(2021, 3, 1, tzinfo=pytz.UTC).timestamp()
+    offsets = [1, 11, 21, 3, 13, 23]
+    stream = TestStream().add_elements([
+        beam.window.TimestampedValue({'offset': o}, base + o) for o in offsets
+    ]).advance_watermark_to_infinity()
+    with TestPipeline() as p:
+      _ = (
+          p
+          | stream
+          | beam.WindowInto(beam.window.FixedWindows(10))
+          | beam.io.WriteToParquet(
+              file_path_prefix=self.tempdir + '/out',
+              file_name_suffix='.parquet',
+              num_shards=1,
+              schema=pa.schema([('offset', pa.int64())])))
+
+    pattern = re.compile(r'.*-\[(?P<start>[\d\.]+), [\d\.]+\)-.*\.parquet$')
+    rows_by_window = {}
+    for file_name in glob.glob(self.tempdir + '/out*'):
+      start = float(pattern.match(file_name).group('start')) - base
+      rows = pq.read_table(file_name).column('offset').to_pylist()
+      rows_by_window[start] = sorted(rows)
+    self.assertEqual({0: [1, 3], 10: [11, 13], 20: [21, 23]}, rows_by_window)
+
+
+@unittest.skipIf(pa is None, "PyArrow is not installed.")
+@pytest.mark.uses_pyarrow
+class RowDictionariesToArrowTableTest(unittest.TestCase):
+  """Unit tests for _RowDictionariesToArrowTable windowing behavior.
+
+  Regression tests for https://github.com/apache/beam/issues/40284: a single
+  bundle may contain elements from multiple windows (the convert_fn ParDo runs
+  before the window-grouping GroupByKey in WriteImpl._expand_unbounded), so
+  the DoFn must buffer and emit tables per window instead of attributing
+  every row to the last window seen.
+  """
+  def _make_dofn(self, **kwargs):
+    from apache_beam.io.parquetio import _RowDictionariesToArrowTable
+    schema = pa.schema([('id', pa.int64()), ('name', pa.string())])
+    return _RowDictionariesToArrowTable(schema, **kwargs)
+
+  def _drain(self, dofn, elements):
+    outputs = []
+    dofn.start_bundle()
+    for row, w in elements:
+      outputs.extend(dofn.process(row, w=w, pane=None))
+    outputs.extend(dofn.finish_bundle())
+    return outputs
+
+  def test_rows_are_buffered_per_window(self):
+    window = beam.transforms.window
+    w_a = window.IntervalWindow(0, 10)
+    w_b = window.IntervalWindow(10, 20)
+    outputs = self._drain(
+        self._make_dofn(),
+        [({
+            'id': 1, 'name': 'a1'
+        }, w_a), ({
+            'id': 2, 'name': 'b1'
+        }, w_b), ({
+            'id': 3, 'name': 'a2'
+        }, w_a)])
+    self.assertEqual(2, len(outputs))
+    by_window = {o.windows[0]: o.value.to_pydict() for o in outputs}
+    self.assertEqual({'id': [1, 3], 'name': ['a1', 'a2']}, by_window[w_a])
+    self.assertEqual({'id': [2], 'name': ['b1']}, by_window[w_b])
+    for o in outputs:
+      self.assertEqual(1, len(o.windows))
+      self.assertEqual(o.windows[0].end, o.timestamp)
+
+  def test_mid_bundle_flush_stays_within_window(self):
+    window = beam.transforms.window
+    w_a = window.IntervalWindow(0, 10)
+    w_b = window.IntervalWindow(10, 20)
+    outputs = self._drain(
+        self._make_dofn(record_batch_size=2),
+        [({
+            'id': 1, 'name': 'a1'
+        }, w_a), ({
+            'id': 2, 'name': 'a2'
+        }, w_a), ({
+            'id': 3, 'name': 'a3'
+        }, w_a), ({
+            'id': 4, 'name': 'b1'
+        }, w_b)])
+    ids_by_window = {}
+    for o in outputs:
+      ids_by_window.setdefault(o.windows[0],
+                               []).extend(o.value.to_pydict()['id'])
+    self.assertEqual([1, 2, 3], ids_by_window[w_a])
+    self.assertEqual([4], ids_by_window[w_b])
+
+  def test_global_window_emits_single_windowed_value(self):
+    window = beam.transforms.window
+    outputs = self._drain(
+        self._make_dofn(),
+        [({
+            'id': i, 'name': 'n%d' % i
+        }, window.GlobalWindow()) for i in range(3)])
+    self.assertEqual(1, len(outputs))
+    self.assertIsInstance(outputs[0].windows[0], window.GlobalWindow)
+    self.assertEqual([0, 1, 2], outputs[0].value.to_pydict()['id'])
 
 
 if __name__ == '__main__':

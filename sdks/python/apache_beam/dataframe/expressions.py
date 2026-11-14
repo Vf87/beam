@@ -17,10 +17,10 @@
 import contextlib
 import random
 import threading
+from collections.abc import Callable
+from collections.abc import Iterable
 from typing import Any
-from typing import Callable
 from typing import Generic
-from typing import Iterable
 from typing import Optional
 from typing import TypeVar
 
@@ -36,12 +36,12 @@ class Session(object):
   def __init__(self, bindings=None):
     self._bindings = dict(bindings or {})
 
-  def evaluate(self, expr):  # type: (Expression) -> Any
+  def evaluate(self, expr: 'Expression') -> Any:
     if expr not in self._bindings:
       self._bindings[expr] = expr.evaluate_at(self)
     return self._bindings[expr]
 
-  def lookup(self, expr):  #  type: (Expression) -> Any
+  def lookup(self, expr: 'Expression') -> Any:
     return self._bindings[expr]
 
 
@@ -61,8 +61,9 @@ class PartitioningSession(Session):
   For testing only.
   """
   def evaluate(self, expr):
-    import pandas as pd
     import collections
+
+    import pandas as pd
 
     def is_scalar(expr):
       return not isinstance(expr.proxy(), pd.core.generic.NDFrame)
@@ -121,6 +122,7 @@ class PartitioningSession(Session):
         # is computed trivially with Singleton partitioning and passes.
         for input_partitioning in sorted(set([expr.requires_partition_by(),
                                               partitionings.Arbitrary(),
+                                              partitionings.JoinIndex(),
                                               partitionings.Index(),
                                               partitionings.Singleton()])):
           if not expr.requires_partition_by().is_subpartitioning_of(
@@ -250,9 +252,9 @@ class Expression(Generic[T]):
 class PlaceholderExpression(Expression):
   """An expression whose value must be explicitly bound in the session."""
   def __init__(
-      self,  # type: PlaceholderExpression
-      proxy, # type: T
-      reference=None,  # type: Any
+      self,
+      proxy: T,
+      reference: Any = None,
   ):
     """Initialize a placeholder expression.
 
@@ -281,11 +283,7 @@ class PlaceholderExpression(Expression):
 
 class ConstantExpression(Expression):
   """An expression whose value is known at pipeline construction time."""
-  def __init__(
-      self,  # type: ConstantExpression
-      value,  # type: T
-      proxy=None  # type: Optional[T]
-  ):
+  def __init__(self, value: T, proxy: Optional[T] = None):
     """Initialize a constant expression.
 
     Args:
@@ -318,14 +316,15 @@ class ConstantExpression(Expression):
 class ComputedExpression(Expression):
   """An expression whose value must be computed at pipeline execution time."""
   def __init__(
-      self,  # type: ComputedExpression
-      name,  # type: str
-      func,  # type: Callable[...,T]
-      args,  # type: Iterable[Expression]
-      proxy=None,  # type: Optional[T]
-      _id=None,  # type: Optional[str]
-      requires_partition_by=partitionings.Index(),  # type: partitionings.Partitioning
-      preserves_partition_by=partitionings.Singleton(),  # type: partitionings.Partitioning
+      self,
+      name: str,
+      func: Callable[..., T],
+      args: Iterable[Expression],
+      proxy: Optional[T] = None,
+      _id: Optional[str] = None,
+      requires_partition_by: partitionings.Partitioning = partitionings.Index(),
+      preserves_partition_by: partitionings.Partitioning = partitionings.
+      Singleton(),
   ):
     """Initialize a computed expression.
 
@@ -364,8 +363,10 @@ class ComputedExpression(Expression):
     self._preserves_partition_by = preserves_partition_by
 
   def placeholders(self):
-    return frozenset.union(
-        frozenset(), *[arg.placeholders() for arg in self.args()])
+    if not hasattr(self, '_placeholders'):
+      self._placeholders = frozenset.union(
+          frozenset(), *[arg.placeholders() for arg in self.args()])
+    return self._placeholders
 
   def args(self):
     return self._args
@@ -403,8 +404,10 @@ def allow_non_parallel_operations(allow=True):
     yield
   else:
     old_value, _ALLOW_NON_PARALLEL.value = _ALLOW_NON_PARALLEL.value, allow
-    yield
-    _ALLOW_NON_PARALLEL.value = old_value
+    try:
+      yield
+    finally:
+      _ALLOW_NON_PARALLEL.value = old_value
 
 
 class NonParallelOperation(Exception):

@@ -17,7 +17,7 @@
  */
 package org.apache.beam.runners.core;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.Serializable;
@@ -31,7 +31,7 @@ import org.apache.beam.sdk.transforms.windowing.Window.ClosingBehavior;
 import org.apache.beam.sdk.transforms.windowing.WindowFn;
 import org.apache.beam.sdk.util.WindowTracing;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -51,15 +51,14 @@ import org.joda.time.Instant;
  * @param <W> The kind of {@link BoundedWindow} the hold is for.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 class WatermarkHold<W extends BoundedWindow> implements Serializable {
   /** Return tag for state containing the output watermark hold used for elements. */
-  public static <W extends BoundedWindow>
-      StateTag<WatermarkHoldState> watermarkHoldTagForTimestampCombiner(
-          TimestampCombiner timestampCombiner) {
+  public static StateTag<WatermarkHoldState> watermarkHoldTagForTimestampCombiner(
+      TimestampCombiner timestampCombiner) {
     return StateTags.makeSystemTagInternal(
-        StateTags.<W>watermarkStateInternal("hold", timestampCombiner));
+        StateTags.watermarkStateInternal("hold", timestampCombiner));
   }
 
   /**
@@ -73,7 +72,8 @@ class WatermarkHold<W extends BoundedWindow> implements Serializable {
       StateTags.makeSystemTagInternal(
           StateTags.watermarkStateInternal("extra", TimestampCombiner.EARLIEST));
 
-  // [BEAM-420] Seems likely these should all be transient or this class should not be Serializable
+  // [https://github.com/apache/beam/issues/18014] Seems likely these should all be transient or
+  // this class should not be Serializable
   @SuppressFBWarnings("SE_BAD_FIELD")
   private final TimerInternals timerInternals;
 
@@ -464,6 +464,23 @@ class WatermarkHold<W extends BoundedWindow> implements Serializable {
         timerInternals.currentOutputWatermarkTime());
     context.state().access(elementHoldTag).clear();
     context.state().access(EXTRA_HOLD_TAG).clear();
+  }
+
+  /**
+   * <b><i>For internal use only; no backwards-compatibility guarantees.</i></b>
+   *
+   * <p>Permit marking the watermark holds as empty locally, without necessarily clearing them in
+   * the backend.
+   */
+  public void setKnownEmpty(ReduceFn<?, ?, ?, W>.Context context) {
+    WindowTracing.debug(
+        "WatermarkHold.setKnownEmpty: For key:{}; window:{}; inputWatermark:{}; outputWatermark:{}",
+        context.key(),
+        context.window(),
+        timerInternals.currentInputWatermarkTime(),
+        timerInternals.currentOutputWatermarkTime());
+    context.state().access(elementHoldTag).setKnownEmpty();
+    context.state().access(EXTRA_HOLD_TAG).setKnownEmpty();
   }
 
   /** Return the current data hold, or null if none. Does not clear. For debugging only. */

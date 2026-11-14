@@ -18,28 +18,24 @@
 package org.apache.beam.io.debezium;
 
 import com.google.auto.service.AutoService;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.expansion.ExternalTransformRegistrar;
 import org.apache.beam.sdk.transforms.ExternalTransformBuilder;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.checkerframework.checker.nullness.qual.Nullable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /** Exposes {@link DebeziumIO.Read} as an external transform for cross-language usage. */
-@Experimental(Experimental.Kind.PORTABILITY)
 @AutoService(ExternalTransformRegistrar.class)
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class DebeziumTransformRegistrar implements ExternalTransformRegistrar {
-  private static final Logger LOG = LoggerFactory.getLogger(DebeziumTransformRegistrar.class);
-  public static final String READ_JSON_URN = "beam:external:java:debezium:read:v1";
+  public static final String READ_JSON_URN = "beam:transform:org.apache.beam:debezium_read:v1";
 
   @Override
   public Map<String, Class<? extends ExternalTransformBuilder<?, ?, ?>>> knownBuilders() {
@@ -82,6 +78,10 @@ public class DebeziumTransformRegistrar implements ExternalTransformRegistrar {
     public static class Configuration extends CrossLanguageConfiguration {
       private @Nullable List<String> connectionProperties;
       private @Nullable Long maxNumberOfRecords;
+      private @Nullable Long maxTimeToRun;
+      private @Nullable List<String> startOffset;
+      private @Nullable String offsetStoragePath;
+      private @Nullable Boolean fullMetadata;
 
       public void setConnectionProperties(@Nullable List<String> connectionProperties) {
         this.connectionProperties = connectionProperties;
@@ -89,6 +89,22 @@ public class DebeziumTransformRegistrar implements ExternalTransformRegistrar {
 
       public void setMaxNumberOfRecords(@Nullable Long maxNumberOfRecords) {
         this.maxNumberOfRecords = maxNumberOfRecords;
+      }
+
+      public void setMaxTimeToRun(@Nullable Long maxTimeToRun) {
+        this.maxTimeToRun = maxTimeToRun;
+      }
+
+      public void setStartOffset(@Nullable List<String> startOffset) {
+        this.startOffset = startOffset;
+      }
+
+      public void setOffsetStoragePath(@Nullable String offsetStoragePath) {
+        this.offsetStoragePath = offsetStoragePath;
+      }
+
+      public void setFullMetadata(@Nullable Boolean fullMetadata) {
+        this.fullMetadata = fullMetadata;
       }
     }
 
@@ -107,7 +123,7 @@ public class DebeziumTransformRegistrar implements ExternalTransformRegistrar {
           String[] parts = connectionProperty.split("=", -1);
           String key = parts[0];
           String value = parts[1];
-          connectorConfiguration.withConnectionProperty(key, value);
+          connectorConfiguration = connectorConfiguration.withConnectionProperty(key, value);
         }
       }
 
@@ -117,6 +133,41 @@ public class DebeziumTransformRegistrar implements ExternalTransformRegistrar {
       if (configuration.maxNumberOfRecords != null) {
         readTransform =
             readTransform.withMaxNumberOfRecords(configuration.maxNumberOfRecords.intValue());
+      }
+
+      if (configuration.maxTimeToRun != null) {
+        readTransform = readTransform.withMaxTimeToRun(configuration.maxTimeToRun);
+      }
+
+      if (configuration.startOffset != null) {
+        Map<String, Object> startOffsetMap = new HashMap<>();
+        for (String property : configuration.startOffset) {
+          String[] parts = property.split("=", 2);
+          if (parts.length != 2) {
+            throw new IllegalArgumentException(
+                "Invalid startOffset entry: \""
+                    + property
+                    + "\". Expected format is \"key=value\".");
+          }
+          String key = parts[0];
+          String value = parts[1];
+          try {
+            startOffsetMap.put(key, Long.parseLong(value));
+          } catch (NumberFormatException e) {
+            startOffsetMap.put(key, value);
+          }
+        }
+        readTransform = readTransform.withStartOffset(startOffsetMap);
+      }
+
+      if (configuration.offsetStoragePath != null) {
+        readTransform =
+            readTransform.withOffsetRetainer(
+                FileSystemOffsetRetainer.of(configuration.offsetStoragePath));
+      }
+
+      if (Boolean.TRUE.equals(configuration.fullMetadata)) {
+        readTransform = readTransform.withFullMetadata(true);
       }
 
       return readTransform;

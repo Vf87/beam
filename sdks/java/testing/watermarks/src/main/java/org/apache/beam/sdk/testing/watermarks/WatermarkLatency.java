@@ -49,7 +49,7 @@ import org.slf4j.LoggerFactory;
  * Kathryn Knight, Kenneth Knowles, Daniel Mills, and Dan Sotolongo.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class WatermarkLatency {
   private static final TupleTag<KV<Long, Instant>> output = new TupleTag<KV<Long, Instant>>() {};
@@ -185,7 +185,7 @@ public class WatermarkLatency {
                                       p95.getMillis(),
                                       p99.getMillis(),
                                       numElements);
-                              LOG.info(out);
+                              LOG.info("{}", out);
                             }
 
                             private void computePercentiles(Iterable<Duration> vals) {

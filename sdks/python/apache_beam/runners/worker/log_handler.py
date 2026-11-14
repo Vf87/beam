@@ -27,10 +27,8 @@ import sys
 import threading
 import time
 import traceback
-from typing import TYPE_CHECKING
 from typing import Iterable
 from typing import Iterator
-from typing import List
 from typing import Union
 from typing import cast
 
@@ -38,15 +36,34 @@ import grpc
 
 from apache_beam.portability.api import beam_fn_api_pb2
 from apache_beam.portability.api import beam_fn_api_pb2_grpc
+from apache_beam.portability.api import endpoints_pb2
 from apache_beam.runners.worker import statesampler
 from apache_beam.runners.worker.channel_factory import GRPCChannelFactory
 from apache_beam.runners.worker.worker_id_interceptor import WorkerIdInterceptor
 from apache_beam.utils.sentinel import Sentinel
 
-if TYPE_CHECKING:
-  from apache_beam.portability.api import endpoints_pb2
+# Mapping from logging levels to LogEntry levels.
+LOG_LEVEL_TO_LOGENTRY_MAP = {
+    logging.FATAL: beam_fn_api_pb2.LogEntry.Severity.CRITICAL,
+    logging.ERROR: beam_fn_api_pb2.LogEntry.Severity.ERROR,
+    logging.WARNING: beam_fn_api_pb2.LogEntry.Severity.WARN,
+    logging.INFO: beam_fn_api_pb2.LogEntry.Severity.INFO,
+    logging.DEBUG: beam_fn_api_pb2.LogEntry.Severity.DEBUG,
+    logging.NOTSET: beam_fn_api_pb2.LogEntry.Severity.UNSPECIFIED,
+    -float('inf'): beam_fn_api_pb2.LogEntry.Severity.DEBUG,
+}
 
-# This module is experimental. No backwards-compatibility guarantees.
+# Mapping from LogEntry levels to logging levels
+LOGENTRY_TO_LOG_LEVEL_MAP = {
+    beam_fn_api_pb2.LogEntry.Severity.CRITICAL: logging.CRITICAL,
+    beam_fn_api_pb2.LogEntry.Severity.ERROR: logging.ERROR,
+    beam_fn_api_pb2.LogEntry.Severity.WARN: logging.WARNING,
+    beam_fn_api_pb2.LogEntry.Severity.NOTICE: logging.INFO + 1,
+    beam_fn_api_pb2.LogEntry.Severity.INFO: logging.INFO,
+    beam_fn_api_pb2.LogEntry.Severity.DEBUG: logging.DEBUG,
+    beam_fn_api_pb2.LogEntry.Severity.TRACE: logging.DEBUG - 1,
+    beam_fn_api_pb2.LogEntry.Severity.UNSPECIFIED: logging.NOTSET,
+}
 
 
 class FnApiLogRecordHandler(logging.Handler):
@@ -60,25 +77,15 @@ class FnApiLogRecordHandler(logging.Handler):
   # dropped. If the average log size is 1KB this may use up to 10MB of memory.
   _QUEUE_SIZE = 10000
 
-  # Mapping from logging levels to LogEntry levels.
-  LOG_LEVEL_MAP = {
-      logging.FATAL: beam_fn_api_pb2.LogEntry.Severity.CRITICAL,
-      logging.ERROR: beam_fn_api_pb2.LogEntry.Severity.ERROR,
-      logging.WARNING: beam_fn_api_pb2.LogEntry.Severity.WARN,
-      logging.INFO: beam_fn_api_pb2.LogEntry.Severity.INFO,
-      logging.DEBUG: beam_fn_api_pb2.LogEntry.Severity.DEBUG,
-      -float('inf'): beam_fn_api_pb2.LogEntry.Severity.DEBUG,
-  }
-
-  def __init__(self, log_service_descriptor):
-    # type: (endpoints_pb2.ApiServiceDescriptor) -> None
+  def __init__(
+      self, log_service_descriptor: endpoints_pb2.ApiServiceDescriptor) -> None:
     super().__init__()
 
     self._alive = True
     self._dropped_logs = 0
-    self._log_entry_queue = queue.Queue(
-        maxsize=self._QUEUE_SIZE
-    )  # type: queue.Queue[Union[beam_fn_api_pb2.LogEntry, Sentinel]]
+    self._log_entry_queue: queue.Queue[Union[beam_fn_api_pb2.LogEntry,
+                                             Sentinel]] = queue.Queue(
+                                                 maxsize=self._QUEUE_SIZE)
 
     ch = GRPCChannelFactory.insecure_channel(log_service_descriptor.url)
     # Make sure the channel is ready to avoid [BEAM-4649]
@@ -90,29 +97,34 @@ class FnApiLogRecordHandler(logging.Handler):
     self._reader.daemon = True
     self._reader.start()
 
-  def connect(self):
-    # type: () -> Iterable
+  def connect(self) -> Iterable:
     if hasattr(self, '_logging_stub'):
       del self._logging_stub  # type: ignore[has-type]
     self._logging_stub = beam_fn_api_pb2_grpc.BeamFnLoggingStub(
         self._log_channel)
     return self._logging_stub.Logging(self._write_log_entries())
 
-  def map_log_level(self, level):
-    # type: (int) -> beam_fn_api_pb2.LogEntry.Severity.Enum
+  def map_log_level(
+      self, level: int) -> beam_fn_api_pb2.LogEntry.Severity.Enum.ValueType:
     try:
-      return self.LOG_LEVEL_MAP[level]
+      return LOG_LEVEL_TO_LOGENTRY_MAP[level]
     except KeyError:
       return max(
-          beam_level for python_level,
-          beam_level in self.LOG_LEVEL_MAP.items() if python_level <= level)
+          beam_level
+          for python_level, beam_level in LOG_LEVEL_TO_LOGENTRY_MAP.items()
+          if python_level <= level)
 
-  def emit(self, record):
-    # type: (logging.LogRecord) -> None
+  def emit(self, record: logging.LogRecord) -> None:
     log_entry = beam_fn_api_pb2.LogEntry()
     log_entry.severity = self.map_log_level(record.levelno)
-    log_entry.message = self.format(record)
-    log_entry.thread = record.threadName
+    try:
+      log_entry.message = self.format(record)
+    except Exception:
+      # record.msg could be an arbitrary object, convert it to a string first.
+      log_entry.message = (
+          "Failed to format '%s' with args '%s' during logging." %
+          (str(record.msg), record.args))
+    log_entry.thread = record.threadName  # type: ignore[assignment]
     log_entry.log_location = '%s:%s' % (
         record.pathname or record.module, record.lineno or record.funcName)
     (fraction, seconds) = math.modf(record.created)
@@ -136,9 +148,7 @@ class FnApiLogRecordHandler(logging.Handler):
     except queue.Full:
       self._dropped_logs += 1
 
-  def close(self):
-    # type: () -> None
-
+  def close(self) -> None:
     """Flush out all existing log entries and unregister this handler."""
     try:
       self._alive = False
@@ -157,8 +167,7 @@ class FnApiLogRecordHandler(logging.Handler):
       # prematurely.
       logging.error("Error closing the logging channel.", exc_info=True)
 
-  def _write_log_entries(self):
-    # type: () -> Iterator[beam_fn_api_pb2.LogEntry.List]
+  def _write_log_entries(self) -> Iterator[beam_fn_api_pb2.LogEntry.List]:
     done = False
     while not done:
       log_entries = [self._log_entry_queue.get()]
@@ -174,10 +183,9 @@ class FnApiLogRecordHandler(logging.Handler):
         # typing: log_entries was initialized as List[Union[..., Sentinel]],
         # but now that we've popped the sentinel out (above) we can safely cast
         yield beam_fn_api_pb2.LogEntry.List(
-            log_entries=cast(List[beam_fn_api_pb2.LogEntry], log_entries))
+            log_entries=cast(list[beam_fn_api_pb2.LogEntry], log_entries))
 
-  def _read_log_control_messages(self):
-    # type: () -> None
+  def _read_log_control_messages(self) -> None:
     # Only reconnect when we are alive.
     # We can drop some logs in the unlikely event of logging connection
     # dropped(not closed) during termination when we still have logs to be sent.

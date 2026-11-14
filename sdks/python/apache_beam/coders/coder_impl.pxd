@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 
-# cython: profile=True
 
 cimport cython
 
@@ -27,6 +26,8 @@ cimport libc.string
 
 cdef extern from "math.h":
   libc.stdint.int64_t abs "llabs"(libc.stdint.int64_t)
+
+ctypedef char* char_ptr
 
 from .stream cimport InputStream, OutputStream
 from apache_beam.utils cimport windowed_value
@@ -80,6 +81,8 @@ cdef class FastPrimitivesCoderImpl(StreamCoderImpl):
   cdef CoderImpl iterable_coder_impl
   cdef object requires_deterministic_step_label
   cdef bint warn_deterministic_fallback
+  cdef bint force_use_dill
+  cdef bint use_relative_filepaths
 
   @cython.locals(dict_value=dict, int_value=libc.stdint.int64_t,
                  unicode_value=unicode)
@@ -87,16 +90,38 @@ cdef class FastPrimitivesCoderImpl(StreamCoderImpl):
   @cython.locals(t=int)
   cpdef decode_from_stream(self, InputStream stream, bint nested)
   cdef encode_special_deterministic(self, value, OutputStream stream)
+  cdef encode_type_2_67_0(self, t, OutputStream stream)
   cdef encode_type(self, t, OutputStream stream)
   cdef decode_type(self, InputStream stream)
 
+cdef dict _pickled_types
+
 cdef dict _unpickled_types
+
+
+cdef class MapCoderImpl(StreamCoderImpl):
+  cdef CoderImpl _key_coder
+  cdef CoderImpl _value_coder
+  cdef bint _is_deterministic
+
 
 cdef class BytesCoderImpl(CoderImpl):
   pass
 
 
 cdef class BooleanCoderImpl(CoderImpl):
+  pass
+
+
+cdef class BigEndianShortCoderImpl(StreamCoderImpl):
+  pass
+
+
+cdef class ByteCoderImpl(StreamCoderImpl):
+  pass
+
+
+cdef class SinglePrecisionFloatCoderImpl(StreamCoderImpl):
   pass
 
 
@@ -111,6 +136,11 @@ cdef class TimestampCoderImpl(StreamCoderImpl):
 cdef list small_ints
 cdef class VarIntCoderImpl(StreamCoderImpl):
   @cython.locals(ivalue=libc.stdint.int64_t)
+  cpdef bytes encode(self, value)
+
+
+cdef class VarInt32CoderImpl(StreamCoderImpl):
+  @cython.locals(ivalue=libc.stdint.int32_t)
   cpdef bytes encode(self, value)
 
 
@@ -154,7 +184,15 @@ cdef class TupleSequenceCoderImpl(SequenceCoderImpl):
   pass
 
 
+cdef class _AbstractIterable:
+  cdef object _contents
+
+
 cdef class IterableCoderImpl(SequenceCoderImpl):
+  cdef bint _use_abstract_iterable
+
+
+cdef class ListCoderImpl(SequenceCoderImpl):
   pass
 
 
@@ -195,6 +233,18 @@ cdef libc.stdint.int64_t MIN_TIMESTAMP_micros
 cdef libc.stdint.int64_t MAX_TIMESTAMP_micros
 
 
+cdef class _OrderedUnionCoderImpl(StreamCoderImpl):
+  cdef tuple _types
+  cdef tuple _coder_impls
+  cdef CoderImpl _fallback_coder_impl
+
+  @cython.locals(ix=int, c=CoderImpl)
+  cpdef encode_to_stream(self, value, OutputStream stream, bint nested)
+
+  @cython.locals(ix=int, c=CoderImpl)
+  cpdef decode_from_stream(self, InputStream stream, bint nested)
+
+
 cdef class WindowedValueCoderImpl(StreamCoderImpl):
   """A coder for windowed values."""
   cdef CoderImpl _value_coder
@@ -224,3 +274,60 @@ cdef class ParamWindowedValueCoderImpl(WindowedValueCoderImpl):
 
 cdef class LengthPrefixCoderImpl(StreamCoderImpl):
   cdef CoderImpl _value_coder
+
+
+cdef class RowColumnEncoder:
+  cdef bint encode_to_stream(self, size_t index, OutputStream stream) except -1
+  cdef bint decode_from_stream(self, size_t index, InputStream stream) except -1
+
+
+cdef class GenericRowColumnEncoder(RowColumnEncoder):
+  cdef object column
+  cdef CoderImpl coder_impl
+
+
+cdef class RowCoderImpl(StreamCoderImpl):
+  cdef object schema
+  cdef int num_fields
+  cdef list field_names
+  cdef list field_nullable
+  cdef object constructor
+  cdef list encoding_positions
+  cdef list encoding_positions_argsort
+  cdef bint encoding_positions_are_trivial
+  cdef list components
+  cdef bint has_nullable_fields
+  cdef bint static_encoding
+
+  @cython.locals(i=int, nvals=libc.stdint.int64_t, running=int, component_coder=CoderImpl,
+                 null_mask=bytes, null_mask_c=char_ptr)
+  cpdef decode_from_stream(self, InputStream stream, bint nested)
+
+  @cython.locals(i=int, nvals=libc.stdint.int64_t, k=size_t, n=size_t,
+                 null_mask=bytes, null_mask_c=char_ptr)
+  cpdef decode_batch_from_stream(self, dict dest, InputStream stream)
+
+  @cython.locals(i=int, running=int, component_coder=CoderImpl)
+  cpdef encode_to_stream(self, value, OutputStream stream, bint nested)
+
+  @cython.locals(i=int, k=size_t, n=size_t,
+                 null_flags=libc.stdint.uint8_t[:,::1],
+                 null_bits=libc.stdint.uint8_t[:,::1],
+                 has_null_bits=libc.stdint.uint8_t[::1])
+  cpdef encode_batch_to_stream(self, dict values, OutputStream stream)
+
+
+cdef class LogicalTypeCoderImpl(StreamCoderImpl):
+  cdef object logical_type
+  cdef CoderImpl representation_coder
+
+  cpdef decode_from_stream(self, InputStream stream, bint nested)
+  cpdef encode_to_stream(self, value, OutputStream stream, bint nested)
+
+
+cdef class BigIntegerCoderImpl(StreamCoderImpl):
+  pass
+
+
+cdef class DecimalCoderImpl(StreamCoderImpl):
+  pass

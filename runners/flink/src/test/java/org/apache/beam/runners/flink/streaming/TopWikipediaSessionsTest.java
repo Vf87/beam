@@ -32,13 +32,16 @@ import org.apache.beam.sdk.transforms.windowing.Sessions;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Joiner;
 import org.apache.flink.test.util.AbstractTestBase;
+import org.apache.flink.test.util.TestBaseUtils;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.ClassRule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
 /** Session window test. */
 public class TopWikipediaSessionsTest extends AbstractTestBase implements Serializable {
@@ -57,19 +60,22 @@ public class TopWikipediaSessionsTest extends AbstractTestBase implements Serial
         "user: user3 value:7",
         "user: user3 value:2"
       };
+  @ClassRule public static final TemporaryFolder TEMP_RESULT_FOLDER = new TemporaryFolder();
 
   @Before
   public void preSubmit() throws Exception {
     // Beam Write will add shard suffix to fileName, see ShardNameTemplate.
     // So tempFile need have a parent to compare.
-    File resultParent = createAndRegisterTempFile("result");
+    // TODO: Consider move to AbstractTestBase.createAndRegisterTempFile when all tests migrated to
+    // JUnit 5
+    File resultParent = new File(TEMP_RESULT_FOLDER.newFolder(), "result");
     resultDir = resultParent.toURI().toString();
     resultPath = new File(resultParent, "file.txt").getAbsolutePath();
   }
 
   @After
   public void postSubmit() throws Exception {
-    compareResultsByLinesInMemory(Joiner.on('\n').join(EXPECTED_RESULT), resultDir);
+    TestBaseUtils.compareResultsByLinesInMemory(Joiner.on('\n').join(EXPECTED_RESULT), resultDir);
   }
 
   @Test

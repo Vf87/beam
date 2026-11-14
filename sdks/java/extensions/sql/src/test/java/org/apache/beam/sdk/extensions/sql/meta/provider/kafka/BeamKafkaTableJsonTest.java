@@ -19,12 +19,12 @@ package org.apache.beam.sdk.extensions.sql.meta.provider.kafka;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
-import com.alibaba.fastjson.JSON;
 import java.util.List;
+import org.apache.beam.sdk.extensions.sql.TableUtils;
 import org.apache.beam.sdk.extensions.sql.meta.Table;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.values.Row;
-import org.testcontainers.shaded.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 
 public class BeamKafkaTableJsonTest extends BeamKafkaTableTest {
 
@@ -48,7 +48,7 @@ public class BeamKafkaTableJsonTest extends BeamKafkaTableTest {
   protected Row generateRow(int i) {
     boolean bool = i % 2 == 0;
     List<Object> values =
-        org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList.of(
+        ImmutableList.of(
             (long) i,
             "json_value" + i,
             bool,
@@ -60,15 +60,15 @@ public class BeamKafkaTableJsonTest extends BeamKafkaTableTest {
   @Override
   protected BeamKafkaTable getBeamKafkaTable() {
     return (BeamKafkaTable)
-        (new KafkaTableProvider()
+        new KafkaTableProvider()
             .buildBeamSqlTable(
                 Table.builder()
                     .name("kafka")
                     .type("kafka")
                     .schema(TEST_SCHEMA)
                     .location("localhost/mytopic")
-                    .properties(JSON.parseObject("{ \"format\": \"json\" }"))
-                    .build()));
+                    .properties(TableUtils.parseProperties("{ \"format\": \"json\" }"))
+                    .build());
   }
 
   private String createJson(int i) {

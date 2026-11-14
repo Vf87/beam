@@ -22,7 +22,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import org.apache.beam.examples.subprocess.configuration.SubProcessConfiguration;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Sets;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -64,7 +64,7 @@ public class CallingSubProcessUtils {
 
   public static synchronized void initSemaphore(Integer permits, String binaryName) {
     if (!semaphores.containsKey(binaryName)) {
-      LOG.info(String.format(String.format("Initialized Semaphore for binary %s ", binaryName)));
+      LOG.info("Initialized Semaphore for binary {} ", binaryName);
       semaphores.put(binaryName, new Semaphore(permits));
     }
   }
@@ -88,7 +88,7 @@ public class CallingSubProcessUtils {
   }
 
   /** Permit class for access to worker cpu resources. */
-  public static class Permit implements AutoCloseable {
+  public static final class Permit implements AutoCloseable {
 
     private String binaryName;
 

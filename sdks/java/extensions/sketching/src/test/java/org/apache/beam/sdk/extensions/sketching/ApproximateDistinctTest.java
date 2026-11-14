@@ -29,8 +29,8 @@ import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
-import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.coders.BigEndianIntegerCoder;
+import org.apache.beam.sdk.extensions.avro.coders.AvroCoder;
 import org.apache.beam.sdk.extensions.sketching.ApproximateDistinct.ApproximateDistinctFn;
 import org.apache.beam.sdk.testing.CoderProperties;
 import org.apache.beam.sdk.testing.PAssert;
@@ -188,7 +188,7 @@ public class ApproximateDistinctTest implements Serializable {
     @Override
     public Void apply(Iterable<Long> input) {
       for (Long estimate : input) {
-        boolean isAccurate = Math.abs(estimate - expectedCard) / expectedCard < expectedError;
+        boolean isAccurate = Math.abs(0.0 + estimate - expectedCard) / expectedCard < expectedError;
         Assert.assertTrue(
             "not accurate enough : \nExpected Cardinality : "
                 + expectedCard

@@ -35,9 +35,9 @@ import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.ByteSource;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.CharSource;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.Files;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.ByteSource;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.CharSource;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Files;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -197,7 +197,7 @@ public class ZipFilesTest {
     assertFalse(invalidDirectory.exists());
     try {
       ZipFiles.unzipFile(zipFile, invalidDirectory);
-      fail("We expect the IllegalArgumentException, but it never occured");
+      fail("We expect the IllegalArgumentException, but it never occurred");
     } catch (IllegalArgumentException e) {
       // This is the expected exception - we passed the test.
     }

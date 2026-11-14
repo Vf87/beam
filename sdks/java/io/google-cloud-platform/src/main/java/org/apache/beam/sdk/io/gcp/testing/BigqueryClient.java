@@ -17,9 +17,11 @@
  */
 package org.apache.beam.sdk.io.gcp.testing;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
+import com.google.api.client.googleapis.json.GoogleJsonResponseException;
+import com.google.api.client.http.HttpResponseException;
 import com.google.api.client.http.HttpTransport;
 import com.google.api.client.json.JsonFactory;
 import com.google.api.client.util.BackOff;
@@ -42,16 +44,16 @@ import com.google.api.services.bigquery.model.TableDataInsertAllRequest;
 import com.google.api.services.bigquery.model.TableDataInsertAllRequest.Rows;
 import com.google.api.services.bigquery.model.TableDataInsertAllResponse;
 import com.google.api.services.bigquery.model.TableFieldSchema;
-import com.google.api.services.bigquery.model.TableList;
-import com.google.api.services.bigquery.model.TableList.Tables;
 import com.google.api.services.bigquery.model.TableReference;
 import com.google.api.services.bigquery.model.TableRow;
 import com.google.api.services.bigquery.model.TableSchema;
 import com.google.auth.Credentials;
 import com.google.auth.http.HttpCredentialsAdapter;
 import com.google.auth.oauth2.GoogleCredentials;
+import com.google.cloud.hadoop.util.ApiErrorExtractor;
 import java.io.IOException;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -63,8 +65,8 @@ import org.apache.beam.sdk.annotations.Internal;
 import org.apache.beam.sdk.extensions.gcp.util.BackOffAdapter;
 import org.apache.beam.sdk.extensions.gcp.util.Transport;
 import org.apache.beam.sdk.util.FluentBackoff;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.slf4j.Logger;
@@ -113,7 +115,7 @@ import org.slf4j.LoggerFactory;
  */
 @Internal
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class BigqueryClient {
   private static final Logger LOG = LoggerFactory.getLogger(BigqueryClient.class);
@@ -288,10 +290,27 @@ public class BigqueryClient {
 
   /** Performs a query without flattening results. */
   @Nonnull
-  public List<TableRow> queryUnflattened(String query, String projectId, boolean typed)
+  public List<TableRow> queryUnflattened(
+      String query, String projectId, boolean typed, boolean useStandardSql)
+      throws IOException, InterruptedException {
+    return queryUnflattened(query, projectId, typed, useStandardSql, null);
+  }
+
+  /**
+   * Performs a query without flattening results. May choose a location (GCP region) to perform this
+   * operation in.
+   */
+  @Nonnull
+  public List<TableRow> queryUnflattened(
+      String query,
+      String projectId,
+      boolean typed,
+      boolean useStandardSql,
+      @Nullable String location)
       throws IOException, InterruptedException {
     Random rnd = new Random(System.currentTimeMillis());
-    String temporaryDatasetId = "_dataflow_temporary_dataset_" + rnd.nextInt(1000000);
+    String temporaryDatasetId =
+        String.format("_dataflow_temporary_dataset_%s_%s", System.nanoTime(), rnd.nextInt(1000000));
     String temporaryTableId = "dataflow_temporary_table_" + rnd.nextInt(1000000);
     TableReference tempTableReference =
         new TableReference()
@@ -299,40 +318,87 @@ public class BigqueryClient {
             .setDatasetId(temporaryDatasetId)
             .setTableId(temporaryTableId);
 
-    createNewDataset(projectId, temporaryDatasetId);
-    createNewTable(
-        projectId, temporaryDatasetId, new Table().setTableReference(tempTableReference));
+    createNewDataset(projectId, temporaryDatasetId, null, location);
+    try {
+      createNewTable(
+          projectId,
+          temporaryDatasetId,
+          new Table().setTableReference(tempTableReference).setLocation(location));
 
-    JobConfigurationQuery jcQuery =
-        new JobConfigurationQuery()
-            .setFlattenResults(false)
-            .setAllowLargeResults(true)
-            .setDestinationTable(tempTableReference)
-            .setQuery(query);
-    JobConfiguration jc = new JobConfiguration().setQuery(jcQuery);
+      JobConfigurationQuery jcQuery =
+          new JobConfigurationQuery()
+              .setFlattenResults(false)
+              .setAllowLargeResults(true)
+              .setDestinationTable(tempTableReference)
+              .setWriteDisposition("WRITE_TRUNCATE")
+              .setUseLegacySql(!useStandardSql)
+              .setQuery(query);
+      GetQueryResultsResponse qResponse = runQueryJobWithRetries(projectId, jcQuery, location);
 
-    Job job = new Job().setConfiguration(jc);
+      final TableSchema schema = qResponse.getSchema();
+      final List<TableRow> rows = qResponse.getRows();
+      if (rows == null) {
+        return Collections.EMPTY_LIST;
+      }
+      return !typed
+          ? rows
+          : rows.stream()
+              .map(r -> getTypedTableRow(schema.getFields(), r))
+              .collect(Collectors.toList());
+    } finally {
+      deleteDataset(projectId, temporaryDatasetId);
+    }
+  }
 
-    Job insertedJob = bqClient.jobs().insert(projectId, job).execute();
-
-    GetQueryResultsResponse qResponse;
+  /**
+   * Starts a query job and waits for its results. Polling again can't revive a job that failed with
+   * a transient error such as a 503 backendError, so each retry starts a new job.
+   */
+  private GetQueryResultsResponse runQueryJobWithRetries(
+      String projectId, JobConfigurationQuery jcQuery, @Nullable String location)
+      throws IOException, InterruptedException {
+    Sleeper sleeper = Sleeper.DEFAULT;
+    BackOff backoff = BackOffAdapter.toGcpBackOff(BACKOFF_FACTORY.backoff());
+    IOException lastException = null;
     do {
-      qResponse =
-          bqClient
-              .jobs()
-              .getQueryResults(projectId, insertedJob.getJobReference().getJobId())
-              .execute();
+      if (lastException != null) {
+        LOG.warn("Retrying query ({}) after exception", jcQuery.getQuery(), lastException);
+      }
+      try {
+        Job job = new Job().setConfiguration(new JobConfiguration().setQuery(jcQuery));
+        String jobId =
+            bqClient.jobs().insert(projectId, job).execute().getJobReference().getJobId();
+        GetQueryResultsResponse qResponse;
+        do {
+          qResponse =
+              bqClient.jobs().getQueryResults(projectId, jobId).setLocation(location).execute();
+        } while (!qResponse.getJobComplete());
+        return qResponse;
+      } catch (IOException e) {
+        if (!isTransient(e)) {
+          throw e;
+        }
+        lastException = e;
+      }
+    } while (BackOffUtils.next(sleeper, backoff));
 
-    } while (!qResponse.getJobComplete());
+    throw new RuntimeException(
+        String.format(
+            "Unable to get BigQuery query results after retrying %d times using query (%s)",
+            MAX_QUERY_RETRIES, jcQuery.getQuery()),
+        lastException);
+  }
 
-    final TableSchema schema = qResponse.getSchema();
-    final List<TableRow> rows = qResponse.getRows();
-    deleteDataset(projectId, temporaryDatasetId);
-    return !typed
-        ? rows
-        : rows.stream()
-            .map(r -> getTypedTableRow(schema.getFields(), r))
-            .collect(Collectors.toList());
+  /**
+   * Returns true for errors that may succeed on retry: 5xx responses, rate limiting (429, or 403
+   * rateLimitExceeded) and failures without an HTTP response, such as timeouts.
+   */
+  private boolean isTransient(IOException e) {
+    if (!(e instanceof HttpResponseException)) {
+      return true;
+    }
+    int statusCode = ((HttpResponseException) e).getStatusCode();
+    return statusCode >= 500 || statusCode == 429 || ApiErrorExtractor.INSTANCE.rateLimited(e);
   }
 
   @Nonnull
@@ -381,6 +447,25 @@ public class BigqueryClient {
   /** Creates a new dataset. */
   public void createNewDataset(String projectId, String datasetId)
       throws IOException, InterruptedException {
+    createNewDataset(projectId, datasetId, null);
+  }
+
+  /** Creates a new dataset with defaultTableExpirationMs. */
+  public void createNewDataset(
+      String projectId, String datasetId, @Nullable Long defaultTableExpirationMs)
+      throws IOException, InterruptedException {
+    createNewDataset(projectId, datasetId, defaultTableExpirationMs, null);
+  }
+
+  /**
+   * Creates a new dataset with defaultTableExpirationMs and in a specified location (GCP region).
+   */
+  public void createNewDataset(
+      String projectId,
+      String datasetId,
+      @Nullable Long defaultTableExpirationMs,
+      @Nullable String location)
+      throws IOException, InterruptedException {
     Sleeper sleeper = Sleeper.DEFAULT;
     BackOff backoff = BackOffAdapter.toGcpBackOff(BACKOFF_FACTORY.backoff());
     IOException lastException = null;
@@ -395,16 +480,24 @@ public class BigqueryClient {
                 .insert(
                     projectId,
                     new Dataset()
-                        .setDatasetReference(new DatasetReference().setDatasetId(datasetId)))
+                        .setDatasetReference(new DatasetReference().setDatasetId(datasetId))
+                        .setDefaultTableExpirationMs(defaultTableExpirationMs)
+                        .setLocation(location))
                 .execute();
         if (response != null) {
-          LOG.info("Successfully created new dataset : " + response.getId());
+          LOG.info("Successfully created new dataset : {}", response.getId());
           return;
         } else {
           lastException =
               new IOException(
                   "Expected valid response from insert dataset job, but received null.");
         }
+      } catch (GoogleJsonResponseException e) {
+        if (e.getStatusCode() == 409) {
+          LOG.info("Dataset {} already exists, treating as success.", datasetId);
+          return;
+        }
+        lastException = e;
       } catch (IOException e) {
         // ignore and retry
         lastException = e;
@@ -421,27 +514,18 @@ public class BigqueryClient {
   public void deleteTable(String projectId, String datasetId, String tableName) {
     try {
       bqClient.tables().delete(projectId, datasetId, tableName).execute();
-      LOG.info("Successfully deleted table: " + tableName);
+      LOG.info("Successfully deleted table: {}", tableName);
     } catch (Exception e) {
-      LOG.debug("Exception caught when deleting table: " + e.getMessage());
+      LOG.debug("Exception caught when deleting table", e);
     }
   }
 
   public void deleteDataset(String projectId, String datasetId) {
     try {
-      TableList tables = bqClient.tables().list(projectId, datasetId).execute();
-      for (Tables table : tables.getTables()) {
-        this.deleteTable(projectId, datasetId, table.getTableReference().getTableId());
-      }
+      bqClient.datasets().delete(projectId, datasetId).setDeleteContents(true).execute();
+      LOG.info("Successfully deleted dataset: {}", datasetId);
     } catch (Exception e) {
-      LOG.debug("Exceptions caught when listing all tables: " + e.getMessage());
-    }
-
-    try {
-      bqClient.datasets().delete(projectId, datasetId).execute();
-      LOG.info("Successfully deleted dataset: " + datasetId);
-    } catch (Exception e) {
-      LOG.debug("Exceptions caught when deleting dataset: " + e.getMessage());
+      LOG.debug("Exceptions caught when deleting dataset", e);
     }
   }
 
@@ -457,12 +541,22 @@ public class BigqueryClient {
       try {
         Table response = this.bqClient.tables().insert(projectId, datasetId, newTable).execute();
         if (response != null) {
-          LOG.info("Successfully created new table: " + response.getId());
+          LOG.info("Successfully created new table: {}", response.getId());
           return;
         } else {
           lastException =
               new IOException("Expected valid response from create table job, but received null.");
         }
+      } catch (GoogleJsonResponseException e) {
+        if (e.getStatusCode() == 409) {
+          LOG.info(
+              "Table {}:{}.{} already exists, treating as success.",
+              projectId,
+              datasetId,
+              newTable.getTableReference().getTableId());
+          return;
+        }
+        lastException = e;
       } catch (IOException e) {
         // ignore and retry
         lastException = e;
@@ -501,7 +595,7 @@ public class BigqueryClient {
                 .execute();
         if (response != null
             && (response.getInsertErrors() == null || response.getInsertErrors().isEmpty())) {
-          LOG.info("Successfully inserted data into table : " + tableName);
+          LOG.info("Successfully inserted data into table : {}", tableName);
           return;
         } else {
           if (response == null || response.getInsertErrors() == null) {
@@ -555,5 +649,20 @@ public class BigqueryClient {
             "Unable to get BigQuery response after retrying %d times for tables.get (%s)",
             MAX_QUERY_RETRIES, tableId),
         lastException);
+  }
+
+  public void updateTableSchema(
+      String projectId, String datasetId, String tableId, TableSchema newSchema)
+      throws IOException {
+    this.bqClient
+        .tables()
+        .patch(projectId, datasetId, tableId, new Table().setSchema(newSchema))
+        .execute();
+    LOG.info(
+        "Successfully updated the schema of table {}:{}.{}. New schema:\n{}",
+        projectId,
+        datasetId,
+        tableId,
+        newSchema.toPrettyString());
   }
 }

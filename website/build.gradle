@@ -21,6 +21,9 @@ plugins {
   id 'org.ajoberstar.grgit'  // Publish website to asf-git branch.
 }
 
+apply plugin: org.apache.beam.gradle.BeamModulePlugin
+applyPythonNature()
+
 def dockerImageTag = 'beam-website'
 def dockerWorkDir = "/opt"
 def buildDir = "${project.rootDir}/build/website"
@@ -41,10 +44,10 @@ def shell = { cmd ->
 
 def envdir = "${buildDir}/gradleenv"
 
-task setupVirtualenv {
+task setupVirtualenvWithDependencies {
   doLast {
     exec {
-      commandLine 'virtualenv', "${envdir}"
+      commandLine "python${project.ext.pythonVersion}", '-m', 'venv', "${envdir}"
     }
     exec {
       executable 'sh'
@@ -125,6 +128,70 @@ task setupDockerContainer(type: Exec) {
     """echo '[params]\n  branch_repo = "${getBranchRepo()}"' > /tmp/_config_branch_repo.toml"""
 }
 
+def performanceLooksOutDir = "$dockerSourceDir/site/static/images/performance/looks"
+def gcpCredsInContainer = "/tmp/gcp-key.json"
+
+task copyGcpCredsToContainer(type: Exec) {
+  dependsOn setupDockerContainer
+
+  def gcpCredsHost = providers.gradleProperty("gcpCredsFile").orNull
+
+  onlyIf { gcpCredsHost != null }
+
+  doFirst {
+    commandLine 'docker', 'cp',
+      gcpCredsHost,
+      "${->startDockerContainer.containerId()}:${gcpCredsInContainer}"
+  }
+}
+
+task downloadPerformanceLooks(type: Exec) {
+  dependsOn setupDockerContainer, copyGcpCredsToContainer
+
+  def gcpCredsHost = providers.gradleProperty("gcpCredsFile").orNull
+
+  onlyIf { gcpCredsHost != null }
+
+  doFirst {
+    // The website container is started as the host uid, which has no
+    // /etc/passwd entry. gcloud storage calls pwd.getpwuid and crashes,
+    // so the build publishes without the plots. Root is required only to
+    // add that uid. gcloud then runs as the repo owner.
+    commandLine 'docker', 'exec', '-u', '0',
+      "${-> setupDockerContainer.containerId()}", '/bin/bash', '-lc',
+      """
+      set -u
+
+      SRC="gs://public_looker_explores_us_a3853f40"
+      OUT_DIR="${performanceLooksOutDir}"
+      HOST_UID="\$(stat -c '%u' /opt/website)"
+      HOST_GID="\$(stat -c '%g' /opt/website)"
+
+      if ! getent passwd "\$HOST_UID" >/dev/null 2>&1; then
+        echo "beamweb:x:\${HOST_UID}:\${HOST_GID}:beamweb:/tmp:/bin/bash" >> /etc/passwd
+      fi
+
+      export HOME=/tmp
+      export CLOUDSDK_CONFIG=/tmp/gcloud
+      export GOOGLE_APPLICATION_CREDENTIALS="${gcpCredsInContainer}"
+
+      mkdir -p "\$OUT_DIR"
+      # mkdir above runs as root. The leaf directory must be writable by the host uid.
+      chown -R "\$HOST_UID:\$HOST_GID" "\$(dirname "\$OUT_DIR")"
+
+      echo "[performance_looks] Syncing looks..."
+
+      if gosu "\$HOST_UID:\$HOST_GID" gcloud auth activate-service-account --key-file="\$GOOGLE_APPLICATION_CREDENTIALS" --no-user-output-enabled \
+        && gosu "\$HOST_UID:\$HOST_GID" gcloud storage rsync -r "\$SRC" "\$OUT_DIR"; then
+        echo "[performance_looks] Download completed successfully"
+      else
+        echo "[performance_looks][WARNING] Failed to sync looks from GCS"
+        echo "[performance_looks][WARNING] Website build will continue without updated images"
+      fi
+    """
+  }
+}
+
 task stopAndRemoveDockerContainer(type: Exec) {
   commandLine 'docker', 'rm', '-f', "${->createDockerContainer.containerId()}"
 }
@@ -144,6 +211,7 @@ def createBuildTask = {
   BuildTaskConfiguration config = it as BuildTaskConfiguration
   task "build${config.name}Website" (type:Exec) {
     dependsOn setupDockerContainer
+    dependsOn downloadPerformanceLooks
     finalizedBy stopAndRemoveDockerContainer
 
     def configs = "$dockerSourceDir/site/config.toml"
@@ -353,12 +421,12 @@ task stageWebsite {
     shell ". ${envdir}/bin/activate && python append_index_html_to_internal_links.py ${buildContentDir('gcs')}"
 
     // Copy the build website to GCS
-    shell "gsutil -m rsync -r -d ${buildContentDir('gcs')} ${gcs_path}"
+    shell "gcloud storage rsync -r --delete-unmatched-destination-objects ${buildContentDir('gcs')} ${gcs_path}"
 
     println "Website published to http://${gcs_bucket}." +
         "storage.googleapis.com/${baseUrl}/index.html"
   }
 }
 
-stageWebsite.dependsOn setupVirtualenv
+stageWebsite.dependsOn setupVirtualenvWithDependencies
 stageWebsite.dependsOn buildGcsWebsite

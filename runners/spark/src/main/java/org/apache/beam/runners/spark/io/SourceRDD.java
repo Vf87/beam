@@ -17,8 +17,8 @@
  */
 package org.apache.beam.runners.spark.io;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -35,8 +35,9 @@ import org.apache.beam.sdk.io.Source;
 import org.apache.beam.sdk.io.UnboundedSource;
 import org.apache.beam.sdk.metrics.MetricsContainer;
 import org.apache.beam.sdk.metrics.MetricsEnvironment;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.spark.Dependency;
 import org.apache.spark.HashPartitioner;
 import org.apache.spark.InterruptibleIterator;
@@ -49,12 +50,12 @@ import org.apache.spark.rdd.RDD;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import scala.Option;
-import scala.collection.JavaConversions;
+import scala.collection.JavaConverters;
 
 /** Classes implementing Beam {@link Source} {@link RDD}s. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class SourceRDD {
 
@@ -74,7 +75,7 @@ public class SourceRDD {
 
     // to satisfy Scala API.
     private static final scala.collection.immutable.Seq<Dependency<?>> NIL =
-        JavaConversions.asScalaBuffer(Collections.<Dependency<?>>emptyList()).toList();
+        JavaConverters.asScalaBuffer(Collections.<Dependency<?>>emptyList()).toList();
 
     public Bounded(
         SparkContext sc,
@@ -147,7 +148,7 @@ public class SourceRDD {
       final Iterator<WindowedValue<T>> readerIterator =
           new ReaderToIteratorAdapter<>(metricsContainer, reader);
 
-      return new InterruptibleIterator<>(context, JavaConversions.asScalaIterator(readerIterator));
+      return new InterruptibleIterator<>(context, JavaConverters.asScalaIterator(readerIterator));
     }
 
     /**
@@ -189,7 +190,7 @@ public class SourceRDD {
             checkState(next == null, "unexpected non-null value for next");
             if (seekNext()) {
               next =
-                  WindowedValue.timestampedValueInGlobalWindow(
+                  WindowedValues.timestampedValueInGlobalWindow(
                       reader.getCurrent(), reader.getCurrentTimestamp());
               return SUCCESSFULLY_OBTAINED_NEXT;
             } else {
@@ -298,7 +299,7 @@ public class SourceRDD {
 
     // to satisfy Scala API.
     private static final scala.collection.immutable.List<Dependency<?>> NIL =
-        JavaConversions.asScalaBuffer(Collections.<Dependency<?>>emptyList()).toList();
+        JavaConverters.asScalaBuffer(Collections.<Dependency<?>>emptyList()).toList();
 
     public Unbounded(
         SparkContext sc,
@@ -343,7 +344,7 @@ public class SourceRDD {
           (CheckpointableSourcePartition<T, CheckpointMarkT>) split;
       scala.Tuple2<Source<T>, CheckpointMarkT> tuple2 =
           new scala.Tuple2<>(partition.getSource(), partition.checkpointMark);
-      return JavaConversions.asScalaIterator(Collections.singleton(tuple2).iterator());
+      return JavaConverters.asScalaIterator(Collections.singleton(tuple2).iterator());
     }
   }
 

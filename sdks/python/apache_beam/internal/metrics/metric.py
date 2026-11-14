@@ -30,22 +30,16 @@ import logging
 import threading
 import time
 from typing import TYPE_CHECKING
-from typing import Dict
 from typing import Optional
-from typing import Type
 from typing import Union
 
-from apache_beam.internal.metrics.cells import HistogramCellFactory
 from apache_beam.metrics import monitoring_infos
-from apache_beam.metrics.execution import MetricUpdater
 from apache_beam.metrics.metric import Metrics as UserMetrics
-from apache_beam.metrics.metricbase import Histogram
 from apache_beam.metrics.metricbase import MetricName
 
 if TYPE_CHECKING:
   from apache_beam.metrics.cells import MetricCell
   from apache_beam.metrics.cells import MetricCellFactory
-  from apache_beam.utils.histogram import BucketType
 
 # Protect against environments where bigquery library is not available.
 # pylint: disable=wrong-import-order, wrong-import-position
@@ -61,9 +55,10 @@ _LOGGER = logging.getLogger(__name__)
 
 class Metrics(object):
   @staticmethod
-  def counter(urn, labels=None, process_wide=False):
-    # type: (str, Optional[Dict[str, str]], bool) -> UserMetrics.DelegatingCounter
-
+  def counter(
+      urn: str,
+      labels: Optional[dict[str, str]] = None,
+      process_wide: bool = False) -> UserMetrics.DelegatingCounter:
     """Obtains or creates a Counter metric.
 
     Args:
@@ -81,74 +76,38 @@ class Metrics(object):
         MetricName(namespace=None, name=None, urn=urn, labels=labels),
         process_wide=process_wide)
 
-  @staticmethod
-  def histogram(namespace, name, bucket_type, logger=None):
-    # type: (Union[Type, str], str, BucketType, Optional[MetricLogger]) -> Metrics.DelegatingHistogram
-
-    """Obtains or creates a Histogram metric.
-
-    Args:
-      namespace: A class or string that gives the namespace to a metric
-      name: A string that gives a unique name to a metric
-      bucket_type: A type of bucket used in a histogram. A subclass of
-        apache_beam.utils.histogram.BucketType
-      logger: MetricLogger for logging locally aggregated metric
-
-    Returns:
-      A Histogram object.
-    """
-    namespace = UserMetrics.get_namespace(namespace)
-    return Metrics.DelegatingHistogram(
-        MetricName(namespace, name), bucket_type, logger)
-
-  class DelegatingHistogram(Histogram):
-    """Metrics Histogram that Delegates functionality to MetricsEnvironment."""
-    def __init__(self, metric_name, bucket_type, logger):
-      # type: (MetricName, BucketType, Optional[MetricLogger]) -> None
-      super().__init__(metric_name)
-      self.metric_name = metric_name
-      self.cell_type = HistogramCellFactory(bucket_type)
-      self.logger = logger
-      self.updater = MetricUpdater(self.cell_type, self.metric_name)
-
-    def update(self, value):
-      # type: (object) -> None
-      self.updater(value)
-      if self.logger:
-        self.logger.update(self.cell_type, self.metric_name, value)
-
 
 class MetricLogger(object):
-  """Simple object to locally aggregate and log metrics.
-
-  This class is experimental. No backwards-compatibility guarantees.
-  """
-  def __init__(self):
-    # type: () -> None
-    self._metric = {}  # type: Dict[MetricName, MetricCell]
+  """Simple object to locally aggregate and log metrics."""
+  def __init__(self) -> None:
+    self._metric: dict[MetricName, 'MetricCell'] = {}
     self._lock = threading.Lock()
     self._last_logging_millis = int(time.time() * 1000)
     self.minimum_logging_frequency_msec = 180000
 
-  def update(self, cell_type, metric_name, value):
-    # type: (Union[Type[MetricCell], MetricCellFactory], MetricName, object) -> None
+  def update(
+      self,
+      cell_type: Union[type['MetricCell'], 'MetricCellFactory'],
+      metric_name: MetricName,
+      value: object) -> None:
     cell = self._get_metric_cell(cell_type, metric_name)
     cell.update(value)
 
-  def _get_metric_cell(self, cell_type, metric_name):
-    # type: (Union[Type[MetricCell], MetricCellFactory], MetricName) -> MetricCell
+  def _get_metric_cell(
+      self,
+      cell_type: Union[type['MetricCell'], 'MetricCellFactory'],
+      metric_name: MetricName) -> 'MetricCell':
     with self._lock:
       if metric_name not in self._metric:
         self._metric[metric_name] = cell_type()
     return self._metric[metric_name]
 
-  def log_metrics(self, reset_after_logging=False):
-    # type: (bool) -> None
+  def log_metrics(self, reset_after_logging: bool = False) -> None:
     if self._lock.acquire(False):
       try:
         current_millis = int(time.time() * 1000)
-        if ((current_millis - self._last_logging_millis) >
-            self.minimum_logging_frequency_msec):
+        if ((current_millis - self._last_logging_millis)
+            > self.minimum_logging_frequency_msec):
           logging_metric_info = [
               '[Locally aggregated metrics since %s]' %
               datetime.datetime.fromtimestamp(
@@ -175,14 +134,14 @@ class ServiceCallMetric(object):
 
   TODO(ajamato): Add Request latency metric.
   """
-  def __init__(self, request_count_urn, base_labels=None):
-    # type: (str, Optional[Dict[str, str]]) -> None
+  def __init__(
+      self,
+      request_count_urn: str,
+      base_labels: Optional[dict[str, str]] = None) -> None:
     self.base_labels = base_labels if base_labels else {}
     self.request_count_urn = request_count_urn
 
-  def call(self, status):
-    # type: (Union[int, str, HttpError]) -> None
-
+  def call(self, status: Union[int, str, 'HttpError']) -> None:
     """Record the status of the call into appropriate metrics."""
     canonical_status = self.convert_to_canonical_status_string(status)
     additional_labels = {monitoring_infos.STATUS_LABEL: canonical_status}
@@ -194,9 +153,8 @@ class ServiceCallMetric(object):
         urn=self.request_count_urn, labels=labels, process_wide=True)
     request_counter.inc()
 
-  def convert_to_canonical_status_string(self, status):
-    # type: (Union[int, str, HttpError]) -> str
-
+  def convert_to_canonical_status_string(
+      self, status: Union[int, str, 'HttpError']) -> str:
     """Converts a status to a canonical GCP status cdoe string."""
     http_status_code = None
     if isinstance(status, int):
@@ -225,9 +183,8 @@ class ServiceCallMetric(object):
     return str(http_status_code)
 
   @staticmethod
-  def bigtable_error_code_to_grpc_status_string(grpc_status_code):
-    # type: (int) -> str
-
+  def bigtable_error_code_to_grpc_status_string(
+      grpc_status_code: Optional[int]) -> str:
     """
     Converts the bigtable error code to a canonical GCP status code string.
 
@@ -259,7 +216,9 @@ class ServiceCallMetric(object):
         13: 'internal',
         14: 'unavailable'
     }
-    if (grpc_status_code is not None and
-        grpc_status_code in grpc_to_canonical_gcp_status):
-      return grpc_to_canonical_gcp_status[grpc_status_code]
-    return str(grpc_status_code)
+    if grpc_status_code is None:
+      # Bigtable indicates this can be retried but itself has exhausted retry
+      # timeout or there is no retry policy set for bigtable.
+      return grpc_to_canonical_gcp_status[4]
+    return grpc_to_canonical_gcp_status.get(
+        grpc_status_code, str(grpc_status_code))

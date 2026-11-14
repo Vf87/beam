@@ -17,10 +17,12 @@
  */
 package org.apache.beam.sdk.transforms;
 
+import java.util.Map;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.Coder.NonDeterministicException;
 import org.apache.beam.sdk.coders.IterableCoder;
 import org.apache.beam.sdk.coders.KvCoder;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.transforms.windowing.AfterWatermark.AfterWatermarkEarlyAndLate;
 import org.apache.beam.sdk.transforms.windowing.AfterWatermark.FromEndOfWindow;
@@ -30,10 +32,14 @@ import org.apache.beam.sdk.transforms.windowing.Never.NeverTrigger;
 import org.apache.beam.sdk.transforms.windowing.TimestampCombiner;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.transforms.windowing.WindowFn;
+import org.apache.beam.sdk.util.Secret;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollection.IsBounded;
+import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.WindowingStrategy;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
  * {@code GroupByKey<K, V>} takes a {@code PCollection<KV<K, V>>}, groups the values by key and
@@ -110,9 +116,13 @@ public class GroupByKey<K, V>
     extends PTransform<PCollection<KV<K, V>>, PCollection<KV<K, Iterable<V>>>> {
 
   private final boolean fewKeys;
+  private boolean insideGBEK;
+  private boolean surroundsGBEK;
 
   private GroupByKey(boolean fewKeys) {
     this.fewKeys = fewKeys;
+    this.insideGBEK = false;
+    surroundsGBEK = false;
   }
 
   /**
@@ -143,6 +153,21 @@ public class GroupByKey<K, V>
     return fewKeys;
   }
 
+  /**
+   * For Beam internal use only. Tells runner that this is an inner GBK inside a GroupByEncryptedKey
+   */
+  public void setInsideGBEK() {
+    this.insideGBEK = true;
+  }
+
+  /**
+   * For Beam internal use only. Tells runner that this is a GBK wrapped around of a
+   * GroupByEncryptedKey
+   */
+  public boolean surroundsGBEK() {
+    return this.surroundsGBEK;
+  }
+
   /////////////////////////////////////////////////////////////////////////////
 
   public static void applicableTo(PCollection<?> input) {
@@ -166,6 +191,25 @@ public class GroupByKey<K, V>
                   + "https://s.apache.org/finishing-triggers-drop-data "
                   + "for details.",
               windowingStrategy.getTrigger()));
+    }
+  }
+
+  @Override
+  public void validate(
+      @Nullable PipelineOptions options,
+      Map<TupleTag<?>, PCollection<?>> inputs,
+      Map<TupleTag<?>, PCollection<?>> outputs) {
+    PCollection<?> input = Iterables.getOnlyElement(inputs.values());
+    KvCoder<K, V> inputCoder = getInputKvCoder(input.getCoder());
+
+    // Ensure that the output coder key and value types aren't different.
+    Coder<?> outputCoder = Iterables.getOnlyElement(outputs.values()).getCoder();
+    KvCoder<?, ?> expectedOutputCoder = getOutputKvCoder(inputCoder);
+    if (!expectedOutputCoder.equals(outputCoder)) {
+      throw new IllegalStateException(
+          String.format(
+              "the GroupByKey requires its output coder to be %s but found %s.",
+              expectedOutputCoder, outputCoder));
     }
   }
 
@@ -220,6 +264,20 @@ public class GroupByKey<K, V>
       throw new IllegalStateException("the keyCoder of a GroupByKey must be deterministic", e);
     }
 
+    PipelineOptions options = input.getPipeline().getOptions();
+    String gbekOveride = options.getGbek();
+    if (!this.insideGBEK && gbekOveride != null && !gbekOveride.trim().isEmpty()) {
+      this.surroundsGBEK = true;
+      Secret hmacSecret = Secret.parseSecretOption(gbekOveride);
+      GroupByKey<byte[], KV<byte[], byte[]>> gbk = GroupByKey.create();
+      if (this.fewKeys) {
+        gbk = GroupByKey.createWithFewKeys();
+      }
+      gbk.setInsideGBEK();
+      GroupByEncryptedKey<K, V> gbek = GroupByEncryptedKey.createWithCustomGbk(hmacSecret, gbk);
+      return input.apply(gbek);
+    }
+
     // This primitive operation groups by the combination of key and window,
     // merging windows as needed, using the windows assigned to the
     // key/value input elements and the window merge operation of the
@@ -235,7 +293,7 @@ public class GroupByKey<K, V>
    * Returns the {@code Coder} of the input to this transform, which should be a {@code KvCoder}.
    */
   @SuppressWarnings("unchecked")
-  static <K, V> KvCoder<K, V> getInputKvCoder(Coder<KV<K, V>> inputCoder) {
+  static <K, V> KvCoder<K, V> getInputKvCoder(Coder<?> inputCoder) {
     if (!(inputCoder instanceof KvCoder)) {
       throw new IllegalStateException("GroupByKey requires its input to use KvCoder");
     }
@@ -249,12 +307,12 @@ public class GroupByKey<K, V>
    * {@code Coder} of the keys of the output of this transform.
    */
   public static <K, V> Coder<K> getKeyCoder(Coder<KV<K, V>> inputCoder) {
-    return getInputKvCoder(inputCoder).getKeyCoder();
+    return GroupByKey.<K, V>getInputKvCoder(inputCoder).getKeyCoder();
   }
 
   /** Returns the {@code Coder} of the values of the input to this transform. */
   public static <K, V> Coder<V> getInputValueCoder(Coder<KV<K, V>> inputCoder) {
-    return getInputKvCoder(inputCoder).getValueCoder();
+    return GroupByKey.<K, V>getInputKvCoder(inputCoder).getValueCoder();
   }
 
   /** Returns the {@code Coder} of the {@code Iterable} values of the output of this transform. */

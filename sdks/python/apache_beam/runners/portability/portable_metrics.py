@@ -27,18 +27,22 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def from_monitoring_infos(monitoring_info_list, user_metrics_only=False):
-  """Groups MonitoringInfo objects into counters, distributions and gauges.
+  """Groups MonitoringInfo objects into counters, distributions, gauges and
+  string sets
 
   Args:
     monitoring_info_list: An iterable of MonitoringInfo objects.
     user_metrics_only: If true, includes user metrics only.
   Returns:
-    A tuple containing three dictionaries: counters, distributions and gauges,
-    respectively. Each dictionary contains (MetricKey, metric result) pairs.
+    A tuple containing three dictionaries: counters, distributions, gauges and
+    string set, respectively. Each dictionary contains (MetricKey, metric
+    result) pairs.
   """
   counters = {}
   distributions = {}
   gauges = {}
+  string_sets = {}
+  bounded_tries = {}
 
   for mi in monitoring_info_list:
     if (user_metrics_only and not monitoring_infos.is_user_monitoring_info(mi)):
@@ -57,15 +61,15 @@ def from_monitoring_infos(monitoring_info_list, user_metrics_only=False):
       distributions[key] = metric_result
     elif monitoring_infos.is_gauge(mi):
       gauges[key] = metric_result
+    elif monitoring_infos.is_string_set(mi):
+      string_sets[key] = metric_result
+    elif monitoring_infos.is_bounded_trie(mi):
+      bounded_tries[key] = metric_result
 
-  return counters, distributions, gauges
+  return counters, distributions, gauges, string_sets, bounded_tries
 
 
 def _create_metric_key(monitoring_info):
   step_name = monitoring_infos.get_step_name(monitoring_info)
-  if not step_name:
-    raise ValueError(
-        'Failed to deduce step_name from MonitoringInfo: {}'.format(
-            monitoring_info))
   namespace, name = monitoring_infos.parse_namespace_and_name(monitoring_info)
   return MetricKey(step_name, MetricName(namespace, name))

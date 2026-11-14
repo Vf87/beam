@@ -19,11 +19,14 @@ package org.apache.beam.sdk.io.gcp.spanner;
 
 import com.google.cloud.spanner.BatchReadOnlyTransaction;
 import com.google.cloud.spanner.TimestampBound;
+import io.opentelemetry.api.OpenTelemetry;
+import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.options.SdkHarnessOptions;
 import org.apache.beam.sdk.transforms.DoFn;
 
 /** Creates a batch transaction. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 class CreateTransactionFn extends DoFn<Object, Transaction> {
   private final SpannerConfig config;
@@ -37,8 +40,9 @@ class CreateTransactionFn extends DoFn<Object, Transaction> {
   private transient SpannerAccessor spannerAccessor;
 
   @DoFn.Setup
-  public void setup() throws Exception {
-    spannerAccessor = SpannerAccessor.getOrCreate(config);
+  public void setup(PipelineOptions options) throws Exception {
+    OpenTelemetry otel = options.as(SdkHarnessOptions.class).getOpenTelemetry();
+    spannerAccessor = SpannerAccessor.getOrCreate(config, otel);
   }
 
   @Teardown

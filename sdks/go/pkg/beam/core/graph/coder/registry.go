@@ -18,12 +18,14 @@ package coder
 import (
 	"reflect"
 
+	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/funcx"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/internal/errors"
 )
 
 var (
-	coderRegistry     = make(map[uintptr]func(reflect.Type) *CustomCoder)
-	interfaceOrdering []reflect.Type
+	coderRegistry         = make(map[reflect.Type]func(reflect.Type) *CustomCoder)
+	interfaceOrdering     []reflect.Type
+	deterministicRegistry = make(map[reflect.Type]bool)
 )
 
 // RegisterCoder registers a user defined coder for a given type, and will
@@ -33,18 +35,41 @@ var (
 // Coders are encoder and decoder pairs, and operate around []bytes.
 //
 // The coder used for a given type follows this ordering:
-//   1. Coders for Known Beam types.
-//   2. Coders registered for specific types
-//   3. Coders registered for interfaces types
-//   4. Default coder (JSON)
+//  1. Coders for Known Beam types.
+//  2. Coders registered for specific types
+//  3. Coders registered for interfaces types
+//  4. Default coder (JSON)
 //
 // Types of kind Interface, are handled specially by the registry, so they may be iterated
 // over to check if element types implement them.
 //
 // Repeated registrations of the same type overrides prior ones.
-func RegisterCoder(t reflect.Type, enc, dec interface{}) {
-	key := tkey(t)
-
+//
+// The enc and dec arguments must be functions matching one of the following
+// signatures, where T is the user type registered (the concrete type
+// represented by t, or an interface implemented by encoded values):
+//
+// Supported encoder signatures:
+//
+//	func(T) []byte
+//	func(reflect.Type, T) []byte
+//	func(T) ([]byte, error)
+//	func(reflect.Type, T) ([]byte, error)
+//
+// Supported decoder signatures:
+//
+//	func([]byte) T
+//	func(reflect.Type, []byte) T
+//	func([]byte) (T, error)
+//	func(reflect.Type, []byte) (T, error)
+//
+// The optional leading reflect.Type parameter is set to the concrete element
+// type at coder construction time; it lets a single (enc, dec) pair serve
+// multiple types (for example, when t is an interface).
+//
+// Passing a function that does not match one of these signatures will cause
+// RegisterCoder to panic.
+func RegisterCoder(t reflect.Type, enc, dec any) {
 	if _, err := NewCustomCoder(t.String(), t, enc, dec); err != nil {
 		panic(errors.Wrapf(err, "RegisterCoder failed for type %v", t))
 	}
@@ -52,11 +77,10 @@ func RegisterCoder(t reflect.Type, enc, dec interface{}) {
 	if t.Kind() == reflect.Interface {
 		// If it's already in the registry, then it's already in the list
 		// and should be removed.
-		if _, ok := coderRegistry[key]; ok {
+		if _, ok := coderRegistry[t]; ok {
 			var index int
 			for i, iT := range interfaceOrdering {
-				iKey := tkey(iT)
-				if iKey == key {
+				if iT == t {
 					index = i
 					break
 				}
@@ -67,7 +91,7 @@ func RegisterCoder(t reflect.Type, enc, dec interface{}) {
 		interfaceOrdering = append(interfaceOrdering, t)
 	}
 	name := t.String() // Use the real type names for coders.
-	coderRegistry[key] = func(rt reflect.Type) *CustomCoder {
+	coderRegistry[t] = func(rt reflect.Type) *CustomCoder {
 		// We need to provide the concrete type, so that coders that use
 		// the reflect.Type have the proper instance.
 		cc, err := NewCustomCoder(name, rt, enc, dec)
@@ -79,25 +103,72 @@ func RegisterCoder(t reflect.Type, enc, dec interface{}) {
 	}
 }
 
+// RegisterDeterministicCoderWithFuncs is like RegisterDeterministicCoder
+// but accepts pre-wrapped reflectx.Func values (typically built via
+// reflectx.MakeFuncWithName) so the caller controls the function name
+// used during cross-worker serialization. This is required for
+// closures inside Go generic functions where different type
+// instantiations produce closures with the same compiler name.
+func RegisterDeterministicCoderWithFuncs(t reflect.Type, encFn, decFn *funcx.Fn) {
+	name := t.String()
+	coderRegistry[t] = func(rt reflect.Type) *CustomCoder {
+		return NewCustomCoderWithFuncs(name, rt, encFn, decFn)
+	}
+	deterministicRegistry[t] = true
+}
+
+// RegisterDeterministicCoder is the deterministic-affirming counterpart to
+// RegisterCoder: it registers the (enc, dec) pair for t AND records that the
+// resulting CustomCoder produces a deterministic encoding. The caller asserts
+// by calling this function that enc produces byte-identical output for any
+// two equal input values of type t.
+//
+// Deterministic coders are required for any type used as a state key in a
+// stateful DoFn, as the key of a KV consumed by GroupByKey / GroupIntoBatches,
+// or as a grouping key for CoGroupByKey.
+//
+// Prefer this over RegisterCoder whenever the encoded type may be used as a
+// key. For types that cannot guarantee determinism (e.g. encodings backed by
+// map[K]V iteration order), use the plain RegisterCoder.
+func RegisterDeterministicCoder(t reflect.Type, enc, dec any) {
+	RegisterCoder(t, enc, dec)
+	deterministicRegistry[t] = true
+}
+
+// isCustomCoderDeterministic returns true iff t has been registered via
+// RegisterDeterministicCoder.
+func isCustomCoderDeterministic(t reflect.Type) bool {
+	if t == nil {
+		return false
+	}
+	if ok, present := deterministicRegistry[t]; present {
+		return ok
+	}
+	// Also match against interface registrations: if the type implements a
+	// registered-deterministic interface, honor that.
+	for rt, det := range deterministicRegistry {
+		if !det {
+			continue
+		}
+		if rt.Kind() == reflect.Interface && t.Implements(rt) {
+			return true
+		}
+	}
+	return false
+}
+
 // LookupCustomCoder returns the custom coder for the type if any,
 // first checking for a specific matching type, and then iterating
 // through registered interface coders in reverse registration order.
 func LookupCustomCoder(t reflect.Type) *CustomCoder {
-	key := tkey(t)
-	if maker, ok := coderRegistry[key]; ok {
+	if maker, ok := coderRegistry[t]; ok {
 		return maker(t)
 	}
 	for i := len(interfaceOrdering) - 1; i >= 0; i-- {
 		iT := interfaceOrdering[i]
 		if t.Implements(iT) {
-			key := tkey(iT)
-			return coderRegistry[key](t)
+			return coderRegistry[iT](t)
 		}
 	}
 	return nil
-}
-
-// tkey returns the uintptr for a given type as the key.
-func tkey(t reflect.Type) uintptr {
-	return reflect.ValueOf(t).Pointer()
 }

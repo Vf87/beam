@@ -19,7 +19,7 @@ import (
 	"encoding/base64"
 
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/internal/errors"
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 // MustEncodeBase64 encodes a proto wrapped in base64 and panics on failure.
@@ -33,7 +33,7 @@ func MustEncodeBase64(msg proto.Message) string {
 
 // EncodeBase64 encodes a proto wrapped in base64.
 func EncodeBase64(msg proto.Message) (string, error) {
-	data, err := proto.Marshal(msg)
+	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
 	if err != nil {
 		return "", err
 	}

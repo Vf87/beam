@@ -17,6 +17,8 @@
  */
 package org.apache.beam.runners.direct;
 
+import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
+
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.stream.Collectors;
@@ -25,12 +27,10 @@ import org.apache.beam.model.pipeline.v1.RunnerApi;
 import org.apache.beam.runners.core.GroupAlsoByWindowsAggregators;
 import org.apache.beam.runners.core.GroupByKeyViaGroupByKeyOnly;
 import org.apache.beam.runners.core.KeyedWorkItem;
-import org.apache.beam.runners.core.OutputWindowedValue;
 import org.apache.beam.runners.core.ReduceFnRunner;
 import org.apache.beam.runners.core.SystemReduceFn;
 import org.apache.beam.runners.core.TimerInternals;
 import org.apache.beam.runners.core.UnsupportedSideInputReader;
-import org.apache.beam.runners.core.construction.TriggerTranslation;
 import org.apache.beam.runners.core.triggers.ExecutableTriggerStateMachine;
 import org.apache.beam.runners.core.triggers.TriggerStateMachines;
 import org.apache.beam.runners.direct.DirectExecutionContext.DirectStepContext;
@@ -43,26 +43,24 @@ import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.runners.AppliedPTransform;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.util.WindowTracing;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.WindowedValueReceiver;
+import org.apache.beam.sdk.util.construction.TriggerTranslation;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowedValue;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.joda.time.Instant;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 
 /**
  * The {@link DirectRunner} {@link TransformEvaluatorFactory} for the {@link
  * DirectGroupAlsoByWindow} {@link PTransform}.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "keyfor",
-  "nullness"
-}) // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "keyfor"
+})
 class GroupAlsoByWindowEvaluatorFactory implements TransformEvaluatorFactory {
   private final EvaluationContext evaluationContext;
   private final PipelineOptions options;
@@ -148,7 +146,9 @@ class GroupAlsoByWindowEvaluatorFactory implements TransformEvaluatorFactory {
       unprocessedElements = ImmutableList.builder();
 
       Coder<V> valueCoder =
-          application.getTransform().getValueCoder(inputBundle.getPCollection().getCoder());
+          application
+              .getTransform()
+              .getValueCoder(checkStateNotNull(inputBundle.getPCollection()).getCoder());
       reduceFn = SystemReduceFn.buffering(valueCoder);
       droppedDueToLateness =
           Metrics.counter(
@@ -179,7 +179,7 @@ class GroupAlsoByWindowEvaluatorFactory implements TransformEvaluatorFactory {
                   TriggerStateMachines.stateMachineForTrigger(runnerApiTrigger)),
               stateInternals,
               timerInternals,
-              new OutputWindowedValueToBundle<>(bundle),
+              new BundleWindowedValueReceiver<>(bundle),
               new UnsupportedSideInputReader(DirectGroupAlsoByWindow.class.getSimpleName()),
               reduceFn,
               options);
@@ -193,8 +193,8 @@ class GroupAlsoByWindowEvaluatorFactory implements TransformEvaluatorFactory {
 
     @Override
     public TransformResult<KeyedWorkItem<K, V>> finishBundle() throws Exception {
-      // State is initialized within the constructor. It can never be null.
-      CopyOnAccessInMemoryStateInternals state = stepContext.commitState();
+      // processElement always accesses state internals, so commitState is non-null here.
+      CopyOnAccessInMemoryStateInternals state = checkStateNotNull(stepContext.commitState());
       return StepTransformResult.<KeyedWorkItem<K, V>>withHold(
               application, state.getEarliestWatermarkHold())
           .withState(state)
@@ -229,7 +229,7 @@ class GroupAlsoByWindowEvaluatorFactory implements TransformEvaluatorFactory {
                           + "window: {} since it is too far behind inputWatermark: {}",
                       DirectGroupAlsoByWindow.class.getSimpleName(),
                       input.getTimestamp(),
-                      key,
+                      String.valueOf(key),
                       window,
                       timerInternals.currentInputWatermarkTime());
                 }
@@ -240,33 +240,17 @@ class GroupAlsoByWindowEvaluatorFactory implements TransformEvaluatorFactory {
     }
   }
 
-  private static class OutputWindowedValueToBundle<K, V>
-      implements OutputWindowedValue<KV<K, Iterable<V>>> {
+  private static class BundleWindowedValueReceiver<K, V>
+      implements WindowedValueReceiver<KV<K, Iterable<V>>> {
     private final UncommittedBundle<KV<K, Iterable<V>>> bundle;
 
-    private OutputWindowedValueToBundle(UncommittedBundle<KV<K, Iterable<V>>> bundle) {
+    private BundleWindowedValueReceiver(UncommittedBundle<KV<K, Iterable<V>>> bundle) {
       this.bundle = bundle;
     }
 
     @Override
-    public void outputWindowedValue(
-        KV<K, Iterable<V>> output,
-        Instant timestamp,
-        Collection<? extends BoundedWindow> windows,
-        PaneInfo pane) {
-      bundle.add(WindowedValue.of(output, timestamp, windows, pane));
-    }
-
-    @Override
-    public <AdditionalOutputT> void outputWindowedValue(
-        TupleTag<AdditionalOutputT> tag,
-        AdditionalOutputT output,
-        Instant timestamp,
-        Collection<? extends BoundedWindow> windows,
-        PaneInfo pane) {
-      throw new UnsupportedOperationException(
-          String.format(
-              "%s should not use tagged outputs", DirectGroupAlsoByWindow.class.getSimpleName()));
+    public void output(WindowedValue<KV<K, Iterable<V>>> windowedValue) {
+      bundle.add(windowedValue);
     }
   }
 }

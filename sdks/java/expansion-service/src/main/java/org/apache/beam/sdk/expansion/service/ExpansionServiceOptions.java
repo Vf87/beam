@@ -17,11 +17,11 @@
  */
 package org.apache.beam.sdk.expansion.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.util.ArrayList;
+import java.io.InputStream;
 import org.apache.beam.sdk.expansion.service.JavaClassLookupTransformProvider.AllowList;
 import org.apache.beam.sdk.options.Default;
 import org.apache.beam.sdk.options.DefaultValueFactory;
@@ -37,10 +37,40 @@ public interface ExpansionServiceOptions extends PipelineOptions {
 
   void setJavaClassLookupAllowlist(AllowList file);
 
-  @Description("Allow list file for Java class based transform expansion")
+  @Description(
+      "Allow list file for Java class based transform expansion, or '*' to allow anything.")
   String getJavaClassLookupAllowlistFile();
 
   void setJavaClassLookupAllowlistFile(String file);
+
+  @Description("Whether to also start a loopback worker as part of this service.")
+  boolean getAlsoStartLoopbackWorker();
+
+  void setAlsoStartLoopbackWorker(boolean value);
+
+  @Description("Expansion service configuration file.")
+  String getExpansionServiceConfigFile();
+
+  void setExpansionServiceConfigFile(String configFile);
+
+  @Description("Expansion service configuration.")
+  @Default.InstanceFactory(ExpansionServiceConfigFactory.class)
+  ExpansionServiceConfig getExpansionServiceConfig();
+
+  void setExpansionServiceConfig(ExpansionServiceConfig configFile);
+
+  @Description("Starts an Expansion Service with support for gRPC ALTS authentication.")
+  @Default.Boolean(false)
+  boolean getUseAltsServer();
+
+  void setUseAltsServer(boolean useAltsServer);
+
+  @Description(
+      "If true, managed transforms expansion will serve artifacts based on the YAML based expansion service config.")
+  @Default.Boolean(false)
+  boolean getUseConfigDependenciesForManaged();
+
+  void setUseConfigDependenciesForManaged(boolean useConfigDependenciesForManaged);
 
   /**
    * Loads the allow list from {@link #getJavaClassLookupAllowlistFile}, defaulting to an empty
@@ -53,23 +83,54 @@ public interface ExpansionServiceOptions extends PipelineOptions {
       String allowListFile =
           options.as(ExpansionServiceOptions.class).getJavaClassLookupAllowlistFile();
       if (allowListFile != null) {
-        ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
+        if (allowListFile.equals("*")) {
+          return AllowList.everything();
+        }
         File allowListFileObj = new File(allowListFile);
         if (!allowListFileObj.exists()) {
           throw new IllegalArgumentException(
               "Allow list file " + allowListFile + " does not exist");
         }
-        try {
-          return mapper.readValue(allowListFileObj, AllowList.class);
+        try (InputStream stream = new FileInputStream(allowListFileObj)) {
+          return AllowList.parseFromYamlStream(stream);
+        } catch (FileNotFoundException e) {
+          throw new RuntimeException(
+              "Could not parse the provided allowlist file " + allowListFile, e);
         } catch (IOException e) {
-          throw new IllegalArgumentException(
-              "Could not load the provided allowlist file " + allowListFile, e);
+          throw new RuntimeException(
+              "Could not parse the provided allowlist file " + allowListFile, e);
         }
       }
 
       // By default produces an empty allow-list.
-      return new AutoValue_JavaClassLookupTransformProvider_AllowList(
-          JavaClassLookupTransformProvider.ALLOW_LIST_VERSION, new ArrayList<>());
+      return AllowList.nothing();
+    }
+  }
+
+  /** Loads the ExpansionService config. */
+  class ExpansionServiceConfigFactory implements DefaultValueFactory<ExpansionServiceConfig> {
+
+    @Override
+    public ExpansionServiceConfig create(PipelineOptions options) {
+      String configFile = options.as(ExpansionServiceOptions.class).getExpansionServiceConfigFile();
+      if (configFile != null) {
+        File configFileObj = new File(configFile);
+        if (!configFileObj.exists()) {
+          throw new IllegalArgumentException("Config file " + configFile + " does not exist");
+        }
+        try (InputStream stream = new FileInputStream(configFileObj)) {
+          return ExpansionServiceConfig.parseFromYamlStream(stream);
+        } catch (FileNotFoundException e) {
+          throw new RuntimeException(
+              "Could not parse the provided Expansion Service config file" + configFile, e);
+        } catch (IOException e) {
+          throw new RuntimeException(
+              "Could not parse the provided Expansion Service config file" + configFile, e);
+        }
+      }
+
+      // By default produces null.
+      return ExpansionServiceConfig.empty();
     }
   }
 }

@@ -23,10 +23,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Charsets;
+import jline.TerminalFactory;
+import jline.UnixTerminal;
+import jline.internal.Log;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import sqlline.SqlLine;
 import sqlline.SqlLine.Status;
@@ -57,7 +60,7 @@ public class BeamSqlLine {
   }
 
   /** Nullable InputStream is being handled inside sqlLine.begin. */
-  @SuppressWarnings("argument.type.incompatible")
+  @SuppressWarnings("argument")
   static Status runSqlLine(
       String[] args,
       @Nullable InputStream inputStream,
@@ -65,16 +68,55 @@ public class BeamSqlLine {
       @Nullable OutputStream errorStream)
       throws IOException {
     String[] modifiedArgs = checkConnectionArgs(args);
+    // JLine uses UnixTerminal on Linux and macOS. We swap in a subclass that lets us interrupt the
+    // terminal
+    TerminalFactory.registerFlavor(TerminalFactory.Flavor.UNIX, InterruptRestoringTerminal.class);
     SqlLine sqlLine = new SqlLine();
 
     if (outputStream != null) {
-      sqlLine.setOutputStream(new PrintStream(outputStream, false, Charsets.UTF_8.name()));
+      sqlLine.setOutputStream(new PrintStream(outputStream, false, StandardCharsets.UTF_8.name()));
     }
 
     if (errorStream != null) {
-      sqlLine.setErrorStream(new PrintStream(errorStream, false, Charsets.UTF_8.name()));
+      sqlLine.setErrorStream(new PrintStream(errorStream, false, StandardCharsets.UTF_8.name()));
     }
 
     return sqlLine.begin(modifiedArgs, inputStream, true);
+  }
+
+  /**
+   * Makes sure Ctrl+C can always stop a running query.
+   *
+   * <p>JLine turns off Ctrl+C while it reads a line, then turns it back on. Sometimes it forgets to
+   * hand it back, and Ctrl+C can't stop queries anymore. This class saves the Ctrl+C character and
+   * hands it back when needed.
+   */
+  public static class InterruptRestoringTerminal extends UnixTerminal {
+    private @Nullable String intr;
+
+    public InterruptRestoringTerminal() throws Exception {}
+
+    @Override
+    public void init() throws Exception {
+      super.init();
+      // Remember the Ctrl+C setting before JLine takes it over.
+      String value = getSettings().getPropertyAsString("intr");
+      intr = "<undef>".equals(value) ? null : value;
+    }
+
+    @Override
+    public void enableInterruptCharacter() {
+      String value = intr;
+      try {
+        if (value != null) {
+          getSettings().set("intr", value);
+        }
+      } catch (Exception e) {
+        if (e instanceof InterruptedException) {
+          Thread.currentThread().interrupt();
+        }
+        Log.error("Failed to enable interrupt character", e);
+      }
+    }
   }
 }

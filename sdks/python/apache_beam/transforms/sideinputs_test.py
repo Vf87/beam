@@ -19,19 +19,25 @@
 
 # pytype: skip-file
 
+import hashlib
 import itertools
 import logging
 import unittest
+from typing import Any
+from typing import Iterable
+from typing import Union
 
 import pytest
 
 import apache_beam as beam
+from apache_beam.testing.synthetic_pipeline import SyntheticSDFAsSource
 from apache_beam.testing.test_pipeline import TestPipeline
 from apache_beam.testing.test_stream import TestStream
 from apache_beam.testing.util import assert_that
 from apache_beam.testing.util import equal_to
 from apache_beam.testing.util import equal_to_per_window
 from apache_beam.transforms import Map
+from apache_beam.transforms import sideinputs
 from apache_beam.transforms import trigger
 from apache_beam.transforms import window
 from apache_beam.utils.timestamp import Timestamp
@@ -100,17 +106,17 @@ class SideInputsTest(unittest.TestCase):
         window.SlidingWindows(size=6, period=2),
         expected=[
             # Element 1 falls in three windows
-            (1, [1]),        # [-4, 2)
-            (1, [1, 2]),     # [-2, 4)
+            (1, [1]),  # [-4, 2)
+            (1, [1, 2]),  # [-2, 4)
             (1, [1, 2, 4]),  # [0, 6)
             # as does 2,
-            (2, [1, 2]),     # [-2, 4)
+            (2, [1, 2]),  # [-2, 4)
             (2, [1, 2, 4]),  # [0, 6)
-            (2, [2, 4]),     # [2, 8)
+            (2, [2, 4]),  # [2, 8)
             # and 4.
             (4, [1, 2, 4]),  # [0, 6)
-            (4, [2, 4]),     # [2, 8)
-            (4, [4]),        # [4, 10)
+            (4, [2, 4]),  # [2, 8)
+            (4, [4]),  # [4, 10)
         ])
 
   def test_windowed_iter(self):
@@ -159,8 +165,8 @@ class SideInputsTest(unittest.TestCase):
     assert_that(result, equal_to([(1, 'empty'), (2, 'empty')]))
     pipeline.run()
 
-  # TODO(BEAM-5025): Disable this test in streaming temporarily.
-  # Remove sickbay-streaming tag after it's fixed.
+  # TODO(https://github.com/apache/beam/issues/19012): Disable this test in
+  # streaming temporarily. Remove sickbay-streaming tag after it's fixed.
   @pytest.mark.no_sickbay_streaming
   @pytest.mark.it_validatesrunner
   def test_multi_valued_singleton_side_input(self):
@@ -228,9 +234,7 @@ class SideInputsTest(unittest.TestCase):
     side_list = pipeline | 'side list' >> beam.Create(a_list)
     side_pairs = pipeline | 'side pairs' >> beam.Create(some_pairs)
     results = main_input | 'concatenate' >> beam.Map(
-        lambda x,
-        the_list,
-        the_dict: [x, the_list, the_dict],
+        lambda x, the_list, the_dict: [x, the_list, the_dict],
         beam.pvalue.AsList(side_list),
         beam.pvalue.AsDict(side_pairs))
 
@@ -256,9 +260,7 @@ class SideInputsTest(unittest.TestCase):
     main_input = pipeline | 'main input' >> beam.Create([1])
     side_list = pipeline | 'side list' >> beam.Create(a_list)
     results = main_input | beam.Map(
-        lambda x,
-        s1,
-        s2: [x, s1, s2],
+        lambda x, s1, s2: [x, s1, s2],
         beam.pvalue.AsSingleton(side_list),
         beam.pvalue.AsSingleton(side_list))
 
@@ -281,9 +283,7 @@ class SideInputsTest(unittest.TestCase):
     main_input = pipeline | 'main input' >> beam.Create([1])
     side_list = pipeline | 'side list' >> beam.Create(a_list)
     results = main_input | beam.Map(
-        lambda x,
-        s1,
-        s2: [x, s1, s2],
+        lambda x, s1, s2: [x, s1, s2],
         beam.pvalue.AsSingleton(side_list, default_value=2),
         beam.pvalue.AsSingleton(side_list, default_value=3))
 
@@ -308,9 +308,7 @@ class SideInputsTest(unittest.TestCase):
     main_input = pipeline | 'main input' >> beam.Create([1])
     side_list = pipeline | 'side list' >> beam.Create(a_list)
     results = main_input | beam.Map(
-        lambda x,
-        ls1,
-        ls2: [x, ls1, ls2],
+        lambda x, ls1, ls2: [x, ls1, ls2],
         beam.pvalue.AsList(side_list),
         beam.pvalue.AsList(side_list))
 
@@ -333,9 +331,7 @@ class SideInputsTest(unittest.TestCase):
     main_input = pipeline | 'main input' >> beam.Create([1])
     side_kvs = pipeline | 'side kvs' >> beam.Create(some_kvs)
     results = main_input | beam.Map(
-        lambda x,
-        dct1,
-        dct2: [x, dct1, dct2],
+        lambda x, dct1, dct2: [x, dct1, dct2],
         beam.pvalue.AsDict(side_kvs),
         beam.pvalue.AsDict(side_kvs))
 
@@ -370,10 +366,10 @@ class SideInputsTest(unittest.TestCase):
   @pytest.mark.it_validatesrunner
   def test_multi_triggered_gbk_side_input(self):
     """Test a GBK sideinput, with multiple triggering."""
-    # TODO(BEAM-9322): Remove use of this experiment.
-    # This flag is only necessary when using the multi-output TestStream b/c
-    # it relies on using the PCollection output tags as the PCollection output
-    # ids.
+    # TODO(https://github.com/apache/beam/issues/20065): Remove use of this
+    # experiment. This flag is only necessary when using the multi-output
+    # TestStream b/c it relies on using the PCollection output tags as the
+    # PCollection output ids.
     with TestPipeline() as p:
 
       test_stream = (
@@ -426,6 +422,105 @@ class SideInputsTest(unittest.TestCase):
           equal_to_per_window(expected_window_to_elements),
           use_global_window=False,
           label='assert per window')
+
+  @pytest.mark.it_validatesrunner
+  def test_side_input_with_sdf(self):
+    """Test a side input with SDF.
+
+    This test verifies consisency of side input when it is split due to
+    SDF (Splittable DoFns). The consistency is verified by checking the size
+    and fingerprint of the side input.
+
+    This test needs to run with at least 2 workers (--num_workers=2) and
+    autoscaling disabled (--autoscaling_algorithm=NONE). Otherwise it might
+    provide false positives (i.e. not fail on bad state).
+    """
+    initial_elements = 1000
+    num_records = 10000
+    key_size = 10
+    value_size = 100
+    expected_fingerprint = '00f7eeac8514721e2683d14a504b33d1'
+
+    class GetSyntheticSDFOptions(beam.DoFn):
+      """A DoFn that emits elements for genenrating SDF."""
+      def process(self, element: Any) -> Iterable[dict[str, Union[int, str]]]:
+        yield {
+            'num_records': num_records // initial_elements,
+            'key_size': key_size,
+            'value_size': value_size,
+            'initial_splitting_num_bundles': 0,
+            'initial_splitting_desired_bundle_size': 0,
+            'sleep_per_input_record_sec': 0,
+            'initial_splitting': 'const',
+        }
+
+    class SideInputTrackingDoFn(beam.DoFn):
+      """A DoFn that emits the size and fingerprint of the side input.
+
+      In this context, the size is the number of elements and the fingerprint
+      is the hash of the sorted serialized elements.
+      """
+      def process(
+          self, element: Any,
+          side_input: Iterable[tuple[bytes,
+                                     bytes]]) -> Iterable[tuple[int, str]]:
+
+        # Sort for consistent hashing.
+        sorted_side_input = sorted(side_input)
+        size = len(sorted_side_input)
+        m = hashlib.md5()
+        for key, value in sorted_side_input:
+          m.update(key)
+          m.update(value)
+        yield (size, m.hexdigest())
+
+    pipeline = self.create_pipeline()
+    main_input = pipeline | 'Main input: Create' >> beam.Create([0])
+    side_input = pipeline | 'Side input: Create' >> beam.Create(
+        range(initial_elements))
+    side_input |= 'Side input: Get synthetic SDF options' >> beam.ParDo(
+        GetSyntheticSDFOptions())
+    side_input |= 'Side input: Process and split' >> beam.ParDo(
+        SyntheticSDFAsSource())
+    results = main_input | 'Emit side input' >> beam.ParDo(
+        SideInputTrackingDoFn(), beam.pvalue.AsIter(side_input))
+
+    assert_that(results, equal_to([(num_records, expected_fingerprint)]))
+    pipeline.run()
+
+  def test_default_window_mapping_fn_source_window(self):
+    """Test that the default window mapping function will propagate the
+    source window when attempting to assign context.
+    """
+    class StringIDWindow(window.BoundedWindow):
+      """A window defined by an arbitrary string ID."""
+      def __init__(self, window_id: str):
+        super().__init__(self._getTimestampFromProto())
+        self.id = window_id
+
+      @staticmethod
+      def _getTimestampFromProto() -> Timestamp:
+        return Timestamp(micros=0)
+
+    class StringIDWindows(window.NonMergingWindowFn):
+      """ A windowing function that assigns each element a window with ID."""
+      def assign(
+          self, assign_context: window.WindowFn.AssignContext
+      ) -> Iterable[window.BoundedWindow]:
+        if assign_context.element is None:
+          assert assign_context.window is not None
+          return [assign_context.window]
+        return [StringIDWindow(str(assign_context.element))]
+
+      def get_window_coder(self):
+        return None
+
+    mapping_fn = sideinputs.default_window_mapping_fn(StringIDWindows())
+    source_window = StringIDWindows().assign(
+        window.WindowFn.AssignContext(Timestamp(10), element='element'))[0]
+    bounded_window = mapping_fn(source_window)
+    assert bounded_window is not None
+    assert bounded_window.id == 'element'
 
 
 if __name__ == '__main__':

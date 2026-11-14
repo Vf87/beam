@@ -42,7 +42,7 @@ import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.PInput;
 import org.apache.beam.sdk.values.POutput;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.hamcrest.Matchers;
 import org.junit.Rule;
 import org.junit.Test;
@@ -190,14 +190,13 @@ public class DirectGraphVisitorTest implements Serializable {
                     c.output(Integer.toString(c.element().length()));
                   }
                 }));
-    PDone finished =
-        transformed.apply(
-            new PTransform<PInput, PDone>() {
-              @Override
-              public PDone expand(PInput input) {
-                return PDone.in(input.getPipeline());
-              }
-            });
+    transformed.apply(
+        new PTransform<PInput, PDone>() {
+          @Override
+          public PDone expand(PInput input) {
+            return PDone.in(input.getPipeline());
+          }
+        });
 
     p.traverseTopologically(visitor);
     DirectGraph graph = visitor.getGraph();

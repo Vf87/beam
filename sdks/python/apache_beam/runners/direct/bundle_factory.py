@@ -21,7 +21,6 @@
 
 from typing import Iterable
 from typing import Iterator
-from typing import List
 from typing import Union
 from typing import cast
 
@@ -40,16 +39,17 @@ class BundleFactory(object):
       in case consecutive ones share the same timestamp and windows.
       DirectRunnerOptions.direct_runner_use_stacked_bundle controls this option.
   """
-  def __init__(self, stacked):
-    # type: (bool) -> None
+  def __init__(self, stacked: bool) -> None:
     self._stacked = stacked
 
-  def create_bundle(self, output_pcollection):
-    # type: (Union[pvalue.PBegin, pvalue.PCollection]) -> _Bundle
+  def create_bundle(
+      self, output_pcollection: Union[pvalue.PBegin,
+                                      pvalue.PCollection]) -> '_Bundle':
     return _Bundle(output_pcollection, self._stacked)
 
-  def create_empty_committed_bundle(self, output_pcollection):
-    # type: (Union[pvalue.PBegin, pvalue.PCollection]) -> _Bundle
+  def create_empty_committed_bundle(
+      self, output_pcollection: Union[pvalue.PBegin,
+                                      pvalue.PCollection]) -> '_Bundle':
     bundle = self.create_bundle(output_pcollection)
     bundle.commit(None)
     return bundle
@@ -110,27 +110,27 @@ class _Bundle(common.Receiver):
     def add_value(self, value):
       self._appended_values.append(value)
 
-    def windowed_values(self):
-      # type: () -> Iterator[WindowedValue]
+    def windowed_values(self) -> Iterator[WindowedValue]:
       # yield first windowed_value as is, then iterate through
       # _appended_values to yield WindowedValue on the fly.
       yield self._initial_windowed_value
       for v in self._appended_values:
         yield self._initial_windowed_value.with_value(v)
 
-  def __init__(self, pcollection, stacked=True):
-    # type: (Union[pvalue.PBegin, pvalue.PCollection], bool) -> None
+  def __init__(
+      self,
+      pcollection: Union[pvalue.PBegin, pvalue.PCollection],
+      stacked: bool = True) -> None:
     assert isinstance(pcollection, (pvalue.PBegin, pvalue.PCollection))
     self._pcollection = pcollection
-    self._elements = [
-    ]  # type: List[Union[WindowedValue, _Bundle._StackedWindowedValues]]
+    self._elements: list[Union[WindowedValue,
+                               _Bundle._StackedWindowedValues]] = []
     self._stacked = stacked
     self._committed = False
     self._tag = None  # optional tag information for this bundle
 
-  def get_elements_iterable(self, make_copy=False):
-    # type: (bool) -> Iterable[WindowedValue]
-
+  def get_elements_iterable(self,
+                            make_copy: bool = False) -> Iterable[WindowedValue]:
     """Returns iterable elements.
 
     Args:
@@ -143,7 +143,7 @@ class _Bundle(common.Receiver):
     """
     if not self._stacked:
       # we can safely assume self._elements contains only WindowedValues
-      elements = cast('List[WindowedValue]', self._elements)
+      elements = cast('list[WindowedValue]', self._elements)
       if self._committed and not make_copy:
         return elements
       return list(elements)
@@ -203,8 +203,7 @@ class _Bundle(common.Receiver):
   def output(self, element):
     self.add(element)
 
-  def receive(self, element):
-    # type: (WindowedValue) -> None
+  def receive(self, element: WindowedValue) -> None:
     self.add(element)
 
   def commit(self, synchronized_processing_time):

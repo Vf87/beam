@@ -34,6 +34,9 @@ import org.apache.beam.sdk.options.Description
 import org.apache.beam.sdk.options.PipelineOptionsFactory
 import org.apache.beam.sdk.options.StreamingOptions
 import org.apache.beam.sdk.transforms.DoFn
+import org.apache.beam.sdk.transforms.DoFn.Element
+import org.apache.beam.sdk.transforms.DoFn.OutputReceiver
+import org.apache.beam.sdk.transforms.DoFn.Timestamp
 import org.apache.beam.sdk.transforms.GroupByKey
 import org.apache.beam.sdk.transforms.PTransform
 import org.apache.beam.sdk.transforms.ParDo
@@ -99,7 +102,7 @@ import java.util.concurrent.TimeUnit
  * "ON_TIME") and freeway = "5" ORDER BY window DESC, processing_time`
  *
  *
- * To see the the difference between accumulation mode and discarding mode, `SELECT * FROM
+ * To see the difference between accumulation mode and discarding mode, `SELECT * FROM
  * <enter_table_name> WHERE (timing = "LATE" or timing = "ON_TIME") AND (trigger_type =
  * "withAllowedLateness" or trigger_type = "sequential") and freeway = "5" ORDER BY window DESC,
  * processing_time`
@@ -364,15 +367,17 @@ object TriggerExample {
 
                                 @ProcessElement
                                 @Throws(Exception::class)
-                                fun processElement(c: ProcessContext) {
-                                    val flows = c.element().value
+                                fun processElement(
+                                        @Element element: KV<String, Iterable<Int>>,
+                                        receiver: OutputReceiver<KV<String, String>>) {
+                                    val flows = element.value
                                     var sum = 0
                                     var numberOfRecords = 0L
                                     for (value in flows) {
                                         sum += value
                                         numberOfRecords++
                                     }
-                                    c.output(KV.of<String, String>(c.element().key, "$sum,$numberOfRecords"))
+                                    receiver.output(KV.of<String, String>(element.key, "$sum,$numberOfRecords"))
                                 }
                             }))
             return results.apply(ParDo.of(FormatTotalFlow(triggerType)))
@@ -387,20 +392,25 @@ object TriggerExample {
 
         @ProcessElement
         @Throws(Exception::class)
-        fun processElement(c: ProcessContext, window: BoundedWindow) {
-            val values = c.element().value.split(",".toRegex()).toTypedArray()
+        fun processElement(
+                @Element element: KV<String, String>,
+                window: BoundedWindow,
+                pane: PaneInfo,
+                @Timestamp timestamp: Instant,
+                receiver: OutputReceiver<TableRow>) {
+            val values = element.value.split(",".toRegex()).toTypedArray()
             val row = TableRow()
                     .set("trigger_type", triggerType)
-                    .set("freeway", c.element().key)
+                    .set("freeway", element.key)
                     .set("total_flow", Integer.parseInt(values[0]))
                     .set("number_of_records", java.lang.Long.parseLong(values[1]))
                     .set("window", window.toString())
-                    .set("isFirst", c.pane().isFirst)
-                    .set("isLast", c.pane().isLast)
-                    .set("timing", c.pane().timing.toString())
-                    .set("event_time", c.timestamp().toString())
+                    .set("isFirst", pane.isFirst)
+                    .set("isLast", pane.isLast)
+                    .set("timing", pane.timing.toString())
+                    .set("event_time", timestamp.toString())
                     .set("processing_time", Instant.now().toString())
-            c.output(row)
+            receiver.output(row)
         }
     }
 
@@ -412,8 +422,8 @@ object TriggerExample {
 
         @ProcessElement
         @Throws(Exception::class)
-        fun processElement(c: ProcessContext) {
-            val laneInfo = c.element().split(",".toRegex()).toTypedArray()
+        fun processElement(@Element element: String, receiver: OutputReceiver<KV<String, Int>>) {
+            val laneInfo = element.split(",".toRegex()).toTypedArray()
             if ("timestamp" == laneInfo[0]) {
                 // Header row
                 return
@@ -429,7 +439,7 @@ object TriggerExample {
             if (totalFlow == null || totalFlow <= 0) {
                 return
             }
-            c.output(KV.of<String, Int>(freeway, totalFlow))
+            receiver.output(KV.of<String, Int>(freeway, totalFlow))
         }
 
         companion object {
@@ -486,16 +496,15 @@ object TriggerExample {
 
         @ProcessElement
         @Throws(Exception::class)
-        fun processElement(c: ProcessContext) {
+        fun processElement(@Element element: String, receiver: OutputReceiver<String>) {
             var timestamp = Instant.now()
-            val random = Random()
             if (random.nextDouble() < THRESHOLD) {
                 val range = MAX_DELAY - MIN_DELAY
                 val delayInMinutes = random.nextInt(range) + MIN_DELAY
                 val delayInMillis = TimeUnit.MINUTES.toMillis(delayInMinutes.toLong())
                 timestamp = Instant(timestamp.millis - delayInMillis)
             }
-            c.outputWithTimestamp(c.element(), timestamp)
+            receiver.outputWithTimestamp(element, timestamp)
         }
 
         companion object {
@@ -503,6 +512,7 @@ object TriggerExample {
             // MIN_DELAY and MAX_DELAY in minutes.
             private const val MIN_DELAY = 1
             private const val MAX_DELAY = 100
+            private val random = Random()
         }
     }
 

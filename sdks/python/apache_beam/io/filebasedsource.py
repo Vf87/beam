@@ -29,6 +29,7 @@ For an example implementation of :class:`FileBasedSource` see
 # pytype: skip-file
 
 from typing import Callable
+from typing import Iterable
 from typing import Union
 
 from apache_beam.internal import pickler
@@ -36,6 +37,7 @@ from apache_beam.io import concat_source
 from apache_beam.io import iobase
 from apache_beam.io import range_trackers
 from apache_beam.io.filesystem import CompressionTypes
+from apache_beam.io.filesystem import FileMetadata
 from apache_beam.io.filesystems import FileSystems
 from apache_beam.io.restriction_trackers import OffsetRange
 from apache_beam.options.value_provider import StaticValueProvider
@@ -132,8 +134,7 @@ class FileBasedSource(iobase.BoundedSource):
     }
 
   @check_accessible(['_pattern'])
-  def _get_concat_source(self):
-    # type: () -> concat_source.ConcatSource
+  def _get_concat_source(self) -> concat_source.ConcatSource:
     if self._concat_source is None:
       pattern = self._pattern.get()
 
@@ -145,7 +146,7 @@ class FileBasedSource(iobase.BoundedSource):
       # with each _SingleFileSource. To prevent this FileBasedSource from having
       # a reference to ConcatSource (resulting in quadratic space complexity)
       # we clone it here.
-      file_based_source_ref = pickler.loads(pickler.dumps(self))
+      file_based_source_ref = pickler.roundtrip(self)
 
       for file_metadata in files_metadata:
         file_name = file_metadata.path
@@ -166,7 +167,10 @@ class FileBasedSource(iobase.BoundedSource):
             min_bundle_size=self._min_bundle_size,
             splittable=splittable)
         single_file_sources.append(single_file_source)
+
+      FileSystems.report_source_lineage(pattern)
       self._concat_source = concat_source.ConcatSource(single_file_sources)
+
     return self._concat_source
 
   def open_file(self, file_name):
@@ -193,11 +197,8 @@ class FileBasedSource(iobase.BoundedSource):
         start_position=start_position,
         stop_position=stop_position)
 
-  @check_accessible(['_pattern'])
   def estimate_size(self):
-    pattern = self._pattern.get()
-    match_result = FileSystems.match([pattern])[0]
-    return sum([f.size_in_bytes for f in match_result.metadata_list])
+    return self._get_concat_source().estimate_size()
 
   def read(self, range_tracker):
     return self._get_concat_source().read(range_tracker)
@@ -282,7 +283,7 @@ class _SingleFileSource(iobase.BoundedSource):
             split.stop - split.start,
             _SingleFileSource(
                 # Copying this so that each sub-source gets a fresh instance.
-                pickler.loads(pickler.dumps(self._file_based_source)),
+                pickler.roundtrip(self._file_based_source),
                 self._file_name,
                 split.start,
                 split.stop,
@@ -343,10 +344,18 @@ class _ExpandIntoRanges(DoFn):
     self._min_bundle_size = min_bundle_size
     self._splittable = splittable
     self._compression_type = compression_type
+    self._size_track = None
 
-  def process(self, element, *args, **kwargs):
-    match_results = FileSystems.match([element])
-    for metadata in match_results[0].metadata_list:
+  def process(self, element: Union[str, FileMetadata], *args,
+              **kwargs) -> Iterable[tuple[FileMetadata, OffsetRange]]:
+    if isinstance(element, FileMetadata):
+      metadata_list = [element]
+    else:
+      match_results = FileSystems.match([element])
+      metadata_list = match_results[0].metadata_list
+    for metadata in metadata_list:
+      FileSystems.report_source_lineage(metadata.path)
+
       splittable = (
           self._splittable and _determine_splittability_from_compression_type(
               metadata.path, self._compression_type))
@@ -364,9 +373,8 @@ class _ExpandIntoRanges(DoFn):
 class _ReadRange(DoFn):
   def __init__(
       self,
-      source_from_file,  # type: Union[str, iobase.BoundedSource]
-      with_filename=False  # type: bool
-    ) -> None:
+      source_from_file: Union[str, iobase.BoundedSource],
+      with_filename: bool = False) -> None:
     self._source_from_file = source_from_file
     self._with_filename = with_filename
 
@@ -397,15 +405,14 @@ class ReadAllFiles(PTransform):
   PTransform authors who wishes to implement file-based Read transforms that
   read a PCollection of files.
   """
-
-  def __init__(self,
-               splittable,  # type: bool
-               compression_type,
-               desired_bundle_size,  # type: int
-               min_bundle_size,  # type: int
-               source_from_file,  # type: Callable[[str], iobase.BoundedSource]
-               with_filename=False  # type: bool
-              ):
+  def __init__(
+      self,
+      splittable: bool,
+      compression_type,
+      desired_bundle_size: int,
+      min_bundle_size: int,
+      source_from_file: Callable[[str], iobase.BoundedSource],
+      with_filename: bool = False):
     """
     Args:
       splittable: If False, files won't be split into sub-ranges. If True,
@@ -435,17 +442,32 @@ class ReadAllFiles(PTransform):
     self._min_bundle_size = min_bundle_size
     self._source_from_file = source_from_file
     self._with_filename = with_filename
+    # TODO(BEAM-14497) always reshuffle once gbk always trigger works.
+    self._is_reshuffle = True
+
+  def _disable_reshuffle(self):
+    # TODO(BEAM-14497) Remove this private method once gbk always trigger works.
+    #
+    # Currently Reshuffle() holds elements until the stage is completed. When
+    # ReadRange is needed instantly after match (like read continuously), the
+    # reshard is temporarily disabled. However, the read then does not scale and
+    # is deemed experimental.
+    self._is_reshuffle = False
+    return self
 
   def expand(self, pvalue):
-    return (
+    pvalue = (
         pvalue
         | 'ExpandIntoRanges' >> ParDo(
             _ExpandIntoRanges(
                 self._splittable,
                 self._compression_type,
                 self._desired_bundle_size,
-                self._min_bundle_size))
-        | 'Reshard' >> Reshuffle()
+                self._min_bundle_size)))
+    if self._is_reshuffle:
+      pvalue = pvalue | 'Reshard' >> Reshuffle()
+    return (
+        pvalue
         | 'ReadRange' >> ParDo(
             _ReadRange(
                 self._source_from_file, with_filename=self._with_filename)))

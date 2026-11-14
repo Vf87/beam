@@ -29,7 +29,7 @@ import org.apache.beam.sdk.fn.stream.PrefetchableIterable;
 import org.apache.beam.sdk.fn.stream.PrefetchableIterator;
 import org.apache.beam.sdk.fn.stream.PrefetchableIterators;
 import org.apache.beam.sdk.fn.stream.PrefetchableIteratorsTest.ReadyAfterPrefetch;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
@@ -81,12 +81,14 @@ public class LazyCachingIteratorToIterableTest {
 
   @Test
   public void testEqualsAndHashCode() {
-    Iterable<String> iterA =
+    LazyCachingIteratorToIterable<String> iterA =
         new LazyCachingIteratorToIterable<>(PrefetchableIterators.fromArray("A", "B", "C"));
-    Iterable<String> iterB =
+    LazyCachingIteratorToIterable<String> iterB =
         new LazyCachingIteratorToIterable<>(PrefetchableIterators.fromArray("A", "B", "C"));
-    Iterable<String> iterC = new LazyCachingIteratorToIterable<>(PrefetchableIterators.fromArray());
-    Iterable<String> iterD = new LazyCachingIteratorToIterable<>(PrefetchableIterators.fromArray());
+    LazyCachingIteratorToIterable<String> iterC =
+        new LazyCachingIteratorToIterable<>(PrefetchableIterators.fromArray());
+    LazyCachingIteratorToIterable<String> iterD =
+        new LazyCachingIteratorToIterable<>(PrefetchableIterators.fromArray());
     assertEquals(iterA, iterB);
     assertEquals(iterC, iterD);
     assertNotEquals(iterA, iterC);

@@ -23,12 +23,16 @@ import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.reflect.DoFnInvokers;
 import org.apache.beam.sdk.util.DoFnInfo;
 import org.apache.beam.sdk.util.SerializableUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Common {@link DoFnInstanceManager} implementations. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class DoFnInstanceManagers {
+  private static final Logger LOG = LoggerFactory.getLogger(DoFnInstanceManagers.class);
+
   /**
    * Returns a {@link DoFnInstanceManager} that returns {@link DoFnInfo} instances obtained by
    * deserializing the provided bytes. {@link DoFnInstanceManager} will call {@link DoFn.Setup} as
@@ -83,7 +87,18 @@ public class DoFnInstanceManagers {
     private DoFnInfo<?, ?> deserializeCopy() throws Exception {
       DoFnInfo<?, ?> fn;
       fn = (DoFnInfo<?, ?>) SerializableUtils.deserializeFromByteArray(serializedFnInfo, null);
+      long startMillis = System.currentTimeMillis();
       DoFnInvokers.tryInvokeSetupFor(fn.getDoFn(), options);
+      long elapsed = System.currentTimeMillis() - startMillis;
+      if (elapsed > 180_000) { // 3 min
+        // Work item could fail for long-running setup due to Dataflow worker lease timeout
+        LOG.warn(
+            "DoFn.setup for {} ran for {} seconds.\nThis could cause Dataflow worker "
+                + "lease expire and failing the job. DoFn.Setup should not contain long "
+                + "running operations.",
+            fn.getDoFn().getClass(),
+            elapsed / 1_000);
+      }
       return fn;
     }
 

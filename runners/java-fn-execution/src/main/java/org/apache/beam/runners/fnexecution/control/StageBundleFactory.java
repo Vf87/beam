@@ -21,14 +21,14 @@ import org.apache.beam.runners.fnexecution.state.StateRequestHandler;
 
 /**
  * A bundle factory scoped to a particular {@link
- * org.apache.beam.runners.core.construction.graph.ExecutableStage}, which has all of the resources
- * it needs to provide new {@link RemoteBundle RemoteBundles}.
+ * org.apache.beam.sdk.util.construction.graph.ExecutableStage}, which has all of the resources it
+ * needs to provide new {@link RemoteBundle RemoteBundles}.
  *
  * <p>Closing a StageBundleFactory signals that the stage has completed and any resources bound to
  * its lifetime can be cleaned up.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public interface StageBundleFactory extends AutoCloseable {
   /** Get a new {@link RemoteBundle bundle} for processing the data in an executable stage. */

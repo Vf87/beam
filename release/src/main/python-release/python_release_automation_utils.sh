@@ -82,23 +82,23 @@ function get_version() {
 #######################################
 function download_files() {
   if [[ $1 = *"wheel"* ]]; then
-    if [[ $2 == "python3.6" ]]; then
-      BEAM_PYTHON_SDK_WHL="apache_beam-$VERSION*-cp36-cp36m-manylinux1_x86_64.whl"
-    elif [[ $2 == "python3.7" ]]; then
-      BEAM_PYTHON_SDK_WHL="apache_beam-$VERSION*-cp37-cp37m-manylinux1_x86_64.whl"
-    elif [[ $2 == "python3.8" ]]; then
-      BEAM_PYTHON_SDK_WHL="apache_beam-$VERSION*-cp38-cp38-manylinux1_x86_64.whl"
-    elif [[ $2 == "python3.9" ]]; then
-      BEAM_PYTHON_SDK_WHL="apache_beam-$VERSION*-cp39-cp39-manylinux1_x86_64.whl"
+    if [[ $2 == "python3.11" ]]; then
+      BEAM_PYTHON_SDK_WHL="apache_beam-$VERSION*-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
+    elif [[ $2 == "python3.12" ]]; then
+      BEAM_PYTHON_SDK_WHL="apache_beam-$VERSION*-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
+    elif [[ $2 == "python3.13" ]]; then
+      BEAM_PYTHON_SDK_WHL="apache_beam-$VERSION*-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
+    elif [[ $2 == "python3.14" ]]; then
+      BEAM_PYTHON_SDK_WHL="apache_beam-$VERSION*-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
     else
       echo "Unable to determine a Beam wheel for interpreter version $2."
       exit 1
     fi
 
-    wget -r -l2 --no-parent -nd -A "$BEAM_PYTHON_SDK_WHL*" $RC_STAGING_URL
+    wget -e robots=off -r -l2 --no-parent -nd -A "$BEAM_PYTHON_SDK_WHL*" "$RC_STAGING_URL"
   else
-    BEAM_PYTHON_SDK_ZIP="apache-beam-$VERSION.zip"
-    wget -r -l2 --no-parent -nd -A "$BEAM_PYTHON_SDK_ZIP*" $RC_STAGING_URL
+    BEAM_PYTHON_SDK_ZIP="apache_beam-$VERSION.tar.gz"
+    wget -e robots=off -r -l2 --no-parent -nd -A "$BEAM_PYTHON_SDK_ZIP*" "$RC_STAGING_URL"
   fi
 }
 
@@ -128,7 +128,7 @@ function get_sha512_name() {
   if [[ $1 = *"wheel"* ]]; then
     echo $(ls | grep "/*.whl.sha512$")
   else
-    echo $(ls | grep "/*.zip.sha512$")
+    echo $(ls | grep "/*.tar.gz.sha512$")
   fi
 }
 
@@ -142,7 +142,7 @@ function get_asc_name() {
   if [[ $1 = *"wheel"* ]]; then
     echo $(ls | grep "/*.whl.asc$")
   else
-    echo $(ls | grep "/*.zip.asc$")
+    echo $(ls | grep "/*.tar.gz.asc$")
   fi
 }
 
@@ -158,10 +158,11 @@ function get_asc_name() {
 function install_sdk() {
   sdk_file=$(get_sdk_name $1)
   print_separator "Creating new virtualenv with $2 interpreter and installing the SDK from $sdk_file."
-  gsutil version -l
+  gcloud version
   rm -rf ./temp_virtualenv_${2}
-  virtualenv temp_virtualenv_${2} -p $2
-  . temp_virtualenv_${2}/bin/activate
+  $2 -m venv temp_virtualenv_${2}
+  . ./temp_virtualenv_${2}/bin/activate
+  pip install --upgrade pip setuptools wheel
   gcloud_version=$(gcloud --version | head -1 | awk '{print $4}')
   if [[ "$gcloud_version" < "189" ]]; then
     update_gcloud
@@ -227,7 +228,7 @@ function cleanup_pubsub() {
 #   $2 - pid: the pid of running pipeline
 #   $3 - running_job (DataflowRunner only): the job id of streaming pipeline running on DataflowRunner
 #######################################
-function verify_steaming_result() {
+function verify_streaming_result() {
   retry=3
   should_see="Python: "
   while(( $retry > 0 )); do
@@ -266,7 +267,7 @@ function verify_user_score() {
   expected_output_file_name="$USERSCORE_OUTPUT_PREFIX-$1-runner.txt"
   actual_output_files=$(ls)
   if [[ $1 = *"dataflow"* ]]; then
-    actual_output_files=$(gsutil ls gs://$BUCKET_NAME)
+    actual_output_files=$(gcloud storage ls gs://$BUCKET_NAME)
     expected_output_file_name="gs://$BUCKET_NAME/$expected_output_file_name"
   fi
   echo $actual_output_files
@@ -278,7 +279,7 @@ function verify_user_score() {
   fi
 
   if [[ $1 = *"dataflow"* ]]; then
-    gsutil rm $expected_output_file_name*
+    gcloud storage rm $expected_output_file_name*
   fi
   echo "SUCCEED: user_score successfully run on $1-runner."
 }
@@ -294,9 +295,11 @@ function verify_user_score() {
 function verify_hourly_team_score() {
   retry=3
   should_see='AntiqueBrassPlatypus'
+  runner=$1
+
   while(( $retry >= 0 )); do
     if [[ $retry > 0 ]]; then
-      bq_pull_result=$(bq head -n 500 $DATASET.hourly_team_score_python_$1)
+      bq_pull_result=$(bq head -n 500 ${DATASET}.${HOURLY_TEAM_SCORE_TABLE_PREFIX}_${runner})
       if [[ $bq_pull_result = *"$should_see"* ]]; then
         echo "SUCCEED: hourly_team_score example successful run on $1-runner"
         break
@@ -306,14 +309,38 @@ function verify_hourly_team_score() {
         sleep 15
       fi
     else
-      echo "FAILED: HourlyTeamScore example failed running on $1-runner. \
-        Did not found scores of team $should_see in $DATASET.leader_board"
+      echo "FAILED: HourlyTeamScore example failed running on $runner runner. \
+        Did not found scores of team $should_see in ${DATASET}.${HOURLY_TEAM_SCORE_TABLE_PREFIX}_${runner}"
       complete "FAILED"
       exit 1
     fi
   done
 }
 
+function cleanup_hourly_team_score() {
+  retry=3
+  runner=$1
+
+  echo "Removing previously created table ${DATASET}.${HOURLY_TEAM_SCORE_TABLE_PREFIX}_${runner}..."
+  bq rm -q -f -t "${DATASET}.${HOURLY_TEAM_SCORE_TABLE_PREFIX}_${runner}"
+
+  while(( $retry >= 0 )); do
+    if [[ $retry > 0 ]]; then
+      bq_ls_result=$(bq ls $DATASET)
+      if [[ $bq_ls_result = *"${HOURLY_TEAM_SCORE_TABLE_PREFIX}_${runner}"* ]]; then
+        retry=$(($retry-1))
+        echo "${DATASET}.${HOURLY_TEAM_SCORE_TABLE_PREFIX}_${runner} not cleaned up yet, waiting"
+        sleep 1000
+      else
+        echo "Confirmed ${DATASET}.${HOURLY_TEAM_SCORE_TABLE_PREFIX}_${runner} removed before running new test."
+        break
+      fi
+    else
+      echo "WARNING: Unable to clean up table ${DATASET}.${HOURLY_TEAM_SCORE_TABLE_PREFIX}_${runner}. \
+            You may need to manually run 'bq rm -r -t ${DATASET}.${HOURLY_TEAM_SCORE_TABLE_PREFIX}_${runner}'."
+    fi
+  done
+}
 
 # Python RC configurations
 VERSION=$(get_version)
@@ -335,4 +362,5 @@ PUBSUB_SUBSCRIPTION='wordstream-python-sub2'
 # Mobile Gaming Configurations
 DATASET='beam_postrelease_mobile_gaming'
 USERSCORE_OUTPUT_PREFIX='python-userscore_result'
+HOURLY_TEAM_SCORE_TABLE_PREFIX='hourly_team_score_python'
 GAME_INPUT_DATA='gs://dataflow-samples/game/5000_gaming_data.csv'

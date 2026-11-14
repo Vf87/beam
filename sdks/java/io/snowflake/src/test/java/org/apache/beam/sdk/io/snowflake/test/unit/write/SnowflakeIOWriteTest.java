@@ -24,12 +24,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
-import net.snowflake.client.jdbc.SnowflakeSQLException;
+import net.snowflake.client.api.exception.SnowflakeSQLException;
 import org.apache.beam.sdk.io.snowflake.SnowflakeIO;
-import org.apache.beam.sdk.io.snowflake.services.SnowflakeService;
+import org.apache.beam.sdk.io.snowflake.services.SnowflakeServices;
 import org.apache.beam.sdk.io.snowflake.test.FakeSnowflakeBasicDataSource;
-import org.apache.beam.sdk.io.snowflake.test.FakeSnowflakeBatchServiceImpl;
 import org.apache.beam.sdk.io.snowflake.test.FakeSnowflakeDatabase;
+import org.apache.beam.sdk.io.snowflake.test.FakeSnowflakeServicesImpl;
 import org.apache.beam.sdk.io.snowflake.test.TestSnowflakePipelineOptions;
 import org.apache.beam.sdk.io.snowflake.test.TestUtils;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
@@ -47,9 +47,6 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
 @RunWith(JUnit4.class)
-@SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-})
 public class SnowflakeIOWriteTest {
   private static final String FAKE_TABLE = "FAKE_TABLE";
   private static final String BUCKET_NAME = "BUCKET/";
@@ -61,13 +58,13 @@ public class SnowflakeIOWriteTest {
   private static TestSnowflakePipelineOptions options;
   private static SnowflakeIO.DataSourceConfiguration dc;
 
-  private static SnowflakeService snowflakeService;
+  private static SnowflakeServices snowflakeServices;
   private static List<Long> testData;
   private static List<String> testDataInStrings;
 
   @BeforeClass
   public static void setupAll() {
-    snowflakeService = new FakeSnowflakeBatchServiceImpl();
+    snowflakeServices = new FakeSnowflakeServicesImpl();
     testData = LongStream.range(0, 100).boxed().collect(Collectors.toList());
 
     testDataInStrings = new ArrayList<>();
@@ -78,6 +75,7 @@ public class SnowflakeIOWriteTest {
     testDataInStrings.add("Third row with \"double\" quotation");
     testDataInStrings.add("Third row with double one \" quotation");
     testDataInStrings.add("Third row with double twice \"\" quotation");
+    testDataInStrings.add("");
   }
 
   @Before
@@ -112,7 +110,7 @@ public class SnowflakeIOWriteTest {
                 .to(FAKE_TABLE)
                 .withStagingBucketName(options.getStagingBucketName())
                 .withStorageIntegrationName(options.getStorageIntegrationName())
-                .withSnowflakeService(snowflakeService));
+                .withSnowflakeServices(snowflakeServices));
 
     pipeline.run(options).waitUntilFinish();
 
@@ -133,7 +131,7 @@ public class SnowflakeIOWriteTest {
                 .withStorageIntegrationName(options.getStorageIntegrationName())
                 .withDataSourceConfiguration(dc)
                 .withUserDataMapper(TestUtils.getLongCsvMapper())
-                .withSnowflakeService(snowflakeService));
+                .withSnowflakeServices(snowflakeServices));
 
     pipeline.run(options).waitUntilFinish();
 
@@ -155,7 +153,7 @@ public class SnowflakeIOWriteTest {
                 .to(FAKE_TABLE)
                 .withStagingBucketName(options.getStagingBucketName())
                 .withStorageIntegrationName(options.getStorageIntegrationName())
-                .withSnowflakeService(snowflakeService));
+                .withSnowflakeServices(snowflakeServices));
 
     pipeline.run(options).waitUntilFinish();
 
@@ -180,7 +178,7 @@ public class SnowflakeIOWriteTest {
                 .withUserDataMapper(TestUtils.getLongCsvMapperKV())
                 .withDataSourceConfiguration(dc)
                 .withQueryTransformation(query)
-                .withSnowflakeService(snowflakeService));
+                .withSnowflakeServices(snowflakeServices));
 
     pipeline.run(options).waitUntilFinish();
 
@@ -202,7 +200,7 @@ public class SnowflakeIOWriteTest {
                 .to(FAKE_TABLE)
                 .withStagingBucketName(options.getStagingBucketName())
                 .withStorageIntegrationName(options.getStorageIntegrationName())
-                .withSnowflakeService(snowflakeService)
+                .withSnowflakeServices(snowflakeServices)
                 .withQuotationMark("\""));
 
     pipeline.run(options).waitUntilFinish();
@@ -210,8 +208,8 @@ public class SnowflakeIOWriteTest {
     List<String> actualData = FakeSnowflakeDatabase.getElements(FAKE_TABLE);
     List<String> escapedTestData =
         testDataInStrings.stream()
-            .map(e -> e.replace("'", "''"))
-            .map(e -> String.format("\"%s\"", e))
+            .map(e -> e.replace("\"", "\\\""))
+            .map(e -> e.isEmpty() ? "" : String.format("\"%s\"", e))
             .collect(Collectors.toList());
     assertTrue(TestUtils.areListsEqual(escapedTestData, actualData));
   }
@@ -228,15 +226,14 @@ public class SnowflakeIOWriteTest {
                 .to(FAKE_TABLE)
                 .withStagingBucketName(options.getStagingBucketName())
                 .withStorageIntegrationName(options.getStorageIntegrationName())
-                .withSnowflakeService(snowflakeService)
+                .withSnowflakeServices(snowflakeServices)
                 .withQuotationMark(""));
 
     pipeline.run(options).waitUntilFinish();
 
     List<String> actualData = FakeSnowflakeDatabase.getElements(FAKE_TABLE);
 
-    List<String> escapedTestData =
-        testDataInStrings.stream().map(e -> e.replace("'", "''")).collect(Collectors.toList());
-    assertTrue(TestUtils.areListsEqual(escapedTestData, actualData));
+    // no escape for blank quotation
+    assertTrue(TestUtils.areListsEqual(testDataInStrings, actualData));
   }
 }

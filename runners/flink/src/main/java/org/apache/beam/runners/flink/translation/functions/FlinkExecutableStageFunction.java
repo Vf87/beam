@@ -31,12 +31,8 @@ import org.apache.beam.model.pipeline.v1.RunnerApi;
 import org.apache.beam.runners.core.InMemoryStateInternals;
 import org.apache.beam.runners.core.InMemoryTimerInternals;
 import org.apache.beam.runners.core.StateInternals;
-import org.apache.beam.runners.core.StateTags;
 import org.apache.beam.runners.core.TimerInternals;
-import org.apache.beam.runners.core.construction.PTransformTranslation;
 import org.apache.beam.runners.core.construction.SerializablePipelineOptions;
-import org.apache.beam.runners.core.construction.Timer;
-import org.apache.beam.runners.core.construction.graph.ExecutableStage;
 import org.apache.beam.runners.flink.FlinkPipelineOptions;
 import org.apache.beam.runners.flink.metrics.FlinkMetricContainer;
 import org.apache.beam.runners.fnexecution.control.BundleCheckpointHandler;
@@ -59,10 +55,14 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.fn.data.FnDataReceiver;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.state.MapState;
 import org.apache.beam.sdk.transforms.join.RawUnionValue;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.sdk.util.construction.PTransformTranslation;
+import org.apache.beam.sdk.util.construction.Timer;
+import org.apache.beam.sdk.util.construction.graph.ExecutableStage;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.apache.flink.api.common.functions.AbstractRichFunction;
 import org.apache.flink.api.common.functions.GroupReduceFunction;
 import org.apache.flink.api.common.functions.MapPartitionFunction;
@@ -76,15 +76,15 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Flink operator that passes its input DataSet through an SDK-executed {@link
- * org.apache.beam.runners.core.construction.graph.ExecutableStage}.
+ * org.apache.beam.sdk.util.construction.graph.ExecutableStage}.
  *
  * <p>The output of this operation is a multiplexed DataSet whose elements are tagged with a union
  * coder. The coder's tags are determined by the output coder map. The resulting data set should be
  * further processed by a {@link FlinkExecutableStagePruningFunction}.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class FlinkExecutableStageFunction<InputT> extends AbstractRichFunction
     implements MapPartitionFunction<WindowedValue<InputT>, RawUnionValue>,
@@ -173,11 +173,12 @@ public class FlinkExecutableStageFunction<InputT> extends AbstractRichFunction
             metricContainer.updateMetrics(stepName, response.getMonitoringInfosList());
           }
         };
-    // TODO(BEAM-11021): Support bundle finalization in portable batch.
+    // TODO(https://github.com/apache/beam/issues/19526): Support bundle finalization in portable
+    // batch.
     finalizationHandler =
         bundleId -> {
           throw new UnsupportedOperationException(
-              "Portable Flink runner doesn't support bundle finalization in batch mode. For more details, please refer to https://issues.apache.org/jira/browse/BEAM-11021.");
+              "Portable Flink runner doesn't support bundle finalization in batch mode. For more details, please refer to https://github.com/apache/beam/issues/19526.");
         };
     bundleCheckpointHandler = getBundleCheckpointHandler(executableStage);
   }
@@ -283,12 +284,17 @@ public class FlinkExecutableStageFunction<InputT> extends AbstractRichFunction
           List<WindowedValue<InputT>> residuals = new ArrayList<>();
           TimerInternals.TimerData timer;
           while ((timer = sdfTimerInternals.removeNextProcessingTimer()) != null) {
-            WindowedValue stateValue =
-                sdfStateInternals
-                    .state(timer.getNamespace(), StateTags.value(timer.getTimerId(), inputCoder))
-                    .read();
-
-            residuals.add(stateValue);
+            MapState<String, WindowedValue<InputT>> residualState =
+                sdfStateInternals.state(
+                    timer.getNamespace(),
+                    BundleCheckpointHandlers.StateAndTimerBundleCheckpointHandler.residualStateTag(
+                        inputCoder));
+            WindowedValue<InputT> stateValue = residualState.get(timer.getTimerId()).read();
+            residualState.remove(timer.getTimerId());
+            // A pre-#27648 savepoint has no entry under the new tag, so the read is null; drop it.
+            if (stateValue != null) {
+              residuals.add(stateValue);
+            }
           }
           processElements(residuals, bundle);
         }

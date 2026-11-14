@@ -23,14 +23,16 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import org.apache.beam.sdk.extensions.sql.impl.TableName;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.SqlAsOperator;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.SqlCall;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.SqlIdentifier;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.SqlJoin;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.SqlNode;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.SqlSelect;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.SqlSetOperator;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.sdk.extensions.sql.impl.parser.TableClause;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlAsOperator;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlCall;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlIdentifier;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlJoin;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlSelect;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlSetOperator;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
  * Helper class to extract table identifiers from the query.
@@ -43,10 +45,13 @@ import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Immutabl
  *   ... FROM table1 JOIN (LEFT, INNER, OUTER etc) table2 JOIN table3 ...
  *   ... FROM table1 UNION (INTERSECT etc) SELECT ...
  * </pre>
+ *
+ * <p>A table read through {@code CHANGES(...)} or with a {@code WITH} clause is extracted by its
+ * name alone.
  */
 public class TableNameExtractionUtils {
 
-  public static List<TableName> extractTableNamesFromNode(SqlNode node) {
+  public static List<TableName> extractTableNamesFromNode(@Nullable SqlNode node) {
     if (node instanceof SqlSelect) {
       return extractTableFromSelect((SqlSelect) node);
     }
@@ -93,6 +98,9 @@ public class TableNameExtractionUtils {
   }
 
   private static List<TableName> extractFromIdentifier(SqlIdentifier identifier) {
-    return ImmutableList.of(TableName.create(identifier.names));
+    int last = identifier.names.size() - 1;
+    @Nullable TableClause clause = TableClause.decode(identifier.names.get(last));
+    SqlIdentifier name = clause == null ? identifier : identifier.setName(last, clause.baseName());
+    return ImmutableList.of(TableName.create(name.names));
   }
 }

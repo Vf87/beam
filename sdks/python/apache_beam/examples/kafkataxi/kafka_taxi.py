@@ -26,7 +26,6 @@
 
 import logging
 import sys
-import typing
 
 import apache_beam as beam
 from apache_beam.io.kafka import ReadFromKafka
@@ -49,8 +48,7 @@ def run(
   #                  '--runner', 'DataflowRunner',
   #                  '--temp_location', 'my-temp-location',
   #                  '--region', 'my-region',
-  #                  '--num_workers', 'my-num-workers',
-  #                  '--experiments', 'use_runner_v2']
+  #                  '--num_workers', 'my-num-workers']
 
   window_size = 15  # size of the Window in seconds.
 
@@ -98,7 +96,7 @@ def run(
             topic='projects/pubsub-public-data/topics/taxirides-realtime').
         with_output_types(bytes)
         | beam.Map(lambda x: (b'', x)).with_output_types(
-            typing.Tuple[bytes, bytes])  # Kafka write transforms expects KVs.
+            tuple[bytes, bytes])  # Kafka write transforms expects KVs.
         | beam.WindowInto(beam.window.FixedWindows(window_size))
         | WriteToKafka(
             producer_config={'bootstrap.servers': bootstrap_servers},

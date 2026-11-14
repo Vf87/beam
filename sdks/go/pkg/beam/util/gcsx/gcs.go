@@ -18,26 +18,69 @@ package gcsx
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/url"
 	"path"
 
 	"cloud.google.com/go/storage"
+	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/runtime"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/internal/errors"
+	"github.com/apache/beam/sdks/v2/go/pkg/beam/util/gcpx"
 	"google.golang.org/api/option"
 )
 
+var userAgent = option.WithUserAgent("(GPN:Beam)")
+
 // NewClient creates a new GCS client with default application credentials, and supplied
-// OAuth scope. The OAuth scopes are defined in https://godoc.org/cloud.google.com/go/storage#pkg-constants.
+// OAuth scope. The OAuth scopes are defined in https://pkg.go.dev/cloud.google.com/go/storage#pkg-constants.
+// Sets the user agent to Beam.
+//
+// The endpoint can be overridden with the --gcs_endpoint flag. In non-default
+// universes (e.g. Trusted Partner Cloud), the universe domain is taken from
+// GOOGLE_CLOUD_UNIVERSE_DOMAIN or, if unset, from the default credentials.
 func NewClient(ctx context.Context, scope string) (*storage.Client, error) {
-	return storage.NewClient(ctx, option.WithScopes(scope))
+	opts := []option.ClientOption{option.WithScopes(scope), userAgent}
+	opts = append(opts, endpointOptions()...)
+	// storage.NewClient ignores the credentials' universe domain, and requests
+	// fail if it differs from the configured one (googleapis.com by default).
+	if ud := gcpx.GetUniverseDomain(ctx); ud != "" {
+		opts = append(opts, option.WithUniverseDomain(ud))
+	}
+	return storage.NewClient(ctx, opts...)
 }
 
 // NewUnauthenticatedClient creates a new GCS client without authentication.
+// Sets the user agent to Beam.
 func NewUnauthenticatedClient(ctx context.Context) (*storage.Client, error) {
-	return storage.NewClient(ctx, option.WithoutAuthentication())
+	opts := []option.ClientOption{option.WithoutAuthentication(), userAgent}
+	opts = append(opts, endpointOptions()...)
+	return storage.NewClient(ctx, opts...)
+}
+
+// endpointOptions returns the client options for the --gcs_endpoint override,
+// if any.
+func endpointOptions() []option.ClientOption {
+	if ep := GetGcsEndpoint(); ep != "" {
+		return []option.ClientOption{option.WithEndpoint(ep)}
+	}
+	return nil
+}
+
+// GetGcsEndpoint returns the GCS endpoint override from the --gcs_endpoint
+// flag. If the flag is unset or not registered, it falls back to the
+// "gcs_endpoint" pipeline option, which is how the value reaches remote
+// workers, where flags are not parsed. Returns an empty string if no override
+// is configured.
+//
+// Looking up the flag by name avoids importing gcpopts, which registers global
+// flags such as --region and --project that can conflict with user binaries.
+func GetGcsEndpoint() string {
+	if f := flag.Lookup("gcs_endpoint"); f != nil && f.Value.String() != "" {
+		return f.Value.String()
+	}
+	return runtime.GlobalOptions.Get("gcs_endpoint")
 }
 
 // Upload writes the given content to GCS. If the specified bucket does not
@@ -60,9 +103,33 @@ func Upload(ctx context.Context, client *storage.Client, project, bucket, object
 
 }
 
-// CreateBucket creates a bucket in GCS.
+var getBucketAttrs = func(ctx context.Context, client *storage.Client, bucketName string) (*storage.BucketAttrs, error) {
+	return client.Bucket(bucketName).Attrs(ctx)
+}
+
+// SoftDeletePolicyEnabled returns true if SoftDeletePolicy is enabled on bucket
+func SoftDeletePolicyEnabled(ctx context.Context, client *storage.Client, bucketName string) (bool, error) {
+	attrs, err := getBucketAttrs(ctx, client, bucketName)
+	if err != nil {
+		return false, err
+	}
+	return attrs.SoftDeletePolicy != nil && attrs.SoftDeletePolicy.RetentionDuration > 0, nil
+}
+
+// Get BucketAttrs with RetentionDuration of SoftDeletePolicy set to zero for disabling SoftDeletePolicy.
+func getDisableSoftDeletePolicyBucketAttrs() *storage.BucketAttrs {
+	attrs := &storage.BucketAttrs{
+		SoftDeletePolicy: &storage.SoftDeletePolicy{
+			RetentionDuration: 0,
+		},
+	}
+	return attrs
+}
+
+// CreateBucket creates a bucket in GCS with RetentionDuration of zero to disable SoftDeletePolicy.
 func CreateBucket(ctx context.Context, client *storage.Client, project, bucket string) error {
-	return client.Bucket(bucket).Create(ctx, project, nil)
+	disableSoftDeletePolicyBucketAttrs := getDisableSoftDeletePolicyBucketAttrs()
+	return client.Bucket(bucket).Create(ctx, project, disableSoftDeletePolicyBucketAttrs)
 }
 
 // BucketExists returns true iff the given bucket exists.
@@ -91,7 +158,7 @@ func ReadObject(ctx context.Context, client *storage.Client, bucket, object stri
 	if err != nil {
 		return nil, err
 	}
-	return ioutil.ReadAll(r)
+	return io.ReadAll(r)
 }
 
 // MakeObject creates a object location from bucket and path. For example,

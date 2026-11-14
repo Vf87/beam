@@ -18,6 +18,7 @@
 
 import argparse
 import logging
+import platform
 import shlex
 import typing
 import unittest
@@ -32,12 +33,9 @@ import pytest
 import apache_beam as beam
 from apache_beam import Impulse
 from apache_beam import Map
-from apache_beam import Pipeline
-from apache_beam.coders import VarIntCoder
 from apache_beam.io.external.generate_sequence import GenerateSequence
 from apache_beam.io.kafka import ReadFromKafka
 from apache_beam.io.kafka import WriteToKafka
-from apache_beam.metrics import Metrics
 from apache_beam.options.pipeline_options import DebugOptions
 from apache_beam.options.pipeline_options import FlinkRunnerOptions
 from apache_beam.options.pipeline_options import PortableOptions
@@ -47,7 +45,6 @@ from apache_beam.runners.portability import portable_runner
 from apache_beam.runners.portability import portable_runner_test
 from apache_beam.testing.util import assert_that
 from apache_beam.testing.util import equal_to
-from apache_beam.transforms import userstate
 from apache_beam.transforms.sql import SqlTransform
 
 # Run as
@@ -73,6 +70,10 @@ class FlinkRunnerTest(portable_runner_test.PortableRunnerTest):
     super().__init__(*args, **kwargs)
     self.environment_type = None
     self.environment_config = None
+    self.enable_commit = False
+
+  def setUp(self):
+    self.enable_commit = False
 
   @pytest.fixture(autouse=True)
   def parse_options(self, request):
@@ -139,6 +140,7 @@ class FlinkRunnerTest(portable_runner_test.PortableRunnerTest):
       cls.test_metrics_path = path.join(cls.conf_dir, 'test-metrics.txt')
 
       # path to write Flink configuration to
+      # Flink 1.x conf:
       conf_path = path.join(cls.conf_dir, 'flink-conf.yaml')
       file_reporter = 'org.apache.beam.runners.flink.metrics.FileReporter'
       with open(conf_path, 'w') as f:
@@ -149,6 +151,19 @@ class FlinkRunnerTest(portable_runner_test.PortableRunnerTest):
                 'metrics.reporter.file.path: %s' % cls.test_metrics_path,
                 'metrics.scope.operator: <operator_name>',
             ]))
+      # Flink 2.x conf:
+      conf_path_2 = path.join(cls.conf_dir, 'config.yaml')
+      with open(conf_path_2, 'w') as f:
+        f.write(
+            '''metrics:
+  reporters: file
+  reporter:
+    file:
+      class: %s
+      path: %s
+  scope:
+    operator: <operator_name>
+''' % (file_reporter, cls.test_metrics_path))
 
   @classmethod
   def _subprocess_command(cls, job_port, expansion_port):
@@ -158,11 +173,19 @@ class FlinkRunnerTest(portable_runner_test.PortableRunnerTest):
 
     cls._create_conf_dir()
     cls.expansion_port = expansion_port
-
+    platform_specific_opts = []
+    if platform.system() == 'Linux':
+      # UseContainerSupport is supported in Linux and turned on by default
+      platform_specific_opts.append('-XX:-UseContainerSupport')
     try:
-      return [
-          'java',
-          '-Dorg.slf4j.simpleLogger.defaultLogLevel=warn',
+      return ['java'] + platform_specific_opts + [
+          '--add-opens=java.base/java.lang=ALL-UNNAMED',
+          '--add-opens=java.base/java.nio=ALL-UNNAMED',
+          '--add-opens=java.base/java.util=ALL-UNNAMED',
+          '-Dslf4j.provider=org.slf4j.simple.SimpleServiceProvider',
+          '-Dorg.slf4j.simpleLogger.log.org.apache.flink.metrics=error',
+          '-Dorg.slf4j.simpleLogger.log.org.apache.flink.runtime=error',
+          '-Dorg.slf4j.simpleLogger.log.org.apache.flink.streaming=error',
           '-jar',
           cls.flink_job_server_jar,
           '--flink-master',
@@ -201,8 +224,21 @@ class FlinkRunnerTest(portable_runner_test.PortableRunnerTest):
     options.view_as(PortableOptions).environment_type = self.environment_type
     options.view_as(
         PortableOptions).environment_options = self.environment_options
+    if self.enable_commit:
+      options.view_as(StandardOptions).streaming = True
+      options._all_options['checkpointing_interval'] = 3000
+      options._all_options['shutdown_sources_after_idle_ms'] = 60000
+      options._all_options['number_of_execution_retries'] = 1
 
     return options
+
+  def test_batch_rebatch_pardos(self):
+    if self.environment_type == 'DOCKER':
+      pytest.skip(
+          "Skipping test_batch_rebatch_pardos for DOCKER environment in "
+          "FlinkRunnerTest as warnings are not propagated back when Python SDK "
+          "is run in Docker.")
+    super().test_batch_rebatch_pardos()
 
   # Can't read host files from within docker, read a "local" file there.
   def test_read(self):
@@ -215,6 +251,11 @@ class FlinkRunnerTest(portable_runner_test.PortableRunnerTest):
     raise unittest.SkipTest("BEAM-4781")
 
   def test_external_transform(self):
+    if self.environment_type == 'PROCESS':
+      self.skipTest(
+          "Skipping external transform test in PROCESS mode due to "
+          "https://github.com/apache/beam/issues/19461 (Flink expansion "
+          "service incompatibility).")
     with self.create_pipeline() as p:
       res = (
           p
@@ -224,10 +265,16 @@ class FlinkRunnerTest(portable_runner_test.PortableRunnerTest):
       assert_that(res, equal_to([i for i in range(1, 10)]))
 
   def test_expand_kafka_read(self):
+    if self.environment_type == 'PROCESS':
+      self.skipTest(
+          "Skipping Kafka read test in PROCESS mode due to "
+          "https://github.com/apache/beam/issues/19461 (Flink expansion "
+          "service incompatibility).")
     # We expect to fail here because we do not have a Kafka cluster handy.
     # Nevertheless, we check that the transform is expanded by the
     # ExpansionService and that the pipeline fails during execution.
     with self.assertRaises(Exception) as ctx:
+      self.enable_commit = True
       with self.create_pipeline() as p:
         # pylint: disable=expression-not-assigned
         (
@@ -246,14 +293,22 @@ class FlinkRunnerTest(portable_runner_test.PortableRunnerTest):
                 'LongDeserializer',
                 commit_offset_in_finalize=True,
                 timestamp_policy=ReadFromKafka.create_time_policy,
+                redistribute=False,
+                redistribute_num_keys=0,
+                allow_duplicates=False,
                 expansion_service=self.get_expansion_service()))
     self.assertTrue(
-        'No resolvable bootstrap urls given in bootstrap.servers' in str(
-            ctx.exception),
+        'No resolvable bootstrap urls given in bootstrap.servers'
+        in str(ctx.exception),
         'Expected to fail due to invalid bootstrap.servers, but '
         'failed due to:\n%s' % str(ctx.exception))
 
   def test_expand_kafka_write(self):
+    if self.environment_type == 'PROCESS':
+      self.skipTest(
+          "Skipping Kafka write test in PROCESS mode due to "
+          "https://github.com/apache/beam/issues/19461 (Flink expansion "
+          "service incompatibility).")
     # We just test the expansion but do not execute.
     # pylint: disable=expression-not-assigned
     (
@@ -274,6 +329,11 @@ class FlinkRunnerTest(portable_runner_test.PortableRunnerTest):
             expansion_service=self.get_expansion_service()))
 
   def test_sql(self):
+    if self.environment_type == 'PROCESS':
+      self.skipTest(
+          "Skipping SQL test in PROCESS mode due to "
+          "https://github.com/apache/beam/issues/19461 (Flink expansion "
+          "service incompatibility).")
     with self.create_pipeline() as p:
       output = (
           p
@@ -290,118 +350,40 @@ class FlinkRunnerTest(portable_runner_test.PortableRunnerTest):
 
   def test_flattened_side_input(self):
     # Blocked on support for transcoding
-    # https://jira.apache.org/jira/browse/BEAM-6523
+    # https://github.com/apache/beam/issues/19365
     super().test_flattened_side_input(with_transcoding=False)
 
+  def test_flatten_and_gbk(self):
+    # Blocked on support for transcoding
+    # https://github.com/apache/beam/issues/19365
+    # Also blocked on support of flatten and groupby sharing the same input
+    # https://github.com/apache/beam/issues/34647
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/34647")
+
   def test_metrics(self):
-    super().test_metrics(check_gauge=False)
-
-  def test_flink_metrics(self):
-    """Run a simple DoFn that increments a counter and verifies state
-    caching metrics. Verifies that its expected value is written to a
-    temporary file by the FileReporter"""
-
-    counter_name = 'elem_counter'
-    state_spec = userstate.BagStateSpec('state', VarIntCoder())
-
-    class DoFn(beam.DoFn):
-      def __init__(self):
-        self.counter = Metrics.counter(self.__class__, counter_name)
-        _LOGGER.info('counter: %s' % self.counter.metric_name)
-
-      def process(self, kv, state=beam.DoFn.StateParam(state_spec)):
-        # Trigger materialization
-        list(state.read())
-        state.add(1)
-        self.counter.inc()
-
-    options = self.create_options()
-    # Test only supports parallelism of 1
-    options._all_options['parallelism'] = 1
-    # Create multiple bundles to test cache metrics
-    options._all_options['max_bundle_size'] = 10
-    options._all_options['max_bundle_time_millis'] = 95130590130
-    experiments = options.view_as(DebugOptions).experiments or []
-    experiments.append('state_cache_size=123')
-    options.view_as(DebugOptions).experiments = experiments
-    with Pipeline(self.get_runner(), options) as p:
-      # pylint: disable=expression-not-assigned
-      (
-          p
-          | "create" >> beam.Create(list(range(0, 110)))
-          | "mapper" >> beam.Map(lambda x: (x % 10, 'val'))
-          | "stateful" >> beam.ParDo(DoFn()))
-
-    lines_expected = {'counter: 110'}
-    if options.view_as(StandardOptions).streaming:
-      lines_expected.update([
-          # Gauges for the last finished bundle
-          'stateful.beam_metric:statecache:capacity: 123',
-          'stateful.beam_metric:statecache:size: 10',
-          'stateful.beam_metric:statecache:get: 20',
-          'stateful.beam_metric:statecache:miss: 0',
-          'stateful.beam_metric:statecache:hit: 20',
-          'stateful.beam_metric:statecache:put: 0',
-          'stateful.beam_metric:statecache:evict: 0',
-          # Counters
-          'stateful.beam_metric:statecache:get_total: 220',
-          'stateful.beam_metric:statecache:miss_total: 10',
-          'stateful.beam_metric:statecache:hit_total: 210',
-          'stateful.beam_metric:statecache:put_total: 10',
-          'stateful.beam_metric:statecache:evict_total: 0',
-      ])
-    else:
-      # Batch has a different processing model. All values for
-      # a key are processed at once.
-      lines_expected.update([
-          # Gauges
-          'stateful).beam_metric:statecache:capacity: 123',
-          # For the first key, the cache token will not be set yet.
-          # It's lazily initialized after first access in StateRequestHandlers
-          'stateful).beam_metric:statecache:size: 10',
-          # We have 11 here because there are 110 / 10 elements per key
-          'stateful).beam_metric:statecache:get: 12',
-          'stateful).beam_metric:statecache:miss: 1',
-          'stateful).beam_metric:statecache:hit: 11',
-          # State is flushed back once per key
-          'stateful).beam_metric:statecache:put: 1',
-          'stateful).beam_metric:statecache:evict: 0',
-          # Counters
-          'stateful).beam_metric:statecache:get_total: 120',
-          'stateful).beam_metric:statecache:miss_total: 10',
-          'stateful).beam_metric:statecache:hit_total: 110',
-          'stateful).beam_metric:statecache:put_total: 10',
-          'stateful).beam_metric:statecache:evict_total: 0',
-      ])
-    lines_actual = set()
-    with open(self.test_metrics_path, 'r') as f:
-      for line in f:
-        print(line, end='')
-        for metric_str in lines_expected:
-          metric_name = metric_str.split()[0]
-          if metric_str in line:
-            lines_actual.add(metric_str)
-          elif metric_name in line:
-            lines_actual.add(line)
-    self.assertSetEqual(lines_actual, lines_expected)
+    super().test_metrics(check_gauge=False, check_bounded_trie=False)
 
   def test_sdf_with_watermark_tracking(self):
     raise unittest.SkipTest("BEAM-2939")
 
   def test_callbacks_with_exception(self):
-    raise unittest.SkipTest("BEAM-11021")
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/19526")
 
   def test_register_finalizations(self):
-    raise unittest.SkipTest("BEAM-11021")
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/19526")
 
   def test_custom_merging_window(self):
-    raise unittest.SkipTest("BEAM-11004")
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/20641")
+
+  def test_custom_window_type(self):
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/20641")
 
   # Inherits all other tests.
 
 
 class FlinkRunnerTestOptimized(FlinkRunnerTest):
-  # TODO: Remove these tests after resolving BEAM-7248 and enabling
+  # TODO: Remove these tests after resolving
+  #  https://github.com/apache/beam/issues/19422 and enabling
   #  PortableRunnerOptimized
   def create_options(self):
     options = super().create_options()
@@ -411,16 +393,16 @@ class FlinkRunnerTestOptimized(FlinkRunnerTest):
     return options
 
   def test_external_transform(self):
-    raise unittest.SkipTest("BEAM-7252")
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/19461")
 
   def test_expand_kafka_read(self):
-    raise unittest.SkipTest("BEAM-7252")
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/19461")
 
   def test_expand_kafka_write(self):
-    raise unittest.SkipTest("BEAM-7252")
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/19461")
 
   def test_sql(self):
-    raise unittest.SkipTest("BEAM-7252")
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/19461")
 
   def test_pack_combiners(self):
     # Stages produced by translations.pack_combiners are fused
@@ -430,19 +412,9 @@ class FlinkRunnerTestOptimized(FlinkRunnerTest):
 
 
 class FlinkRunnerTestStreaming(FlinkRunnerTest):
-  def __init__(self, *args, **kwargs):
-    super().__init__(*args, **kwargs)
-    self.enable_commit = False
-
-  def setUp(self):
-    self.enable_commit = False
-
   def create_options(self):
     options = super().create_options()
     options.view_as(StandardOptions).streaming = True
-    if self.enable_commit:
-      options._all_options['checkpointing_interval'] = 3000
-      options._all_options['shutdown_sources_after_idle_ms'] = 60000
     return options
 
   def test_callbacks_with_exception(self):

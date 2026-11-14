@@ -19,6 +19,8 @@ limitations under the License.
 
 # Using the Apache Samza Runner
 
+**Note** Samza runner is no longer supported since Beam 2.74.0 ([Issue](https://github.com/apache/beam/issues/35448)).
+
 The Apache Samza Runner can be used to execute Beam pipelines using [Apache Samza](https://samza.apache.org/). The Samza Runner executes Beam pipeline in a Samza application and can run locally. The application can further be built into a .tgz file, and deployed to a YARN cluster or Samza standalone cluster with Zookeeper.
 
 The Samza Runner and Samza are suitable for large scale, stateful streaming jobs, and provide:
@@ -26,7 +28,7 @@ The Samza Runner and Samza are suitable for large scale, stateful streaming jobs
 * First class support for local state (with RocksDB store). This allows fast state access for high frequency streaming jobs.
 * Fault-tolerance with support for incremental checkpointing of state instead of full snapshots. This enables Samza to scale to applications with very large state.
 * A fully asynchronous processing engine that makes remote calls efficient.
-* Flexible deployment model for running the the applications in any hosting environment with Zookeeper.
+* Flexible deployment model for running the applications in any hosting environment with Zookeeper.
 * Features like canaries, upgrades and rollbacks that support extremely large deployments with minimal downtime.
 
 The [Beam Capability Matrix](/documentation/runners/capability-matrix/) documents the currently supported capabilities of the Samza Runner.
@@ -42,7 +44,7 @@ The Samza Runner is built on Samza version greater than 1.0.
 <dependency>
   <groupId>org.apache.beam</groupId>
   <artifactId>beam-runners-samza</artifactId>
-  <version>{{< param release_latest >}}</version>
+  <version>2.72.0</version>
   <scope>runtime</scope>
 </dependency>
 
@@ -115,6 +117,7 @@ Check out our [Samza Beam example from Github](https://github.com/apache/samza-b
 
 When executing your pipeline with the Samza Runner, you can use the following pipeline options.
 
+<div class="table-container-wrapper">
 <table class="table table-bordered">
 <tr>
   <th>Field</th>
@@ -178,7 +181,7 @@ When executing your pipeline with the Samza Runner, you can use the following pi
 </tr>
 <tr>
   <td><code>enableMetrics</code></td>
-  <td>Enable/disable Beam metrics in Samza Runne.</td>
+  <td>Enable/disable Beam metrics in Samza Runner.</td>
   <td><code>true</code></td>
 </tr>
 <tr>
@@ -197,6 +200,7 @@ When executing your pipeline with the Samza Runner, you can use the following pi
   <td><code>1000</code></td>
 </tr>
 </table>
+</div>
 
 ## Monitoring your job
 

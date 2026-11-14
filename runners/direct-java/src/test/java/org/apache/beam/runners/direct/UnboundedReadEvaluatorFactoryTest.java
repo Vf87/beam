@@ -21,7 +21,7 @@ import static java.util.Collections.emptyMap;
 import static java.util.Collections.emptySet;
 import static java.util.Collections.singletonMap;
 import static org.apache.beam.runners.direct.DirectGraphs.getProducer;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
@@ -30,7 +30,7 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.Assert.assertEquals;
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -47,7 +47,6 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.Executors;
-import org.apache.beam.runners.core.construction.SplittableParDo;
 import org.apache.beam.runners.direct.UnboundedReadDeduplicator.NeverDeduplicator;
 import org.apache.beam.runners.direct.UnboundedReadEvaluatorFactory.UnboundedSourceShard;
 import org.apache.beam.sdk.Pipeline;
@@ -73,16 +72,18 @@ import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.util.CoderUtils;
 import org.apache.beam.sdk.util.VarInt;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.construction.SplittableParDo;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ContiguousSet;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.DiscreteDomain;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.LinkedListMultimap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Range;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ContiguousSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.DiscreteDomain;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.LinkedListMultimap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Range;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.hamcrest.Matchers;
 import org.joda.time.DateTime;
@@ -97,7 +98,7 @@ import org.junit.runners.JUnit4;
 /** Tests for {@link UnboundedReadEvaluatorFactory}. */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
   "keyfor",
 })
 public class UnboundedReadEvaluatorFactoryTest {
@@ -311,7 +312,7 @@ public class UnboundedReadEvaluatorFactoryTest {
     when(context.createBundle(pcollection)).thenReturn(output);
 
     WindowedValue<UnboundedSourceShard<Long, TestCheckpointMark>> shard =
-        WindowedValue.valueInGlobalWindow(
+        WindowedValues.valueInGlobalWindow(
             UnboundedSourceShard.unstarted(source, NeverDeduplicator.create()));
     CommittedBundle<UnboundedSourceShard<Long, TestCheckpointMark>> inputBundle =
         bundleFactory
@@ -338,8 +339,8 @@ public class UnboundedReadEvaluatorFactoryTest {
     } while (!Iterables.isEmpty(residual.getElements()));
 
     verify(output, times(numElements)).add(any());
-    assertThat(TestUnboundedSource.readerCreatedCount, equalTo(1));
-    assertThat(TestUnboundedSource.readerClosedCount, equalTo(1));
+    assertThat(TestUnboundedSource.READER_CREATED_COUNT.get(), equalTo(1));
+    assertThat(TestUnboundedSource.READER_CLOSED_COUNT.get(), equalTo(1));
   }
 
   @Test
@@ -356,7 +357,7 @@ public class UnboundedReadEvaluatorFactoryTest {
     when(context.createBundle(pcollection)).thenReturn(output);
 
     WindowedValue<UnboundedSourceShard<Long, TestCheckpointMark>> shard =
-        WindowedValue.valueInGlobalWindow(
+        WindowedValues.valueInGlobalWindow(
             UnboundedSourceShard.unstarted(source, NeverDeduplicator.create()));
     CommittedBundle<UnboundedSourceShard<Long, TestCheckpointMark>> inputBundle =
         bundleFactory
@@ -381,7 +382,7 @@ public class UnboundedReadEvaluatorFactoryTest {
     secondEvaluator.processElement(Iterables.getOnlyElement(residual.getElements()));
     secondEvaluator.finishBundle();
 
-    assertThat(TestUnboundedSource.readerClosedCount, equalTo(2));
+    assertThat(TestUnboundedSource.READER_CLOSED_COUNT.get(), equalTo(2));
     assertThat(
         Iterables.getOnlyElement(residual.getElements()).getValue().getCheckpoint().isFinalized(),
         is(true));
@@ -402,7 +403,7 @@ public class UnboundedReadEvaluatorFactoryTest {
     when(context.createBundle(pcollection)).thenReturn(output);
 
     WindowedValue<UnboundedSourceShard<Long, TestCheckpointMark>> shard =
-        WindowedValue.valueInGlobalWindow(
+        WindowedValues.valueInGlobalWindow(
             UnboundedSourceShard.unstarted(source, NeverDeduplicator.create()));
     CommittedBundle<UnboundedSourceShard<Long, TestCheckpointMark>> inputBundle =
         bundleFactory
@@ -420,12 +421,12 @@ public class UnboundedReadEvaluatorFactoryTest {
 
   @Test // before this was throwing a NPE
   public void emptySource() throws Exception {
-    TestUnboundedSource.readerClosedCount = 0;
+    TestUnboundedSource.READER_CLOSED_COUNT.set(0);
     final TestUnboundedSource<String> source = new TestUnboundedSource<>(StringUtf8Coder.of());
     source.advanceWatermarkToInfinity = true;
     processElement(source);
-    assertEquals(1, TestUnboundedSource.readerClosedCount);
-    TestUnboundedSource.readerClosedCount = 0; // reset
+    assertEquals(1, TestUnboundedSource.READER_CLOSED_COUNT.get());
+    TestUnboundedSource.READER_CLOSED_COUNT.set(0); // reset
   }
 
   @Test(expected = IOException.class)
@@ -469,9 +470,9 @@ public class UnboundedReadEvaluatorFactoryTest {
     final UnboundedSourceShard<String, TestCheckpointMark> shard =
         UnboundedSourceShard.of(source, new NeverDeduplicator(), reader, null);
     final WindowedValue<UnboundedSourceShard<String, TestCheckpointMark>> value =
-        WindowedValue.of(
+        WindowedValues.of(
             shard, BoundedWindow.TIMESTAMP_MAX_VALUE, GlobalWindow.INSTANCE, PaneInfo.NO_FIRING);
-    TestUnboundedSource.readerClosedCount = 0;
+    TestUnboundedSource.READER_CLOSED_COUNT.set(0);
     evaluator.processElement(value);
   }
 
@@ -480,7 +481,7 @@ public class UnboundedReadEvaluatorFactoryTest {
    * is the epoch offset by the value of the element.
    */
   private static WindowedValue<Long> tgw(Long elem) {
-    return WindowedValue.timestampedValueInGlobalWindow(elem, new Instant(elem));
+    return WindowedValues.timestampedValueInGlobalWindow(elem, new Instant(elem));
   }
 
   private static class LongToInstantFn implements SerializableFunction<Long, Instant> {
@@ -491,11 +492,15 @@ public class UnboundedReadEvaluatorFactoryTest {
   }
 
   private static class TestUnboundedSource<T> extends UnboundedSource<T, TestCheckpointMark> {
-    private static int getWatermarkCalls = 0;
+    private static final java.util.concurrent.atomic.AtomicInteger getWatermarkCalls =
+        new java.util.concurrent.atomic.AtomicInteger(0);
 
-    static int readerCreatedCount;
-    static int readerClosedCount;
-    static int readerAdvancedCount;
+    static final java.util.concurrent.atomic.AtomicInteger READER_CREATED_COUNT =
+        new java.util.concurrent.atomic.AtomicInteger(0);
+    static final java.util.concurrent.atomic.AtomicInteger READER_CLOSED_COUNT =
+        new java.util.concurrent.atomic.AtomicInteger(0);
+    static final java.util.concurrent.atomic.AtomicInteger READER_ADVANCED_COUNT =
+        new java.util.concurrent.atomic.AtomicInteger(0);
     private final Coder<T> coder;
     private final List<T> elems;
     private boolean dedupes = false;
@@ -507,9 +512,9 @@ public class UnboundedReadEvaluatorFactoryTest {
     }
 
     private TestUnboundedSource(Coder<T> coder, boolean throwOnClose, List<T> elems) {
-      readerCreatedCount = 0;
-      readerClosedCount = 0;
-      readerAdvancedCount = 0;
+      READER_CREATED_COUNT.set(0);
+      READER_CLOSED_COUNT.set(0);
+      READER_ADVANCED_COUNT.set(0);
       this.coder = coder;
       this.elems = elems;
       this.throwOnClose = throwOnClose;
@@ -527,7 +532,7 @@ public class UnboundedReadEvaluatorFactoryTest {
       checkState(
           checkpointMark == null || checkpointMark.decoded,
           "Cannot resume from a checkpoint that has not been decoded");
-      readerCreatedCount++;
+      READER_CREATED_COUNT.incrementAndGet();
       return new TestUnboundedReader(elems, checkpointMark == null ? -1 : checkpointMark.index);
     }
 
@@ -567,7 +572,7 @@ public class UnboundedReadEvaluatorFactoryTest {
 
       @Override
       public boolean advance() throws IOException {
-        readerAdvancedCount++;
+        READER_ADVANCED_COUNT.incrementAndGet();
         if (index + 1 < elems.size()) {
           index++;
           return true;
@@ -577,11 +582,11 @@ public class UnboundedReadEvaluatorFactoryTest {
 
       @Override
       public Instant getWatermark() {
-        getWatermarkCalls++;
+        getWatermarkCalls.incrementAndGet();
         if (index + 1 == elems.size() && TestUnboundedSource.this.advanceWatermarkToInfinity) {
           return BoundedWindow.TIMESTAMP_MAX_VALUE;
         } else {
-          return new Instant(index + getWatermarkCalls);
+          return new Instant(index + getWatermarkCalls.get());
         }
       }
 
@@ -617,7 +622,7 @@ public class UnboundedReadEvaluatorFactoryTest {
       @Override
       public void close() throws IOException {
         try {
-          readerClosedCount++;
+          READER_CLOSED_COUNT.incrementAndGet();
           // Enforce the AutoCloseable contract. Close is not idempotent.
           assertThat(closed, is(false));
           if (throwOnClose) {

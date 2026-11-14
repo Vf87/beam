@@ -21,35 +21,40 @@ import com.google.auto.value.AutoValue;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
-import org.apache.beam.fn.harness.PTransformRunnerFactory.ProgressRequestCallback;
+import org.apache.beam.fn.harness.control.BundleProgressReporter;
 import org.apache.beam.fn.harness.control.BundleSplitListener;
 import org.apache.beam.fn.harness.data.BeamFnDataClient;
-import org.apache.beam.fn.harness.data.BeamFnTimerClient;
 import org.apache.beam.fn.harness.state.BeamFnStateClient;
+import org.apache.beam.model.fnexecution.v1.BeamFnApi;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi.BundleApplication;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi.DelayedBundleApplication;
+import org.apache.beam.model.fnexecution.v1.BeamFnApi.Elements;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi.StateRequest;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi.StateResponse;
 import org.apache.beam.model.pipeline.v1.Endpoints.ApiServiceDescriptor;
-import org.apache.beam.model.pipeline.v1.MetricsApi;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
-import org.apache.beam.runners.core.construction.Timer;
+import org.apache.beam.runners.core.metrics.ShortIdMap;
 import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.fn.data.BeamFnDataOutboundAggregator;
 import org.apache.beam.sdk.fn.data.CloseableFnDataReceiver;
+import org.apache.beam.sdk.fn.data.DataEndpoint;
 import org.apache.beam.sdk.fn.data.FnDataReceiver;
-import org.apache.beam.sdk.fn.data.InboundDataClient;
-import org.apache.beam.sdk.fn.data.LogicalEndpoint;
+import org.apache.beam.sdk.fn.data.TimerEndpoint;
 import org.apache.beam.sdk.function.ThrowingRunnable;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.DoFn.BundleFinalizer;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.ByteString;
+import org.apache.beam.sdk.util.construction.Timer;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
 import org.joda.time.Instant;
 
 /**
@@ -64,21 +69,34 @@ public abstract class PTransformRunnerFactoryTestContext
   public static Builder builder(String pTransformId, RunnerApi.PTransform pTransform) {
     return new AutoValue_PTransformRunnerFactoryTestContext.Builder()
         .pipelineOptions(PipelineOptionsFactory.create())
+        .shortIdMap(new ShortIdMap())
         .beamFnDataClient(
             new BeamFnDataClient() {
               @Override
-              public InboundDataClient receive(
-                  ApiServiceDescriptor apiServiceDescriptor,
-                  LogicalEndpoint inputLocation,
-                  FnDataReceiver<ByteString> receiver) {
+              public void registerReceiver(
+                  String instructionId,
+                  String dataStreamId,
+                  List<ApiServiceDescriptor> apiServiceDescriptors,
+                  CloseableFnDataReceiver<Elements> receiver) {
                 throw new UnsupportedOperationException("Unexpected call during test.");
               }
 
               @Override
-              public <T> CloseableFnDataReceiver<T> send(
-                  ApiServiceDescriptor apiServiceDescriptor,
-                  LogicalEndpoint outputLocation,
-                  Coder<T> coder) {
+              public void unregisterReceiver(
+                  String instructionId,
+                  String dataStreamId,
+                  List<ApiServiceDescriptor> apiServiceDescriptors) {
+                throw new UnsupportedOperationException("Unexpected call during test.");
+              }
+
+              @Override
+              public StreamObserver<Elements> getOutboundObserver(
+                  ApiServiceDescriptor apiServiceDescriptor, String dataStreamId) {
+                throw new UnsupportedOperationException("Unexpected call during test.");
+              }
+
+              @Override
+              public void poisonInstructionId(String instructionId) {
                 throw new UnsupportedOperationException("Unexpected call during test.");
               }
             })
@@ -89,32 +107,34 @@ public abstract class PTransformRunnerFactoryTestContext
                 throw new UnsupportedOperationException("Unexpected call during test.");
               }
             })
-        .beamFnTimerClient(
-            new BeamFnTimerClient() {
-
-              @Override
-              public <K> TimerHandler<K> register(
-                  LogicalEndpoint timerEndpoint,
-                  Coder<Timer<K>> coder,
-                  FnDataReceiver<Timer<K>> receiver) {
-                throw new UnsupportedOperationException("Unexpected call during test.");
-              }
-            })
         .pTransformId(pTransformId)
         .pTransform(pTransform)
         .processBundleInstructionIdSupplier(
             () -> {
               throw new UnsupportedOperationException("Unexpected call during test.");
             })
-        .pCollections(Collections.emptyMap()) // expected to be immutable
-        .coders(Collections.emptyMap()) // expected to be immutable
-        .windowingStrategies(Collections.emptyMap()) // expected to be immutable
+        .cacheTokensSupplier(() -> Collections.emptyList())
+        .bundleCacheSupplier(() -> Caches.noop())
+        .processWideCache(Caches.noop())
+        .components(
+            RunnerApi.Components.newBuilder()
+                .putAllCoders(Collections.emptyMap())
+                .putAllEnvironments(Collections.emptyMap())
+                .putAllWindowingStrategies(Collections.emptyMap())
+                .putAllPcollections(Collections.emptyMap())
+                .build())
         .pCollectionConsumers(new HashMap<>())
         .startBundleFunctions(new ArrayList<>())
         .finishBundleFunctions(new ArrayList<>())
         .resetFunctions(new ArrayList<>())
         .tearDownFunctions(new ArrayList<>())
-        .progressRequestCallbacks(new ArrayList<>())
+        .bundleProgressReporters(new ArrayList<>())
+        .incomingDataEndpoints(new HashMap<>())
+        .incomingTimerEndpoints(new ArrayList<>())
+        .outgoingDataEndpoints(new HashMap<>())
+        .outgoingTimersEndpoints(new ArrayList<>())
+        .outboundAggregators(new HashMap<>())
+        .timerApiServiceDescriptor(ApiServiceDescriptor.getDefaultInstance())
         .splitListener(
             new BundleSplitListener() {
               @Override
@@ -130,7 +150,8 @@ public abstract class PTransformRunnerFactoryTestContext
               public void afterBundleCommit(Instant callbackExpiry, Callback callback) {
                 throw new UnsupportedOperationException("Unexpected call during test.");
               }
-            });
+            })
+        .runnerCapabilities(new HashSet<>());
   }
 
   /** A builder to create a context for tests. */
@@ -138,11 +159,11 @@ public abstract class PTransformRunnerFactoryTestContext
   public interface Builder {
     Builder pipelineOptions(PipelineOptions value);
 
+    Builder shortIdMap(ShortIdMap shortIdMap);
+
     Builder beamFnDataClient(BeamFnDataClient value);
 
     Builder beamFnStateClient(BeamFnStateClient value);
-
-    Builder beamFnTimerClient(BeamFnTimerClient value);
 
     Builder pTransformId(String value);
 
@@ -150,17 +171,31 @@ public abstract class PTransformRunnerFactoryTestContext
 
     Builder processBundleInstructionIdSupplier(Supplier<String> value);
 
+    Builder cacheTokensSupplier(Supplier<List<BeamFnApi.ProcessBundleRequest.CacheToken>> value);
+
+    Builder bundleCacheSupplier(Supplier<Cache<?, ?>> value);
+
+    Builder processWideCache(Cache<?, ?> value);
+
     default Builder processBundleInstructionId(String value) {
       return processBundleInstructionIdSupplier(() -> value);
     }
 
-    Builder pCollections(Map<String, RunnerApi.PCollection> value);
+    // Builder pCollections(Map<String, RunnerApi.PCollection> value);
 
-    Builder coders(Map<String, RunnerApi.Coder> value);
+    Builder components(RunnerApi.Components value);
 
-    Builder windowingStrategies(Map<String, RunnerApi.WindowingStrategy> value);
+    // Builder coders(Map<String, RunnerApi.Coder> value);
+
+    // Builder windowingStrategies(Map<String, RunnerApi.WindowingStrategy> value);
+
+    Builder runnerCapabilities(Set<String> value);
 
     Builder pCollectionConsumers(Map<String, List<FnDataReceiver<?>>> value);
+
+    Builder incomingDataEndpoints(Map<ApiServiceDescriptor, List<DataEndpoint<?>>> value);
+
+    Builder incomingTimerEndpoints(List<TimerEndpoint<?>> value);
 
     Builder startBundleFunctions(List<ThrowingRunnable> value);
 
@@ -170,11 +205,19 @@ public abstract class PTransformRunnerFactoryTestContext
 
     Builder tearDownFunctions(List<ThrowingRunnable> value);
 
-    Builder progressRequestCallbacks(List<ProgressRequestCallback> value);
+    Builder bundleProgressReporters(List<BundleProgressReporter> value);
 
     Builder splitListener(BundleSplitListener value);
 
     Builder bundleFinalizer(BundleFinalizer value);
+
+    Builder outboundAggregators(Map<ApiServiceDescriptor, BeamFnDataOutboundAggregator> value);
+
+    Builder outgoingDataEndpoints(Map<ApiServiceDescriptor, List<DataEndpoint<?>>> value);
+
+    Builder outgoingTimersEndpoints(List<TimerEndpoint<?>> value);
+
+    Builder timerApiServiceDescriptor(ApiServiceDescriptor value);
 
     PTransformRunnerFactoryTestContext build();
   }
@@ -184,9 +227,7 @@ public abstract class PTransformRunnerFactoryTestContext
 
   @Override
   public <T> void addPCollectionConsumer(
-      String pCollectionId,
-      FnDataReceiver<WindowedValue<T>> consumer,
-      org.apache.beam.sdk.coders.Coder<T> valueCoder) {
+      String pCollectionId, FnDataReceiver<WindowedValue<T>> consumer) {
     getPCollectionConsumers()
         .computeIfAbsent(pCollectionId, (unused) -> new ArrayList<>())
         .add(consumer);
@@ -209,6 +250,84 @@ public abstract class PTransformRunnerFactoryTestContext
       }
     };
   }
+
+  public abstract Map<ApiServiceDescriptor, List<DataEndpoint<?>>> getIncomingDataEndpoints();
+
+  @Override
+  public <T> void addIncomingDataEndpoint(
+      ApiServiceDescriptor apiServiceDescriptor, Coder<T> coder, FnDataReceiver<T> receiver) {
+    getIncomingDataEndpoints()
+        .computeIfAbsent(apiServiceDescriptor, (unused) -> new ArrayList<>())
+        .add(DataEndpoint.create(getPTransformId(), coder, receiver));
+  }
+
+  public abstract List<TimerEndpoint<?>> getIncomingTimerEndpoints();
+
+  public <T> TimerEndpoint<T> getIncomingTimerEndpoint(String timerFamilyId) {
+    for (TimerEndpoint<?> timerEndpoint : getIncomingTimerEndpoints()) {
+      if (timerFamilyId.equals(timerEndpoint.getTimerFamilyId())) {
+        return (TimerEndpoint<T>) timerEndpoint;
+      }
+    }
+    throw new NoSuchElementException();
+  }
+
+  @Override
+  public <T> void addIncomingTimerEndpoint(
+      String timerFamilyId, Coder<Timer<T>> coder, FnDataReceiver<Timer<T>> receiver) {
+    getIncomingTimerEndpoints()
+        .add(TimerEndpoint.create(getPTransformId(), timerFamilyId, coder, receiver));
+  }
+
+  @Override
+  public <T> void addChannelRoot(BeamFnDataReadRunner<T> beamFnDataReadRunner) {
+    // noop
+  }
+
+  public abstract Map<ApiServiceDescriptor, BeamFnDataOutboundAggregator> getOutboundAggregators();
+
+  public void addOutboundAggregator(
+      ApiServiceDescriptor apiServiceDescriptor, BeamFnDataOutboundAggregator aggregator) {
+    getOutboundAggregators().put(apiServiceDescriptor, aggregator);
+  }
+
+  public abstract Map<ApiServiceDescriptor, List<DataEndpoint<?>>> getOutgoingDataEndpoints();
+
+  @Override
+  public <T> FnDataReceiver<T> addOutgoingDataEndpoint(
+      ApiServiceDescriptor apiServiceDescriptor, Coder<T> coder) {
+    BeamFnDataOutboundAggregator aggregator = getOutboundAggregators().get(apiServiceDescriptor);
+    FnDataReceiver<T> receiver = aggregator.registerOutputDataLocation(getPTransformId(), coder);
+    getOutgoingDataEndpoints()
+        .computeIfAbsent(apiServiceDescriptor, (unused) -> new ArrayList<>())
+        .add(DataEndpoint.create(getPTransformId(), coder, receiver));
+    return receiver;
+  }
+
+  public abstract List<TimerEndpoint<?>> getOutgoingTimersEndpoints();
+
+  public <T> TimerEndpoint<T> getOutgoingTimersEndpoint(String timerFamilyId) {
+    for (TimerEndpoint<?> timerEndpoint : getOutgoingTimersEndpoints()) {
+      if (timerFamilyId.equals(timerEndpoint.getTimerFamilyId())) {
+        return (TimerEndpoint<T>) timerEndpoint;
+      }
+    }
+    throw new NoSuchElementException();
+  }
+
+  @Override
+  public <T> FnDataReceiver<Timer<T>> addOutgoingTimersEndpoint(
+      String timerFamilyId, Coder<Timer<T>> coder) {
+    BeamFnDataOutboundAggregator aggregator =
+        getOutboundAggregators().get(getTimerApiServiceDescriptor());
+    FnDataReceiver<Timer<T>> receiver =
+        aggregator.registerOutputTimersLocation(getPTransformId(), timerFamilyId, coder);
+    getOutgoingTimersEndpoints()
+        .add(TimerEndpoint.create(getPTransformId(), timerFamilyId, coder, receiver));
+    return receiver;
+  }
+
+  public abstract ApiServiceDescriptor getTimerApiServiceDescriptor();
 
   /** Returns a list of methods registered to perform {@link DoFn.StartBundle}. */
   public abstract List<ThrowingRunnable> getStartBundleFunctions();
@@ -246,13 +365,13 @@ public abstract class PTransformRunnerFactoryTestContext
   }
 
   /**
-   * Returns a list of methods registered to return additional {@link MetricsApi.MonitoringInfo}
-   * during bundle processing.
+   * Returns a list of methods registered to return additional monitoring data during bundle
+   * processing.
    */
-  public abstract List<ProgressRequestCallback> getProgressRequestCallbacks();
+  public abstract List<BundleProgressReporter> getBundleProgressReporters();
 
   @Override
-  public void addProgressRequestCallback(ProgressRequestCallback progressRequestCallback) {
-    getProgressRequestCallbacks().add(progressRequestCallback);
+  public void addBundleProgressReporter(BundleProgressReporter bundleProgressReporter) {
+    getBundleProgressReporters().add(bundleProgressReporter);
   }
 }

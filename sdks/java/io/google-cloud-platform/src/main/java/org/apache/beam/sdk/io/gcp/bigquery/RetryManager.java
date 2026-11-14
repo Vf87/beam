@@ -17,9 +17,12 @@
  */
 package org.apache.beam.sdk.io.gcp.bigquery;
 
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
+
 import com.google.api.core.ApiFuture;
 import com.google.api.core.ApiFutureCallback;
 import com.google.api.core.ApiFutures;
+import java.time.Instant;
 import java.util.Queue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
@@ -31,23 +34,27 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.io.gcp.bigquery.RetryManager.Operation.Context;
+import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.util.BackOff;
 import org.apache.beam.sdk.util.BackOffUtils;
 import org.apache.beam.sdk.util.FluentBackoff;
+import org.apache.beam.sdk.util.Preconditions;
 import org.apache.beam.sdk.util.Sleeper;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Queues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Queues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.joda.time.Duration;
 
 /**
  * Retry manager used by Storage API operations. This class manages a sequence of operations (e.g.
  * sequential appends to a stream) and retries of those operations. If any one operation fails, then
- * all subsequent operations are expected to fail true and will alll be retried.
+ * all subsequent operations are expected to fail true and will all be retried.
  */
 class RetryManager<ResultT, ContextT extends Context<ResultT>> {
   private Queue<Operation<ResultT, ContextT>> operations;
   private final BackOff backoff;
-  private final ExecutorService executor;
+  private static final ExecutorService executor =
+      Executors.newCachedThreadPool(
+          new ThreadFactoryBuilder().setNameFormat("BeamBQRetryManager-%d").build());
 
   // Enum returned by onError indicating whether errors should be retried.
   enum RetryType {
@@ -78,13 +85,26 @@ class RetryManager<ResultT, ContextT extends Context<ResultT>> {
             .withMaxBackoff(maxBackoff)
             .withMaxRetries(maxRetries)
             .backoff();
-    this.executor = Executors.newCachedThreadPool();
+  }
+
+  RetryManager(
+      Duration initialBackoff, Duration maxBackoff, int maxRetries, Counter throttledTimeCounter) {
+    this.operations = Queues.newArrayDeque();
+    backoff =
+        FluentBackoff.DEFAULT
+            .withInitialBackoff(initialBackoff)
+            .withMaxBackoff(maxBackoff)
+            .withMaxRetries(maxRetries)
+            .withThrottledTimeCounter(throttledTimeCounter)
+            .backoff();
   }
 
   static class Operation<ResultT, ContextT extends Context<ResultT>> {
     static class Context<ResultT> {
       private @Nullable Throwable error = null;
       private @Nullable ResultT result = null;
+      private @Nullable Instant operationStartTime = null;
+      private @Nullable Instant operationEndTime = null;
 
       public void setError(@Nullable Throwable error) {
         this.error = error;
@@ -101,6 +121,22 @@ class RetryManager<ResultT, ContextT extends Context<ResultT>> {
       public @Nullable ResultT getResult() {
         return result;
       }
+
+      public void setOperationStartTime(@Nullable Instant operationStartTime) {
+        this.operationStartTime = operationStartTime;
+      }
+
+      public @Nullable Instant getOperationStartTime() {
+        return operationStartTime;
+      }
+
+      public void setOperationEndTime(@Nullable Instant operationEndTime) {
+        this.operationEndTime = operationEndTime;
+      }
+
+      public @Nullable Instant getOperationEndTime() {
+        return operationEndTime;
+      }
     }
 
     private final Function<ContextT, ApiFuture<ResultT>> runOperation;
@@ -109,7 +145,7 @@ class RetryManager<ResultT, ContextT extends Context<ResultT>> {
     private final Function<ResultT, Boolean> hasSucceeded;
     @Nullable private ApiFuture<ResultT> future = null;
     @Nullable private Callback<ResultT> callback = null;
-    @Nullable ContextT context = null;
+    ContextT context;
 
     public Operation(
         Function<ContextT, ApiFuture<ResultT>> runOperation,
@@ -124,15 +160,16 @@ class RetryManager<ResultT, ContextT extends Context<ResultT>> {
       this.context = context;
     }
 
-    @SuppressWarnings({"nullness"})
     void run(Executor executor) {
+      this.context.setOperationStartTime(Instant.now());
+      this.context.setOperationEndTime(null);
       this.future = runOperation.apply(context);
       this.callback = new Callback<>(hasSucceeded);
       ApiFutures.addCallback(future, callback, executor);
     }
 
-    @SuppressWarnings({"nullness"})
     boolean await() throws Exception {
+      Callback<ResultT> callback = Preconditions.checkStateNotNull(this.callback);
       callback.await();
       return callback.getFailed();
     }
@@ -143,6 +180,7 @@ class RetryManager<ResultT, ContextT extends Context<ResultT>> {
     private final Function<ResultT, Boolean> hasSucceeded;
     @Nullable private Throwable failure = null;
     boolean failed = false;
+    @Nullable Instant operationEndTime = null;
 
     Callback(Function<ResultT, Boolean> hasSucceeded) {
       this.waiter = new CountDownLatch(1);
@@ -160,6 +198,7 @@ class RetryManager<ResultT, ContextT extends Context<ResultT>> {
     @Override
     public void onFailure(Throwable t) {
       synchronized (this) {
+        operationEndTime = Instant.now();
         failure = t;
         failed = true;
       }
@@ -169,6 +208,7 @@ class RetryManager<ResultT, ContextT extends Context<ResultT>> {
     @Override
     public void onSuccess(ResultT result) {
       synchronized (this) {
+        operationEndTime = Instant.now();
         if (hasSucceeded.apply(result)) {
           failure = null;
         } else {
@@ -189,6 +229,13 @@ class RetryManager<ResultT, ContextT extends Context<ResultT>> {
     boolean getFailed() {
       synchronized (this) {
         return failed;
+      }
+    }
+
+    @Nullable
+    Instant getOperationEndTime() {
+      synchronized (this) {
+        return operationEndTime;
       }
     }
   }
@@ -249,13 +296,24 @@ class RetryManager<ResultT, ContextT extends Context<ResultT>> {
     }
   }
 
-  @SuppressWarnings({"nullness"})
+  int getRemainingOperationCount() {
+    return operations.size();
+  }
+
+  Iterable<ContextT> getRemainingContexts() {
+    return operations.stream().map(o -> o.context).collect(Collectors.toList());
+  }
+
   void await() throws Exception {
     while (!this.operations.isEmpty()) {
       Operation<ResultT, ContextT> operation = this.operations.element();
       boolean failed = operation.await();
+      @Nullable Callback<?> callback = operation.callback;
+      if (callback != null) {
+        operation.context.setOperationEndTime(callback.getOperationEndTime());
+      }
       if (failed) {
-        Throwable failure = operation.callback.getFailure();
+        Throwable failure = Preconditions.checkStateNotNull(operation.callback).getFailure();
         operation.context.setError(failure);
         RetryType retryType =
             operation.onError.apply(
@@ -263,7 +321,7 @@ class RetryManager<ResultT, ContextT extends Context<ResultT>> {
         if (retryType == RetryType.DONT_RETRY) {
           operations.clear();
         } else {
-          Preconditions.checkState(RetryType.RETRY_ALL_OPERATIONS == retryType);
+          checkState(RetryType.RETRY_ALL_OPERATIONS == retryType);
           if (!BackOffUtils.next(Sleeper.DEFAULT, backoff)) {
             throw new RuntimeException(failure);
           }
@@ -274,7 +332,7 @@ class RetryManager<ResultT, ContextT extends Context<ResultT>> {
           run(false);
         }
       } else {
-        operation.context.setResult(operation.future.get());
+        operation.context.setResult(Preconditions.checkStateNotNull(operation.future).get());
         operation.onSuccess.accept(operation.context);
         operations.remove();
       }

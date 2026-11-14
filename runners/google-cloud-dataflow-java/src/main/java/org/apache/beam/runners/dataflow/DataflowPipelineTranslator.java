@@ -27,10 +27,10 @@ import static org.apache.beam.runners.dataflow.util.Structs.getString;
 import static org.apache.beam.sdk.options.ExperimentalOptions.hasExperiment;
 import static org.apache.beam.sdk.util.SerializableUtils.serializeToByteArray;
 import static org.apache.beam.sdk.util.StringUtils.byteArrayToJsonString;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings.isNullOrEmpty;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings.isNullOrEmpty;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -42,6 +42,7 @@ import com.google.api.services.dataflow.model.Environment;
 import com.google.api.services.dataflow.model.Job;
 import com.google.api.services.dataflow.model.Step;
 import com.google.api.services.dataflow.model.WorkerPool;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -49,20 +50,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
-import org.apache.beam.runners.core.construction.Environments;
-import org.apache.beam.runners.core.construction.ParDoTranslation;
-import org.apache.beam.runners.core.construction.SdkComponents;
-import org.apache.beam.runners.core.construction.SplittableParDo;
-import org.apache.beam.runners.core.construction.TransformInputs;
-import org.apache.beam.runners.core.construction.WindowingStrategyTranslation;
 import org.apache.beam.runners.dataflow.BatchViewOverrides.GroupByKeyAndSortValuesOnly;
 import org.apache.beam.runners.dataflow.DataflowRunner.CombineGroupedValues;
 import org.apache.beam.runners.dataflow.PrimitiveParDoSingleFactory.ParDoSingle;
 import org.apache.beam.runners.dataflow.TransformTranslator.StepTranslationContext;
 import org.apache.beam.runners.dataflow.TransformTranslator.TranslationContext;
+import org.apache.beam.runners.dataflow.internal.DataflowGroupByKey;
 import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
 import org.apache.beam.runners.dataflow.util.CloudObject;
 import org.apache.beam.runners.dataflow.util.CloudObjects;
@@ -93,12 +88,29 @@ import org.apache.beam.sdk.transforms.display.HasDisplayData;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignatures;
 import org.apache.beam.sdk.transforms.resourcehints.ResourceHint;
 import org.apache.beam.sdk.transforms.resourcehints.ResourceHints;
+import org.apache.beam.sdk.transforms.windowing.AfterAll;
+import org.apache.beam.sdk.transforms.windowing.AfterEach;
+import org.apache.beam.sdk.transforms.windowing.AfterFirst;
+import org.apache.beam.sdk.transforms.windowing.AfterPane;
+import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
+import org.apache.beam.sdk.transforms.windowing.AfterSynchronizedProcessingTime;
+import org.apache.beam.sdk.transforms.windowing.AfterWatermark;
 import org.apache.beam.sdk.transforms.windowing.DefaultTrigger;
+import org.apache.beam.sdk.transforms.windowing.Never;
+import org.apache.beam.sdk.transforms.windowing.OrFinallyTrigger;
+import org.apache.beam.sdk.transforms.windowing.Repeatedly;
+import org.apache.beam.sdk.transforms.windowing.ReshuffleTrigger;
+import org.apache.beam.sdk.transforms.windowing.TriggerVisitor;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.util.AppliedCombineFn;
 import org.apache.beam.sdk.util.CoderUtils;
 import org.apache.beam.sdk.util.DoFnInfo;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.construction.Environments;
+import org.apache.beam.sdk.util.construction.ParDoTranslation;
+import org.apache.beam.sdk.util.construction.SdkComponents;
+import org.apache.beam.sdk.util.construction.SplittableParDo;
+import org.apache.beam.sdk.util.construction.TransformInputs;
+import org.apache.beam.sdk.util.construction.WindowingStrategyTranslation;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionView;
@@ -107,12 +119,11 @@ import org.apache.beam.sdk.values.POutput;
 import org.apache.beam.sdk.values.PValue;
 import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.ByteString;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Charsets;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Supplier;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.apache.commons.codec.EncoderException;
 import org.apache.commons.codec.net.PercentCodec;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -124,9 +135,9 @@ import org.slf4j.LoggerFactory;
  * Dataflow Service API {@link Job}s.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
   "unchecked",
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 @VisibleForTesting
 public class DataflowPipelineTranslator {
@@ -135,10 +146,82 @@ public class DataflowPipelineTranslator {
   private static final Logger LOG = LoggerFactory.getLogger(DataflowPipelineTranslator.class);
   private static final ObjectMapper MAPPER = new ObjectMapper();
 
+  /** Checks to see whether the Trigger tree is compatible with combiner lifting. */
+  private static class TriggerCombinerLiftingCompatibility implements TriggerVisitor<Boolean> {
+    static final TriggerCombinerLiftingCompatibility INSTANCE =
+        new TriggerCombinerLiftingCompatibility();
+
+    @Override
+    public Boolean visit(DefaultTrigger trigger) {
+      return true;
+    }
+
+    @Override
+    public Boolean visit(AfterWatermark.FromEndOfWindow trigger) {
+      return true;
+    }
+
+    @Override
+    public Boolean visit(AfterWatermark.AfterWatermarkEarlyAndLate trigger) {
+      return trigger.subTriggers().stream().allMatch(t -> t.accept(this));
+    }
+
+    @Override
+    public Boolean visit(Never.NeverTrigger trigger) {
+      return true;
+    }
+
+    @Override
+    public Boolean visit(ReshuffleTrigger<?> trigger) {
+      return false;
+    }
+
+    @Override
+    public Boolean visit(AfterProcessingTime trigger) {
+      return true;
+    }
+
+    @Override
+    public Boolean visit(AfterSynchronizedProcessingTime trigger) {
+      return true;
+    }
+
+    @Override
+    public Boolean visit(AfterFirst trigger) {
+      return trigger.subTriggers().stream().allMatch(t -> t.accept(this));
+    }
+
+    @Override
+    public Boolean visit(AfterAll trigger) {
+      return trigger.subTriggers().stream().allMatch(t -> t.accept(this));
+    }
+
+    @Override
+    public Boolean visit(AfterEach trigger) {
+      return trigger.subTriggers().stream().allMatch(t -> t.accept(this));
+    }
+
+    @Override
+    public Boolean visit(AfterPane trigger) {
+      // Combiner lifting not supported for count triggers.
+      return false;
+    }
+
+    @Override
+    public Boolean visit(Repeatedly trigger) {
+      return trigger.subTriggers().stream().allMatch(t -> t.accept(this));
+    }
+
+    @Override
+    public Boolean visit(OrFinallyTrigger trigger) {
+      return trigger.subTriggers().stream().allMatch(t -> t.accept(this));
+    }
+  }
+
   private static byte[] serializeWindowingStrategy(
       WindowingStrategy<?, ?> windowingStrategy, PipelineOptions options) {
     try {
-      SdkComponents sdkComponents = SdkComponents.create();
+      SdkComponents sdkComponents = SdkComponents.create(options);
 
       String workerHarnessContainerImageURL =
           DataflowRunner.getContainerImageForJob(options.as(DataflowPipelineOptions.class));
@@ -270,21 +353,6 @@ public class DataflowPipelineTranslator {
    * <p>For internal use only.
    */
   class Translator extends PipelineVisitor.Defaults implements TranslationContext {
-
-    /**
-     * An id generator to be used when giving unique ids for pipeline level constructs. This is
-     * purposely wrapped inside of a {@link Supplier} to prevent the incorrect usage of the {@link
-     * AtomicLong} that is contained.
-     */
-    private final Supplier<Long> idGenerator =
-        new Supplier<Long>() {
-          private final AtomicLong generator = new AtomicLong(1L);
-
-          @Override
-          public Long get() {
-            return generator.getAndIncrement();
-          }
-        };
 
     /** The Pipeline to translate. */
     private final Pipeline pipeline;
@@ -421,6 +489,13 @@ public class DataflowPipelineTranslator {
       if (options.getDiskSizeGb() > 0) {
         workerPool.setDiskSizeGb(options.getDiskSizeGb());
       }
+      if (options.getDiskProvisionedIops() != null && options.getDiskProvisionedIops() > 0) {
+        workerPool.setDiskProvisionedIops(options.getDiskProvisionedIops());
+      }
+      if (options.getDiskProvisionedThroughputMibps() != null
+          && options.getDiskProvisionedThroughputMibps() > 0) {
+        workerPool.setDiskProvisionedThroughputMibps(options.getDiskProvisionedThroughputMibps());
+      }
       AutoscalingSettings settings = new AutoscalingSettings();
       if (options.getAutoscalingAlgorithm() != null) {
         settings.setAlgorithm(options.getAutoscalingAlgorithm().getAlgorithm());
@@ -439,13 +514,17 @@ public class DataflowPipelineTranslator {
       if (options.getDataflowKmsKey() != null) {
         environment.setServiceKmsKeyName(options.getDataflowKmsKey());
       }
-      if (options.isHotKeyLoggingEnabled()) {
+      if (options.isHotKeyLoggingEnabled() || hasExperiment(options, "enable_hot_key_logging")) {
         DebugOptions debugOptions = new DebugOptions();
         debugOptions.setEnableHotKeyLogging(true);
         environment.setDebugOptions(debugOptions);
       }
 
-      pipeline.traverseTopologically(this);
+      if (DataflowRunner.useUnifiedWorker(options)) {
+        LOG.info("Skipping v1 pipeline translation since this job will run on v2.");
+      } else {
+        pipeline.traverseTopologically(this);
+      }
 
       return job;
     }
@@ -555,8 +634,8 @@ public class DataflowPipelineTranslator {
 
       StepTranslator stepContext = new StepTranslator(this, step);
       stepContext.addInput(PropertyNames.USER_NAME, getFullName(transform));
-      stepContext.addDisplayData(step, stepName, transform);
-      stepContext.addResourceHints(step, stepName, transform.getResourceHints());
+      stepContext.addDisplayData(transform);
+      stepContext.addResourceHints(transform.getResourceHints());
       LOG.info("Adding {} as step {}", getCurrentTransform(transform).getFullName(), stepName);
       return stepContext;
     }
@@ -630,7 +709,7 @@ public class DataflowPipelineTranslator {
     // For compatibility with URL encoding implementations that represent space as +,
     // always encode + as %2b even though we don't encode space as +.
     private final PercentCodec percentCodec =
-        new PercentCodec("+".getBytes(Charsets.US_ASCII), false);
+        new PercentCodec("+".getBytes(StandardCharsets.US_ASCII), false);
 
     private StepTranslator(Translator translator, Step step) {
       this.translator = translator;
@@ -643,7 +722,7 @@ public class DataflowPipelineTranslator {
 
     @Override
     public void addEncodingInput(Coder<?> coder) {
-      CloudObject encoding = translateCoder(coder, translator);
+      CloudObject encoding = translateCoder(coder);
       addObject(getProperties(), PropertyNames.ENCODING, encoding);
     }
 
@@ -687,7 +766,7 @@ public class DataflowPipelineTranslator {
       translator.producers.put(value, translator.currentTransform);
       // Wrap the PCollection element Coder inside a WindowedValueCoder.
       Coder<?> coder =
-          WindowedValue.getFullCoder(
+          WindowedValues.getFullCoder(
               value.getCoder(), value.getWindowingStrategy().getWindowFn().windowCoder());
       addOutput(name, value, coder);
     }
@@ -700,7 +779,7 @@ public class DataflowPipelineTranslator {
       // The inputValueCoder for the input PCollection should be some
       // WindowedValueCoder of the input PCollection's element
       // coder.
-      checkState(inputValueCoder instanceof WindowedValue.WindowedValueCoder);
+      checkState(inputValueCoder instanceof WindowedValues.WindowedValueCoder);
       // The outputValueCoder for the output should be an
       // IterableCoder of the inputValueCoder. This is a property
       // of the backend "CollectionToSingleton" step.
@@ -716,13 +795,13 @@ public class DataflowPipelineTranslator {
       translator.registerOutputName(value, name);
 
       // If the output requires runner determined sharding, also append necessary input properties.
-      if (value instanceof PCollection
-          && translator.runner.doesPCollectionRequireAutoSharding((PCollection<?>) value)) {
-        addInput(PropertyNames.ALLOWS_SHARDABLE_STATE, "true");
-        // Currently we only allow auto-sharding to be enabled through the GroupIntoBatches
-        // transform. So we also add the following property which GroupIntoBatchesDoFn has, to allow
-        // the backend to perform graph optimization.
-        addInput(PropertyNames.PRESERVES_KEYS, "true");
+      if (value instanceof PCollection) {
+        if (translator.runner.doesPCollectionRequireAutoSharding((PCollection<?>) value)) {
+          addInput(PropertyNames.ALLOWS_SHARDABLE_STATE, "true");
+        }
+        if (translator.runner.doesPCollectionPreserveKeys((PCollection<?>) value)) {
+          addInput(PropertyNames.PRESERVES_KEYS, "true");
+        }
       }
 
       Map<String, Object> properties = getProperties();
@@ -749,14 +828,14 @@ public class DataflowPipelineTranslator {
       if ((value instanceof PCollection
               && translator.runner.doesPCollectionRequireIndexedFormat((PCollection<?>) value))
           || ((value instanceof PCollectionView)
-              && (Materializations.MULTIMAP_MATERIALIZATION_URN.equals(
-                  ((PCollectionView) value).getViewFn().getMaterialization().getUrn())))) {
+              && Materializations.MULTIMAP_MATERIALIZATION_URN.equals(
+                  ((PCollectionView) value).getViewFn().getMaterialization().getUrn()))) {
         addBoolean(outputInfo, PropertyNames.USE_INDEXED_FORMAT, true);
       }
       if (valueCoder != null) {
         // Verify that encoding can be decoded, in order to catch serialization
         // failures as early as possible.
-        CloudObject encoding = translateCoder(valueCoder, translator);
+        CloudObject encoding = translateCoder(valueCoder);
         addObject(outputInfo, PropertyNames.ENCODING, encoding);
         translator.outputCoders.put(value, valueCoder);
       }
@@ -764,19 +843,20 @@ public class DataflowPipelineTranslator {
       outputInfoList.add(outputInfo);
     }
 
-    private void addDisplayData(Step step, String stepName, HasDisplayData hasDisplayData) {
+    private void addDisplayData(HasDisplayData hasDisplayData) {
       DisplayData displayData = DisplayData.from(hasDisplayData);
       List<Map<String, Object>> list = MAPPER.convertValue(displayData, List.class);
       addList(getProperties(), PropertyNames.DISPLAY_DATA, list);
     }
 
-    private void addResourceHints(Step step, String stepName, ResourceHints hints) {
+    private void addResourceHints(ResourceHints hints) {
       Map<String, Object> urlEncodedHints = new HashMap<>();
       for (Entry<String, ResourceHint> entry : hints.hints().entrySet()) {
         try {
           urlEncodedHints.put(
               entry.getKey(),
-              new String(percentCodec.encode(entry.getValue().toBytes()), Charsets.US_ASCII));
+              new String(
+                  percentCodec.encode(entry.getValue().toBytes()), StandardCharsets.US_ASCII));
         } catch (EncoderException e) {
           // Should never happen.
           throw new RuntimeException("Invalid value for resource hint: " + entry.getKey(), e);
@@ -931,6 +1011,34 @@ public class DataflowPipelineTranslator {
         });
 
     registerTransformTranslator(
+        DataflowGroupByKey.class,
+        new TransformTranslator<DataflowGroupByKey>() {
+          @Override
+          public void translate(DataflowGroupByKey transform, TranslationContext context) {
+            dataflowGroupByKeyHelper(transform, context);
+          }
+
+          private <K, V> void dataflowGroupByKeyHelper(
+              DataflowGroupByKey<K, V> transform, TranslationContext context) {
+            StepTranslationContext stepContext = context.addStep(transform, "GroupByKey");
+            PCollection<KV<K, V>> input = context.getInput(transform);
+            stepContext.addInput(PropertyNames.PARALLEL_INPUT, input);
+            stepContext.addOutput(PropertyNames.OUTPUT, context.getOutput(transform));
+
+            WindowingStrategy<?, ?> windowingStrategy = input.getWindowingStrategy();
+            stepContext.addInput(PropertyNames.DISALLOW_COMBINER_LIFTING, true);
+            stepContext.addInput(
+                PropertyNames.SERIALIZED_FN,
+                byteArrayToJsonString(
+                    serializeWindowingStrategy(windowingStrategy, context.getPipelineOptions())));
+            stepContext.addInput(
+                PropertyNames.IS_MERGING_WINDOW_FN,
+                !windowingStrategy.getWindowFn().isNonMerging());
+            stepContext.addInput(PropertyNames.ALLOW_DUPLICATES, transform.allowDuplicates());
+          }
+        });
+
+    registerTransformTranslator(
         GroupByKey.class,
         new TransformTranslator<GroupByKey>() {
           @Override
@@ -953,8 +1061,10 @@ public class DataflowPipelineTranslator {
                     && windowingStrategy.getWindowFn().assignsToOneWindow();
             if (isStreaming) {
               allowCombinerLifting &= transform.fewKeys();
-              // TODO: Allow combiner lifting on the non-default trigger, as appropriate.
-              allowCombinerLifting &= (windowingStrategy.getTrigger() instanceof DefaultTrigger);
+              allowCombinerLifting &=
+                  windowingStrategy
+                      .getTrigger()
+                      .accept(TriggerCombinerLiftingCompatibility.INSTANCE);
             }
             stepContext.addInput(PropertyNames.DISALLOW_COMBINER_LIFTING, !allowCombinerLifting);
             stepContext.addInput(
@@ -994,11 +1104,8 @@ public class DataflowPipelineTranslator {
                 transform.getSideInputs().values(),
                 context);
             translateOutputs(context.getOutputs(transform), stepContext);
-            String ptransformId =
-                context.getSdkComponents().getPTransformIdOrThrow(context.getCurrentTransform());
             translateFn(
                 stepContext,
-                ptransformId,
                 transform.getFn(),
                 context.getInput(transform).getWindowingStrategy(),
                 transform.getSideInputs().values(),
@@ -1041,11 +1148,8 @@ public class DataflowPipelineTranslator {
                 context);
             stepContext.addOutput(
                 transform.getMainOutputTag().getId(), context.getOutput(transform));
-            String ptransformId =
-                context.getSdkComponents().getPTransformIdOrThrow(context.getCurrentTransform());
             translateFn(
                 stepContext,
-                ptransformId,
                 transform.getFn(),
                 context.getInput(transform).getWindowingStrategy(),
                 transform.getSideInputs().values(),
@@ -1180,11 +1284,8 @@ public class DataflowPipelineTranslator {
             translateInputs(
                 stepContext, context.getInput(transform), transform.getSideInputs(), context);
             translateOutputs(context.getOutputs(transform), stepContext);
-            String ptransformId =
-                context.getSdkComponents().getPTransformIdOrThrow(context.getCurrentTransform());
             translateFn(
                 stepContext,
-                ptransformId,
                 transform.getFn(),
                 transform.getInputWindowingStrategy(),
                 transform.getSideInputs(),
@@ -1200,8 +1301,7 @@ public class DataflowPipelineTranslator {
                 translateCoder(
                     KvCoder.of(
                         transform.getRestrictionCoder(),
-                        transform.getWatermarkEstimatorStateCoder()),
-                    context));
+                        transform.getWatermarkEstimatorStateCoder())));
           }
         });
   }
@@ -1233,7 +1333,6 @@ public class DataflowPipelineTranslator {
 
   private static void translateFn(
       StepTranslationContext stepContext,
-      String ptransformId,
       DoFn fn,
       WindowingStrategy windowingStrategy,
       Iterable<PCollectionView<?>> sideInputs,
@@ -1284,7 +1383,7 @@ public class DataflowPipelineTranslator {
     }
   }
 
-  private static CloudObject translateCoder(Coder<?> coder, TranslationContext context) {
+  private static CloudObject translateCoder(Coder<?> coder) {
     return CloudObjects.asCloudObject(coder, null);
   }
 }

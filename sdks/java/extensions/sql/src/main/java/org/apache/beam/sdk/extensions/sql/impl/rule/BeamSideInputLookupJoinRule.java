@@ -20,12 +20,12 @@ package org.apache.beam.sdk.extensions.sql.impl.rule;
 import org.apache.beam.sdk.extensions.sql.impl.rel.BeamJoinRel;
 import org.apache.beam.sdk.extensions.sql.impl.rel.BeamLogicalConvention;
 import org.apache.beam.sdk.extensions.sql.impl.rel.BeamSideInputLookupJoinRel;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.Convention;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelOptRuleCall;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.RelNode;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.convert.ConverterRule;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.core.Join;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.logical.LogicalJoin;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.Convention;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptRuleCall;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.convert.ConverterRule;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.core.Join;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.logical.LogicalJoin;
 
 /**
  * Rule to convert {@code LogicalJoin} node to {@code BeamSideInputLookupJoinRel} node.
@@ -47,15 +47,14 @@ public class BeamSideInputLookupJoinRule extends ConverterRule {
   @Override
   public boolean matches(RelOptRuleCall call) {
     RelNode joinRel = call.rel(0);
-    boolean matches = BeamJoinRel.containsSeekableInput(joinRel);
-    return (matches);
+    return BeamJoinRel.containsSeekableInput(joinRel);
   }
 
   @Override
   public RelNode convert(RelNode rel) {
     Join join = (Join) rel;
 
-    return (new BeamSideInputLookupJoinRel(
+    return new BeamSideInputLookupJoinRel(
         join.getCluster(),
         join.getTraitSet().replace(BeamLogicalConvention.INSTANCE),
         convert(
@@ -64,6 +63,6 @@ public class BeamSideInputLookupJoinRule extends ConverterRule {
             join.getRight(), join.getRight().getTraitSet().replace(BeamLogicalConvention.INSTANCE)),
         join.getCondition(),
         join.getVariablesSet(),
-        join.getJoinType()));
+        join.getJoinType());
   }
 }

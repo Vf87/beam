@@ -17,10 +17,12 @@
  */
 package org.apache.beam.fn.harness;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables.getOnlyElement;
+import static org.apache.beam.sdk.util.Preconditions.checkArgumentNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables.getOnlyElement;
 
 import com.google.auto.service.AutoService;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -29,43 +31,43 @@ import java.util.Map;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import org.apache.beam.fn.harness.HandlesSplits.SplitResult;
-import org.apache.beam.fn.harness.data.BeamFnDataClient;
+import org.apache.beam.fn.harness.control.BundleProgressReporter;
 import org.apache.beam.fn.harness.state.BeamFnStateClient;
 import org.apache.beam.fn.harness.state.StateBackedIterable.StateBackedIterableTranslationContext;
-import org.apache.beam.model.fnexecution.v1.BeamFnApi;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi.ProcessBundleSplitRequest;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi.ProcessBundleSplitRequest.DesiredSplit;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi.ProcessBundleSplitResponse;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi.RemoteGrpcPort;
 import org.apache.beam.model.pipeline.v1.Endpoints;
+import org.apache.beam.model.pipeline.v1.MetricsApi;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
-import org.apache.beam.model.pipeline.v1.RunnerApi.Components;
-import org.apache.beam.runners.core.construction.CoderTranslation;
-import org.apache.beam.runners.core.construction.RehydratedComponents;
 import org.apache.beam.runners.core.metrics.MonitoringInfoConstants;
+import org.apache.beam.runners.core.metrics.MonitoringInfoConstants.Urns;
+import org.apache.beam.runners.core.metrics.MonitoringInfoEncodings;
+import org.apache.beam.runners.core.metrics.ShortIdMap;
 import org.apache.beam.runners.core.metrics.SimpleMonitoringInfoBuilder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.fn.data.FnDataReceiver;
-import org.apache.beam.sdk.fn.data.InboundDataClient;
-import org.apache.beam.sdk.fn.data.LogicalEndpoint;
 import org.apache.beam.sdk.fn.data.RemoteGrpcPortRead;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.sdk.util.construction.CoderTranslation;
+import org.apache.beam.sdk.util.construction.RehydratedComponents;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * Registers as a consumer for data over the Beam Fn API. Multiplexes any received data to all
  * receivers in a specified output map.
- *
- * <p>Can be re-used serially across {@link BeamFnApi.ProcessBundleRequest}s. For each request, call
- * {@link #registerInputLocation()} to start and call {@link #blockTillReadFinishes()} to finish.
  */
-@SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
+@SuppressFBWarnings(
+    value = "CT_CONSTRUCTOR_THROW",
+    justification =
+        "Pre-existing finding, not triaged yet."
+            + " Making the class final or moving the throwing code"
+            + " into a static factory method may fix it.")
 public class BeamFnDataReadRunner<OutputT> {
 
   private static final Logger LOG = LoggerFactory.getLogger(BeamFnDataReadRunner.class);
@@ -81,31 +83,36 @@ public class BeamFnDataReadRunner<OutputT> {
   }
 
   /** A factory for {@link BeamFnDataReadRunner}s. */
-  static class Factory<OutputT> implements PTransformRunnerFactory<BeamFnDataReadRunner<OutputT>> {
+  static class Factory implements PTransformRunnerFactory {
 
     @Override
-    public BeamFnDataReadRunner<OutputT> createRunnerForPTransform(Context context)
-        throws IOException {
+    public void addRunnerForPTransform(Context context) throws IOException {
+      addReadRunnerForPTransform(context);
+    }
 
+    @VisibleForTesting
+    <OutputT> BeamFnDataReadRunner<OutputT> addReadRunnerForPTransform(Context context)
+        throws IOException {
       FnDataReceiver<WindowedValue<OutputT>> consumer =
-          (FnDataReceiver<WindowedValue<OutputT>>)
-              (FnDataReceiver)
-                  context.getPCollectionConsumer(
-                      getOnlyElement(context.getPTransform().getOutputsMap().values()));
+          context.getPCollectionConsumer(
+              getOnlyElement(context.getPTransform().getOutputsMap().values()));
 
       BeamFnDataReadRunner<OutputT> runner =
           new BeamFnDataReadRunner<>(
+              context.getShortIdMap(),
+              context.getBundleCacheSupplier(),
               context.getPTransformId(),
               context.getPTransform(),
               context.getProcessBundleInstructionIdSupplier(),
-              context.getCoders(),
-              context.getBeamFnDataClient(),
+              context.getComponents(),
               context.getBeamFnStateClient(),
-              context::addProgressRequestCallback,
+              context::addBundleProgressReporter,
               consumer);
-      context.addStartBundleFunction(runner::registerInputLocation);
+      context.addIncomingDataEndpoint(
+          runner.apiServiceDescriptor, runner.coder, runner::forwardElementToConsumer);
       context.addFinishBundleFunction(runner::blockTillReadFinishes);
       context.addResetFunction(runner::reset);
+      context.addChannelRoot(runner);
       return runner;
     }
   }
@@ -114,42 +121,52 @@ public class BeamFnDataReadRunner<OutputT> {
   private final Endpoints.ApiServiceDescriptor apiServiceDescriptor;
   private final FnDataReceiver<WindowedValue<OutputT>> consumer;
   private final Supplier<String> processBundleInstructionIdSupplier;
-  private final BeamFnDataClient beamFnDataClient;
   private final Coder<WindowedValue<OutputT>> coder;
+  private final String dataChannelReadIndexShortId;
 
   private final Object splittingLock = new Object();
   // 0-based index of the current element being processed. -1 if we have yet to process an element.
   // stopIndex if we are done processing.
-  private long index;
+  private long index = -1;
   // 0-based index of the first element to not process, aka the first element of the residual
-  private long stopIndex;
-  private InboundDataClient readFuture;
+  private long stopIndex = Long.MAX_VALUE;
 
   BeamFnDataReadRunner(
+      ShortIdMap shortIdMap,
+      Supplier<Cache<?, ?>> cache,
       String pTransformId,
       RunnerApi.PTransform grpcReadNode,
       Supplier<String> processBundleInstructionIdSupplier,
-      Map<String, RunnerApi.Coder> coders,
-      BeamFnDataClient beamFnDataClient,
+      RunnerApi.Components components,
       BeamFnStateClient beamFnStateClient,
-      Consumer<PTransformRunnerFactory.ProgressRequestCallback> addProgressRequestCallback,
+      Consumer<BundleProgressReporter> addBundleProgressReporter,
       FnDataReceiver<WindowedValue<OutputT>> consumer)
       throws IOException {
     this.pTransformId = pTransformId;
     RemoteGrpcPort port = RemoteGrpcPortRead.fromPTransform(grpcReadNode).getPort();
     this.apiServiceDescriptor = port.getApiServiceDescriptor();
     this.processBundleInstructionIdSupplier = processBundleInstructionIdSupplier;
-    this.beamFnDataClient = beamFnDataClient;
     this.consumer = consumer;
 
-    RehydratedComponents components =
-        RehydratedComponents.forComponents(Components.newBuilder().putAllCoders(coders).build());
+    RehydratedComponents rehydratedComponents = RehydratedComponents.forComponents(components);
+
+    RunnerApi.Coder coderProto =
+        checkArgumentNotNull(
+            components.getCodersMap().get(port.getCoderId()),
+            "Corrupt pipeline: coder %s not defined",
+            port.getCoderId());
+
     this.coder =
         (Coder<WindowedValue<OutputT>>)
             CoderTranslation.fromProto(
-                coders.get(port.getCoderId()),
-                components,
+                coderProto,
+                rehydratedComponents,
                 new StateBackedIterableTranslationContext() {
+                  @Override
+                  public Supplier<Cache<?, ?>> getCache() {
+                    return cache;
+                  }
+
                   @Override
                   public BeamFnStateClient getStateClient() {
                     return beamFnStateClient;
@@ -161,27 +178,51 @@ public class BeamFnDataReadRunner<OutputT> {
                   }
                 });
 
-    addProgressRequestCallback.accept(
-        () -> {
-          synchronized (splittingLock) {
-            return ImmutableList.of(
-                new SimpleMonitoringInfoBuilder()
-                    .setUrn(MonitoringInfoConstants.Urns.DATA_CHANNEL_READ_INDEX)
-                    .setLabel(MonitoringInfoConstants.Labels.PTRANSFORM, pTransformId)
-                    .setInt64SumValue(index)
-                    .build());
+    SimpleMonitoringInfoBuilder monitoringInfoBuilder =
+        new SimpleMonitoringInfoBuilder()
+            .setUrn(Urns.DATA_CHANNEL_READ_INDEX)
+            .setType(MonitoringInfoConstants.TypeUrns.SUM_INT64_TYPE)
+            .setLabel(MonitoringInfoConstants.Labels.PTRANSFORM, pTransformId);
+
+    MetricsApi.MonitoringInfo monitoringInfo = monitoringInfoBuilder.build();
+    if (monitoringInfo == null) {
+      throw new IllegalArgumentException(
+          String.format(
+              "Internal error initializing BeamFnDataReadRunner: invalid monitoring info: %s",
+              monitoringInfoBuilder.validate()));
+    }
+
+    dataChannelReadIndexShortId = shortIdMap.getOrCreateShortId(monitoringInfo);
+    addBundleProgressReporter.accept(
+        new BundleProgressReporter() {
+          @Override
+          public void updateIntermediateMonitoringData(Map<String, ByteString> monitoringData) {
+            synchronized (splittingLock) {
+              monitoringData.put(
+                  dataChannelReadIndexShortId, MonitoringInfoEncodings.encodeInt64Counter(index));
+            }
+          }
+
+          @Override
+          public void updateFinalMonitoringData(Map<String, ByteString> monitoringData) {
+            /**
+             * We report the data channel read index on bundle completion allowing runners to
+             * perform a sanity check to ensure that the index aligns with any splitting that had
+             * occurred preventing missing or duplicate processing of data.
+             *
+             * <p>We are guaranteed to have the latest version of index since {@link
+             * BeamFnDataReadRunner#blockTillReadFinishes} will have been invoked on the main bundle
+             * processing thread synchronizing on {@code splittingLock}.
+             */
+            monitoringData.put(
+                dataChannelReadIndexShortId, MonitoringInfoEncodings.encodeInt64Counter(index));
+          }
+
+          @Override
+          public void reset() {
+            // no-op
           }
         });
-    clearSplitIndices();
-  }
-
-  public void registerInputLocation() {
-    this.readFuture =
-        beamFnDataClient.receive(
-            apiServiceDescriptor,
-            LogicalEndpoint.data(processBundleInstructionIdSupplier.get(), pTransformId),
-            coder,
-            this::forwardElementToConsumer);
   }
 
   public void forwardElementToConsumer(WindowedValue<OutputT> element) throws Exception {
@@ -322,7 +363,6 @@ public class BeamFnDataReadRunner<OutputT> {
         "Waiting for process bundle instruction {} and transform {} to close.",
         processBundleInstructionIdSupplier.get(),
         pTransformId);
-    readFuture.awaitCompletion();
     synchronized (splittingLock) {
       index += 1;
       stopIndex = index;

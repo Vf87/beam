@@ -17,15 +17,15 @@
  */
 package org.apache.beam.runners.direct;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.sdk.util.Preconditions.checkArgumentNotNull;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 import org.apache.beam.runners.core.DoFnRunner;
 import org.apache.beam.runners.core.DoFnRunners;
-import org.apache.beam.runners.core.DoFnRunners.OutputManager;
 import org.apache.beam.runners.core.KeyedWorkItemCoder;
 import org.apache.beam.runners.core.PushbackSideInputDoFnRunner;
 import org.apache.beam.runners.core.ReadyCheckingSideInputReader;
@@ -42,17 +42,24 @@ import org.apache.beam.sdk.transforms.DoFnSchemaInformation;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignatures;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.util.UserCodeException;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.WindowedValueMultiReceiver;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowedValue;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
+@SuppressFBWarnings(
+    value = "CT_CONSTRUCTOR_THROW",
+    justification =
+        "Pre-existing finding, not triaged yet."
+            + " Making the class final or moving the throwing code"
+            + " into a static factory method may fix it.")
 class ParDoEvaluator<InputT> implements TransformEvaluator<InputT> {
 
   public interface DoFnRunnerFactory<InputT, OutputT> {
@@ -61,7 +68,7 @@ class ParDoEvaluator<InputT> implements TransformEvaluator<InputT> {
         DoFn<InputT, OutputT> fn,
         List<PCollectionView<?>> sideInputs,
         ReadyCheckingSideInputReader sideInputReader,
-        OutputManager outputManager,
+        WindowedValueMultiReceiver outputManager,
         TupleTag<OutputT> mainOutputTag,
         List<TupleTag<?>> additionalOutputTags,
         DirectStepContext stepContext,
@@ -257,7 +264,8 @@ class ParDoEvaluator<InputT> implements TransformEvaluator<InputT> {
           window,
           timer.getTimestamp(),
           timer.getOutputTimestamp(),
-          timer.getDomain());
+          timer.getDomain(),
+          timer.causedByDrain());
     } catch (Exception e) {
       throw UserCodeException.wrap(e);
     }
@@ -271,7 +279,7 @@ class ParDoEvaluator<InputT> implements TransformEvaluator<InputT> {
       throw UserCodeException.wrap(e);
     }
     StepTransformResult.Builder<InputT> resultBuilder;
-    CopyOnAccessInMemoryStateInternals state = stepContext.commitState();
+    @Nullable CopyOnAccessInMemoryStateInternals state = stepContext.commitState();
     if (state != null) {
       resultBuilder =
           StepTransformResult.<InputT>withHold(transform, state.getEarliestWatermarkHold())
@@ -287,7 +295,7 @@ class ParDoEvaluator<InputT> implements TransformEvaluator<InputT> {
         .build();
   }
 
-  static class BundleOutputManager implements OutputManager {
+  static class BundleOutputManager implements WindowedValueMultiReceiver {
     private final Map<TupleTag<?>, UncommittedBundle<?>> bundles;
 
     public static BundleOutputManager create(Map<TupleTag<?>, UncommittedBundle<?>> outputBundles) {
@@ -298,11 +306,11 @@ class ParDoEvaluator<InputT> implements TransformEvaluator<InputT> {
       this.bundles = bundles;
     }
 
-    @SuppressWarnings({"unchecked", "rawtypes"})
     @Override
-    public <T> void output(TupleTag<T> tag, WindowedValue<T> output) {
-      checkArgument(bundles.containsKey(tag), "Unknown output tag %s", tag);
-      ((UncommittedBundle) bundles.get(tag)).add(output);
+    public <OutputT> void output(TupleTag<OutputT> tag, WindowedValue<OutputT> output) {
+      UncommittedBundle<?> bundle =
+          checkArgumentNotNull(bundles.get(tag), "Unknown output tag %s", tag);
+      bundle.add((WindowedValue) output);
     }
   }
 }

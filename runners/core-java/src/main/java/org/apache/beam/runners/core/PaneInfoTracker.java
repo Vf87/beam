@@ -17,7 +17,7 @@
  */
 package org.apache.beam.runners.core;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import org.apache.beam.sdk.state.ReadableState;
@@ -27,7 +27,7 @@ import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo.PaneInfoCoder;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo.Timing;
 import org.apache.beam.sdk.util.WindowTracing;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.joda.time.Instant;
 
 /**
@@ -37,7 +37,7 @@ import org.joda.time.Instant;
  * output watermark.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class PaneInfoTracker {
   private TimerInternals timerInternals;
@@ -48,7 +48,7 @@ public class PaneInfoTracker {
 
   @VisibleForTesting
   static final StateTag<ValueState<PaneInfo>> PANE_INFO_TAG =
-      StateTags.makeSystemTagInternal(StateTags.value("pane", PaneInfoCoder.INSTANCE));
+      StateTags.makeSystemTagInternal(StateTags.value("paneInfo", PaneInfoCoder.INSTANCE));
 
   public void clear(StateAccessor<?> state) {
     state.access(PANE_INFO_TAG).clear();
@@ -93,7 +93,7 @@ public class PaneInfoTracker {
     context.state().access(PANE_INFO_TAG).write(currentPane);
   }
 
-  private <W> PaneInfo describePane(
+  private PaneInfo describePane(
       Object key, Instant windowMaxTimestamp, PaneInfo previousPane, boolean isFinal) {
     boolean isFirst = previousPane == null;
     Timing previousTiming = isFirst ? null : previousPane.getTiming();

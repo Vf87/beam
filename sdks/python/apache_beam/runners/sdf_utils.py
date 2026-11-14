@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING
 from typing import Any
 from typing import NamedTuple
 from typing import Optional
-from typing import Tuple
 from typing import Union
 
 from apache_beam.transforms.core import WatermarkEstimatorProvider
@@ -50,13 +49,12 @@ SplitResultResidual = NamedTuple(
 
 
 class ThreadsafeRestrictionTracker(object):
-  """A thread-safe wrapper which wraps a `RestritionTracker`.
+  """A thread-safe wrapper which wraps a `RestrictionTracker`.
 
   This wrapper guarantees synchronization of modifying restrictions across
   multi-thread.
   """
-  def __init__(self, restriction_tracker):
-    # type: (RestrictionTracker) -> None
+  def __init__(self, restriction_tracker: 'RestrictionTracker') -> None:
     from apache_beam.io.iobase import RestrictionTracker
     if not isinstance(restriction_tracker, RestrictionTracker):
       raise ValueError(
@@ -67,7 +65,7 @@ class ThreadsafeRestrictionTracker(object):
     self._timestamp = None
     self._lock = threading.RLock()
     self._deferred_residual = None
-    self._deferred_timestamp = None  # type: Optional[Union[Timestamp, Duration]]
+    self._deferred_timestamp: Optional[Union[Timestamp, Duration]] = None
 
   def current_restriction(self):
     with self._lock:
@@ -110,8 +108,7 @@ class ThreadsafeRestrictionTracker(object):
     with self._lock:
       return self._restriction_tracker.check_done()
 
-  def current_progress(self):
-    # type: () -> RestrictionProgress
+  def current_progress(self) -> 'RestrictionProgress':
     with self._lock:
       return self._restriction_tracker.current_progress()
 
@@ -119,9 +116,7 @@ class ThreadsafeRestrictionTracker(object):
     with self._lock:
       return self._restriction_tracker.try_split(fraction_of_remainder)
 
-  def deferred_status(self):
-    # type: () -> Optional[Tuple[Any, Duration]]
-
+  def deferred_status(self) -> Optional[tuple[Any, Duration]]:
     """Returns deferred work which is produced by ``defer_remainder()``.
 
     When there is a self-checkpoint performed, the system needs to fulfill the
@@ -159,8 +154,9 @@ class RestrictionTrackerView(object):
   time, the RestrictionTrackerView will be fed into the ``DoFn.process`` as a
   restriction_tracker.
   """
-  def __init__(self, threadsafe_restriction_tracker):
-    # type: (ThreadsafeRestrictionTracker) -> None
+  def __init__(
+      self,
+      threadsafe_restriction_tracker: ThreadsafeRestrictionTracker) -> None:
     if not isinstance(threadsafe_restriction_tracker,
                       ThreadsafeRestrictionTracker):
       raise ValueError(
@@ -185,8 +181,7 @@ class ThreadsafeWatermarkEstimator(object):
   """A threadsafe wrapper which wraps a WatermarkEstimator with locking
   mechanism to guarantee multi-thread safety.
   """
-  def __init__(self, watermark_estimator):
-    # type: (WatermarkEstimator) -> None
+  def __init__(self, watermark_estimator: 'WatermarkEstimator') -> None:
     from apache_beam.io.iobase import WatermarkEstimator
     if not isinstance(watermark_estimator, WatermarkEstimator):
       raise ValueError('Initializing Threadsafe requires a WatermarkEstimator')
@@ -207,13 +202,11 @@ class ThreadsafeWatermarkEstimator(object):
     with self._lock:
       return self._watermark_estimator.get_estimator_state()
 
-  def current_watermark(self):
-    # type: () -> Timestamp
+  def current_watermark(self) -> Timestamp:
     with self._lock:
       return self._watermark_estimator.current_watermark()
 
-  def observe_timestamp(self, timestamp):
-    # type: (Timestamp) -> None
+  def observe_timestamp(self, timestamp: Timestamp) -> None:
     if not isinstance(timestamp, Timestamp):
       raise ValueError(
           'Input of observe_timestamp should be a Timestamp '

@@ -29,6 +29,8 @@ For each of the assigned windows the extracted value is accumulated using a user
  a key/window pair.
 -->
 
+**Note:** Beam Euphoria support has been deprecated ([details](https://github.com/apache/beam/issues/29451)) and may be removed in a future version.
+
 ## What is Euphoria
 Easy to use Java 8 API build on top of the Beam's Java SDK. API provides a [high-level abstraction](#operator-reference) of data transformations, with focus on the Java 8 language features (e.g. lambdas and streams). It is fully inter-operable with existing Beam SDK and convertible back and forth. It allows fast prototyping through use of (optional) [Kryo](https://github.com/EsotericSoftware/kryo) based coders, lambdas and high level operators and can be seamlessly integrated into existing Beam `Pipelines`.
 
@@ -399,9 +401,9 @@ Following example shows basic usage of `ReduceByKey` operator including value ex
 {{< highlight java >}}
 //suppose animals contains : [ "mouse", "rat", "elephant", "cat", "X", "duck"]
 PCollection<KV<Integer, Long>> countOfAnimalNamesByLength =
-  ReduceByKey.named("to-letters-couts")
+  ReduceByKey.named("to-letters-counts")
     .of(animals)
-    .keyBy(String::length) // length of animal name will be used as groupping key
+    .keyBy(String::length) // length of animal name will be used as grouping key
     // we need to count each animal name once, so why not to optimize each string to 1
     .valueBy(e -> 1)
     .reduceBy(Stream::count)
@@ -412,7 +414,7 @@ PCollection<KV<Integer, Long>> countOfAnimalNamesByLength =
 Now suppose that we want to track our `ReduceByKey` internals using counter.
 {{< highlight java >}}
 //suppose animals contains : [ "mouse", "rat", "elephant", "cat", "X", "duck"]
-PCollection<KV<Integer, Long>> countOfAnimalNamesByLenght =
+PCollection<KV<Integer, Long>> countOfAnimalNamesByLength =
   ReduceByKey.named("to-letters-couts")
     .of(animals)
     .keyBy(String::length) // length of animal name will be used as grouping key
@@ -430,7 +432,7 @@ PCollection<KV<Integer, Long>> countOfAnimalNamesByLenght =
 Again the same example with optimized combinable output.
 {{< highlight java >}}
 //suppose animals contains : [ "mouse", "rat", "elephant", "cat", "X", "duck"]
-PCollection<KV<Integer, Long>> countOfAnimalNamesByLenght =
+PCollection<KV<Integer, Long>> countOfAnimalNamesByLength =
   ReduceByKey.named("to-letters-couts")
     .of(animals)
     .keyBy(String::length) // length of animal name will e used as grouping key
@@ -490,7 +492,7 @@ PCollection<KV<Integer, Long>> output =
 Merge of at least two datasets of the same type without any guarantee about elements ordering.
 {{< highlight java >}}
 //suppose cats contains: [ "cheetah", "cat", "lynx", "jaguar" ]
-//suppose rodents conains: [ "squirrel", "mouse", "rat", "lemming", "beaver" ]
+//suppose rodents contains: [ "squirrel", "mouse", "rat", "lemming", "beaver" ]
 PCollection<String> animals =
   Union.named("to-animals")
     .of(cats, rodents)
@@ -518,7 +520,7 @@ Euphoria needs to know how to extract time-stamp from elements when [windowing](
 {{< highlight java >}}
 // suppose events contain events of SomeEventObject, its 'getEventTimeInMillis()' methods returns time-stamp
 PCollection<SomeEventObject> timeStampedEvents =
-  AssignEventTime.named("extract-event-tyme")
+  AssignEventTime.named("extract-event-time")
     .of(events)
     .using(SomeEventObject::getEventTimeInMillis)
     .output();

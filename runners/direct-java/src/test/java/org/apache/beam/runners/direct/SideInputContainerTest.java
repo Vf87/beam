@@ -43,14 +43,15 @@ import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo.Timing;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.ListenableFuture;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.MoreExecutors;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.MoreExecutors;
+import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Before;
 import org.junit.Rule;
@@ -126,13 +127,13 @@ public class SideInputContainerTest {
     for (Object materializedValue :
         materializeValuesFor(mapView.getPipeline().getOptions(), View.asMap(), KV.of("one", 1))) {
       valuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue, new Instant(1L), FIRST_WINDOW, PaneInfo.ON_TIME_AND_ONLY_FIRING));
     }
     for (Object materializedValue :
         materializeValuesFor(mapView.getPipeline().getOptions(), View.asMap(), KV.of("two", 2))) {
       valuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue, new Instant(20L), FIRST_WINDOW, PaneInfo.ON_TIME_AND_ONLY_FIRING));
     }
     container.write(mapView, valuesBuilder.build());
@@ -150,7 +151,7 @@ public class SideInputContainerTest {
     for (Object materializedValue :
         materializeValuesFor(mapView.getPipeline().getOptions(), View.asMap(), KV.of("one", 1))) {
       valuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue,
               new Instant(1L),
               SECOND_WINDOW,
@@ -159,7 +160,7 @@ public class SideInputContainerTest {
     for (Object materializedValue :
         materializeValuesFor(mapView.getPipeline().getOptions(), View.asMap(), KV.of("two", 2))) {
       valuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue,
               new Instant(20L),
               SECOND_WINDOW,
@@ -177,7 +178,7 @@ public class SideInputContainerTest {
     for (Object materializedValue :
         materializeValuesFor(mapView.getPipeline().getOptions(), View.asMap(), KV.of("three", 3))) {
       overwriteValuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue,
               new Instant(300L),
               SECOND_WINDOW,
@@ -232,18 +233,18 @@ public class SideInputContainerTest {
     for (Object materializedValue :
         materializeValuesFor(singletonView.getPipeline().getOptions(), View.asSingleton(), 2.875)) {
       valuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue,
-              FIRST_WINDOW.maxTimestamp().minus(200L),
+              FIRST_WINDOW.maxTimestamp().minus(Duration.millis(200L)),
               FIRST_WINDOW,
               PaneInfo.ON_TIME_AND_ONLY_FIRING));
     }
     for (Object materializedValue :
         materializeValuesFor(singletonView.getPipeline().getOptions(), View.asSingleton(), 4.125)) {
       valuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue,
-              SECOND_WINDOW.maxTimestamp().minus(2_000_000L),
+              SECOND_WINDOW.maxTimestamp().minus(Duration.millis(2_000_000L)),
               SECOND_WINDOW,
               PaneInfo.ON_TIME_AND_ONLY_FIRING));
     }
@@ -266,9 +267,9 @@ public class SideInputContainerTest {
     for (Object materializedValue :
         materializeValuesFor(iterableView.getPipeline().getOptions(), View.asIterable(), 44, 44)) {
       valuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue,
-              FIRST_WINDOW.maxTimestamp().minus(200L),
+              FIRST_WINDOW.maxTimestamp().minus(Duration.millis(200L)),
               FIRST_WINDOW,
               PaneInfo.ON_TIME_AND_ONLY_FIRING));
     }
@@ -287,9 +288,9 @@ public class SideInputContainerTest {
     for (Object materializedValue :
         materializeValuesFor(singletonView.getPipeline().getOptions(), View.asSingleton(), 2.875)) {
       valuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue,
-              FIRST_WINDOW.maxTimestamp().minus(200L),
+              FIRST_WINDOW.maxTimestamp().minus(Duration.millis(200L)),
               ImmutableList.of(FIRST_WINDOW, SECOND_WINDOW),
               PaneInfo.ON_TIME_AND_ONLY_FIRING));
     }
@@ -312,7 +313,7 @@ public class SideInputContainerTest {
     for (Object materializedValue :
         materializeValuesFor(mapView.getPipeline().getOptions(), View.asMap(), KV.of("one", 1))) {
       valuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue,
               new Instant(1L),
               SECOND_WINDOW,
@@ -321,7 +322,7 @@ public class SideInputContainerTest {
     for (Object materializedValue :
         materializeValuesFor(mapView.getPipeline().getOptions(), View.asMap(), KV.of("two", 2))) {
       valuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue,
               new Instant(20L),
               SECOND_WINDOW,
@@ -372,9 +373,9 @@ public class SideInputContainerTest {
     for (Object materializedValue :
         materializeValuesFor(mapView.getPipeline().getOptions(), View.asMap(), KV.of("one", 1))) {
       mapValuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue,
-              SECOND_WINDOW.maxTimestamp().minus(100L),
+              SECOND_WINDOW.maxTimestamp().minus(Duration.millis(100L)),
               SECOND_WINDOW,
               PaneInfo.ON_TIME_AND_ONLY_FIRING));
     }
@@ -391,9 +392,9 @@ public class SideInputContainerTest {
     for (Object materializedValue :
         materializeValuesFor(mapView.getPipeline().getOptions(), View.asMap(), KV.of("too", 2))) {
       newMapValuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue,
-              FIRST_WINDOW.maxTimestamp().minus(100L),
+              FIRST_WINDOW.maxTimestamp().minus(Duration.millis(100L)),
               FIRST_WINDOW,
               PaneInfo.ON_TIME_AND_ONLY_FIRING));
     }
@@ -405,9 +406,9 @@ public class SideInputContainerTest {
     for (Object materializedValue :
         materializeValuesFor(singletonView.getPipeline().getOptions(), View.asSingleton(), 1.25)) {
       singletonValuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue,
-              SECOND_WINDOW.maxTimestamp().minus(100L),
+              SECOND_WINDOW.maxTimestamp().minus(Duration.millis(100L)),
               SECOND_WINDOW,
               PaneInfo.ON_TIME_AND_ONLY_FIRING));
     }
@@ -472,6 +473,7 @@ public class SideInputContainerTest {
    * windowing strategy is invoked, start a thread that will invoke the callback after the returned
    * {@link CountDownLatch} is counted down once.
    */
+  @SuppressWarnings({"FutureReturnValueIgnored", "CheckReturnValue"})
   private CountDownLatch invokeLatchedCallback(
       PCollectionView<?> view, BoundedWindow window, final CountDownLatch onComplete) {
     final CountDownLatch runLatch = new CountDownLatch(1);
@@ -479,21 +481,20 @@ public class SideInputContainerTest {
             invocation -> {
               Object callback = invocation.getArguments()[3];
               final Runnable callbackRunnable = (Runnable) callback;
-              ListenableFuture<?> result =
-                  MoreExecutors.listeningDecorator(Executors.newSingleThreadExecutor())
-                      .submit(
-                          () -> {
-                            try {
-                              if (!runLatch.await(1500L, TimeUnit.MILLISECONDS)) {
-                                fail("Run latch didn't count down within timeout");
-                              }
-                              callbackRunnable.run();
-                              onComplete.countDown();
-                            } catch (InterruptedException e) {
-                              throw new AssertionError(
-                                  "Unexpectedly interrupted while waiting for latch ", e);
-                            }
-                          });
+              MoreExecutors.listeningDecorator(Executors.newSingleThreadExecutor())
+                  .submit(
+                      () -> {
+                        try {
+                          if (!runLatch.await(1500L, TimeUnit.MILLISECONDS)) {
+                            fail("Run latch didn't count down within timeout");
+                          }
+                          callbackRunnable.run();
+                          onComplete.countDown();
+                        } catch (InterruptedException e) {
+                          throw new AssertionError(
+                              "Unexpectedly interrupted while waiting for latch ", e);
+                        }
+                      });
               return null;
             })
         .when(context)

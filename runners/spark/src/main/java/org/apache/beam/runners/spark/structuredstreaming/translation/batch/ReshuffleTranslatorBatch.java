@@ -17,13 +17,48 @@
  */
 package org.apache.beam.runners.spark.structuredstreaming.translation.batch;
 
-import org.apache.beam.runners.spark.structuredstreaming.translation.AbstractTranslationContext;
-import org.apache.beam.runners.spark.structuredstreaming.translation.TransformTranslator;
-import org.apache.beam.sdk.transforms.Reshuffle;
+import static org.apache.spark.sql.functions.col;
 
-/** TODO: Should be removed if {@link Reshuffle} won't be translated. */
-class ReshuffleTranslatorBatch<K, InputT> implements TransformTranslator<Reshuffle<K, InputT>> {
+import java.io.IOException;
+import org.apache.beam.runners.spark.structuredstreaming.translation.TransformTranslator;
+import org.apache.beam.sdk.transforms.PTransform;
+import org.apache.beam.sdk.transforms.Reshuffle;
+import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.internal.SQLConf;
+
+class ReshuffleTranslatorBatch<K, V>
+    extends TransformTranslator<
+        PCollection<KV<K, V>>,
+        PCollection<KV<K, V>>,
+        PTransform<PCollection<KV<K, V>>, PCollection<KV<K, V>>>> {
+
+  ReshuffleTranslatorBatch() {
+    super(0.1f);
+  }
 
   @Override
-  public void translateTransform(Reshuffle<K, InputT> transform, AbstractTranslationContext context) {}
+  protected void translate(
+      PTransform<PCollection<KV<K, V>>, PCollection<KV<K, V>>> transform, Context cxt)
+      throws IOException {
+    Dataset<WindowedValue<KV<K, V>>> input = cxt.getDataset(cxt.getInput());
+    cxt.putDataset(cxt.getOutput(), input.repartition(col("value.key")));
+  }
+
+  static class ViaRandomKey<V>
+      extends TransformTranslator<PCollection<V>, PCollection<V>, Reshuffle.ViaRandomKey<V>> {
+
+    ViaRandomKey() {
+      super(0.1f);
+    }
+
+    @Override
+    protected void translate(Reshuffle.ViaRandomKey<V> transform, Context cxt) throws IOException {
+      Dataset<WindowedValue<V>> input = cxt.getDataset(cxt.getInput());
+      // Reshuffle randomly
+      cxt.putDataset(cxt.getOutput(), input.repartition(SQLConf.get().numShufflePartitions()));
+    }
+  }
 }

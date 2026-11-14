@@ -26,30 +26,29 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// EncodeStructPayload takes a native Go struct and returns a marshaled
-// ExternalConfigurationPayload proto, containing a Schema representation of
-// the original type and the original value encoded as a Row. This is intended
-// to be used as the expansion payload for an External transform.
-func EncodeStructPayload(pl interface{}) ([]byte, error) {
+// CreateExternalConfigurationPayload takes a native Go struct and returns an
+// ExternalConfigurationPayload proto with the struct encoded as a Row and its
+// associated schema.
+func CreateExternalConfigurationPayload(pl any) (*pipepb.ExternalConfigurationPayload, error) {
 	rt := reflect.TypeOf(pl)
 
 	// Encode payload value as a Row.
 	enc, err := coder.RowEncoderForStruct(rt)
 	if err != nil {
 		err = errors.WithContext(err, "creating Row encoder for payload")
-		return []byte{}, errors.WithContextf(err, "encoding external payload %v", pl)
+		return nil, errors.WithContextf(err, "encoding external payload %v", pl)
 	}
 	var buf bytes.Buffer
 	if err := enc(pl, &buf); err != nil {
 		err = errors.WithContext(err, "encoding payload as Row")
-		return []byte{}, errors.WithContextf(err, "encoding external payload %v", pl)
+		return nil, errors.WithContextf(err, "encoding external payload %v", pl)
 	}
 
 	// Convert payload type into Schema representation.
 	scm, err := schema.FromType(rt)
 	if err != nil {
 		err = errors.WithContext(err, "creating schema for payload")
-		return []byte{}, errors.WithContextf(err, "encoding external payload %v", pl)
+		return nil, errors.WithContextf(err, "encoding external payload %v", pl)
 	}
 
 	// Put schema and row into payload proto, and marshal it.
@@ -57,6 +56,19 @@ func EncodeStructPayload(pl interface{}) ([]byte, error) {
 		Schema:  scm,
 		Payload: buf.Bytes(),
 	}
+	return ecp, nil
+}
+
+// EncodeStructPayload takes a native Go struct and returns a marshaled
+// ExternalConfigurationPayload proto, containing a Schema representation of
+// the original type and the original value encoded as a Row. This is intended
+// to be used as the expansion payload for an External transform.
+func EncodeStructPayload(pl any) ([]byte, error) {
+	ecp, err := CreateExternalConfigurationPayload(pl)
+	if err != nil {
+		return []byte{}, err
+	}
+
 	plBytes, err := proto.Marshal(ecp)
 	if err != nil {
 		err = errors.Wrapf(err, "failed to marshal payload as proto")
@@ -64,4 +76,38 @@ func EncodeStructPayload(pl interface{}) ([]byte, error) {
 	}
 
 	return plBytes, nil
+}
+
+// DecodeStructPayload takes a marshaled ExternalConfigurationPayload proto
+// and returns a native Go struct, with its type converted from the Schema
+// representation and its value decoded from the Row.
+func DecodeStructPayload(plBytes []byte) (any, error) {
+	// Unmarshal payload proto.
+	ecp := &pipepb.ExternalConfigurationPayload{}
+	if err := proto.Unmarshal(plBytes, ecp); err != nil {
+		err = errors.WithContext(err, "failed to unmarshal the payload proto")
+		return nil, errors.WithContext(err, "decoding external payload")
+	}
+
+	// Convert Schema representation into payload type.
+	rt, err := schema.ToType(ecp.GetSchema())
+	if err != nil {
+		err = errors.WithContextf(err, "converting schema to payload type. schema: %v", ecp.GetSchema())
+		return nil, errors.WithContext(err, "decoding external payload")
+	}
+
+	// Decode a Row to payload value.
+	dec, err := coder.RowDecoderForStruct(rt)
+	if err != nil {
+		err = errors.WithContextf(err, "creating Row decoder for type %v", rt)
+		return nil, errors.WithContext(err, "decoding external payload")
+	}
+	buf := bytes.NewBuffer(ecp.Payload)
+	val, err := dec(buf)
+	if err != nil {
+		err = errors.WithContext(err, "decoding Row to payload")
+		return nil, errors.WithContextf(err, "decoding external payload")
+	}
+
+	return val, nil
 }

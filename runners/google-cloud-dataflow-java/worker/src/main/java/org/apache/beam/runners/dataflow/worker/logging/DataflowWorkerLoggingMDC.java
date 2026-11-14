@@ -17,13 +17,16 @@
  */
 package org.apache.beam.runners.dataflow.worker.logging;
 
+import javax.annotation.Nullable;
+
 /** Mapped diagnostic context for the Dataflow worker. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class DataflowWorkerLoggingMDC {
   private static final InheritableThreadLocal<String> jobId = new InheritableThreadLocal<>();
-  private static final InheritableThreadLocal<String> stageName = new InheritableThreadLocal<>();
+  private static final InheritableThreadLocal<String> systemStageName =
+      new InheritableThreadLocal<>();
   private static final InheritableThreadLocal<String> workerId = new InheritableThreadLocal<>();
   private static final InheritableThreadLocal<String> workId = new InheritableThreadLocal<>();
   private static final InheritableThreadLocal<String> sdkHarnessId = new InheritableThreadLocal<>();
@@ -33,9 +36,9 @@ public class DataflowWorkerLoggingMDC {
     jobId.set(newJobId);
   }
 
-  /** Sets the Stage Name of the current thread, which will be inherited by child threads. */
-  public static void setStageName(String newStageName) {
-    stageName.set(newStageName);
+  /** Sets the System Stage Name of the current thread, which will be inherited by child threads. */
+  public static void setSystemStageName(@Nullable String newSystemStageName) {
+    systemStageName.set(newSystemStageName);
   }
 
   /** Sets the Worker ID of the current thread, which will be inherited by child threads. */
@@ -44,7 +47,7 @@ public class DataflowWorkerLoggingMDC {
   }
 
   /** Sets the Work ID of the current thread, which will be inherited by child threads. */
-  public static void setWorkId(String newWorkId) {
+  public static void setWorkId(@Nullable String newWorkId) {
     workId.set(newWorkId);
   }
 
@@ -58,9 +61,9 @@ public class DataflowWorkerLoggingMDC {
     return jobId.get();
   }
 
-  /** Gets the Stage Name of the current thread. */
-  public static String getStageName() {
-    return stageName.get();
+  /** Gets the System Stage Name of the current thread. */
+  public static String getSystemStageName() {
+    return systemStageName.get();
   }
 
   /** Gets the Worker ID of the current thread. */

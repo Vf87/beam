@@ -17,7 +17,7 @@
  */
 package org.apache.beam.fn.harness.control;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Throwables.getStackTraceAsString;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Throwables.getStackTraceAsString;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -40,15 +40,15 @@ import org.apache.beam.model.fnexecution.v1.BeamFnApi.InstructionRequest;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi.RegisterRequest;
 import org.apache.beam.model.fnexecution.v1.BeamFnControlGrpc;
 import org.apache.beam.model.pipeline.v1.Endpoints;
+import org.apache.beam.sdk.fn.channel.ManagedChannelFactory;
 import org.apache.beam.sdk.fn.stream.OutboundObserverFactory;
-import org.apache.beam.sdk.fn.test.InProcessManagedChannelFactory;
 import org.apache.beam.sdk.fn.test.TestStreams;
 import org.apache.beam.sdk.function.ThrowingFunction;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.Server;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.inprocess.InProcessServerBuilder;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.CallStreamObserver;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.StreamObserver;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.Uninterruptibles;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Server;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.inprocess.InProcessServerBuilder;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.CallStreamObserver;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.Uninterruptibles;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestRule;
@@ -87,6 +87,18 @@ public class BeamFnControlClientTest {
       BeamFnApi.InstructionResponse.newBuilder()
           .setInstructionId("3L")
           .setError(getStackTraceAsString(FAILURE))
+          .build();
+  private static final org.apache.beam.fn.harness.state.WorkCancelledException CANCELLED =
+      new org.apache.beam.fn.harness.state.WorkCancelledException("Work item cancelled");
+  private static final BeamFnApi.InstructionRequest CANCELLED_REQUEST =
+      BeamFnApi.InstructionRequest.newBuilder()
+          .setInstructionId("4L")
+          .setSampleData(BeamFnApi.SampleDataRequest.getDefaultInstance())
+          .build();
+  private static final BeamFnApi.InstructionResponse CANCELLED_RESPONSE =
+      BeamFnApi.InstructionResponse.newBuilder()
+          .setInstructionId("4L")
+          .setError(getStackTraceAsString(CANCELLED))
           .build();
 
   @Rule public TestRule restoreMDCAfterTest = new RestoreBeamFnLoggingMDC();
@@ -137,12 +149,18 @@ public class BeamFnControlClientTest {
             assertEquals(value.getInstructionId(), BeamFnLoggingMDC.getInstructionId());
             throw FAILURE;
           });
+      handlers.put(
+          BeamFnApi.InstructionRequest.RequestCase.SAMPLE_DATA,
+          value -> {
+            assertEquals(value.getInstructionId(), BeamFnLoggingMDC.getInstructionId());
+            throw CANCELLED;
+          });
 
       ExecutorService executor = Executors.newCachedThreadPool();
       BeamFnControlClient client =
           new BeamFnControlClient(
               apiServiceDescriptor,
-              InProcessManagedChannelFactory.create(),
+              ManagedChannelFactory.createInProcess(),
               OutboundObserverFactory.trivial(),
               executor,
               handlers);
@@ -163,10 +181,14 @@ public class BeamFnControlClientTest {
       outboundServerObserver.onNext(FAILURE_REQUEST);
       assertEquals(FAILURE_RESPONSE, values.take());
 
+      // Ensure that WorkCancelledException is caught and translated to a failure response
+      outboundServerObserver.onNext(CANCELLED_REQUEST);
+      assertEquals(CANCELLED_RESPONSE, values.take());
+
       // Ensure that the server completing the stream translates to the completable future
       // being completed allowing for a successful shutdown of the client.
       outboundServerObserver.onCompleted();
-      client.waitForTermination();
+      client.terminationFuture().get();
     } finally {
       server.shutdownNow();
     }
@@ -216,7 +238,7 @@ public class BeamFnControlClientTest {
       BeamFnControlClient client =
           new BeamFnControlClient(
               apiServiceDescriptor,
-              InProcessManagedChannelFactory.create(),
+              ManagedChannelFactory.createInProcess(),
               OutboundObserverFactory.trivial(),
               executor,
               handlers);
@@ -236,7 +258,7 @@ public class BeamFnControlClientTest {
 
       // Ensure that the client shuts down when an Error is thrown from the harness
       try {
-        client.waitForTermination();
+        client.terminationFuture().get();
         throw new IllegalStateException("The future should have terminated with an error");
       } catch (ExecutionException errorWrapper) {
         assertThat(errorWrapper.getCause().getMessage(), containsString("Test Error"));

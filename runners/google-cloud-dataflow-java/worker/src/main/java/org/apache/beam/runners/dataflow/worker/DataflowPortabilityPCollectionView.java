@@ -30,7 +30,6 @@ import org.apache.beam.sdk.transforms.ViewFn;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.WindowFn;
 import org.apache.beam.sdk.transforms.windowing.WindowMappingFn;
-import org.apache.beam.sdk.util.WindowedValue.FullWindowedValueCoder;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionView;
@@ -38,6 +37,7 @@ import org.apache.beam.sdk.values.PInput;
 import org.apache.beam.sdk.values.PValue;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TypeDescriptor;
+import org.apache.beam.sdk.values.WindowedValues.FullWindowedValueCoder;
 import org.apache.beam.sdk.values.WindowingStrategy;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
@@ -54,7 +54,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * SideInputReader}s.
  */
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class DataflowPortabilityPCollectionView<K, V, W extends BoundedWindow>
     implements PCollectionView<MultimapView<K, V>> {
@@ -113,7 +113,8 @@ public class DataflowPortabilityPCollectionView<K, V, W extends BoundedWindow>
     public TypeDescriptor<MultimapView<K, V>> getTypeDescriptor() {
       throw new UnsupportedOperationException();
     }
-  };
+  }
+  ;
 
   @Override
   public WindowMappingFn<?> getWindowMappingFn() {

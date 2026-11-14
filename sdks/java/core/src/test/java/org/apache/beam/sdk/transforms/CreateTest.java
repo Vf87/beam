@@ -18,8 +18,7 @@
 package org.apache.beam.sdk.transforms;
 
 import static org.apache.beam.sdk.TestUtils.LINES;
-import static org.apache.beam.sdk.TestUtils.LINES_ARRAY;
-import static org.apache.beam.sdk.TestUtils.NO_LINES_ARRAY;
+import static org.apache.beam.sdk.TestUtils.NO_LINES;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -35,6 +34,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Random;
+import java.util.stream.Collectors;
 import org.apache.beam.sdk.coders.AtomicCoder;
 import org.apache.beam.sdk.coders.BigEndianIntegerCoder;
 import org.apache.beam.sdk.coders.Coder;
@@ -51,12 +51,16 @@ import org.apache.beam.sdk.options.ValueProvider.NestedValueProvider;
 import org.apache.beam.sdk.options.ValueProvider.StaticValueProvider;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.SchemaCoder;
+import org.apache.beam.sdk.testing.BeamParallelJunit4Runner;
 import org.apache.beam.sdk.testing.NeedsRunner;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.SourceTestUtils;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.testing.ValidatesRunner;
 import org.apache.beam.sdk.transforms.Create.Values.CreateSource;
+import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
+import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.util.SerializableUtils;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
@@ -64,8 +68,10 @@ import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.hamcrest.Matchers;
 import org.joda.time.Instant;
@@ -74,10 +80,9 @@ import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
 
 /** Tests for Create. */
-@RunWith(JUnit4.class)
+@RunWith(BeamParallelJunit4Runner.class)
 @SuppressWarnings({
   "unchecked",
 })
@@ -90,7 +95,7 @@ public class CreateTest {
   public void testCreate() {
     PCollection<String> output = p.apply(Create.of(LINES));
 
-    PAssert.that(output).containsInAnyOrder(LINES_ARRAY);
+    PAssert.that(output).containsInAnyOrder(LINES.toArray(new String[0]));
     p.run();
   }
 
@@ -99,7 +104,7 @@ public class CreateTest {
   public void testCreateEmpty() {
     PCollection<String> output = p.apply(Create.empty(StringUtf8Coder.of()));
 
-    PAssert.that(output).containsInAnyOrder(NO_LINES_ARRAY);
+    PAssert.that(output).containsInAnyOrder(NO_LINES.toArray(new String[0]));
 
     assertEquals(StringUtf8Coder.of(), output.getCoder());
     p.run();
@@ -129,16 +134,17 @@ public class CreateTest {
     p.run();
   }
 
-  static class Record implements Serializable {}
+  static class TestRecord implements Serializable {}
 
-  static class Record2 extends Record {}
+  static class TestRecord2 extends TestRecord {}
 
-  private static class RecordCoder extends AtomicCoder<Record> {
+  private static class TestRecordCoder extends AtomicCoder<TestRecord> {
     @Override
-    public void encode(Record value, OutputStream outStream) throws CoderException, IOException {}
+    public void encode(TestRecord value, OutputStream outStream)
+        throws CoderException, IOException {}
 
     @Override
-    public Record decode(InputStream inStream) throws CoderException, IOException {
+    public TestRecord decode(InputStream inStream) throws CoderException, IOException {
       return null;
     }
   }
@@ -149,7 +155,7 @@ public class CreateTest {
     thrown.expectMessage(Matchers.containsString("Unable to infer a coder"));
 
     // Create won't infer a default coder in this case.
-    p.apply(Create.of(new Record(), new Record2()));
+    p.apply(Create.of(new TestRecord(), new TestRecord2()));
 
     p.run();
   }
@@ -180,6 +186,7 @@ public class CreateTest {
 
     p.run();
   }
+
   /** An unserializable class to demonstrate encoding of elements. */
   private static class UnserializableRecord {
     private final String myString;
@@ -240,6 +247,22 @@ public class CreateTest {
     }
   }
 
+  private static class FormatMetadata extends DoFn<String, String> {
+    @ProcessElement
+    public void processElement(
+        @Element String e,
+        @Timestamp Instant timestamp,
+        BoundedWindow w,
+        PaneInfo p,
+        OutputReceiver<String> o) {
+      o.output(formatMetadata(e, timestamp, w, p));
+    }
+  }
+
+  private static String formatMetadata(String s, Instant timestamp, BoundedWindow w, PaneInfo p) {
+    return s + ":" + timestamp.getMillis() + ":" + w + ":" + p;
+  }
+
   @Test
   @Category(NeedsRunner.class)
   public void testCreateTimestamped() {
@@ -287,11 +310,11 @@ public class CreateTest {
     thrown.expectMessage(Matchers.containsString("Unable to infer a coder"));
 
     // Create won't infer a default coder in this case.
-    PCollection<Record> c =
+    PCollection<TestRecord> c =
         p.apply(
             Create.timestamped(
-                TimestampedValue.of(new Record(), new Instant(0)),
-                TimestampedValue.of(new Record2(), new Instant(0))));
+                TimestampedValue.of(new TestRecord(), new Instant(0)),
+                TimestampedValue.of(new TestRecord2(), new Instant(0))));
 
     p.run();
 
@@ -300,25 +323,85 @@ public class CreateTest {
 
   @Test
   public void testCreateTimestampedDefaultOutputCoderUsingCoder() throws Exception {
-    Coder<Record> coder = new RecordCoder();
-    Create.TimestampedValues<Record> values =
+    Coder<TestRecord> coder = new TestRecordCoder();
+    Create.TimestampedValues<TestRecord> values =
         Create.timestamped(
-                TimestampedValue.of(new Record(), new Instant(0)),
-                TimestampedValue.of(new Record2(), new Instant(0)))
+                TimestampedValue.of(new TestRecord(), new Instant(0)),
+                TimestampedValue.of(new TestRecord2(), new Instant(0)))
             .withCoder(coder);
     assertThat(p.apply(values).getCoder(), equalTo(coder));
   }
 
   @Test
   public void testCreateTimestampedDefaultOutputCoderUsingTypeDescriptor() throws Exception {
-    Coder<Record> coder = new RecordCoder();
-    p.getCoderRegistry().registerCoderForClass(Record.class, coder);
-    Create.TimestampedValues<Record> values =
+    Coder<TestRecord> coder = new TestRecordCoder();
+    p.getCoderRegistry().registerCoderForClass(TestRecord.class, coder);
+    Create.TimestampedValues<TestRecord> values =
         Create.timestamped(
-                TimestampedValue.of(new Record(), new Instant(0)),
-                TimestampedValue.of(new Record2(), new Instant(0)))
-            .withType(new TypeDescriptor<Record>() {});
+                TimestampedValue.of(new TestRecord(), new Instant(0)),
+                TimestampedValue.of(new TestRecord2(), new Instant(0)))
+            .withType(new TypeDescriptor<TestRecord>() {});
     assertThat(p.apply(values).getCoder(), equalTo(coder));
+  }
+
+  @Test
+  @Category(NeedsRunner.class)
+  public void testCreateWindowedValues() {
+    List<WindowedValue<String>> data =
+        Arrays.asList(
+            WindowedValues.of("a", new Instant(1L), GlobalWindow.INSTANCE, PaneInfo.NO_FIRING),
+            WindowedValues.of("b", new Instant(2L), GlobalWindow.INSTANCE, PaneInfo.NO_FIRING),
+            WindowedValues.of(
+                "c", new Instant(3L), GlobalWindow.INSTANCE, PaneInfo.ON_TIME_AND_ONLY_FIRING));
+
+    // The easiest way to directly check the created PCollection with PAssert and without relying on
+    // other
+    // mechanisms than built-in DoFn processing is to dump it all to a string.
+    List<String> formattedData =
+        data.stream()
+            .flatMap(
+                (WindowedValue<String> windowedValue) ->
+                    windowedValue.getWindows().stream()
+                        .map(
+                            (BoundedWindow w) ->
+                                formatMetadata(
+                                    windowedValue.getValue(),
+                                    windowedValue.getTimestamp(),
+                                    w,
+                                    windowedValue.getPaneInfo())))
+            .collect(Collectors.toList());
+
+    PCollection<String> output =
+        p.apply(Create.windowedValues(data).withWindowCoder(GlobalWindow.Coder.INSTANCE))
+            .apply(ParDo.of(new FormatMetadata()));
+
+    PAssert.that(output).containsInAnyOrder(formattedData);
+    p.run();
+  }
+
+  @Test
+  @Category(NeedsRunner.class)
+  public void testCreateWindowedValuesEmpty() {
+    PCollection<String> output =
+        p.apply(
+            Create.windowedValues(new ArrayList<WindowedValue<String>>())
+                .withCoder(StringUtf8Coder.of()));
+
+    PAssert.that(output).empty();
+    p.run();
+  }
+
+  @Test
+  public void testCreateWindowedValuesEmptyUnspecifiedCoder() {
+    p.enableAbandonedNodeEnforcement(false);
+
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("determine a default Coder");
+    thrown.expectMessage("Create.empty(Coder)");
+    thrown.expectMessage("Create.empty(TypeDescriptor)");
+    thrown.expectMessage("withCoder(Coder)");
+    thrown.expectMessage("withType(TypeDescriptor)");
+    p.apply(Create.windowedValues(new ArrayList<>()));
   }
 
   @Test
@@ -378,26 +461,28 @@ public class CreateTest {
 
   @Test
   public void testCreateDefaultOutputCoderUsingInference() throws Exception {
-    Coder<Record> coder = new RecordCoder();
-    p.getCoderRegistry().registerCoderForClass(Record.class, coder);
+    Coder<TestRecord> coder = new TestRecordCoder();
+    p.getCoderRegistry().registerCoderForClass(TestRecord.class, coder);
     assertThat(
-        p.apply(Create.of(new Record(), new Record(), new Record())).getCoder(), equalTo(coder));
+        p.apply(Create.of(new TestRecord(), new TestRecord(), new TestRecord())).getCoder(),
+        equalTo(coder));
   }
 
   @Test
   public void testCreateDefaultOutputCoderUsingCoder() throws Exception {
-    Coder<Record> coder = new RecordCoder();
+    Coder<TestRecord> coder = new TestRecordCoder();
     assertThat(
-        p.apply(Create.of(new Record(), new Record2()).withCoder(coder)).getCoder(),
+        p.apply(Create.of(new TestRecord(), new TestRecord2()).withCoder(coder)).getCoder(),
         equalTo(coder));
   }
 
   @Test
   public void testCreateDefaultOutputCoderUsingTypeDescriptor() throws Exception {
-    Coder<Record> coder = new RecordCoder();
-    p.getCoderRegistry().registerCoderForClass(Record.class, coder);
-    Create.Values<Record> values =
-        Create.of(new Record(), new Record2()).withType(new TypeDescriptor<Record>() {});
+    Coder<TestRecord> coder = new TestRecordCoder();
+    p.getCoderRegistry().registerCoderForClass(TestRecord.class, coder);
+    Create.Values<TestRecord> values =
+        Create.of(new TestRecord(), new TestRecord2())
+            .withType(new TypeDescriptor<TestRecord>() {});
     assertThat(p.apply(values).getCoder(), equalTo(coder));
   }
 

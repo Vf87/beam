@@ -17,7 +17,7 @@
  */
 package org.apache.beam.runners.spark.util;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import java.io.Serializable;
 import java.util.HashMap;
@@ -28,11 +28,11 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import javax.annotation.Nonnull;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.CacheBuilder;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.CacheLoader;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.LoadingCache;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Maps;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheBuilder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheLoader;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.LoadingCache;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Maps;
 import org.apache.spark.SparkEnv;
 import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.storage.BlockId;
@@ -56,8 +56,8 @@ import scala.reflect.ClassTag;
  * advances the watermarks according to the queue (first-in-first-out).
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class GlobalWatermarkHolder {
 
@@ -175,7 +175,9 @@ public class GlobalWatermarkHolder {
   /**
    * Computes the next watermark values per source id.
    *
-   * @return The new watermarks values or null if no source has reported its progress.
+   * <p>Sources with no queued update keep their last known watermarks.
+   *
+   * @return The new watermarks values, or an empty map if no source has reported its progress.
    */
   private static Map<Integer, SparkWatermarks> computeNewWatermarks(BlockManager blockManager) {
 
@@ -183,14 +185,26 @@ public class GlobalWatermarkHolder {
       return new HashMap<>();
     }
 
-    // update all sources' watermarks into the new broadcast.
+    final Map<Integer, SparkWatermarks> currentWatermarks = initWatermarks(blockManager);
+
+    // Update the sources that reported progress over a copy of the stored map, so a source
+    // with no update in this batch keeps its last known watermarks. A source whose high
+    // watermark already reached the end of time has finished, so it is dropped before its
+    // last low watermark pins the minimum.
     final Map<Integer, SparkWatermarks> newValues = new HashMap<>();
+    for (Map.Entry<Integer, SparkWatermarks> current : currentWatermarks.entrySet()) {
+      if (current.getValue().getHighWatermark().isBefore(BoundedWindow.TIMESTAMP_MAX_VALUE)) {
+        newValues.put(current.getKey(), current.getValue());
+      }
+    }
+    boolean hasUpdates = false;
 
     for (final Map.Entry<Integer, Queue<SparkWatermarks>> watermarkInfo : sourceTimes.entrySet()) {
 
       if (watermarkInfo.getValue().isEmpty()) {
         continue;
       }
+      hasUpdates = true;
 
       final Integer sourceId = watermarkInfo.getKey();
 
@@ -198,8 +212,6 @@ public class GlobalWatermarkHolder {
       Instant currentLowWatermark = BoundedWindow.TIMESTAMP_MIN_VALUE;
       Instant currentHighWatermark = BoundedWindow.TIMESTAMP_MIN_VALUE;
       Instant currentSynchronizedProcessingTime = BoundedWindow.TIMESTAMP_MIN_VALUE;
-
-      final Map<Integer, SparkWatermarks> currentWatermarks = initWatermarks(blockManager);
 
       if (currentWatermarks.containsKey(sourceId)) {
         final SparkWatermarks currentTimes = currentWatermarks.get(sourceId);
@@ -240,7 +252,7 @@ public class GlobalWatermarkHolder {
           new SparkWatermarks(nextLowWatermark, nextHighWatermark, nextSynchronizedProcessingTime));
     }
 
-    return newValues;
+    return hasUpdates ? newValues : new HashMap<>();
   }
 
   private static void writeRemoteWatermarkBlock(
@@ -252,7 +264,7 @@ public class GlobalWatermarkHolder {
         WATERMARKS_BLOCK_ID, newWatermarks, StorageLevel.MEMORY_ONLY(), true, WATERMARKS_TAG);
     // if an executor tries to fetch the watermark block here, it still may fail to do so since
     // the put operation might not have been executed yet
-    // see also https://issues.apache.org/jira/browse/BEAM-2789
+    // see also https://github.com/apache/beam/issues/18426
     LOG.info("Put new watermark block: {}", newWatermarks);
   }
 

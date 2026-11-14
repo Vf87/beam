@@ -17,7 +17,8 @@
  */
 package org.apache.beam.sdk.io.gcp.bigquery;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.sdk.io.gcp.bigquery.BigQueryResourceNaming.createTempTableReference;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.api.services.bigquery.model.JobStatistics;
 import com.google.api.services.bigquery.model.Table;
@@ -25,9 +26,11 @@ import com.google.api.services.bigquery.model.TableReference;
 import com.google.cloud.bigquery.storage.v1.DataFormat;
 import java.io.IOException;
 import java.io.ObjectInputStream;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.TypedRead.QueryPriority;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryServices.DatasetService;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.SerializableFunction;
@@ -35,9 +38,6 @@ import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** A {@link org.apache.beam.sdk.io.Source} representing reading the results of a query. */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 class BigQueryStorageQuerySource<T> extends BigQueryStorageSourceBase<T> {
 
   public static <T> BigQueryStorageQuerySource<T> create(
@@ -48,6 +48,39 @@ class BigQueryStorageQuerySource<T> extends BigQueryStorageSourceBase<T> {
       QueryPriority priority,
       @Nullable String location,
       @Nullable String queryTempDataset,
+      @Nullable String queryTempProject,
+      @Nullable String kmsKey,
+      @Nullable DataFormat format,
+      SerializableFunction<SchemaAndRecord, T> parseFn,
+      Coder<T> outputCoder,
+      BigQueryServices bqServices,
+      @Nullable TimestampPrecision picosTimestampPrecision) {
+    return new BigQueryStorageQuerySource<>(
+        stepUuid,
+        queryProvider,
+        flattenResults,
+        useLegacySql,
+        priority,
+        location,
+        queryTempDataset,
+        queryTempProject,
+        kmsKey,
+        format,
+        parseFn,
+        outputCoder,
+        bqServices,
+        picosTimestampPrecision);
+  }
+
+  public static <T> BigQueryStorageQuerySource<T> create(
+      String stepUuid,
+      ValueProvider<String> queryProvider,
+      Boolean flattenResults,
+      Boolean useLegacySql,
+      QueryPriority priority,
+      @Nullable String location,
+      @Nullable String queryTempDataset,
+      @Nullable String queryTempProject,
       @Nullable String kmsKey,
       @Nullable DataFormat format,
       SerializableFunction<SchemaAndRecord, T> parseFn,
@@ -61,11 +94,13 @@ class BigQueryStorageQuerySource<T> extends BigQueryStorageSourceBase<T> {
         priority,
         location,
         queryTempDataset,
+        queryTempProject,
         kmsKey,
         format,
         parseFn,
         outputCoder,
-        bqServices);
+        bqServices,
+        /* picosTimestampPrecision= */ null);
   }
 
   public static <T> BigQueryStorageQuerySource<T> create(
@@ -87,11 +122,13 @@ class BigQueryStorageQuerySource<T> extends BigQueryStorageSourceBase<T> {
         priority,
         location,
         null,
+        null,
         kmsKey,
         null,
         parseFn,
         outputCoder,
-        bqServices);
+        bqServices,
+        /* picosTimestampPrecision= */ null);
   }
 
   private final String stepUuid;
@@ -99,11 +136,13 @@ class BigQueryStorageQuerySource<T> extends BigQueryStorageSourceBase<T> {
   private final Boolean flattenResults;
   private final Boolean useLegacySql;
   private final QueryPriority priority;
-  private final String location;
-  private final String queryTempDataset;
-  private final String kmsKey;
+  private final @Nullable String location;
+  private final @Nullable String queryTempDataset;
 
-  private transient AtomicReference<JobStatistics> dryRunJobStats;
+  private final @Nullable String queryTempProject;
+  private final @Nullable String kmsKey;
+
+  private transient AtomicReference<@Nullable JobStatistics> dryRunJobStats;
 
   private BigQueryStorageQuerySource(
       String stepUuid,
@@ -113,12 +152,14 @@ class BigQueryStorageQuerySource<T> extends BigQueryStorageSourceBase<T> {
       QueryPriority priority,
       @Nullable String location,
       @Nullable String queryTempDataset,
+      @Nullable String queryTempProject,
       @Nullable String kmsKey,
-      DataFormat format,
+      @Nullable DataFormat format,
       SerializableFunction<SchemaAndRecord, T> parseFn,
       Coder<T> outputCoder,
-      BigQueryServices bqServices) {
-    super(format, null, null, parseFn, outputCoder, bqServices);
+      BigQueryServices bqServices,
+      @Nullable TimestampPrecision picosTimestampPrecision) {
+    super(format, null, null, parseFn, outputCoder, bqServices, picosTimestampPrecision);
     this.stepUuid = checkNotNull(stepUuid, "stepUuid");
     this.queryProvider = checkNotNull(queryProvider, "queryProvider");
     this.flattenResults = checkNotNull(flattenResults, "flattenResults");
@@ -126,6 +167,7 @@ class BigQueryStorageQuerySource<T> extends BigQueryStorageSourceBase<T> {
     this.priority = checkNotNull(priority, "priority");
     this.location = location;
     this.queryTempDataset = queryTempDataset;
+    this.queryTempProject = queryTempProject;
     this.kmsKey = kmsKey;
     this.dryRunJobStats = new AtomicReference<>();
   }
@@ -159,7 +201,7 @@ class BigQueryStorageQuerySource<T> extends BigQueryStorageSourceBase<T> {
   }
 
   @Override
-  protected Table getTargetTable(BigQueryOptions options) throws Exception {
+  protected @Nullable Table getTargetTable(BigQueryOptions options) throws Exception {
     TableReference queryResultTable =
         BigQueryQueryHelper.executeQuery(
             bqServices,
@@ -172,12 +214,35 @@ class BigQueryStorageQuerySource<T> extends BigQueryStorageSourceBase<T> {
             priority,
             location,
             queryTempDataset,
+            queryTempProject,
             kmsKey);
-    return bqServices.getDatasetService(options).getTable(queryResultTable);
+    try (DatasetService datasetService = bqServices.getDatasetService(options)) {
+      return datasetService.getTable(queryResultTable);
+    }
   }
 
   @Override
   protected @Nullable String getTargetTableId(BigQueryOptions options) throws Exception {
     return null;
+  }
+
+  void removeDestinationIfExists(BigQueryOptions options) throws Exception {
+    DatasetService datasetService = bqServices.getDatasetService(options.as(BigQueryOptions.class));
+    String project = queryTempProject;
+    if (project == null) {
+      project =
+          options.as(BigQueryOptions.class).getBigQueryProject() == null
+              ? options.as(BigQueryOptions.class).getProject()
+              : options.as(BigQueryOptions.class).getBigQueryProject();
+    }
+    String tempTableID =
+        BigQueryResourceNaming.createJobIdPrefix(
+            options.getJobName(), stepUuid, BigQueryResourceNaming.JobType.QUERY);
+    TableReference tempTableReference =
+        createTempTableReference(project, tempTableID, Optional.ofNullable(queryTempDataset));
+    Table destTable = datasetService.getTable(tempTableReference);
+    if (destTable != null) {
+      datasetService.deleteTable(tempTableReference);
+    }
   }
 }

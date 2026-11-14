@@ -24,12 +24,13 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterators;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.PeekingIterator;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterators;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.PeekingIterator;
 import org.apache.flink.api.common.functions.GroupReduceFunction;
 import org.apache.flink.util.Collector;
 import org.joda.time.Instant;
@@ -41,7 +42,7 @@ import org.joda.time.Instant;
  * @param <K> Key type.
  * @param <InputT> Input type.
  */
-@SuppressWarnings({"keyfor", "nullness"}) // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+@SuppressWarnings({"keyfor", "nullness"}) // TODO(https://github.com/apache/beam/issues/20497)
 public class FlinkNonMergingReduceFunction<K, InputT>
     implements GroupReduceFunction<
         WindowedValue<KV<K, InputT>>, WindowedValue<KV<K, Iterable<InputT>>>> {
@@ -100,11 +101,11 @@ public class FlinkNonMergingReduceFunction<K, InputT>
                   (WindowedValue<KV<K, InputT>> wv) ->
                       Objects.requireNonNull(wv).getValue().getValue()));
     }
-    coll.collect(
-        WindowedValue.of(
-            KV.of(first.getValue().getKey(), values),
-            combinedTimestamp,
-            first.getWindows(),
-            PaneInfo.ON_TIME_AND_ONLY_FIRING));
+    WindowedValues.builder(first)
+        .withValue(KV.of(first.getValue().getKey(), values))
+        .setReceiver(coll::collect)
+        .setPaneInfo(PaneInfo.ON_TIME_AND_ONLY_FIRING)
+        .setTimestamp(combinedTimestamp)
+        .output();
   }
 }

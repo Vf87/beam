@@ -23,6 +23,7 @@ import com.google.api.gax.rpc.StatusCode;
 import com.google.rpc.Code;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Random;
@@ -43,10 +44,11 @@ import org.apache.beam.sdk.transforms.Sum;
 import org.apache.beam.sdk.util.BackOff;
 import org.apache.beam.sdk.util.MovingFunction;
 import org.apache.beam.sdk.util.Sleeper;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.primitives.Ints;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.primitives.Ints;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -70,6 +72,7 @@ final class RpcQosImpl implements RpcQos {
           .stream()
           .map(Code::getNumber)
           .collect(ImmutableSet.toImmutableSet());
+
   /**
    * The target minimum number of requests per samplePeriodMs, even if no requests succeed. Must be
    * greater than 0, else we could throttle to zero. Because every decision is probabilistic, there
@@ -316,7 +319,7 @@ final class RpcQosImpl implements RpcQos {
     }
 
     final long durationMs(Instant end) {
-      return end.minus(start.getMillis()).getMillis();
+      return end.minus(Duration.millis(start.getMillis())).getMillis();
     }
 
     private Optional<Integer> getStatusCodeNumber(ApiException apiException) {
@@ -373,6 +376,9 @@ final class RpcQosImpl implements RpcQos {
     @Override
     public boolean awaitSafeToProceed(Instant instant) throws InterruptedException {
       state.checkActive();
+      if (!options.isShouldThrottleRampup()) {
+        return super.awaitSafeToProceed(instant);
+      }
       Optional<Duration> shouldThrottle = writeRampUp.shouldThrottle(instant);
       if (shouldThrottle.isPresent()) {
         Duration throttleDuration = shouldThrottle.get();
@@ -386,10 +392,13 @@ final class RpcQosImpl implements RpcQos {
     }
 
     @Override
-    public <T, ElementT extends Element<T>> FlushBufferImpl<T, ElementT> newFlushBuffer(
+    public <ElementT extends Element<?>> FlushBufferImpl<ElementT> newFlushBuffer(
         Instant instantSinceEpoch) {
       state.checkActive();
-      int availableWriteCountBudget = writeRampUp.getAvailableWriteCountBudget(instantSinceEpoch);
+      int availableWriteCountBudget =
+          options.isShouldThrottleRampup()
+              ? writeRampUp.getAvailableWriteCountBudget(instantSinceEpoch)
+              : Integer.MAX_VALUE;
       int nextBatchMaxCount = wb.nextBatchMaxCount(instantSinceEpoch);
       int batchMaxCount =
           Ints.min(
@@ -651,7 +660,7 @@ final class RpcQosImpl implements RpcQos {
       long calculatedGrowth =
           (durationSinceFirst.getStandardMinutes() - rampUpIntervalMinutes) / rampUpIntervalMinutes;
       long growth = Math.max(0, calculatedGrowth);
-      return baseBatchBudget * Math.pow(1.5, growth);
+      return baseBatchBudget * Math.pow(1.5, (double) growth);
     }
 
     void recordWriteCount(Instant instant, int numWrites) {
@@ -799,7 +808,8 @@ final class RpcQosImpl implements RpcQos {
 
       double currentIntervalMillis =
           Math.min(
-              initialBackoff.getMillis() * Math.pow(1.5, attempt - 1), MAX_BACKOFF.getMillis());
+              initialBackoff.getMillis() * Math.pow(1.5, attempt - 1),
+              (double) MAX_BACKOFF.getMillis());
       double randomOffset =
           (rand.nextDouble() * 2 - 1) * RANDOMIZATION_FACTOR * currentIntervalMillis;
       long nextBackoffMillis = Math.round(currentIntervalMillis + randomOffset);
@@ -808,7 +818,7 @@ final class RpcQosImpl implements RpcQos {
       nextBackoffMillis = Math.min(nextBackoffMillis, remainingCumulative.getMillis());
 
       // Update state and return backoff.
-      cumulativeBackoff = cumulativeBackoff.plus(nextBackoffMillis);
+      cumulativeBackoff = cumulativeBackoff.plus(Duration.millis(nextBackoffMillis));
       attempt += 1;
       return new BackoffDuration(Duration.millis(nextBackoffMillis));
     }
@@ -935,7 +945,7 @@ final class RpcQosImpl implements RpcQos {
     }
   }
 
-  static class FlushBufferImpl<T, ElementT extends Element<T>> implements FlushBuffer<ElementT> {
+  static class FlushBufferImpl<ElementT extends Element<?>> implements FlushBuffer<ElementT> {
 
     final int nextBatchMaxCount;
     final long nextBatchMaxBytes;
@@ -1067,6 +1077,11 @@ final class RpcQosImpl implements RpcQos {
     @Override
     public String getName() {
       return name;
+    }
+
+    @Override
+    public Map<String, String> getLabels() {
+      return ImmutableMap.<String, String>of();
     }
   }
 }

@@ -17,9 +17,14 @@
  */
 package org.apache.beam.sdk.extensions.sql.impl.rel;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
+
 import java.math.BigDecimal;
+import java.time.Instant;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.extensions.sql.impl.BeamTableStatistics;
+import org.apache.beam.sdk.extensions.sql.impl.planner.BeamRelMetadataQuery;
 import org.apache.beam.sdk.extensions.sql.impl.planner.NodeStats;
 import org.apache.beam.sdk.extensions.sql.meta.provider.test.TestBoundedTable;
 import org.apache.beam.sdk.extensions.sql.meta.provider.test.TestUnboundedTable;
@@ -27,13 +32,13 @@ import org.apache.beam.sdk.runners.TransformHierarchy;
 import org.apache.beam.sdk.schemas.FieldAccessDescriptor;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.testing.TestPipeline;
+import org.apache.beam.sdk.transforms.DoFnSchemaInformation;
 import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.transforms.reflect.DoFnSignature;
-import org.apache.beam.sdk.transforms.reflect.DoFnSignatures;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PValue;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.RelNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelNode;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.joda.time.DateTime;
 import org.joda.time.Duration;
 import org.junit.Assert;
@@ -118,7 +123,9 @@ public class BeamCalcRelTest extends BaseRelTest {
 
     Assert.assertTrue(root instanceof BeamCalcRel);
 
-    NodeStats estimate = BeamSqlRelUtils.getNodeStats(root, root.getCluster().getMetadataQuery());
+    NodeStats estimate =
+        BeamSqlRelUtils.getNodeStats(
+            root, ((BeamRelMetadataQuery) root.getCluster().getMetadataQuery()));
 
     Assert.assertEquals(5d, estimate.getRowCount(), 0.001);
     Assert.assertEquals(5d, estimate.getWindow(), 0.001);
@@ -133,7 +140,9 @@ public class BeamCalcRelTest extends BaseRelTest {
 
     Assert.assertTrue(root instanceof BeamCalcRel);
 
-    NodeStats estimate = BeamSqlRelUtils.getNodeStats(root, root.getCluster().getMetadataQuery());
+    NodeStats estimate =
+        BeamSqlRelUtils.getNodeStats(
+            root, ((BeamRelMetadataQuery) root.getCluster().getMetadataQuery()));
 
     Assert.assertTrue(5d > estimate.getRowCount());
     Assert.assertTrue(5d > estimate.getWindow());
@@ -149,9 +158,11 @@ public class BeamCalcRelTest extends BaseRelTest {
     RelNode geqRoot = env.parseQuery(geqSql);
 
     NodeStats equalEstimate =
-        BeamSqlRelUtils.getNodeStats(equalRoot, equalRoot.getCluster().getMetadataQuery());
+        BeamSqlRelUtils.getNodeStats(
+            equalRoot, ((BeamRelMetadataQuery) equalRoot.getCluster().getMetadataQuery()));
     NodeStats geqEstimate =
-        BeamSqlRelUtils.getNodeStats(geqRoot, geqRoot.getCluster().getMetadataQuery());
+        BeamSqlRelUtils.getNodeStats(
+            geqRoot, ((BeamRelMetadataQuery) geqRoot.getCluster().getMetadataQuery()));
 
     Assert.assertTrue(geqEstimate.getRowCount() > equalEstimate.getRowCount());
     Assert.assertTrue(geqEstimate.getWindow() > equalEstimate.getWindow());
@@ -166,10 +177,12 @@ public class BeamCalcRelTest extends BaseRelTest {
     RelNode doubleEqualRoot = env.parseQuery(doubleEqualSql);
 
     NodeStats equalEstimate =
-        BeamSqlRelUtils.getNodeStats(equalRoot, equalRoot.getCluster().getMetadataQuery());
+        BeamSqlRelUtils.getNodeStats(
+            equalRoot, ((BeamRelMetadataQuery) equalRoot.getCluster().getMetadataQuery()));
     NodeStats doubleEqualEstimate =
         BeamSqlRelUtils.getNodeStats(
-            doubleEqualRoot, doubleEqualRoot.getCluster().getMetadataQuery());
+            doubleEqualRoot,
+            ((BeamRelMetadataQuery) doubleEqualRoot.getCluster().getMetadataQuery()));
 
     Assert.assertTrue(doubleEqualEstimate.getRowCount() < equalEstimate.getRowCount());
     Assert.assertTrue(doubleEqualEstimate.getWindow() < equalEstimate.getWindow());
@@ -204,18 +217,15 @@ public class BeamCalcRelTest extends BaseRelTest {
 
     ParDo.MultiOutput<Row, Row> pardo =
         (ParDo.MultiOutput<Row, Row>) nodeGetter.producer.getTransform();
-    DoFnSignature sig = DoFnSignatures.getSignature(pardo.getFn().getClass());
+    PCollection<Row> input =
+        (PCollection<Row>) Iterables.getOnlyElement(nodeGetter.producer.getInputs().values());
 
-    Assert.assertEquals(1, sig.fieldAccessDeclarations().size());
-    DoFnSignature.FieldAccessDeclaration dec =
-        sig.fieldAccessDeclarations().values().iterator().next();
-    FieldAccessDescriptor fieldAccess = (FieldAccessDescriptor) dec.field().get(pardo.getFn());
+    DoFnSchemaInformation info = ParDo.getDoFnSchemaInformation(pardo.getFn(), input);
+
+    FieldAccessDescriptor fieldAccess = info.getFieldAccessDescriptor();
 
     Assert.assertTrue(fieldAccess.referencesSingleField());
-
-    fieldAccess =
-        fieldAccess.resolve(nodeGetter.producer.getInputs().values().iterator().next().getSchema());
-    Assert.assertEquals("order_id", fieldAccess.fieldNamesAccessed().iterator().next());
+    Assert.assertEquals("order_id", Iterables.getOnlyElement(fieldAccess.fieldNamesAccessed()));
 
     pipeline.run().waitUntilFinish();
   }
@@ -231,17 +241,33 @@ public class BeamCalcRelTest extends BaseRelTest {
 
     ParDo.MultiOutput<Row, Row> pardo =
         (ParDo.MultiOutput<Row, Row>) nodeGetter.producer.getTransform();
-    DoFnSignature sig = DoFnSignatures.getSignature(pardo.getFn().getClass());
+    PCollection<Row> input =
+        (PCollection<Row>) Iterables.getOnlyElement(nodeGetter.producer.getInputs().values());
 
-    Assert.assertEquals(1, sig.fieldAccessDeclarations().size());
-    DoFnSignature.FieldAccessDeclaration dec =
-        sig.fieldAccessDeclarations().values().iterator().next();
-    FieldAccessDescriptor fieldAccess = (FieldAccessDescriptor) dec.field().get(pardo.getFn());
+    DoFnSchemaInformation info = ParDo.getDoFnSchemaInformation(pardo.getFn(), input);
+
+    FieldAccessDescriptor fieldAccess = info.getFieldAccessDescriptor();
 
     Assert.assertFalse(fieldAccess.getAllFields());
     Assert.assertTrue(fieldAccess.getFieldsAccessed().isEmpty());
     Assert.assertTrue(fieldAccess.getNestedFieldsAccessed().isEmpty());
 
     pipeline.run().waitUntilFinish();
+  }
+
+  @Test
+  public void testTimestampToCalciteMillisAcceptsMillisecondPrecision() {
+    Instant instant = Instant.parse("2025-07-31T20:17:40.123Z");
+    assertEquals(instant.toEpochMilli(), BeamCalcRel.timestampToCalciteMillis(instant));
+  }
+
+  @Test
+  public void testTimestampToCalciteMillisRejectsSubMillisecondPrecision() {
+    Instant instant = Instant.parse("2025-07-31T20:17:40.123456Z");
+    UnsupportedOperationException thrown =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () -> BeamCalcRel.timestampToCalciteMillis(instant));
+    Assert.assertTrue(thrown.getMessage().contains("sub-millisecond"));
   }
 }

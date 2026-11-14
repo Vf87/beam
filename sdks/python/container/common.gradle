@@ -22,35 +22,74 @@ description = "Apache Beam :: SDKs :: Python :: Container :: Python ${pythonVers
 
 configurations {
   sdkSourceTarball
-  sdkHarnessLauncher
+  pythonHarnessLauncher
 }
 
 dependencies {
   sdkSourceTarball project(path: ":sdks:python", configuration: "distTarBall")
-  sdkHarnessLauncher project(path: ":sdks:python:container", configuration: "sdkHarnessLauncher")
+  pythonHarnessLauncher project(path: ":sdks:python:container", configuration: "pythonHarnessLauncher")
 }
 
-task copyDockerfileDependencies(type: Copy) {
+def generatePythonRequirements = tasks.register("generatePythonRequirements") {
+  dependsOn ':sdks:python:sdist'
+  def pipExtraOptions = project.hasProperty("testRCDependencies") ? "--pre" : ""
+  def runScriptsPath = "${rootDir}/sdks/python/container/run_generate_requirements.sh"
+  doLast {
+    exec {
+      executable 'sh'
+      args '-c', "cd ${rootDir} && ${runScriptsPath} " +
+              "${project.ext.pythonVersion} " +
+              "${files(configurations.sdkSourceTarball.files).singleFile} " +
+              "base_image_requirements.txt " +
+              "container " +
+              "[gcp,dataframe,test,tfrecord,yaml] " +
+              "${pipExtraOptions}"
+    }
+    // Generate versions for ML dependencies
+    // Skip for 3.14 since there isn't a tensorflow release that supports it
+    // yet.
+    if ("${project.ext.pythonVersion}" != "3.14") {
+      exec {
+        executable 'sh'
+        args '-c', "cd ${rootDir} && ${runScriptsPath} " +
+                "${project.ext.pythonVersion} " +
+                "${files(configurations.sdkSourceTarball.files).singleFile} " +
+                "base_image_requirements.txt " +
+              "container/ml " +
+              "[gcp,dataframe,test,ml_cpu,tfrecord,yaml] " +
+              "${pipExtraOptions}"
+    }
+    }
+  }
+}
+
+def copyDockerfileDependencies = tasks.register("copyDockerfileDependencies", Copy) {
   from configurations.sdkSourceTarball
-  from file("../base_image_requirements.txt")
+  from file("base_image_requirements.txt")
   into "build/target"
   if(configurations.sdkSourceTarball.isEmpty()) {
       throw new StopExecutionException();
   }
 }
 
-task copyLicenseScripts(type: Copy){
+def copyLicenseScripts = tasks.register("copyLicenseScripts", Copy){
   from ("../license_scripts")
   into "build/target/license_scripts"
 }
 
-task copyLauncherDependencies(type: Copy) {
-  from configurations.sdkHarnessLauncher
+def copyLauncherDependencies = tasks.register("copyLauncherDependencies", Copy) {
+  from configurations.pythonHarnessLauncher
   into "build/target/launcher"
-  if(configurations.sdkHarnessLauncher.isEmpty()) {
+
+  // Avoid seemingly gradle bug stated in https://github.com/apache/beam/issues/29220
+  mustRunAfter "copyLicenses"
+
+  if(configurations.pythonHarnessLauncher.isEmpty()) {
       throw new StopExecutionException();
   }
 }
+
+def pushContainers = project.rootProject.hasProperty(["isRelease"]) || project.rootProject.hasProperty("push-containers")
 
 docker {
   name containerImageName(
@@ -66,23 +105,28 @@ docker {
   buildArgs(['py_version': "${project.ext.pythonVersion}",
              'pull_licenses': project.rootProject.hasProperty(["docker-pull-licenses"]) ||
                      project.rootProject.hasProperty(["isRelease"])])
+  buildx project.useBuildx()
+  platform(*project.containerPlatforms())
+  load project.useBuildx() && !pushContainers
+  push pushContainers
 }
 
 dockerPrepare.dependsOn copyLauncherDependencies
 dockerPrepare.dependsOn copyDockerfileDependencies
 dockerPrepare.dependsOn copyLicenseScripts
 
-if (project.rootProject.hasProperty(["docker-pull-licenses"])) {
-  task copyGolangLicenses(type: Copy) {
+if (project.rootProject.hasProperty("docker-pull-licenses")) {
+  def copyGolangLicenses = tasks.register("copyGolangLicenses", Copy) {
     from "${project(':release:go-licenses:py').buildDir}/output"
     into "build/target/go-licenses"
     dependsOn ':release:go-licenses:py:createLicenses'
   }
-  dockerPrepare.dependsOn 'copyGolangLicenses'
+  dockerPrepare.dependsOn copyGolangLicenses
 } else {
-  task skipPullLicenses(type: Exec) {
+  def skipPullLicenses = tasks.register("skipPullLicenses", Exec) {
     executable "sh"
-    args "-c", "mkdir -p build/target/go-licenses"
+    // Touch a dummy file to ensure the directory exists.
+    args "-c", "mkdir -p build/target/go-licenses && touch build/target/go-licenses/skip"
   }
-  dockerPrepare.dependsOn 'skipPullLicenses'
+  dockerPrepare.dependsOn skipPullLicenses
 }

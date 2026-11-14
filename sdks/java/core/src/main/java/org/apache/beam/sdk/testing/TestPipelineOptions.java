@@ -48,9 +48,8 @@ public interface TestPipelineOptions extends PipelineOptions {
 
   void setOnSuccessMatcher(SerializableMatcher<PipelineResult> value);
 
-  @Default.Long(10 * 60)
-  @Nullable
-  Long getTestTimeoutSeconds();
+  @Default.Long(15 * 60)
+  @Nullable Long getTestTimeoutSeconds();
 
   void setTestTimeoutSeconds(Long value);
 

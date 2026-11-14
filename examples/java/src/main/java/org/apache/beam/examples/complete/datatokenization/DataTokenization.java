@@ -19,7 +19,7 @@ package org.apache.beam.examples.complete.datatokenization;
 
 import static org.apache.beam.examples.complete.datatokenization.utils.DurationUtils.parseDuration;
 import static org.apache.beam.examples.complete.datatokenization.utils.SchemasUtils.DEADLETTER_SCHEMA;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -78,7 +78,7 @@ import org.slf4j.LoggerFactory;
  *       <ul>
  *         <li>File system (Only JSON or CSV)
  *         <li><a href=https://cloud.google.com/bigquery>Google Cloud BigQuery</a>
- *         <li><a href=https://cloud.google.com/bigtable>Cloud BigTable</a>
+ *         <li><a href=https://cloud.google.com/bigtable>Cloud Bigtable</a>
  *       </ul>
  *   <li>A configured tokenization server
  * </ul>
@@ -91,7 +91,7 @@ import org.slf4j.LoggerFactory;
  * to execute the pipeline:
  *   {@code
  *   task execute (type:JavaExec) {
- *      main = System.getProperty("mainClass")
+ *      mainClass = System.getProperty("mainClass")
  *      classpath = sourceSets.main.runtimeClasspath
  *      systemProperties System.getProperties()
  *      args System.getProperty("exec.args", "").split()
@@ -138,13 +138,13 @@ import org.slf4j.LoggerFactory;
  *         - <b><i>bigQueryTableName</i></b>: Cloud BigQuery table name to write into
  *         - <b><i>tempLocation</i></b>: Folder in a Google Cloud Storage bucket, which is needed for
  *           BigQuery to handle data writing
- *     - Cloud BigTable
- *         - <b><i>bigTableProjectId</i></b>: Id of the project where the Cloud BigTable instance to write into
+ *     - Cloud Bigtable
+ *         - <b><i>bigTableProjectId</i></b>: Id of the project where the Cloud Bigtable instance to write into
  *           is located
- *         - <b><i>bigTableInstanceId</i></b>: Id of the Cloud BigTable instance to write into
- *         - <b><i>bigTableTableId</i></b>: Id of the Cloud BigTable table to write into
- *         - <b><i>bigTableKeyColumnName</i></b>: Column name to use as a key in Cloud BigTable
- *         - <b><i>bigTableColumnFamilyName</i></b>: Column family name to use in Cloud BigTable
+ *         - <b><i>bigTableInstanceId</i></b>: Id of the Cloud Bigtable instance to write into
+ *         - <b><i>bigTableTableId</i></b>: Id of the Cloud Bigtable table to write into
+ *         - <b><i>bigTableKeyColumnName</i></b>: Column name to use as a key in Cloud Bigtable
+ *         - <b><i>bigTableColumnFamilyName</i></b>: Column family name to use in Cloud Bigtable
  * - RPC server parameters
  *     - <b><i>rpcUri</i></b>: URI for the API calls to RPC server
  *     - <b><i>batchSize</i></b>: Size of the batch to send to RPC server per request
@@ -215,7 +215,7 @@ public class DataTokenization {
    * @param options The execution options.
    * @return The pipeline result.
    */
-  @SuppressWarnings({"dereference.of.nullable", "argument.type.incompatible"})
+  @SuppressWarnings({"dereference.of.nullable", "argument"})
   public static PipelineResult run(DataTokenizationOptions options) {
     SchemasUtils schema = null;
     try {
@@ -335,7 +335,7 @@ public class DataTokenization {
           .write(tokenizedRows.get(TOKENIZATION_OUT), schema.getBeamSchema());
     } else {
       throw new IllegalStateException(
-          "No sink is provided, please configure BigQuery or BigTable.");
+          "No sink is provided, please configure BigQuery or Bigtable.");
     }
 
     return pipeline.run();

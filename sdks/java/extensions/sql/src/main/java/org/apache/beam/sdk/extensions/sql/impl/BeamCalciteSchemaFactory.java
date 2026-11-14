@@ -23,20 +23,24 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.ServiceLoader;
 import java.util.Set;
+import org.apache.beam.sdk.extensions.sql.meta.catalog.CatalogManager;
+import org.apache.beam.sdk.extensions.sql.meta.catalog.EmptyCatalogManager;
+import org.apache.beam.sdk.extensions.sql.meta.catalog.InMemoryCatalogManager;
 import org.apache.beam.sdk.extensions.sql.meta.provider.ReadOnlyTableProvider;
 import org.apache.beam.sdk.extensions.sql.meta.provider.TableProvider;
 import org.apache.beam.sdk.extensions.sql.meta.store.InMemoryMetaStore;
 import org.apache.beam.sdk.extensions.sql.meta.store.MetaStore;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.jdbc.CalciteConnection;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.linq4j.tree.Expression;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.type.RelProtoDataType;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.Function;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.Schema;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.SchemaFactory;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.SchemaPlus;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.SchemaVersion;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.Table;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.jdbc.CalciteConnection;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.tree.Expression;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelProtoDataType;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.Function;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.Schema;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.SchemaFactory;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.SchemaPlus;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.SchemaVersion;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.Table;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
  * Factory classes that Calcite uses to create initial schema for JDBC connection.
@@ -54,9 +58,6 @@ import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.Table;
  * <p>{@link Empty} is an override used in {@link JdbcDriver#connect(TableProvider,
  * org.apache.beam.sdk.options.PipelineOptions)} to avoid loading all available table providers.
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 class BeamCalciteSchemaFactory {
 
   /**
@@ -64,8 +65,15 @@ class BeamCalciteSchemaFactory {
    * actual {@link BeamCalciteSchema}.
    */
   static TableProvider fromInitialEmptySchema(JdbcConnection jdbcConnection) {
-    InitialEmptySchema initialEmptySchema = jdbcConnection.getCurrentBeamSchema();
+    InitialEmptySchema initialEmptySchema =
+        (InitialEmptySchema) jdbcConnection.getCurrentBeamSchema();
     return initialEmptySchema.getTableProvider();
+  }
+
+  static CatalogManager catalogFromInitialEmptySchema(JdbcConnection jdbcConnection) {
+    InitialEmptySchema initialEmptySchema =
+        (InitialEmptySchema) jdbcConnection.getCurrentBeamSchema();
+    return initialEmptySchema.getCatalogManager();
   }
 
   /**
@@ -92,6 +100,16 @@ class BeamCalciteSchemaFactory {
       return metaStore;
     }
 
+    @Override
+    public CatalogManager getCatalogManager() {
+      CatalogManager catalogManager = new InMemoryCatalogManager();
+      for (TableProvider provider :
+          ServiceLoader.load(TableProvider.class, getClass().getClassLoader())) {
+        catalogManager.registerTableProvider(provider);
+      }
+      return catalogManager;
+    }
+
     /** This is what Calcite calls to create an instance of the default top level schema. */
     @Override
     public Schema create(SchemaPlus parentSchema, String name, Map<String, Object> operand) {
@@ -109,6 +127,7 @@ class BeamCalciteSchemaFactory {
 
     private static final TableProvider READ_ONLY_TABLE_PROVIDER =
         new ReadOnlyTableProvider("empty", ImmutableMap.of());
+    private static final CatalogManager READ_ONLY_CATALOG_MANAGER = new EmptyCatalogManager();
 
     /**
      * We call this in {@link #fromInitialEmptySchema(JdbcConnection)} to convert the schema created
@@ -119,6 +138,11 @@ class BeamCalciteSchemaFactory {
     @Override
     public TableProvider getTableProvider() {
       return READ_ONLY_TABLE_PROVIDER;
+    }
+
+    @Override
+    public CatalogManager getCatalogManager() {
+      return READ_ONLY_CATALOG_MANAGER;
     }
 
     /** This is what Calcite calls to create an instance of the top level schema. */
@@ -141,6 +165,8 @@ class BeamCalciteSchemaFactory {
   public abstract static class InitialEmptySchema implements Schema {
 
     public abstract TableProvider getTableProvider();
+
+    public abstract CatalogManager getCatalogManager();
 
     @Override
     public Table getTable(String name) {
@@ -183,7 +209,7 @@ class BeamCalciteSchemaFactory {
     }
 
     @Override
-    public Expression getExpression(SchemaPlus parentSchema, String name) {
+    public Expression getExpression(@Nullable SchemaPlus parentSchema, String name) {
       return illegal();
     }
 

@@ -64,6 +64,11 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=<GrafanaPasswordHere>
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_NAME=Beam
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_ANONYMOUS_HIDE_VERSION=true
+      - GF_EXPLORE_ENABLED=false
+      - GF_USERS_VIEWERS_CAN_EDIT=false
+      - GF_SNAPSHOTS_EXTERNAL_ENABLED=false
       - GF_INSTALL_PLUGINS=marcusolsson-json-datasource
       - PSQL_DB_HOST=beampostgresql
       - PSQL_DB_PORT=5432
@@ -85,24 +90,15 @@ services:
       - DB_DBNAME=beam_metrics
       - DB_DBUSERNAME=admin
       - DB_DBPWD=<PGPasswordHere>
-      - GH_ACCESS_TOKEN=<GithubAccessToken>
+      - GH_APP_ID=<GithubAppID>
+      - GH_APP_INSTALLATION_ID=<GithubAppInstallationID>
+      - GH_PEM_KEY=<GithubPemKey>
+      - GH_NUMBER_OF_WORKFLOW_RUNS_TO_FETCH=30
   syncjenkins:
     image: syncjenkins
     container_name: beamsyncjenkins
     build:
       context: ./sync/jenkins
-      dockerfile: Dockerfile
-    environment:
-      - DB_HOST=beampostgresql
-      - DB_PORT=5432
-      - DB_DBNAME=beam_metrics
-      - DB_DBUSERNAME=admin
-      - DB_DBPWD=<PGPasswordHere>
-  syncjira:
-    image: syncjira
-    container_name: beamsyncjira
-    build:
-      context: ./sync/jira
       dockerfile: Dockerfile
     environment:
       - DB_HOST=beampostgresql

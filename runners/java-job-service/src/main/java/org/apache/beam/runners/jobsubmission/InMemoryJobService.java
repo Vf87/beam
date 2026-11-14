@@ -49,20 +49,20 @@ import org.apache.beam.model.jobmanagement.v1.JobApi.RunJobResponse;
 import org.apache.beam.model.jobmanagement.v1.JobServiceGrpc;
 import org.apache.beam.model.pipeline.v1.Endpoints;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
-import org.apache.beam.runners.core.construction.graph.PipelineValidator;
 import org.apache.beam.runners.fnexecution.artifact.ArtifactStagingService;
 import org.apache.beam.sdk.fn.server.FnService;
 import org.apache.beam.sdk.fn.server.GrpcFnServer;
 import org.apache.beam.sdk.fn.stream.SynchronizedStreamObserver;
 import org.apache.beam.sdk.function.ThrowingConsumer;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.Struct;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.Status;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.StatusException;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.StatusRuntimeException;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.StreamObserver;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Maps;
+import org.apache.beam.sdk.util.construction.Environments;
+import org.apache.beam.sdk.util.construction.graph.PipelineValidator;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.Struct;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Status;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.StatusException;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.StatusRuntimeException;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -76,7 +76,7 @@ import org.slf4j.LoggerFactory;
  * <p>TODO: replace in-memory job management state with persistent solution.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class InMemoryJobService extends JobServiceGrpc.JobServiceImplBase implements FnService {
   private static final Logger LOG = LoggerFactory.getLogger(InMemoryJobService.class);
@@ -128,10 +128,13 @@ public class InMemoryJobService extends JobServiceGrpc.JobServiceImplBase implem
 
   /** Map of preparationId to preparation. */
   private final ConcurrentHashMap<String, JobPreparation> preparations;
+
   /** Map of preparationId to staging token. */
   private final ConcurrentHashMap<String, String> stagingSessionTokens;
+
   /** Map of invocationId to invocation. */
   private final ConcurrentHashMap<String, JobInvocation> invocations;
+
   /** InvocationIds of completed invocations in least-recently-completed order. */
   private final ConcurrentLinkedDeque<String> completedInvocationsIds;
 
@@ -198,11 +201,7 @@ public class InMemoryJobService extends JobServiceGrpc.JobServiceImplBase implem
 
       stagingService
           .getService()
-          .registerJob(
-              stagingSessionToken,
-              Maps.transformValues(
-                  request.getPipeline().getComponents().getEnvironmentsMap(),
-                  RunnerApi.Environment::getDependenciesList));
+          .registerJob(stagingSessionToken, extractDependencies(request.getPipeline()));
 
       // send response
       PrepareJobResponse response =
@@ -280,11 +279,22 @@ public class InMemoryJobService extends JobServiceGrpc.JobServiceImplBase implem
       LOG.warn("Encountered Status Exception", e);
       responseObserver.onError(e);
     } catch (Exception e) {
-      String errMessage =
-          String.format("Encountered Unexpected Exception for Preparation %s", preparationId);
-      LOG.error(errMessage, e);
+      LOG.error("Encountered Unexpected Exception for Preparation {}", preparationId, e);
       responseObserver.onError(Status.INTERNAL.withCause(e).asException());
     }
+  }
+
+  private Map<String, List<RunnerApi.ArtifactInformation>> extractDependencies(
+      RunnerApi.Pipeline pipeline) {
+    Map<String, List<RunnerApi.ArtifactInformation>> dependencies = new HashMap<>();
+    for (Map.Entry<String, RunnerApi.Environment> entry :
+        pipeline.getComponents().getEnvironmentsMap().entrySet()) {
+      List<RunnerApi.Environment> subEnvs = Environments.expandAnyOfEnvironments(entry.getValue());
+      for (int i = 0; i < subEnvs.size(); i++) {
+        dependencies.put(i + ":" + entry.getKey(), subEnvs.get(i).getDependenciesList());
+      }
+    }
+    return dependencies;
   }
 
   private RunnerApi.Pipeline resolveDependencies(RunnerApi.Pipeline pipeline, String stagingToken) {
@@ -293,20 +303,30 @@ public class InMemoryJobService extends JobServiceGrpc.JobServiceImplBase implem
     Map<String, RunnerApi.Environment> newEnvironments = new HashMap<>();
     for (Map.Entry<String, RunnerApi.Environment> entry :
         pipeline.getComponents().getEnvironmentsMap().entrySet()) {
-      if (entry.getValue().getDependenciesCount() > 0 && resolvedDependencies == null) {
-        throw new RuntimeException(
-            "Artifact dependencies provided but not staged for " + entry.getKey());
+      List<RunnerApi.Environment> subEnvs = Environments.expandAnyOfEnvironments(entry.getValue());
+      List<RunnerApi.Environment> newSubEnvs = new ArrayList<>();
+      for (int i = 0; i < subEnvs.size(); i++) {
+        RunnerApi.Environment subEnv = subEnvs.get(i);
+        if (subEnv.getDependenciesCount() > 0 && resolvedDependencies == null) {
+          throw new RuntimeException(
+              "Artifact dependencies provided but not staged for " + entry.getKey());
+        }
+        newSubEnvs.add(
+            subEnv.getDependenciesCount() == 0
+                ? subEnv
+                : subEnv.toBuilder()
+                    .clearDependencies()
+                    .addAllDependencies(resolvedDependencies.get(i + ":" + entry.getKey()))
+                    .build());
       }
-      newEnvironments.put(
-          entry.getKey(),
-          entry.getValue().getDependenciesCount() == 0
-              ? entry.getValue()
-              : entry
-                  .getValue()
-                  .toBuilder()
-                  .clearDependencies()
-                  .addAllDependencies(resolvedDependencies.get(entry.getKey()))
-                  .build());
+      if (newSubEnvs.size() == 1) {
+        newEnvironments.put(entry.getKey(), newSubEnvs.get(0));
+      } else {
+        newEnvironments.put(
+            entry.getKey(),
+            Environments.createAnyOfEnvironment(
+                newSubEnvs.toArray(new RunnerApi.Environment[newSubEnvs.size()])));
+      }
     }
     RunnerApi.Pipeline.Builder builder = pipeline.toBuilder();
     builder.getComponentsBuilder().clearEnvironments().putAllEnvironments(newEnvironments);
@@ -343,9 +363,7 @@ public class InMemoryJobService extends JobServiceGrpc.JobServiceImplBase implem
     } catch (StatusRuntimeException | StatusException e) {
       responseObserver.onError(e);
     } catch (Exception e) {
-      String errMessage =
-          String.format("Encountered Unexpected Exception for Invocation %s", invocationId);
-      LOG.error(errMessage, e);
+      LOG.error("Encountered Unexpected Exception for Invocation {}", invocationId, e);
       responseObserver.onError(Status.INTERNAL.withCause(e).asException());
     }
   }
@@ -365,9 +383,7 @@ public class InMemoryJobService extends JobServiceGrpc.JobServiceImplBase implem
     } catch (StatusRuntimeException | StatusException e) {
       responseObserver.onError(e);
     } catch (Exception e) {
-      String errMessage =
-          String.format("Encountered Unexpected Exception for Invocation %s", invocationId);
-      LOG.error(errMessage, e);
+      LOG.error("Encountered Unexpected Exception for Invocation {}", invocationId, e);
       responseObserver.onError(Status.INTERNAL.withCause(e).asException());
     }
   }
@@ -386,9 +402,7 @@ public class InMemoryJobService extends JobServiceGrpc.JobServiceImplBase implem
     } catch (StatusRuntimeException | StatusException e) {
       responseObserver.onError(e);
     } catch (Exception e) {
-      String errMessage =
-          String.format("Encountered Unexpected Exception for Invocation %s", invocationId);
-      LOG.error(errMessage, e);
+      LOG.error("Encountered Unexpected Exception for Invocation {}", invocationId, e);
       responseObserver.onError(Status.INTERNAL.withCause(e).asException());
     }
   }
@@ -412,9 +426,7 @@ public class InMemoryJobService extends JobServiceGrpc.JobServiceImplBase implem
     } catch (StatusRuntimeException | StatusException e) {
       responseObserver.onError(e);
     } catch (Exception e) {
-      String errMessage =
-          String.format("Encountered Unexpected Exception for Invocation %s", invocationId);
-      LOG.error(errMessage, e);
+      LOG.error("Encountered Unexpected Exception for Invocation {}", invocationId, e);
       responseObserver.onError(Status.INTERNAL.withCause(e).asException());
     }
   }
@@ -452,9 +464,7 @@ public class InMemoryJobService extends JobServiceGrpc.JobServiceImplBase implem
     } catch (StatusRuntimeException | StatusException e) {
       responseObserver.onError(e);
     } catch (Exception e) {
-      String errMessage =
-          String.format("Encountered Unexpected Exception for Invocation %s", invocationId);
-      LOG.error(errMessage, e);
+      LOG.error("Encountered Unexpected Exception for Invocation {}", invocationId, e);
       responseObserver.onError(Status.INTERNAL.withCause(e).asException());
     }
   }
@@ -478,7 +488,7 @@ public class InMemoryJobService extends JobServiceGrpc.JobServiceImplBase implem
     } catch (StatusRuntimeException | StatusException e) {
       responseObserver.onError(e);
     } catch (Exception e) {
-      LOG.error(String.format("Encountered exception for job invocation %s", invocationId), e);
+      LOG.error("Encountered exception for job invocation {}", invocationId, e);
       responseObserver.onError(Status.INTERNAL.withCause(e).asException());
     }
     LOG.info("Finished getting job metrics for {}", invocationId);

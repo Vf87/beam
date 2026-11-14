@@ -18,8 +18,9 @@
 package org.apache.beam.sdk.io.gcp.bigquery;
 
 import static org.apache.beam.sdk.values.TypeDescriptors.extractFromTypeParameters;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
+import com.google.api.services.bigquery.model.TableConstraints;
 import com.google.api.services.bigquery.model.TableSchema;
 import java.io.Serializable;
 import java.util.List;
@@ -32,7 +33,7 @@ import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
 import org.apache.beam.sdk.values.ValueInSingleWindow;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -73,9 +74,6 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * be a compact type with an efficient coder, as these objects may be used as a key in a {@link
  * org.apache.beam.sdk.transforms.GroupByKey}.
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public abstract class DynamicDestinations<T, DestinationT> implements Serializable {
   interface SideInputAccessor {
     <SideInputT> SideInputT sideInput(PCollectionView<SideInputT> view);
@@ -83,6 +81,33 @@ public abstract class DynamicDestinations<T, DestinationT> implements Serializab
 
   private transient @Nullable SideInputAccessor sideInputAccessor;
   private transient @Nullable PipelineOptions options;
+
+  static class SideInputAccessorViaOnTimerContext implements SideInputAccessor {
+    private DoFn<?, ?>.OnTimerContext onTimerContext;
+
+    public SideInputAccessorViaOnTimerContext(DoFn<?, ?>.OnTimerContext onTimerContext) {
+      this.onTimerContext = onTimerContext;
+    }
+
+    @Override
+    public <SideInputT> SideInputT sideInput(PCollectionView<SideInputT> view) {
+      return onTimerContext.sideInput(view);
+    }
+  }
+
+  static class SideInputAccessorViaOnWindowExpirationContext implements SideInputAccessor {
+    private DoFn<?, ?>.OnWindowExpirationContext onWindowExpirationContext;
+
+    public SideInputAccessorViaOnWindowExpirationContext(
+        DoFn<?, ?>.OnWindowExpirationContext onWindowExpirationContext) {
+      this.onWindowExpirationContext = onWindowExpirationContext;
+    }
+
+    @Override
+    public <SideInputT> SideInputT sideInput(PCollectionView<SideInputT> view) {
+      return onWindowExpirationContext.sideInput(view);
+    }
+  }
 
   static class SideInputAccessorViaProcessContext implements SideInputAccessor {
     private DoFn<?, ?>.ProcessContext processContext;
@@ -98,8 +123,7 @@ public abstract class DynamicDestinations<T, DestinationT> implements Serializab
   }
 
   /** Get the current PipelineOptions if set. */
-  @Nullable
-  PipelineOptions getPipelineOptions() {
+  @Nullable PipelineOptions getPipelineOptions() {
     return options;
   }
 
@@ -120,6 +144,9 @@ public abstract class DynamicDestinations<T, DestinationT> implements Serializab
         "View %s not declared in getSideInputs() (%s)",
         view,
         getSideInputs());
+    if (sideInputAccessor == null) {
+      throw new IllegalStateException("sideInputAccessor (transient field) is null");
+    }
     return sideInputAccessor.sideInput(view);
   }
 
@@ -128,11 +155,26 @@ public abstract class DynamicDestinations<T, DestinationT> implements Serializab
     this.options = context.getPipelineOptions();
   }
 
+  void setSideInputAccessorFromOnTimerContext(DoFn<?, ?>.OnTimerContext context) {
+    this.sideInputAccessor = new SideInputAccessorViaOnTimerContext(context);
+    this.options = context.getPipelineOptions();
+  }
+
+  void setSideInputAccessorFromOnWindowExpirationContext(
+      DoFn<?, ?>.OnWindowExpirationContext context) {
+    this.sideInputAccessor = new SideInputAccessorViaOnWindowExpirationContext(context);
+    this.options = context.getPipelineOptions();
+  }
+
   /**
    * Returns an object that represents at a high level which table is being written to. May not
    * return null.
+   *
+   * <p>The method must return a unique object for different destination tables involved over all
+   * BigQueryIO write transforms in the same pipeline. See
+   * https://github.com/apache/beam/issues/32335 for details.
    */
-  public abstract DestinationT getDestination(ValueInSingleWindow<T> element);
+  public abstract DestinationT getDestination(@Nullable ValueInSingleWindow<T> element);
 
   /**
    * Returns the coder for {@link DestinationT}. If this is not overridden, then {@link BigQueryIO}
@@ -151,8 +193,16 @@ public abstract class DynamicDestinations<T, DestinationT> implements Serializab
    */
   public abstract TableDestination getTable(DestinationT destination);
 
-  /** Returns the table schema for the destination. May not return null. */
-  public abstract TableSchema getSchema(DestinationT destination);
+  /** Returns the table schema for the destination. */
+  public abstract @Nullable TableSchema getSchema(DestinationT destination);
+
+  /**
+   * Returns TableConstraints (including primary and foreign key) to be used when creating the
+   * table. Note: this is not currently supported when using FILE_LOADS!.
+   */
+  public @Nullable TableConstraints getTableConstraints(DestinationT destination) {
+    return null;
+  }
 
   // Gets the destination coder. If the user does not provide one, try to find one in the coder
   // registry. If no coder can be found, throws CannotProvideCoderException.

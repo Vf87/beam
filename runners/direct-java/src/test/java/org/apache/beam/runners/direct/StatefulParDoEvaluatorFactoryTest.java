@@ -21,8 +21,8 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Matchers.anyList;
-import static org.mockito.Matchers.eq;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 import java.io.Serializable;
@@ -33,7 +33,6 @@ import org.apache.beam.runners.core.KeyedWorkItem;
 import org.apache.beam.runners.core.KeyedWorkItems;
 import org.apache.beam.runners.core.ReadyCheckingSideInputReader;
 import org.apache.beam.runners.core.StateInternals;
-import org.apache.beam.runners.core.construction.TransformInputs;
 import org.apache.beam.runners.direct.ParDoMultiOverrideFactory.StatefulParDo;
 import org.apache.beam.runners.direct.WatermarkManager.TimerUpdate;
 import org.apache.beam.runners.direct.WatermarkManager.TransformWatermarks;
@@ -61,7 +60,7 @@ import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.transforms.windowing.Window;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.construction.TransformInputs;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
@@ -69,9 +68,11 @@ import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Before;
@@ -79,7 +80,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-import org.mockito.Matchers;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
@@ -87,7 +88,10 @@ import org.mockito.MockitoAnnotations;
 /** Tests for {@link StatefulParDoEvaluatorFactory}. */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  // TODO(https://github.com/apache/beam/issues/21230): Remove when new version of
+  // errorprone is released (2.11.0)
+  "unused"
 })
 public class StatefulParDoEvaluatorFactoryTest implements Serializable {
   @Mock private transient EvaluationContext mockEvaluationContext;
@@ -153,6 +157,7 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
             .apply(
                 new ParDoMultiOverrideFactory.GbkThenStatefulParDo<>(
                     new DoFn<KV<String, Integer>, Integer>() {
+
                       @StateId(stateId)
                       private final StateSpec<ValueState<String>> spec =
                           StateSpecs.value(StringUtf8Coder.of());
@@ -183,13 +188,14 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
             eq(producingTransform), Mockito.<StructuralKey>any()))
         .thenReturn(mockExecutionContext);
     when(mockExecutionContext.getStepContext(any())).thenReturn(mockStepContext);
-    when(mockEvaluationContext.createBundle(Matchers.<PCollection<Integer>>any()))
+    when(mockEvaluationContext.createBundle(ArgumentMatchers.<PCollection<Integer>>any()))
         .thenReturn(mockUncommittedBundle);
     when(mockStepContext.getTimerUpdate()).thenReturn(TimerUpdate.empty());
 
     // And digging to check whether the window is ready
     when(mockEvaluationContext.createSideInputReader(anyList())).thenReturn(mockSideInputReader);
-    when(mockSideInputReader.isReady(Matchers.any(), Matchers.any())).thenReturn(false);
+    when(mockSideInputReader.isReady(ArgumentMatchers.any(), ArgumentMatchers.any()))
+        .thenReturn(false);
 
     IntervalWindow firstWindow = new IntervalWindow(new Instant(0), new Instant(9));
 
@@ -198,7 +204,7 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
     // depend on the window.
     String key = "hello";
     WindowedValue<KV<String, Integer>> firstKv =
-        WindowedValue.of(KV.of(key, 1), new Instant(3), firstWindow, PaneInfo.NO_FIRING);
+        WindowedValues.of(KV.of(key, 1), new Instant(3), firstWindow, PaneInfo.NO_FIRING);
 
     WindowedValue<KeyedWorkItem<String, KV<String, Integer>>> gbkOutputElement =
         firstKv.withValue(
@@ -250,8 +256,8 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
     PCollection<KV<String, Integer>> input =
         pipeline.apply(
             Create.timestamped(
-                TimestampedValue.of(KV.of("", 1), now.plus(2)),
-                TimestampedValue.of(KV.of("", 2), now.plus(1)),
+                TimestampedValue.of(KV.of("", 1), now.plus(Duration.millis(2))),
+                TimestampedValue.of(KV.of("", 2), now.plus(Duration.millis(1))),
                 TimestampedValue.of(KV.of("", 3), now)));
     PCollection<String> result = input.apply(ParDo.of(statefulConcat()));
     PAssert.that(result).containsInAnyOrder("3", "3:2", "3:2:1");
@@ -264,9 +270,9 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
     PCollection<KV<String, Integer>> input =
         pipeline.apply(
             TestStream.create(KvCoder.of(StringUtf8Coder.of(), VarIntCoder.of()))
-                .addElements(TimestampedValue.of(KV.of("", 1), now.plus(2)))
-                .addElements(TimestampedValue.of(KV.of("", 2), now.plus(1)))
-                .advanceWatermarkTo(now.plus(1))
+                .addElements(TimestampedValue.of(KV.of("", 1), now.plus(Duration.millis(2))))
+                .addElements(TimestampedValue.of(KV.of("", 2), now.plus(Duration.millis(1))))
+                .advanceWatermarkTo(now.plus(Duration.millis(1)))
                 .addElements(TimestampedValue.of(KV.of("", 3), now))
                 .advanceWatermarkToInfinity());
     PCollection<String> result = input.apply(ParDo.of(statefulConcat()));
@@ -281,9 +287,9 @@ public class StatefulParDoEvaluatorFactoryTest implements Serializable {
         pipeline
             .apply(
                 TestStream.create(KvCoder.of(StringUtf8Coder.of(), VarIntCoder.of()))
-                    .addElements(TimestampedValue.of(KV.of("", 1), now.plus(2)))
-                    .addElements(TimestampedValue.of(KV.of("", 2), now.plus(1)))
-                    .advanceWatermarkTo(now.plus(1))
+                    .addElements(TimestampedValue.of(KV.of("", 1), now.plus(Duration.millis(2))))
+                    .addElements(TimestampedValue.of(KV.of("", 2), now.plus(Duration.millis(1))))
+                    .advanceWatermarkTo(now.plus(Duration.millis(1)))
                     .addElements(TimestampedValue.of(KV.of("", 3), now))
                     .advanceWatermarkToInfinity())
             .apply(

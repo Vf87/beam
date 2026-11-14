@@ -45,7 +45,7 @@ import org.slf4j.LoggerFactory;
  */
 @Internal
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class TextTable extends SchemaBaseBeamTable {
 
@@ -93,7 +93,7 @@ public class TextTable extends SchemaBaseBeamTable {
       Double rows = textRowCountEstimator.estimateRowCount(options);
       return BeamTableStatistics.createBoundedTableStatistics(rows);
     } catch (IOException | TextRowCountEstimator.NoEstimationException e) {
-      LOG.warn("Could not get the row count for the text table " + filePattern, e);
+      LOG.warn("Could not get the row count for the text table {}", filePattern, e);
     }
     return BeamTableStatistics.BOUNDED_UNKNOWN;
   }

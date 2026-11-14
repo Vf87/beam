@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.transforms;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -44,7 +44,7 @@ import org.apache.beam.sdk.util.NameUtils.NameOverride;
 import org.apache.beam.sdk.util.common.ElementByteSizeObserver;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -53,7 +53,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * PCollection} of {@code KV}s.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class Top {
 
@@ -178,30 +178,37 @@ public class Top {
   public static <T extends Comparable<T>> TopCombineFn<T, Natural<T>> largestFn(int count) {
     return new TopCombineFn<T, Natural<T>>(count, new Natural<T>()) {};
   }
+
   /** Returns a {@link TopCombineFn} that aggregates the largest count long values. */
   public static TopCombineFn<Long, Natural<Long>> largestLongsFn(int count) {
     return new TopCombineFn<Long, Natural<Long>>(count, new Natural<Long>()) {};
   }
+
   /** Returns a {@link TopCombineFn} that aggregates the largest count int values. */
   public static TopCombineFn<Integer, Natural<Integer>> largestIntsFn(int count) {
     return new TopCombineFn<Integer, Natural<Integer>>(count, new Natural<>()) {};
   }
+
   /** Returns a {@link TopCombineFn} that aggregates the largest count double values. */
   public static TopCombineFn<Double, Natural<Double>> largestDoublesFn(int count) {
     return new TopCombineFn<Double, Natural<Double>>(count, new Natural<>()) {};
   }
+
   /** Returns a {@link TopCombineFn} that aggregates the smallest count values. */
   public static <T extends Comparable<T>> TopCombineFn<T, Reversed<T>> smallestFn(int count) {
     return new TopCombineFn<T, Reversed<T>>(count, new Reversed<>()) {};
   }
+
   /** Returns a {@link TopCombineFn} that aggregates the smallest count long values. */
   public static TopCombineFn<Long, Reversed<Long>> smallestLongsFn(int count) {
     return new TopCombineFn<Long, Reversed<Long>>(count, new Reversed<>()) {};
   }
+
   /** Returns a {@link TopCombineFn} that aggregates the smallest count int values. */
   public static TopCombineFn<Integer, Reversed<Integer>> smallestIntsFn(int count) {
     return new TopCombineFn<Integer, Reversed<Integer>>(count, new Reversed<>()) {};
   }
+
   /** Returns a {@link TopCombineFn} that aggregates the smallest count double values. */
   public static TopCombineFn<Double, Reversed<Double>> smallestDoublesFn(int count) {
     return new TopCombineFn<Double, Reversed<Double>>(count, new Reversed<>()) {};
@@ -326,7 +333,9 @@ public class Top {
     return Combine.perKey(largestFn(count));
   }
 
-  /** @deprecated use {@link Natural} instead */
+  /**
+   * @deprecated use {@link Natural} instead
+   */
   @Deprecated
   public static class Largest<T extends Comparable<? super T>>
       implements Comparator<T>, Serializable {
@@ -348,7 +357,9 @@ public class Top {
     }
   }
 
-  /** @deprecated use {@link Reversed} instead */
+  /**
+   * @deprecated use {@link Reversed} instead
+   */
   @Deprecated
   public static class Smallest<T extends Comparable<? super T>>
       implements Comparator<T>, Serializable {

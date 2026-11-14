@@ -57,6 +57,7 @@ from apache_beam import FlatMap
 from apache_beam import Map
 from apache_beam import ParDo
 from apache_beam.io import Read
+from apache_beam.io.gcp.experimental.spannerio import _Mutator
 from apache_beam.io.gcp.experimental.spannerio import ReadFromSpanner
 from apache_beam.io.gcp.experimental.spannerio import WriteToSpanner
 from apache_beam.testing.load_tests.load_test import LoadTest
@@ -119,6 +120,7 @@ class SpannerReadPerfTest(LoadTest):
 
     def make_insert_mutations(element):
       import uuid
+
       from apache_beam.io.gcp.experimental.spannerio import WriteMutation
       ins_mutation = WriteMutation.insert(
           table='test_data',
@@ -132,7 +134,8 @@ class SpannerReadPerfTest(LoadTest):
           | 'Produce rows' >> Read(
               SyntheticSource(self.parse_synthetic_source_options()))
           | 'Format' >> Map(format_record)
-          | 'Make mutations' >> FlatMap(make_insert_mutations)
+          | 'Make mutations' >> FlatMap(
+              make_insert_mutations).with_output_types(_Mutator)
           | 'Write to Spanner' >> WriteToSpanner(
             project_id=self.project,
             instance_id=self.spanner_instance,

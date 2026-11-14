@@ -20,7 +20,7 @@ package org.apache.beam.runners.dataflow.worker;
 import static org.apache.beam.runners.dataflow.util.Structs.getBytes;
 import static org.apache.beam.runners.dataflow.util.Structs.getObject;
 import static org.apache.beam.runners.dataflow.util.Structs.getString;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.api.services.dataflow.model.SideInputInfo;
 import java.util.ArrayList;
@@ -31,10 +31,6 @@ import org.apache.beam.model.pipeline.v1.RunnerApi.MessageWithComponents.RootCas
 import org.apache.beam.runners.core.NullSideInputReader;
 import org.apache.beam.runners.core.SideInputReader;
 import org.apache.beam.runners.core.StateInternalsFactory;
-import org.apache.beam.runners.core.construction.RehydratedComponents;
-import org.apache.beam.runners.core.construction.WindowingStrategyTranslation;
-import org.apache.beam.runners.dataflow.DataflowRunner;
-import org.apache.beam.runners.dataflow.options.DataflowPipelineDebugOptions;
 import org.apache.beam.runners.dataflow.util.CloudObject;
 import org.apache.beam.runners.dataflow.util.CloudObjects;
 import org.apache.beam.runners.dataflow.util.PropertyNames;
@@ -54,26 +50,24 @@ import org.apache.beam.sdk.transforms.CombineWithContext.CombineFnWithContext;
 import org.apache.beam.sdk.transforms.CombineWithContext.Context;
 import org.apache.beam.sdk.util.AppliedCombineFn;
 import org.apache.beam.sdk.util.SerializableUtils;
-import org.apache.beam.sdk.util.WindowedValue.WindowedValueCoder;
+import org.apache.beam.sdk.util.construction.RehydratedComponents;
+import org.apache.beam.sdk.util.construction.WindowingStrategyTranslation;
 import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowedValues.WindowedValueCoder;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.InvalidProtocolBufferException;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.checkerframework.checker.nullness.qual.Nullable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * A {@link ParDoFnFactory} to create GroupAlsoByWindowsDoFn instances according to specifications
  * from the Dataflow service.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 class GroupAlsoByWindowParDoFnFactory implements ParDoFnFactory {
-
-  private static final Logger LOG = LoggerFactory.getLogger(GroupAlsoByWindowParDoFnFactory.class);
 
   @Override
   public ParDoFn create(
@@ -98,20 +92,7 @@ class GroupAlsoByWindowParDoFnFactory implements ParDoFnFactory {
         entry.getValue());
 
     byte[] encodedWindowingStrategy = getBytes(cloudUserFn, PropertyNames.SERIALIZED_FN);
-    WindowingStrategy windowingStrategy;
-    try {
-      windowingStrategy = deserializeWindowingStrategy(encodedWindowingStrategy);
-    } catch (Exception e) {
-      // Temporarily choose default windowing strategy if fn API is enabled.
-      // TODO: Catch block disappears, becoming an error once Python SDK is compliant.
-      if (DataflowRunner.hasExperiment(
-          options.as(DataflowPipelineDebugOptions.class), "beam_fn_api")) {
-        LOG.info("FnAPI: Unable to deserialize windowing strategy, assuming default", e);
-        windowingStrategy = WindowingStrategy.globalDefault();
-      } else {
-        throw e;
-      }
-    }
+    WindowingStrategy windowingStrategy = deserializeWindowingStrategy(encodedWindowingStrategy);
 
     byte[] serializedCombineFn = getBytes(cloudUserFn, WorkerPropertyNames.COMBINE_FN, null);
     AppliedCombineFn<?, ?, ?, ?> combineFn = null;
@@ -120,7 +101,8 @@ class GroupAlsoByWindowParDoFnFactory implements ParDoFnFactory {
           SerializableUtils.deserializeFromByteArray(serializedCombineFn, "serialized combine fn");
       checkArgument(
           combineFnObj instanceof AppliedCombineFn,
-          "unexpected kind of AppliedCombineFn: " + combineFnObj.getClass().getName());
+          "unexpected kind of AppliedCombineFn: %s",
+          combineFnObj.getClass().getName());
       combineFn = (AppliedCombineFn<?, ?, ?, ?>) combineFnObj;
     }
 
@@ -129,14 +111,16 @@ class GroupAlsoByWindowParDoFnFactory implements ParDoFnFactory {
     Coder<?> inputCoder = CloudObjects.coderFromCloudObject(CloudObject.fromSpec(inputCoderObject));
     checkArgument(
         inputCoder instanceof WindowedValueCoder,
-        "Expected WindowedValueCoder for inputCoder, got: " + inputCoder.getClass().getName());
+        "Expected WindowedValueCoder for inputCoder, got: %s",
+        inputCoder.getClass().getName());
     @SuppressWarnings("unchecked")
     WindowedValueCoder<?> windowedValueCoder = (WindowedValueCoder<?>) inputCoder;
 
     Coder<?> elemCoder = windowedValueCoder.getValueCoder();
     checkArgument(
         elemCoder instanceof KvCoder,
-        "Expected KvCoder for inputCoder, got: " + elemCoder.getClass().getName());
+        "Expected KvCoder for inputCoder, got: %s",
+        elemCoder.getClass().getName());
     @SuppressWarnings("unchecked")
     KvCoder<?, ?> kvCoder = (KvCoder<?, ?>) elemCoder;
 
@@ -212,7 +196,6 @@ class GroupAlsoByWindowParDoFnFactory implements ParDoFnFactory {
           ((AppliedCombineFn) maybeMergingCombineFn).getSideInputViews(),
           gabwInputCoder,
           sideInputReader,
-          mainOutputTag,
           executionContext.getStepContext(operationContext));
     } else {
       return new GroupAlsoByWindowsParDoFn(
@@ -222,7 +205,6 @@ class GroupAlsoByWindowParDoFnFactory implements ParDoFnFactory {
           null,
           gabwInputCoder,
           sideInputReader,
-          mainOutputTag,
           executionContext.getStepContext(operationContext));
     }
   }

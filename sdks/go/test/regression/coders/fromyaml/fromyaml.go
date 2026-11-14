@@ -22,30 +22,38 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"math"
+	"os"
 	"reflect"
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/graph/mtime"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/graph/window"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/runtime/exec"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/runtime/graphx"
+	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/runtime/graphx/schema"
+	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/typex"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/util/reflectx"
 	pipepb "github.com/apache/beam/sdks/v2/go/pkg/beam/model/pipeline_v1"
 	"github.com/google/go-cmp/cmp"
 	"golang.org/x/text/encoding/charmap"
+	"google.golang.org/protobuf/proto"
 	yaml "gopkg.in/yaml.v2"
 )
 
 var unimplementedCoders = map[string]bool{
 	"beam:coder:param_windowed_value:v1": true,
-	"beam:coder:timer:v1":                true,
 	"beam:coder:sharded_key:v1":          true,
 	"beam:coder:custom_window:v1":        true,
+}
+
+var filteredCases = []struct{ filter, reason string }{
+	{"30ea5a25-dcd8-4cdb-abeb-5332d15ab4b9", "https://github.com/apache/beam/issues/21206: Support encoding position."},
+	{"beam:logical_type:timestamp:v1", "https://github.com/apache/beam/issues/39684: Support timestamp."},
 }
 
 // Coder is a representation a serialized beam coder.
@@ -57,8 +65,8 @@ type Coder struct {
 }
 
 type logger interface {
-	Errorf(string, ...interface{})
-	Logf(string, ...interface{})
+	Errorf(string, ...any)
+	Logf(string, ...any)
 }
 
 // Spec is a set of conditions that a coder must pass.
@@ -83,11 +91,17 @@ func (s *Spec) testStandardCoder() (err error) {
 		log.Printf("skipping unimplemented coder urn: %v", s.Coder.Urn)
 		return nil
 	}
-	// TODO(BEAM-9615): Support Logical types, and produce a better error message.
-	if strings.Contains(s.Coder.Payload, "logical") {
-		log.Printf("skipping coder with logical type. Unsupported in the Go SDK for now. Payload: %v", s.Coder.Payload)
+	if s.Coder.Urn == "beam:coder:state_backed_iterable:v1" {
+		log.Printf("skipping unimplemented test coverage for beam:coder:state_backed_iterable:v1. https://github.com/apache/beam/issues/21324")
 		return nil
 	}
+	for _, c := range filteredCases {
+		if strings.Contains(s.Coder.Payload, c.filter) {
+			log.Printf("skipping coder case. Unsupported in the Go SDK for now: %v Payload: %v", c.reason, s.Coder.Payload)
+			return nil
+		}
+	}
+
 	// Construct the coder proto equivalents.
 
 	// Only nested tests need to be run, since nestedness is a pre-portability
@@ -150,6 +164,7 @@ func (s *Spec) testStandardCoder() (err error) {
 		}
 		if d := cmp.Diff(recoded, string(out.Bytes())); d != "" {
 			log.Printf("Encoding error: diff(-want,+got): %v\n", d)
+			encFails++
 		}
 	}
 	if decFails+encFails > 0 {
@@ -163,10 +178,25 @@ var cmpOpts = []cmp.Option{
 	cmp.Transformer("bytes2string", func(in []byte) (out string) {
 		return string(in)
 	}),
+	cmp.Comparer(func(a, b schema.MicrosInstant) bool {
+		return a.Time().Equal(b.Time())
+	}),
+	cmp.Comparer(func(a, b schema.MillisInstant) bool {
+		return a.Time().Equal(b.Time())
+	}),
+	cmp.Comparer(func(a, b schema.Decimal) bool {
+		return a.String() == b.String()
+	}),
+}
+
+// latin1Bytes returns the bytes that a yaml string denotes. The yaml strings
+// escape bytes above 0x7f as code points, which yaml decodes to UTF-8.
+func latin1Bytes(s string) ([]byte, error) {
+	return charmap.ISO8859_1.NewEncoder().Bytes([]byte(s))
 }
 
 func diff(c Coder, elem *exec.FullValue, eg yaml.MapItem) bool {
-	var got, want interface{}
+	var got, want any
 	switch c.Urn {
 	case "beam:coder:bytes:v1":
 		got = string(elem.Elm.([]byte))
@@ -207,6 +237,19 @@ func diff(c Coder, elem *exec.FullValue, eg yaml.MapItem) bool {
 		}
 		return pass
 
+	case "beam:coder:nullable:v1":
+		if elem.Elm == nil || eg.Value == nil {
+			got, want = elem.Elm, eg.Value
+		} else {
+			got = string(elem.Elm.([]byte))
+			switch egv := eg.Value.(type) {
+			case string:
+				want = egv
+			case []byte:
+				want = string(egv)
+			}
+		}
+
 	case "beam:coder:iterable:v1":
 		pass := true
 		gotrv := reflect.ValueOf(elem.Elm)
@@ -227,7 +270,7 @@ func diff(c Coder, elem *exec.FullValue, eg yaml.MapItem) bool {
 	case "beam:coder:interval_window:v1":
 		var a, b int
 		val := eg.Value
-		if is, ok := eg.Value.([]interface{}); ok {
+		if is, ok := eg.Value.([]any); ok {
 			val = is[0]
 		}
 		v := val.(yaml.MapSlice)
@@ -269,32 +312,59 @@ func diff(c Coder, elem *exec.FullValue, eg yaml.MapItem) bool {
 		if !diff(c.Components[1], elem, vs[3]) {
 			pass = false
 		}
-		// TODO compare pane information.
+		if !diffPane(vs[2].Value, elem.Pane) {
+			pass = false
+		}
 		return pass
 	case "beam:coder:row:v1":
+		row, err := rowFromYAML(c.Payload, eg.Value.(yaml.MapSlice))
+		if err != nil {
+			log.Printf("unable to build the expected row: %v\n", err)
+			return false
+		}
+		got, want = elem.Elm, row
+	case "beam:coder:timer:v1":
+		pass := true
+		tm := elem.Elm.(exec.TimerRecv)
 		fs := eg.Value.(yaml.MapSlice)
-		var rfs []reflect.StructField
-		// There are only 2 pointer examples, but they reuse field names,
-		// so we key off the proto hash to know which example we're handling.
-		ptrEg := strings.Contains(c.Payload, "51ace21c7393")
-		for _, rf := range fs {
-			name := rf.Key.(string)
-			t := nameToType[name]
-			if ptrEg {
-				t = reflect.PtrTo(t)
-			}
-			rfs = append(rfs, reflect.StructField{
-				Name: strings.ToUpper(name[:1]) + name[1:],
-				Type: t,
-				Tag:  reflect.StructTag(fmt.Sprintf("beam:\"%v\"", name)),
-			})
-		}
-		rv := reflect.New(reflect.StructOf(rfs)).Elem()
-		for i, rf := range fs {
-			setField(rv, i, rf.Value)
-		}
+		for _, item := range fs {
 
-		got, want = elem.Elm, rv.Interface()
+			switch item.Key.(string) {
+			case "userKey":
+				if want := item.Value.(string); want != tm.Key.Elm.(string) {
+					pass = false
+				}
+			case "dynamicTimerTag":
+				if want := item.Value.(string); want != tm.Tag {
+					pass = false
+				}
+			case "windows":
+				if v, ok := item.Value.([]any); ok {
+					for i, val := range v {
+						if val.(string) == "global" && fmt.Sprintf("%s", tm.Windows[i]) == "[*]" {
+							continue
+						} else if val.(string) != fmt.Sprintf("%s", tm.Windows[i]) {
+							pass = false
+						}
+					}
+				}
+			case "clearBit":
+				if want := item.Value.(bool); want != tm.Clear {
+					pass = false
+				}
+			case "fireTimestamp":
+				if want := item.Value.(int); want != int(tm.FireTimestamp) {
+					pass = false
+				}
+			case "holdTimestamp":
+				if want := item.Value.(int); want != int(tm.HoldTimestamp) {
+					pass = false
+				}
+			case "pane":
+				pass = diffPane(item.Value, tm.Pane)
+			}
+		}
+		return pass
 	default:
 		got, want = elem.Elm, eg.Value
 	}
@@ -305,66 +375,184 @@ func diff(c Coder, elem *exec.FullValue, eg yaml.MapItem) bool {
 	return true
 }
 
-// standard_coders.yaml uses the name for type indication, except for nullability.
-var nameToType = map[string]reflect.Type{
-	"str":     reflectx.String,
-	"i32":     reflectx.Int32,
-	"f64":     reflectx.Float64,
-	"arr":     reflect.SliceOf(reflectx.String),
-	"f_bool":  reflectx.Bool,
-	"f_bytes": reflect.PtrTo(reflectx.ByteSlice),
-	"f_map":   reflect.MapOf(reflectx.String, reflect.PtrTo(reflectx.Int64)),
+func diffPane(eg any, got typex.PaneInfo) bool {
+	pass := true
+	paneTiming := map[typex.PaneTiming]string{
+		typex.PaneUnknown: "UNKNOWN",
+		typex.PaneEarly:   "EARLY",
+		typex.PaneLate:    "LATE",
+		typex.PaneOnTime:  "ONTIME",
+	}
+	for _, item := range eg.(yaml.MapSlice) {
+		switch item.Key.(string) {
+		case "is_first":
+			if want := item.Value.(bool); want != got.IsFirst {
+				pass = false
+			}
+		case "is_last":
+			if want := item.Value.(bool); want != got.IsLast {
+				pass = false
+			}
+		case "timing":
+			if want := item.Value.(string); want != paneTiming[got.Timing] {
+				pass = false
+			}
+		case "index":
+			if want := item.Value.(int); want != int(got.Index) {
+				pass = false
+			}
+		case "on_time_index":
+			if want := item.Value.(int); want != int(got.NonSpeculativeIndex) {
+				pass = false
+			}
+		}
+	}
+	return pass
 }
 
-func setField(rv reflect.Value, i int, v interface{}) {
+// rowFromYAML builds the expected value of a beam:coder:row:v1 example from
+// the schema in the coder payload and the field values of the example.
+// The Go type is the one the Go SDK derives from the schema, so logical type
+// fields have their registered Go types.
+func rowFromYAML(payload string, fields yaml.MapSlice) (any, error) {
+	b, err := latin1Bytes(payload)
+	if err != nil {
+		return nil, err
+	}
+	var s pipepb.Schema
+	if err := proto.Unmarshal(b, &s); err != nil {
+		return nil, fmt.Errorf("unmarshalling the row schema: %v", err)
+	}
+	rt, err := schema.ToType(&s)
+	if err != nil {
+		return nil, fmt.Errorf("converting the row schema to a type: %v", err)
+	}
+	rv := reflect.New(rt).Elem()
+	if err := setStruct(rv, fields); err != nil {
+		return nil, err
+	}
+	return rv.Interface(), nil
+}
+
+// setStruct sets the fields of the struct value rv from the yaml mapping.
+func setStruct(rv reflect.Value, fields yaml.MapSlice) error {
+	for _, f := range fields {
+		name := f.Key.(string)
+		fv, ok := fieldByName(rv, name)
+		if !ok {
+			return fmt.Errorf("no field %q in %v", name, rv.Type())
+		}
+		if err := setValue(fv, f.Value); err != nil {
+			return fmt.Errorf("field %q: %v", name, err)
+		}
+	}
+	return nil
+}
+
+// fieldByName returns the field of rv with the given schema field name, which
+// is either the Go field name or the name in the beam struct tag.
+func fieldByName(rv reflect.Value, name string) (reflect.Value, bool) {
+	rt := rv.Type()
+	for i := 0; i < rt.NumField(); i++ {
+		sf := rt.Field(i)
+		if sf.Name == name {
+			return rv.Field(i), true
+		}
+		if tag, ok := sf.Tag.Lookup("beam"); ok && strings.Split(tag, ",")[0] == name {
+			return rv.Field(i), true
+		}
+	}
+	return reflect.Value{}, false
+}
+
+// setValue sets rv from a yaml example value. A nil value leaves rv at its
+// zero value, which is nil for nullable fields.
+func setValue(rv reflect.Value, v any) error {
 	if v == nil {
-		return
+		return nil
 	}
-	rf := rv.Field(i)
-	if rf.Kind() == reflect.Ptr {
-		// Ensure it's initialized.
-		rf.Set(reflect.New(rf.Type().Elem()))
-		rf = rf.Elem()
+	if rv.Kind() == reflect.Ptr {
+		rv.Set(reflect.New(rv.Type().Elem()))
+		rv = rv.Elem()
 	}
-	switch rf.Kind() {
+	switch rv.Type() {
+	case reflect.TypeOf(schema.MicrosInstant{}):
+		var seconds, micros int64
+		for _, f := range v.(yaml.MapSlice) {
+			switch f.Key.(string) {
+			case "seconds":
+				seconds = int64(f.Value.(int))
+			case "micros":
+				micros = int64(f.Value.(int))
+			}
+		}
+		rv.Set(reflect.ValueOf(schema.MicrosInstant(time.Unix(seconds, micros*1000).UTC())))
+		return nil
+	case reflect.TypeOf(schema.MillisInstant{}):
+		// The example value is the shifted INT64 representation.
+		millis := int64(v.(int)) + math.MinInt64
+		rv.Set(reflect.ValueOf(schema.MillisInstant(time.UnixMilli(millis).UTC())))
+		return nil
+	case reflect.TypeOf(schema.Decimal{}):
+		d, err := schema.ParseDecimal(v.(string))
+		if err != nil {
+			return err
+		}
+		rv.Set(reflect.ValueOf(d))
+		return nil
+	}
+	switch rv.Kind() {
 	case reflect.String:
-		rf.SetString(v.(string))
-	case reflect.Int32:
-		rf.SetInt(int64(v.(int)))
+		rv.SetString(v.(string))
+	case reflect.Int16, reflect.Int32, reflect.Int64:
+		rv.SetInt(int64(v.(int)))
+	case reflect.Float32:
+		c, err := strconv.ParseFloat(v.(string), 32)
+		if err != nil {
+			return err
+		}
+		rv.SetFloat(c)
 	case reflect.Float64:
 		c, err := strconv.ParseFloat(v.(string), 64)
 		if err != nil {
-			panic(err)
+			return err
 		}
-		rf.SetFloat(c)
-	case reflect.Slice:
-		if rf.Type() == reflectx.ByteSlice {
-			rf.Set(reflect.ValueOf([]byte(v.(string))))
-			break
-		}
-		// Value is a []interface{} with string values.
-		var arr []string
-		for _, a := range v.([]interface{}) {
-			arr = append(arr, a.(string))
-		}
-		rf.Set(reflect.ValueOf(arr))
+		rv.SetFloat(c)
 	case reflect.Bool:
-		rf.SetBool(v.(bool))
-	case reflect.Map:
-		// only f_map presently, which is always map[string]*int64
-		rm := reflect.MakeMap(rf.Type())
-		for _, a := range v.(yaml.MapSlice) {
-			rk := reflect.ValueOf(a.Key.(string))
-			rv := reflect.Zero(rf.Type().Elem())
-			if a.Value != nil {
-				rv = reflect.New(reflectx.Int64)
-				rv.Elem().SetInt(int64(a.Value.(int)))
-			}
-			rm.SetMapIndex(rk, rv)
+		rv.SetBool(v.(bool))
+	case reflect.Slice:
+		if rv.Type() == reflectx.ByteSlice {
+			rv.SetBytes([]byte(v.(string)))
+			return nil
 		}
-		rf.Set(rm)
-
+		items := v.([]any)
+		sv := reflect.MakeSlice(rv.Type(), len(items), len(items))
+		for i, item := range items {
+			if err := setValue(sv.Index(i), item); err != nil {
+				return err
+			}
+		}
+		rv.Set(sv)
+	case reflect.Map:
+		mv := reflect.MakeMap(rv.Type())
+		for _, entry := range v.(yaml.MapSlice) {
+			key := reflect.New(rv.Type().Key()).Elem()
+			if err := setValue(key, entry.Key); err != nil {
+				return err
+			}
+			val := reflect.New(rv.Type().Elem()).Elem()
+			if err := setValue(val, entry.Value); err != nil {
+				return err
+			}
+			mv.SetMapIndex(key, val)
+		}
+		rv.Set(mv)
+	case reflect.Struct:
+		return setStruct(rv, v.(yaml.MapSlice))
+	default:
+		return fmt.Errorf("unsupported field type %v", rv.Type())
 	}
+	return nil
 }
 
 func (s *Spec) parseCoder(c Coder) string {
@@ -373,10 +561,14 @@ func (s *Spec) parseCoder(c Coder) string {
 	for _, comp := range c.Components {
 		compIDs = append(compIDs, s.parseCoder(comp))
 	}
+	payload, err := latin1Bytes(c.Payload)
+	if err != nil {
+		panic(fmt.Sprintf("invalid coder payload %q: %v", c.Payload, err))
+	}
 	s.coderPBs[id] = &pipepb.Coder{
 		Spec: &pipepb.FunctionSpec{
 			Urn:     c.Urn,
-			Payload: []byte(c.Payload),
+			Payload: payload,
 		},
 		ComponentCoderIds: compIDs,
 	}
@@ -386,18 +578,18 @@ func (s *Spec) parseCoder(c Coder) string {
 // Simple logger to run as main program.
 type logLogger struct{}
 
-func (*logLogger) Errorf(format string, v ...interface{}) {
+func (*logLogger) Errorf(format string, v ...any) {
 	log.Printf(format, v...)
 }
 
-func (*logLogger) Logf(format string, v ...interface{}) {
+func (*logLogger) Logf(format string, v ...any) {
 	log.Printf(format, v...)
 }
 
 const yamlPath = "../../../../../../model/fn-execution/src/main/resources/org/apache/beam/model/fnexecution/v1/standard_coders.yaml"
 
 func main() {
-	data, err := ioutil.ReadFile(yamlPath)
+	data, err := os.ReadFile(yamlPath)
 	if err != nil {
 		log.Fatalf("Couldn't read %v: %v", yamlPath, err)
 	}

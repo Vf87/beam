@@ -32,10 +32,12 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  *
  * @param <InputT> input type
  * @param <OutputT> output type
+ * @deprecated Use Java SDK directly, Euphoria is scheduled for removal in a future release.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
+@Deprecated
 public class TimestampExtractTransform<InputT, OutputT>
     extends PTransform<PCollection<InputT>, PCollection<OutputT>> {
 
@@ -83,14 +85,6 @@ public class TimestampExtractTransform<InputT, OutputT>
     @ProcessElement
     public void processElement(ProcessContext ctx) {
       ctx.output(KV.of(ctx.timestamp().getMillis(), ctx.element()));
-    }
-  }
-
-  private static class Unwrap<T> extends DoFn<KV<Long, T>, T> {
-
-    @ProcessElement
-    public void processElement(ProcessContext ctx) {
-      ctx.output(ctx.element().getValue());
     }
   }
 

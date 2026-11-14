@@ -17,8 +17,8 @@
  */
 package org.apache.beam.sdk.io.azure.blobstore;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import java.util.Date;
 import java.util.Objects;
@@ -26,18 +26,19 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.apache.beam.sdk.io.fs.ResolveOptions;
 import org.apache.beam.sdk.io.fs.ResourceId;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Optional;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Optional;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 class AzfsResourceId implements ResourceId {
 
   static final String SCHEME = "azfs";
   private static final Pattern AZFS_URI =
       Pattern.compile("(?<SCHEME>[^:]+)://(?<ACCOUNT>[^/]+)/(?<CONTAINER>[^/]+)(?:/(?<BLOB>.*))?");
+
   /** Matches a glob containing a wildcard, capturing the portion before the first wildcard. */
   private static final Pattern GLOB_PREFIX = Pattern.compile("(?<PREFIX>[^\\[*?]*)[\\[*?].*");
 
@@ -122,7 +123,7 @@ class AzfsResourceId implements ResourceId {
 
   @Override
   public boolean isDirectory() {
-    return (blob == null) || (blob.endsWith("/"));
+    return (blob == null) || blob.endsWith("/");
   }
 
   boolean isWildcard() {

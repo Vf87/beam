@@ -1,3 +1,4 @@
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -18,7 +19,7 @@
 
 plugins {
   id 'org.apache.beam.module'
-  id 'ca.coglinc.javacc'
+  id 'org.javacc.javacc'
 }
 applyJavaNature(
   automaticModuleName: 'org.apache.beam.sdk.io.clickhouse',
@@ -28,9 +29,11 @@ applyJavaNature(
   // javacc generated code produces lint warnings
   disableLintWarnings: ['dep-ann'],
 )
+provideIntegrationTestingDependencies()
+enableJavaPerformanceTesting()
 
 description = "Apache Beam :: SDKs :: Java :: IO :: ClickHouse"
-ext.summary = "IO to write to ClickHouse (https://clickhouse.yandex)."
+ext.summary = "IO to write to ClickHouse (https://clickhouse.com)."
 
 // Match the output directory for generated code with the package, to be more tool-friendly
 def generatedJavaccSourceDir = "${project.buildDir}/generated/javacc"
@@ -49,21 +52,21 @@ idea {
   }
 }
 
-def clickhouse_jdbc_version = "0.2.6"
+def clickhouse_java_client_version = "0.9.6"
 
 dependencies {
   javacc "net.java.dev.javacc:javacc:7.0.9"
-  compile project(path: ":sdks:java:core", configuration: "shadow")
-  compile library.java.guava
-  compile library.java.joda_time
-  compile library.java.slf4j_api
-  compile library.java.vendored_guava_26_0_jre
-  compile "ru.yandex.clickhouse:clickhouse-jdbc:$clickhouse_jdbc_version"
-  testCompile library.java.slf4j_api
-  testCompile library.java.junit
-  testCompile library.java.hamcrest_core
-  testCompile library.java.hamcrest_library
-  testCompile library.java.testcontainers_clickhouse
+  implementation project(path: ":sdks:java:core", configuration: "shadow")
+  implementation library.java.guava
+  implementation library.java.joda_time
+  implementation library.java.slf4j_api
+  implementation library.java.vendored_guava_32_1_2_jre
+  implementation "com.clickhouse:client-v2:$clickhouse_java_client_version:all"
+  testImplementation library.java.slf4j_api
+  testImplementation library.java.junit
+  testImplementation library.java.hamcrest
+  testImplementation library.java.testcontainers_clickhouse
+  testImplementation "com.clickhouse:clickhouse-jdbc:$clickhouse_java_client_version:all"
   testRuntimeOnly library.java.slf4j_jdk14
   testRuntimeOnly project(path: ":runners:direct-java", configuration: "shadow")
 }

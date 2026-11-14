@@ -18,25 +18,27 @@
 
 BUCKET=gs://beam-python-nightly-snapshots
 
-VERSION=$(awk '/__version__/{print $3}' $WORKSPACE/src/sdks/python/apache_beam/version.py)
+VERSION=$(awk '/__version__/{print $3}' $WORKSPACE/sdks/python/apache_beam/version.py)
 VERSION=$(echo $VERSION | cut -c 2- | rev | cut -c 2- | rev)
 time=$(date +"%Y-%m-%dT%H:%M:%S")
-SNAPSHOT="apache-beam-$VERSION-$time.zip"
+SNAPSHOT="apache-beam-$VERSION-$time.tar.gz"
 
 DEP_SNAPSHOT_ROOT="$BUCKET/dependency_requirements_snapshot"
 DEP_SNAPSHOT_FILE_NAME="beam-py-requirements-$time.txt"
 
 # Snapshots are built by Gradle task :sdks:python:depSnapshot
 # and located under Gradle build directory.
-cd $WORKSPACE/src/sdks/python/build
+cd $WORKSPACE/sdks/python/build
 
-# Rename the file to be apache-beam-{VERSION}-{datetime}.zip
-for file in "apache-beam-$VERSION*.zip"; do
+# Rename the file to be apache-beam-{VERSION}-{datetime}.tar.gz
+# Notice that the distribution name of beam can be "apache-beam" with
+# setuptools<69.3.0 or "apache_beam" with setuptools>=69.3.0.
+for file in "apache[-_]beam-$VERSION*.tar.gz"; do
   mv $file $SNAPSHOT
 done
 
 # Upload to gcs bucket
-gsutil cp $SNAPSHOT $BUCKET/$VERSION/
+gcloud storage cp $SNAPSHOT $BUCKET/$VERSION/
 
 # Upload requirements.txt to gcs.
-gsutil cp requirements.txt $DEP_SNAPSHOT_ROOT/$DEP_SNAPSHOT_FILE_NAME
+gcloud storage cp requirements.txt $DEP_SNAPSHOT_ROOT/$DEP_SNAPSHOT_FILE_NAME

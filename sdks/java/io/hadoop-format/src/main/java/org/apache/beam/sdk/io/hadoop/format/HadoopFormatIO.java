@@ -18,10 +18,11 @@
 package org.apache.beam.sdk.io.hadoop.format;
 
 import static java.util.Objects.requireNonNull;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.auto.value.AutoValue;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -33,6 +34,7 @@ import java.io.Serializable;
 import java.lang.reflect.InvocationTargetException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -43,8 +45,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
+import org.apache.beam.repackaged.core.org.apache.commons.lang3.StringUtils;
 import org.apache.beam.sdk.coders.AtomicCoder;
 import org.apache.beam.sdk.coders.CannotProvideCoderException;
 import org.apache.beam.sdk.coders.Coder;
@@ -54,6 +55,7 @@ import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.io.hadoop.SerializableConfiguration;
 import org.apache.beam.sdk.io.hadoop.WritableCoder;
+import org.apache.beam.sdk.metrics.Lineage;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.Create;
@@ -75,9 +77,9 @@ import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.AtomicDouble;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.AtomicDouble;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.ObjectWritable;
@@ -97,6 +99,7 @@ import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.hadoop.mapreduce.TaskAttemptID;
 import org.apache.hadoop.mapreduce.TaskID;
 import org.apache.hadoop.mapreduce.lib.db.DBConfiguration;
+import org.apache.hadoop.mapreduce.lib.input.FileSplit;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 import org.apache.hadoop.mapreduce.task.JobContextImpl;
 import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl;
@@ -184,8 +187,8 @@ import org.slf4j.LoggerFactory;
  * available for value class hence value translation is required.).
  *
  * <pre>{@code
- * SimpleFunction&lt;InputFormatValueClass, MyValueClass&gt; myOutputValueType =
- *      new SimpleFunction&lt;InputFormatValueClass, MyValueClass&gt;() {
+ * SimpleFunction<InputFormatValueClass, MyValueClass> myOutputValueType =
+ *      new SimpleFunction<InputFormatValueClass, MyValueClass>() {
  *          public MyValueClass apply(InputFormatValueClass input) {
  *            // ...logic to transform InputFormatValueClass to MyValueClass
  *          }
@@ -257,15 +260,15 @@ import org.slf4j.LoggerFactory;
  * <pre>{@code
  * Configuration myHadoopConfiguration = new Configuration(false);
  * // Set Hadoop OutputFormat, key and value class in configuration
- * myHadoopConfiguration.setClass(&quot;mapreduce.job.outputformat.class&quot;,
+ * myHadoopConfiguration.setClass("mapreduce.job.outputformat.class",
  *    MyDbOutputFormatClass, OutputFormat.class);
- * myHadoopConfiguration.setClass(&quot;mapreduce.job.output.key.class&quot;,
+ * myHadoopConfiguration.setClass("mapreduce.job.output.key.class",
  *    MyDbOutputFormatKeyClass, Object.class);
- * myHadoopConfiguration.setClass(&quot;mapreduce.job.output.value.class&quot;,
+ * myHadoopConfiguration.setClass("mapreduce.job.output.value.class",
  *    MyDbOutputFormatValueClass, Object.class);
- * myHadoopConfiguration.setClass(&quot;mapreduce.job.partitioner.class&quot;,
+ * myHadoopConfiguration.setClass("mapreduce.job.partitioner.class",
  *    MyPartitionerClass, Object.class);
- * myHadoopConfiguration.setInt(&quot;mapreduce.job.reduces&quot;, 2);
+ * myHadoopConfiguration.setInt("mapreduce.job.reduces", 2);
  * }</pre>
  *
  * <p>You will need to set OutputFormat key and value class (i.e. "mapreduce.job.output.key.class"
@@ -310,11 +313,11 @@ import org.slf4j.LoggerFactory;
  * }
  * }</pre>
  */
-@Experimental(Kind.SOURCE_SINK)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
+@SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "Initialization is safe.")
 public class HadoopFormatIO {
   private static final Logger LOG = LoggerFactory.getLogger(HadoopFormatIO.class);
 
@@ -555,9 +558,8 @@ public class HadoopFormatIO {
       if (configuration.get("mapreduce.job.inputformat.class").endsWith("DBInputFormat")) {
         checkArgument(
             configuration.get(DBConfiguration.INPUT_ORDER_BY_PROPERTY) != null,
-            "Configuration must contain \""
-                + DBConfiguration.INPUT_ORDER_BY_PROPERTY
-                + "\" when using DBInputFormat");
+            "Configuration must contain \"%s\" when using DBInputFormat",
+            DBConfiguration.INPUT_ORDER_BY_PROPERTY);
       }
     }
 
@@ -703,6 +705,12 @@ public class HadoopFormatIO {
                     hadoopConfig.get("mapreduce.job.inputformat.class"))
                 .withLabel("InputFormat Class"));
         builder.addIfNotNull(
+            DisplayData.item(
+                    "mapreduce.input.fileinputformat.inputdir",
+                    StringUtils.abbreviate(
+                        hadoopConfig.get("mapreduce.input.fileinputformat.inputdir"), 250))
+                .withLabel("Input Directory"));
+        builder.addIfNotNull(
             DisplayData.item("key.class", hadoopConfig.get("key.class")).withLabel("Key Class"));
         builder.addIfNotNull(
             DisplayData.item("value.class", hadoopConfig.get("value.class"))
@@ -720,6 +728,7 @@ public class HadoopFormatIO {
         return ImmutableList.of(this);
       }
       computeSplitsIfNecessary();
+      reportSourceLineage(inputSplits);
       LOG.info(
           "Generated {} splits. Size of first split is {} ",
           inputSplits.size(),
@@ -737,6 +746,27 @@ public class HadoopFormatIO {
                       skipKeyClone,
                       skipValueClone))
           .collect(Collectors.toList());
+    }
+
+    private void reportSourceLineage(final List<SerializableSplit> inputSplits) {
+      for (SerializableSplit serializableSplit : inputSplits) {
+        InputSplit split = serializableSplit.getSplit();
+        if (split instanceof FileSplit) {
+          URI uri = ((FileSplit) split).getPath().toUri();
+          String scheme = uri.getScheme();
+          if (scheme == null) {
+            continue;
+          }
+          ImmutableList.Builder<String> segments = ImmutableList.builder();
+          if (uri.getAuthority() != null && !uri.getAuthority().isEmpty()) {
+            segments.add(uri.getAuthority());
+          }
+          if (uri.getPath() != null && !uri.getPath().isEmpty() && !uri.getPath().equals("/")) {
+            segments.add(uri.getPath());
+          }
+          Lineage.getSources().add(scheme, segments.build(), "/");
+        }
+      }
     }
 
     @Override
@@ -969,7 +999,7 @@ public class HadoopFormatIO {
         } else {
           output = (T3) input;
         }
-        return skipClone ? output : cloneIfPossiblyMutable(output, coder);
+        return skipClone || output == null ? output : cloneIfPossiblyMutable(output, coder);
       }
 
       /**
@@ -1055,8 +1085,7 @@ public class HadoopFormatIO {
     public SerializableSplit() {}
 
     public SerializableSplit(InputSplit split) {
-      checkArgument(
-          split instanceof Writable, String.format("Split is not of type Writable: %s", split));
+      checkArgument(split instanceof Writable, "Split is not of type Writable: %s", split);
       this.inputSplit = split;
     }
 
@@ -1142,8 +1171,8 @@ public class HadoopFormatIO {
 
     private final transient @Nullable Configuration configuration;
 
-    private final @Nullable PTransform<
-            PCollection<? extends KV<KeyT, ValueT>>, PCollectionView<Configuration>>
+    private final @Nullable
+        PTransform<PCollection<? extends KV<KeyT, ValueT>>, PCollectionView<Configuration>>
         configTransform;
 
     private final ExternalSynchronization externalSynchronization;
@@ -1154,7 +1183,7 @@ public class HadoopFormatIO {
         @Nullable Configuration configuration,
         @Nullable
             PTransform<PCollection<? extends KV<KeyT, ValueT>>, PCollectionView<Configuration>>
-                configTransform,
+            configTransform,
         ExternalSynchronization externalSynchronization,
         boolean withPartitioning) {
       this.configuration = configuration;
@@ -1678,14 +1707,17 @@ public class HadoopFormatIO {
       checkArgument(conf != null, "Configuration can not be null");
       checkArgument(
           conf.get(OUTPUT_FORMAT_CLASS_ATTR) != null,
-          "Configuration must contain \"" + OUTPUT_FORMAT_CLASS_ATTR + "\"");
+          "Configuration must contain \"%s\"",
+          OUTPUT_FORMAT_CLASS_ATTR);
       checkArgument(
           conf.get(OUTPUT_KEY_CLASS) != null,
-          "Configuration must contain \"" + OUTPUT_KEY_CLASS + "\"");
+          "Configuration must contain \"%s\"",
+          OUTPUT_KEY_CLASS);
       checkArgument(
           conf.get(OUTPUT_VALUE_CLASS) != null,
-          "Configuration must contain \"" + OUTPUT_VALUE_CLASS + "\"");
-      checkArgument(conf.get(JOB_ID) != null, "Configuration must contain \"" + JOB_ID + "\"");
+          "Configuration must contain \"%s\"",
+          OUTPUT_VALUE_CLASS);
+      checkArgument(conf.get(JOB_ID) != null, "Configuration must contain \"%s\"", JOB_ID);
     }
 
     /**

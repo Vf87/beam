@@ -32,36 +32,53 @@ Below are some highlights for the project as a whole.
 Portability is the primary Beam vision: running pipelines authored with _any SDK_
 on _any runner_. This is a cross-cutting effort across Java, Python, and Go,
 and every Beam runner. Portability is currently supported on the
-[Flink](/documentation/runners/flink/)
-and [Spark](/documentation/runners/spark/) runners.
+[DataFlow](/documentation/runners/dataflow), [Flink](/documentation/runners/flink/), [Jet](/documentation/runners/jet), [Prism](/documentation/runners/prism/), and [Spark](/documentation/runners/spark/) runners.
 
 See the details on the [Portability Roadmap](/roadmap/portability/)
 
-## Cross-language transforms
+### Portable schemas
+
+Schemas allow SDKs and runners to understand
+the structure of user data and unlock relational optimization possibilities.
+Portable schemas enable compatibility between rows in Python and Java.
+A particularly interesting use case is the combination of SQL (implemented in Java)
+with the Python SDK via Beam's cross-language support.
+Learn more about portable schemas from this [design doc](https://s.apache.org/beam-schemas).
+
+### Cross-language transforms
 
 As a benefit of the portability effort, we are able to utilize Beam transforms across SDKs.
 Examples include using Java connectors and Beam SQL from Python or Go pipelines
 or Beam TFX transforms from Java and Go.
+
+The [SchemaTransform API](/documentation/sdks/python-custom-multi-language-pipelines-guide) is now the preferred way to author cross-language transforms, leveraging Beam Schemas for configuration and data exchange. Implementing SchemaTransforms is also required to make transforms available to [Beam YAML](/documentation/sdks/yaml) and the [Managed I/O](/documentation/io/managed-io) API.
 For details see [Roadmap for multi-SDK efforts](/roadmap/connectors-multi-sdk/).
+
+## Extended Metadata and SDK level CDC (Change Data Capture) support
+
+Beam is introducing **Extended Metadata** to make element values extensible. This provides native, cross-SDK support for:
+
+* **Change Data Capture (CDC)**: First-class change operations (`INSERT`, `UPDATE`, `DELETE`) natively consumed by connectors like Iceberg, Delta Lake, and Spanner.
+* **Lifecycle & Observability**: Allow SDK level Pipeline drain support (currently as a Dataflow runner feature).
+* **DoFn API Evolution**: Fluent `OutputBuilder` APIs allowing transforms to selectively set metadata without combinatorial method overloads.
+
+Learn more from the [Beam Element Extended Metadata Design Doc](https://s.apache.org/beam-element-extended-metadata).
 
 ## Go SDK
 
-The Go SDK is the newest SDK, and is the first SDK built entirely on the
-portability framework. See the [Go SDK's Roadmap](/roadmap/go-sdk) if this piques your
-interest.
+The Go SDK is not actively being developed beyond bugfixes due to lack of contributors. If you'd like to help move this forward again, see the [Go SDK's Roadmap](/roadmap/go-sdk)
 
-## Python 3 support
+## Python SDK
 
-Apache Beam 2.14.0 and higher support Python 3.5, 3.6, and 3.7. We continue to [improve](https://issues.apache.org/jira/browse/BEAM-1251?focusedCommentId=16890504&page=com.atlassian.jira.plugin.system.issuetabpanels%3Acomment-tabpanel#comment-1689050) the experience for Python 3 users and plan to phase out Python 2 support ([BEAM-8371](https://issues.apache.org/jira/browse/BEAM-8371)):
+As of Apache Beam 2.78.0, we support Python 3.11, 3.12, 3.13 and 3.14.
 
 See details on
-the [Python SDK's Roadmap](/roadmap/python-sdk/#python-3-support).
+the [Python SDK's Roadmap](/roadmap/python-sdk/).
 
-## Java 11 support
+## Java support
 
-The Java SDK is eager to add support for Java's first new LTS (Long Term Support)
-version. See details on
-the [Java SDK's Roadmap](/roadmap/java-sdk).
+As of Beam 2.75.0, we support Java 11, 17, 21, 25. Certain modules requires Java 17+ due to upstream dependency constraints.
+See details on the [Java SDK's Roadmap](/roadmap/java-sdk).
 
 ## SQL
 
@@ -69,18 +86,3 @@ Beam's SQL module is rapidly maturing to allow users to author batch and
 streaming pipelines using only SQL, but also to allow Beam Java developers
 to use SQL in components of their pipeline for added efficiency. See the
 [Beam SQL Roadmap](/roadmap/sql/)
-
-## Portable schemas
-
-Schemas allow SDKs and runners to understand
-the structure of user data and unlock relational optimization possibilities.
-Portable schemas enable compatibility between rows in Python and Java.
-A particularly interesting use case is the combination of SQL (implemented in Java)
-with the Python SDK via Beam's cross-language support.
-Learn more about portable schemas from this [presentation](https://s.apache.org/portable-schemas-seattle).
-
-## Euphoria
-
-Euphoria is Beam's newest API, offering a high-level, fluent style for
-Beam Java developers. See the [Euphoria API Roadmap](/roadmap/euphoria).
-

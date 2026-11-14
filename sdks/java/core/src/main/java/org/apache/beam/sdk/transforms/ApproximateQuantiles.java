@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.transforms;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -46,9 +46,9 @@ import org.apache.beam.sdk.util.WeightedValue;
 import org.apache.beam.sdk.util.common.ElementByteSizeObserver;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterators;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.UnmodifiableIterator;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterators;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.UnmodifiableIterator;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -56,7 +56,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * approximate {@code N}-tiles (e.g. quartiles, percentiles, etc.), either globally or per-key.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class ApproximateQuantiles {
   private ApproximateQuantiles() {
@@ -147,7 +147,7 @@ public class ApproximateQuantiles {
   }
 
   /**
-   * Like {@link #perKey(int, Comparator)}, but sorts values using the their natural ordering.
+   * Like {@link #perKey(int, Comparator)}, but sorts values using their natural ordering.
    *
    * @param <K> the type of the keys in the input and output {@code PCollection}s
    * @param <V> the type of the values in the input {@code PCollection}
@@ -277,7 +277,7 @@ public class ApproximateQuantiles {
      * of {@code maxNumElements}.
      */
     public ApproximateQuantilesCombineFn<T, ComparatorT> withMaxInputSize(long maxNumElements) {
-      return create(numQuantiles, compareFn, maxNumElements, maxNumElements);
+      return create(numQuantiles, compareFn, maxNumElements, (double) maxNumElements);
     }
 
     /**
@@ -484,7 +484,8 @@ public class ApproximateQuantiles {
         newLevel = Math.max(newLevel, buffer.level + 1);
         newWeight += buffer.weight;
       }
-      List<T> newElements = interpolate(buffers, bufferSize, newWeight, offset(newWeight));
+      List<T> newElements =
+          interpolate(buffers, bufferSize, (double) newWeight, (double) offset(newWeight));
       return new QuantileBuffer<>(newLevel, newWeight, newElements);
     }
 
@@ -506,8 +507,8 @@ public class ApproximateQuantiles {
 
     /**
      * Emulates taking the ordered union of all elements in buffers, repeated according to their
-     * weight, and picking out the (k * step + offset)-th elements of this list for {@code 0 &lt;= k
-     * &lt; count}.
+     * weight, and picking out the (k * step + offset)-th elements of this list for 0 &lt;= k &lt;
+     * count.
      */
     private List<T> interpolate(
         Iterable<QuantileBuffer<T>> buffers, int count, double step, double offset) {

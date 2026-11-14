@@ -24,22 +24,22 @@ import static org.apache.beam.sdk.transforms.Watch.Growth.eitherOf;
 import static org.apache.beam.sdk.transforms.Watch.Growth.never;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
-import static org.hamcrest.Matchers.greaterThan;
 import static org.joda.time.Duration.standardSeconds;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
-import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
@@ -61,24 +61,22 @@ import org.apache.beam.sdk.transforms.Watch.WatchGrowthFn;
 import org.apache.beam.sdk.transforms.splittabledofn.ManualWatermarkEstimator;
 import org.apache.beam.sdk.transforms.splittabledofn.WatermarkEstimators;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
+import org.apache.beam.sdk.util.CoderUtils;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TimestampedValue;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Function;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Ordering;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Sets;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.hash.Funnel;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.hash.Funnels;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.hash.HashCode;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.hash.Hashing;
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.hash.Funnel;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.hash.Funnels;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.hash.HashCode;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.hash.Hashing;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.BaseEncoding;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.joda.time.ReadableDuration;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -188,6 +186,36 @@ public class WatchTest implements Serializable {
     PAssert.that(res).containsInAnyOrder(all);
 
     p.run();
+  }
+
+  @Test
+  @Category({NeedsRunner.class, UsesUnboundedSplittableParDo.class})
+  public void testMultiplePollsWithTimestampCursor() {
+    List<Integer> all = Arrays.asList(0, 1, 2, 3, 4, 5, 6, 7, 8, 9);
+
+    PCollection<Integer> res =
+        p.apply(Create.of("a"))
+            .apply(
+                Watch.growthOf(
+                        new StablyTimedPollFn<String, Integer>(
+                            all, standardSeconds(3) /* timeToOutputEverything */))
+                    .withPollInterval(Duration.millis(300))
+                    .withTimestampCursor()
+                    .withOutputCoder(VarIntCoder.of()))
+            .apply("Drop input", Values.create());
+
+    PAssert.that(res).containsInAnyOrder(all);
+
+    p.run();
+  }
+
+  @Test
+  public void testTimestampCursorRejectsNegativeAllowedLateness() {
+    Watch.Growth<String, Integer, Integer> growth =
+        Watch.growthOf(
+            new StablyTimedPollFn<String, Integer>(Arrays.asList(0), standardSeconds(1)));
+    assertThrows(
+        IllegalArgumentException.class, () -> growth.withTimestampCursor(standardSeconds(-1)));
   }
 
   @Test
@@ -312,75 +340,6 @@ public class WatchTest implements Serializable {
   }
 
   @Test
-  @Category({NeedsRunner.class, UsesUnboundedSplittableParDo.class})
-  @Ignore("https://issues.apache.org/jira/browse/BEAM-8035")
-  public void testMultiplePollsWithManyResults() {
-    final long numResults = 3000;
-    List<Integer> all = Lists.newArrayList();
-    for (int i = 0; i < numResults; ++i) {
-      all.add(i);
-    }
-
-    PCollection<TimestampedValue<Integer>> res =
-        p.apply(Create.of("a"))
-            .apply(
-                Watch.growthOf(
-                        new TimedPollFn<String, Integer>(
-                            all,
-                            standardSeconds(1) /* timeToOutputEverything */,
-                            standardSeconds(3) /* timeToDeclareOutputFinal */,
-                            standardSeconds(30) /* timeToFail */))
-                    .withPollInterval(Duration.millis(500))
-                    .withOutputCoder(VarIntCoder.of()))
-            .apply(Reify.timestampsInValue())
-            .apply("Drop timestamped input", Values.create());
-
-    PAssert.that(res)
-        .satisfies(
-            outputs -> {
-              Function<TimestampedValue<Integer>, Integer> extractValueFn =
-                  new Function<TimestampedValue<Integer>, Integer>() {
-                    @Override
-                    public @Nullable Integer apply(@Nullable TimestampedValue<Integer> input) {
-                      return input.getValue();
-                    }
-                  };
-              Function<TimestampedValue<Integer>, Instant> extractTimestampFn =
-                  new Function<TimestampedValue<Integer>, Instant>() {
-                    @Override
-                    public @Nullable Instant apply(@Nullable TimestampedValue<Integer> input) {
-                      return input.getTimestamp();
-                    }
-                  };
-
-              Ordering<TimestampedValue<Integer>> byTimestamp =
-                  Ordering.natural().onResultOf(extractTimestampFn);
-              // New outputs appear in timestamp order because each output's assigned timestamp
-              // is Instant.now() at the time of poll.
-              assertTrue("Outputs must be in timestamp order", byTimestamp.isOrdered(outputs));
-              assertEquals(
-                  "Yields all expected values",
-                  numResults,
-                  Sets.newHashSet(
-                          StreamSupport.stream(outputs.spliterator(), false)
-                              .map(extractValueFn::apply)
-                              .collect(Collectors.toList()))
-                      .size());
-              assertThat(
-                  "Poll called more than once",
-                  Sets.newHashSet(
-                          StreamSupport.stream(outputs.spliterator(), false)
-                              .map(extractTimestampFn::apply)
-                              .collect(Collectors.toList()))
-                      .size(),
-                  greaterThan(1));
-              return null;
-            });
-
-    p.run();
-  }
-
-  @Test
   public void testCoder() throws Exception {
     GrowthState pollingState =
         PollingGrowthState.of(
@@ -397,6 +356,45 @@ public class WatchTest implements Serializable {
 
     CoderProperties.coderDecodeEncodeEqual(coder, pollingState);
     CoderProperties.coderDecodeEncodeEqual(coder, nonPollingState);
+  }
+
+  @Test
+  public void testCoderWithTimestampCursor() throws Exception {
+    Instant now = Instant.now();
+    ImmutableMap<HashCode, Instant> completed =
+        ImmutableMap.of(HashCode.fromString("0123456789abcdef0123456789abcdef"), now);
+    GrowthState withoutCursor = PollingGrowthState.of(completed, now, "STATE");
+    GrowthState withCursor = PollingGrowthState.of(completed, now, "STATE", now);
+    Coder<GrowthState> coder =
+        Watch.GrowthStateCoder.of(StringUtf8Coder.of(), StringUtf8Coder.of());
+
+    CoderProperties.coderDecodeEncodeEqual(coder, withCursor);
+    // A state without a cursor keeps the pre-cursor bytes, so a pipeline written before the cursor
+    // existed can still be updated.
+    assertEquals(0, CoderUtils.encodeToByteArray(coder, withoutCursor)[0]);
+  }
+
+  @Test
+  public void testCoderKeepsPreCursorEncodedForm() throws Exception {
+    // Encoded forms produced before the cursor existed; an update must keep them byte for byte.
+    Instant ts = new Instant(1234567890123L);
+    GrowthState polling =
+        PollingGrowthState.of(
+            ImmutableMap.of(HashCode.fromString("0123456789abcdef0123456789abcdef"), ts),
+            ts,
+            "STATE");
+    GrowthState nonPolling =
+        NonPollingGrowthState.of(Growth.PollResult.incomplete(ts, Arrays.asList("A", "B")));
+    Coder<GrowthState> coder =
+        Watch.GrowthStateCoder.of(StringUtf8Coder.of(), StringUtf8Coder.of());
+
+    assertEquals(
+        "00055354415445018000011F71FB04CB0000000101234567"
+            + "89ABCDEF0123456789ABCDEF8000011F71FB04CB",
+        BaseEncoding.base16().encode(CoderUtils.encodeToByteArray(coder, polling)));
+    assertEquals(
+        "01000000000201418000011F71FB04CB01428000011F71FB04CB",
+        BaseEncoding.base16().encode(CoderUtils.encodeToByteArray(coder, nonPolling)));
   }
 
   /**
@@ -443,6 +441,38 @@ public class WatchTest implements Serializable {
       return elapsed.isLongerThan(timeToDeclareOutputFinal)
           ? PollResult.complete(toEmit)
           : PollResult.incomplete(toEmit).withWatermark(now);
+    }
+  }
+
+  /**
+   * Gradually emits all items from the given list, giving item {@code i} a timestamp of its own so
+   * that every poll reports an item at the same timestamp. Items are paired onto shared timestamps,
+   * so a poll boundary can fall between two items that carry the same one.
+   */
+  private static class StablyTimedPollFn<InputT, OutputT> extends PollFn<InputT, OutputT> {
+
+    private final Instant baseTime;
+    private final List<OutputT> outputs;
+    private final Duration timeToOutputEverything;
+
+    StablyTimedPollFn(List<OutputT> outputs, Duration timeToOutputEverything) {
+      this.baseTime = Instant.now();
+      this.outputs = outputs;
+      this.timeToOutputEverything = timeToOutputEverything;
+    }
+
+    @Override
+    public PollResult<OutputT> apply(InputT element, Context c) throws Exception {
+      Duration elapsed = new Duration(baseTime, Instant.now());
+      double fractionElapsed = 1.0 * elapsed.getMillis() / timeToOutputEverything.getMillis();
+      int numToEmit = (int) Math.min(outputs.size(), fractionElapsed * outputs.size());
+      List<TimestampedValue<OutputT>> toEmit = Lists.newArrayList();
+      for (int i = 0; i < numToEmit; ++i) {
+        toEmit.add(TimestampedValue.of(outputs.get(i), baseTime.plus(standardSeconds(i / 2))));
+      }
+      return numToEmit == outputs.size()
+          ? PollResult.complete(toEmit)
+          : PollResult.incomplete(toEmit);
     }
   }
 
@@ -517,6 +547,11 @@ public class WatchTest implements Serializable {
   }
 
   private static GrowthTracker<String, Integer> newTracker(GrowthState state) {
+    return newTracker(state, null);
+  }
+
+  private static GrowthTracker<String, Integer> newTracker(
+      GrowthState state, Duration allowedLateness) {
     Funnel<String> coderFunnel =
         (from, into) -> {
           try {
@@ -525,7 +560,7 @@ public class WatchTest implements Serializable {
             throw new RuntimeException(e);
           }
         };
-    return new GrowthTracker<>(state, coderFunnel);
+    return new GrowthTracker<>(state, coderFunnel, allowedLateness);
   }
 
   private static HashCode hash128(String value) {
@@ -542,6 +577,11 @@ public class WatchTest implements Serializable {
 
   private static GrowthTracker<String, Integer> newPollingGrowthTracker() {
     return newTracker(PollingGrowthState.of(never().forNewInput(Instant.now(), null)));
+  }
+
+  private static GrowthTracker<String, Integer> newPollingGrowthTracker(Duration allowedLateness) {
+    return newTracker(
+        PollingGrowthState.of(never().forNewInput(Instant.now(), null)), allowedLateness);
   }
 
   @Test
@@ -577,6 +617,91 @@ public class WatchTest implements Serializable {
   }
 
   @Test
+  public void testPollingGrowthTrackerDropsOutputsBehindCursor() throws Exception {
+    Instant now = Instant.now();
+    Watch.Growth<String, String, String> growth =
+        Watch.growthOf(
+                new PollFn<String, String>() {
+                  @Override
+                  public PollResult<String> apply(String element, Context c) throws Exception {
+                    return PollResult.incomplete(
+                        Arrays.asList(
+                            TimestampedValue.of("retired", now.plus(standardSeconds(1))),
+                            TimestampedValue.of("atCursor", now.plus(standardSeconds(3))),
+                            TimestampedValue.of("fresh", now.plus(standardSeconds(5)))));
+                  }
+                })
+            .withPollInterval(standardSeconds(10))
+            .withTimestampCursor();
+    WatchGrowthFn<String, String, String, Integer> growthFn =
+        new WatchGrowthFn(
+            growth, StringUtf8Coder.of(), SerializableFunctions.identity(), StringUtf8Coder.of());
+    GrowthTracker<String, Integer> tracker =
+        newTracker(
+            PollingGrowthState.of(
+                ImmutableMap.of(),
+                null,
+                never().forNewInput(now, null),
+                now.plus(standardSeconds(3))),
+            Duration.ZERO);
+    DoFn.ProcessContext context = mock(DoFn.ProcessContext.class);
+    ManualWatermarkEstimator<Instant> watermarkEstimator =
+        new WatermarkEstimators.Manual(BoundedWindow.TIMESTAMP_MIN_VALUE);
+
+    ProcessContinuation processContinuation =
+        growthFn.process(context, tracker, watermarkEstimator);
+
+    // The output below the cursor has no key left to prove it was seen, so it is taken as seen. An
+    // output at the cursor is still retained, so it is deduplicated by key rather than dropped.
+    verify(context)
+        .output(
+            KV.of(
+                null,
+                Arrays.asList(
+                    TimestampedValue.of("atCursor", now.plus(standardSeconds(3))),
+                    TimestampedValue.of("fresh", now.plus(standardSeconds(5))))));
+    assertEquals(now.plus(standardSeconds(3)), watermarkEstimator.currentWatermark());
+    assertTrue(processContinuation.shouldResume());
+  }
+
+  @Test
+  public void testPollingGrowthTrackerEmptyRoundAdvancesWatermarkToFloor() throws Exception {
+    Instant now = Instant.now();
+    Watch.Growth<String, String, String> growth =
+        Watch.growthOf(
+                new PollFn<String, String>() {
+                  @Override
+                  public PollResult<String> apply(String element, Context c) throws Exception {
+                    // A re-listed output below the floor, and no explicit watermark.
+                    return PollResult.incomplete(
+                        Arrays.asList(
+                            TimestampedValue.of("retired", now.minus(standardSeconds(1)))));
+                  }
+                })
+            .withPollInterval(standardSeconds(10))
+            .withTimestampCursor();
+    WatchGrowthFn<String, String, String, Integer> growthFn =
+        new WatchGrowthFn(
+            growth, StringUtf8Coder.of(), SerializableFunctions.identity(), StringUtf8Coder.of());
+    GrowthTracker<String, Integer> tracker =
+        newTracker(
+            PollingGrowthState.of(ImmutableMap.of(), null, never().forNewInput(now, null), now),
+            Duration.ZERO);
+    DoFn.ProcessContext context = mock(DoFn.ProcessContext.class);
+    ManualWatermarkEstimator<Instant> watermarkEstimator =
+        new WatermarkEstimators.Manual(BoundedWindow.TIMESTAMP_MIN_VALUE);
+
+    ProcessContinuation processContinuation =
+        growthFn.process(context, tracker, watermarkEstimator);
+
+    // Nothing below the retention floor is ever emitted, so the floor is a sound watermark for a
+    // round that computed none.
+    verify(context, org.mockito.Mockito.never()).output(any());
+    assertEquals(now, watermarkEstimator.currentWatermark());
+    assertTrue(processContinuation.shouldResume());
+  }
+
+  @Test
   public void testPollingGrowthTrackerCheckpointNonEmpty() {
     Instant now = Instant.now();
     GrowthTracker<String, Integer> tracker = newPollingGrowthTracker();
@@ -607,6 +732,151 @@ public class WatchTest implements Serializable {
         residual.getCompleted().keySet(),
         containsInAnyOrder(hash128("a"), hash128("b"), hash128("c"), hash128("d")));
     assertEquals(1, (int) residual.getTerminationState());
+    assertNull(residual.getCursor());
+  }
+
+  @Test
+  public void testPollingGrowthTrackerRetiresCompletedBehindCursor() {
+    Instant now = Instant.now();
+    GrowthTracker<String, Integer> tracker = newPollingGrowthTracker(Duration.ZERO);
+
+    PollResult<String> claim =
+        PollResult.incomplete(
+            Arrays.asList(
+                TimestampedValue.of("a", now.plus(standardSeconds(1))),
+                TimestampedValue.of("b", now.plus(standardSeconds(2))),
+                TimestampedValue.of("c", now.plus(standardSeconds(4))),
+                TimestampedValue.of("d", now.plus(standardSeconds(4)))));
+
+    assertTrue(tracker.tryClaim(KV.of(claim, 1 /* termination state */)));
+
+    PollingGrowthState<Integer> residual =
+        (PollingGrowthState<Integer>) tracker.trySplit(0).getResidual();
+
+    assertEquals(now.plus(standardSeconds(4)), residual.getCursor());
+    // A key at the cursor is retained, so an output that arrives later at the same timestamp is
+    // still deduplicated by key.
+    assertThat(residual.getCompleted().keySet(), containsInAnyOrder(hash128("c"), hash128("d")));
+  }
+
+  @Test
+  public void testPollingGrowthTrackerAllowedLatenessRetainsCompleted() {
+    Instant now = Instant.now();
+    GrowthTracker<String, Integer> tracker = newPollingGrowthTracker(standardSeconds(2));
+
+    PollResult<String> claim =
+        PollResult.incomplete(
+            Arrays.asList(
+                TimestampedValue.of("a", now.plus(standardSeconds(1))),
+                TimestampedValue.of("b", now.plus(standardSeconds(2))),
+                TimestampedValue.of("c", now.plus(standardSeconds(4))),
+                TimestampedValue.of("d", now.plus(standardSeconds(4)))));
+
+    assertTrue(tracker.tryClaim(KV.of(claim, 1 /* termination state */)));
+
+    PollingGrowthState<Integer> residual =
+        (PollingGrowthState<Integer>) tracker.trySplit(0).getResidual();
+
+    assertEquals(now.plus(standardSeconds(4)), residual.getCursor());
+    assertThat(
+        residual.getCompleted().keySet(),
+        containsInAnyOrder(hash128("b"), hash128("c"), hash128("d")));
+  }
+
+  @Test
+  public void testPollingGrowthTrackerRoundWithoutCursorDropsStaleCursor() throws Exception {
+    Instant now = Instant.now();
+    // A round that is not bounding the state retains every key, so the cursor that would retire
+    // them is dropped and the restriction returns to the pre-cursor encoding.
+    GrowthState state =
+        PollingGrowthState.of(
+            ImmutableMap.of(), null, never().forNewInput(now, null), now.plus(standardSeconds(10)));
+    GrowthTracker<String, Integer> tracker = newTracker(state, null);
+
+    assertTrue(
+        tracker.tryClaim(
+            KV.of(
+                PollResult.incomplete(
+                    Arrays.asList(TimestampedValue.of("a", now.plus(standardSeconds(20))))),
+                1)));
+
+    PollingGrowthState<Integer> residual =
+        (PollingGrowthState<Integer>) tracker.trySplit(0).getResidual();
+
+    assertNull(residual.getCursor());
+    assertEquals(1, residual.getCompleted().size());
+    Coder<GrowthState> coder = Watch.GrowthStateCoder.of(StringUtf8Coder.of(), VarIntCoder.of());
+    assertEquals(0, CoderUtils.encodeToByteArray(coder, residual)[0]);
+  }
+
+  @Test
+  public void testPollingGrowthTrackerAllowedLatenessKeepsMaxCursorClaimable() throws Exception {
+    // A cursor at the maximum timestamp still leaves the allowed lateness window claimable.
+    GrowthState state =
+        PollingGrowthState.of(
+            ImmutableMap.of(),
+            null,
+            never().forNewInput(Instant.now(), null),
+            BoundedWindow.TIMESTAMP_MAX_VALUE);
+    GrowthTracker<String, Integer> tracker = newTracker(state, Duration.standardHours(1));
+
+    assertTrue(
+        tracker.tryClaim(
+            KV.of(
+                PollResult.incomplete(
+                    Arrays.asList(
+                        TimestampedValue.of(
+                            "late",
+                            BoundedWindow.TIMESTAMP_MAX_VALUE.minus(
+                                Duration.standardMinutes(30))))),
+                1)));
+  }
+
+  @Test
+  public void testPollingGrowthTrackerHugeAllowedLatenessDoesNotOverflow() {
+    Instant now = Instant.now();
+    GrowthState state =
+        PollingGrowthState.of(ImmutableMap.of(), null, never().forNewInput(now, null), now);
+    GrowthTracker<String, Integer> tracker = newTracker(state, Duration.millis(Long.MAX_VALUE));
+
+    // The floor saturates at the minimum timestamp rather than throwing.
+    assertTrue(
+        tracker.tryClaim(
+            KV.of(
+                PollResult.incomplete(
+                    Arrays.asList(TimestampedValue.of("a", BoundedWindow.TIMESTAMP_MIN_VALUE))),
+                1)));
+  }
+
+  @Test
+  public void testPollingGrowthTrackerRejectsClaimBehindCursor() {
+    Instant now = Instant.now();
+    GrowthTracker<String, Integer> tracker = newPollingGrowthTracker(Duration.ZERO);
+
+    assertTrue(
+        tracker.tryClaim(
+            KV.of(
+                PollResult.incomplete(
+                    Arrays.asList(TimestampedValue.of("a", now.plus(standardSeconds(4))))),
+                1)));
+
+    PollingGrowthState<Integer> residual =
+        (PollingGrowthState<Integer>) tracker.trySplit(0).getResidual();
+
+    assertFalse(
+        newTracker(residual, Duration.ZERO)
+            .tryClaim(
+                KV.of(
+                    PollResult.incomplete(
+                        Arrays.asList(TimestampedValue.of("b", now.plus(standardSeconds(3))))),
+                    2)));
+    assertTrue(
+        newTracker(residual, Duration.ZERO)
+            .tryClaim(
+                KV.of(
+                    PollResult.incomplete(
+                        Arrays.asList(TimestampedValue.of("b", now.plus(standardSeconds(4))))),
+                    2)));
   }
 
   @Test

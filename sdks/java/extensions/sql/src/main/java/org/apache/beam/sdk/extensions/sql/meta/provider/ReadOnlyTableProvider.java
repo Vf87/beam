@@ -17,19 +17,18 @@
  */
 package org.apache.beam.sdk.extensions.sql.meta.provider;
 
+import static org.apache.beam.sdk.util.Preconditions.checkArgumentNotNull;
+
 import java.util.Map;
 import org.apache.beam.sdk.extensions.sql.meta.BeamSqlTable;
 import org.apache.beam.sdk.extensions.sql.meta.Table;
 import org.apache.beam.sdk.schemas.Schema;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 
 /**
  * A {@code ReadOnlyTableProvider} provides in-memory read only set of {@code BeamSqlTable
  * BeamSqlTables}.
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class ReadOnlyTableProvider implements TableProvider {
   private final String typeName;
   private final Map<String, BeamSqlTable> tables;
@@ -73,6 +72,6 @@ public class ReadOnlyTableProvider implements TableProvider {
 
   @Override
   public BeamSqlTable buildBeamSqlTable(Table table) {
-    return tables.get(table.getName());
+    return checkArgumentNotNull(tables.get(table.getName()), "Table not found: " + table.getName());
   }
 }

@@ -47,6 +47,7 @@ final class ReadFromTwitterDoFn extends DoFn<TwitterConfig, String> {
   ReadFromTwitterDoFn() {
     this.startTime = new DateTime();
   }
+
   /* Logger for class.*/
   private static final Logger LOG = LoggerFactory.getLogger(ReadFromTwitterDoFn.class);
 
@@ -64,7 +65,7 @@ final class ReadFromTwitterDoFn extends DoFn<TwitterConfig, String> {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof OffsetHolder)) {
         return false;
       }
       OffsetHolder that = (OffsetHolder) o;
@@ -91,10 +92,9 @@ final class ReadFromTwitterDoFn extends DoFn<TwitterConfig, String> {
     @Override
     public boolean tryClaim(TwitterConfig twitterConfig) {
       LOG.debug(
-          "-------------- Claiming "
-              + twitterConfig.hashCode()
-              + " used to have: "
-              + restriction.fetchedRecords);
+          "-------------- Claiming {} used to have: {}",
+          twitterConfig.hashCode(),
+          restriction.fetchedRecords);
       long fetchedRecords =
           this.restriction == null || this.restriction.fetchedRecords == null
               ? 0
@@ -120,7 +120,7 @@ final class ReadFromTwitterDoFn extends DoFn<TwitterConfig, String> {
 
     @Override
     public SplitResult<OffsetHolder> trySplit(double fractionOfRemainder) {
-      LOG.debug("-------------- Trying to split: fractionOfRemainder=" + fractionOfRemainder);
+      LOG.debug("-------------- Trying to split: fractionOfRemainder={}", fractionOfRemainder);
       return SplitResult.of(new OffsetHolder(null, 0L), restriction);
     }
 
@@ -190,7 +190,8 @@ final class ReadFromTwitterDoFn extends DoFn<TwitterConfig, String> {
         return DoFn.ProcessContinuation.stop();
       }
       if (status != null) {
-        Instant currentInstant = Instant.ofEpochMilli(status.getCreatedAt().getTime());
+        Instant currentInstant =
+            Instant.ofEpochMilli(status.getCreatedAt().toInstant().toEpochMilli());
         watermarkEstimator.setWatermark(currentInstant);
         out.outputWithTimestamp(status.getText(), currentInstant);
       }

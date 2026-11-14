@@ -30,8 +30,9 @@ import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.transforms.Combine.Holder;
 import org.apache.beam.sdk.transforms.Min;
 import org.apache.beam.sdk.transforms.SerializableFunction;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.checkerframework.checker.nullness.qual.Nullable;
+import org.checkerframework.dataflow.qual.Pure;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.joda.time.format.PeriodFormat;
@@ -44,10 +45,7 @@ import org.joda.time.format.PeriodFormatter;
  * <p>This class is for internal use only and may change at any time.
  */
 // This class should be inlined to subclasses and deleted, simplifying them too
-// https://issues.apache.org/jira/browse/BEAM-1486
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
+// https://github.com/apache/beam/issues/18117
 public abstract class AfterDelayFromFirstElementStateMachine extends TriggerStateMachine {
 
   protected static final List<SerializableFunction<Instant, Instant>> IDENTITY = ImmutableList.of();
@@ -61,6 +59,7 @@ public abstract class AfterDelayFromFirstElementStateMachine extends TriggerStat
   private static final PeriodFormatter PERIOD_FORMATTER = PeriodFormat.wordBased(Locale.ENGLISH);
 
   /** To complete an implementation, return the desired time from the TriggerContext. */
+  @Pure
   public abstract @Nullable Instant getCurrentTime(TriggerStateMachine.TriggerContext context);
 
   /**
@@ -294,7 +293,9 @@ public abstract class AfterDelayFromFirstElementStateMachine extends TriggerStat
     @Override
     public Instant apply(Instant point) {
       long millisSinceStart = new Duration(offset, point).getMillis() % size.getMillis();
-      return millisSinceStart == 0 ? point : point.plus(size).minus(millisSinceStart);
+      return millisSinceStart == 0
+          ? point
+          : point.plus(size).minus(Duration.millis(millisSinceStart));
     }
 
     @Override

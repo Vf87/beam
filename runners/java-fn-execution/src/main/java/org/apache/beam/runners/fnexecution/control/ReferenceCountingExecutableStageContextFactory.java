@@ -24,16 +24,16 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.apache.beam.runners.core.construction.PipelineOptionsTranslation;
-import org.apache.beam.runners.core.construction.graph.ExecutableStage;
 import org.apache.beam.runners.fnexecution.provisioning.JobInfo;
 import org.apache.beam.sdk.function.ThrowingFunction;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PortablePipelineOptions;
 import org.apache.beam.sdk.transforms.SerializableFunction;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.beam.sdk.util.construction.PipelineOptionsTranslation;
+import org.apache.beam.sdk.util.construction.graph.ExecutableStage;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,7 +43,7 @@ import org.slf4j.LoggerFactory;
  * keeping.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class ReferenceCountingExecutableStageContextFactory
     implements ExecutableStageContext.Factory {
@@ -115,7 +115,7 @@ public class ReferenceCountingExecutableStageContextFactory
   private void scheduleRelease(JobInfo jobInfo) {
     WrappedContext wrapper = getCache().get(jobInfo.jobId());
     Preconditions.checkState(
-        wrapper != null, "Releasing context for unknown job: " + jobInfo.jobId());
+        wrapper != null, "Releasing context for unknown job %s", jobInfo.jobId());
 
     PipelineOptions pipelineOptions =
         PipelineOptionsTranslation.fromProto(jobInfo.pipelineOptions());
@@ -158,7 +158,12 @@ public class ReferenceCountingExecutableStageContextFactory
     synchronized (this) {
       if (executor == null) {
         executor =
-            Executors.newScheduledThreadPool(1, new ThreadFactoryBuilder().setDaemon(true).build());
+            Executors.newScheduledThreadPool(
+                1,
+                new ThreadFactoryBuilder()
+                    .setNameFormat("ScheduledExecutor-thread")
+                    .setDaemon(true)
+                    .build());
       }
       return executor;
     }
@@ -175,6 +180,8 @@ public class ReferenceCountingExecutableStageContextFactory
         if (getCache().remove(wrapper.jobInfo.jobId(), wrapper)) {
           try {
             wrapper.closeActual();
+          } catch (OutOfMemoryError oom) {
+            throw oom;
           } catch (Throwable t) {
             LOG.error("Unable to close ExecutableStageContext.", t);
           }
@@ -217,7 +224,7 @@ public class ReferenceCountingExecutableStageContextFactory
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof WrappedContext)) {
         return false;
       }
       WrappedContext that = (WrappedContext) o;

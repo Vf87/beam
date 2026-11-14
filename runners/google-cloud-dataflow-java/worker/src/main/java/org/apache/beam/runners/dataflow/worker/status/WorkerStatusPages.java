@@ -27,7 +27,7 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import org.apache.beam.runners.dataflow.worker.status.DebugCapture.Capturable;
 import org.apache.beam.runners.dataflow.worker.util.MemoryMonitor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.servlet.ServletHandler;
 import org.eclipse.jetty.servlet.ServletHolder;
@@ -36,7 +36,7 @@ import org.slf4j.LoggerFactory;
 
 /** Manages the server providing the worker status pages. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class WorkerStatusPages {
 
@@ -54,10 +54,11 @@ public class WorkerStatusPages {
     this.capturePages = new ArrayList<>();
     this.statusServer.setHandler(servletHandler);
 
-    // Install the default servlets (threadz, healthz, heapz, statusz)
+    // Install the default servlets (threadz, healthz, heapz, jfrz, statusz)
     addServlet(threadzServlet);
     addServlet(new HealthzServlet(healthyIndicator));
     addServlet(new HeapzServlet(memoryMonitor));
+    addServlet(new JfrzServlet(memoryMonitor));
     addServlet(statuszServlet);
 
     // Add default capture pages (threadz, statusz)
@@ -74,6 +75,10 @@ public class WorkerStatusPages {
       statusPort = Integer.parseInt(System.getProperty("status_port"));
     }
     return new WorkerStatusPages(new Server(statusPort), memoryMonitor, healthyIndicator);
+  }
+
+  public static WorkerStatusPages create(int defaultStatusPort, MemoryMonitor memoryMonitor) {
+    return create(defaultStatusPort, memoryMonitor, () -> true);
   }
 
   /** Start the server. */

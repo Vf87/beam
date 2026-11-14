@@ -23,6 +23,7 @@ import unittest
 import apache_beam as beam
 from apache_beam import coders
 from apache_beam.runners.interactive import cache_manager as cache
+from apache_beam.runners.interactive import interactive_beam as ib
 
 
 class FileBasedCacheManagerTest(object):
@@ -36,7 +37,7 @@ class FileBasedCacheManagerTest(object):
   tested with InteractiveRunner as a part of integration tests instead.
   """
 
-  cache_format = None  # type: str
+  cache_format: str = None
 
   def setUp(self):
     self.cache_manager = cache.FileBasedCacheManager(
@@ -68,6 +69,18 @@ class FileBasedCacheManagerTest(object):
     self.mock_write_cache(cache_version_one, prefix, cache_label)
     self.assertTrue(self.cache_manager.exists(prefix, cache_label))
 
+  def test_empty_label_not_exist(self):
+    prefix = 'full'
+    cache_label = 'some-cache-label'
+    cache_version_one = ['cache', 'version', 'one']
+
+    self.assertFalse(self.cache_manager.exists(prefix, cache_label))
+    self.mock_write_cache(cache_version_one, prefix, cache_label)
+    self.assertTrue(self.cache_manager.exists(prefix, cache_label))
+
+    # '' shouldn't be treated as a wildcard to match everything.
+    self.assertFalse(self.cache_manager.exists(prefix, ''))
+
   def test_size(self):
     """Test getting the size of some cache label."""
 
@@ -89,10 +102,9 @@ class FileBasedCacheManagerTest(object):
     coder = self.cache_manager.load_pcoder(prefix, cache_label)
     encoded = coder.encode(value)
 
-    # Add one to the size on disk because of the extra new-line character when
-    # writing to file.
-    self.assertEqual(
-        self.cache_manager.size(prefix, cache_label), len(encoded) + 1)
+    # We encode in a format that escapes newlines.
+    self.assertGreater(
+        self.cache_manager.size(prefix, cache_label), len(encoded))
 
   def test_clear(self):
     """Test that CacheManager can correctly tell if the cache exists or not."""
@@ -202,6 +214,55 @@ class FileBasedCacheManagerTest(object):
     self.assertIs(
         type(self.cache_manager.load_pcoder('full', 'a key')),
         type(coders.registry.get_coder(int)))
+
+  def test_cache_manager_uses_gcs_ib_cache_root(self):
+    """
+    Checks that FileBasedCacheManager._cache_dir is set to the
+    cache_root set under Interactive Beam for a GCS directory.
+    """
+    # Set Interactive Beam specified cache dir to cloud storage
+    ib.options.cache_root = 'gs://'
+
+    cache_manager_with_ib_option = cache.FileBasedCacheManager(
+        cache_dir=ib.options.cache_root)
+
+    self.assertEqual(
+        ib.options.cache_root, cache_manager_with_ib_option._cache_dir)
+
+    # Reset Interactive Beam setting
+    ib.options.cache_root = None
+
+  def test_cache_manager_uses_local_ib_cache_root(self):
+    """
+    Checks that FileBasedCacheManager._cache_dir is set to the
+    cache_root set under Interactive Beam for a local directory
+    and that the cached values are the same as the values of a
+    cache using default settings.
+    """
+    prefix = 'full'
+    cache_label = 'some-cache-label'
+    cached_values = [1, 2, 3]
+
+    self.mock_write_cache(cached_values, prefix, cache_label)
+    reader_one, _ = self.cache_manager.read(prefix, cache_label)
+    pcoll_list_one = list(reader_one)
+
+    # Set Interactive Beam specified cache dir to local directory
+    ib.options.cache_root = '/tmp/it-test/'
+    cache_manager_with_ib_option = cache.FileBasedCacheManager(
+        cache_dir=ib.options.cache_root)
+    self.assertEqual(
+        ib.options.cache_root, cache_manager_with_ib_option._cache_dir)
+
+    cache_manager_with_ib_option.write(cached_values, *[prefix, cache_label])
+    reader_two, _ = self.cache_manager.read(prefix, cache_label)
+    pcoll_list_two = list(reader_two)
+
+    # Writing to a different directory should not impact the cached values
+    self.assertEqual(pcoll_list_one, pcoll_list_two)
+
+    # Reset Interactive Beam setting
+    ib.options.cache_root = None
 
 
 class TextFileBasedCacheManagerTest(

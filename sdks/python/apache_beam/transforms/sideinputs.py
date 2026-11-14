@@ -27,11 +27,11 @@ AsSingleton, AsIter, AsList and AsDict in apache_beam.pvalue.
 # pytype: skip-file
 
 import re
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 from typing import Any
-from typing import Callable
-from typing import Dict
 
+from apache_beam.coders import coder_impl
 from apache_beam.transforms import window
 
 if TYPE_CHECKING:
@@ -45,30 +45,29 @@ SIDE_INPUT_REGEX = SIDE_INPUT_PREFIX + '([0-9]+)(-.*)?$'
 
 
 # Top-level function so we can identify it later.
-def _global_window_mapping_fn(w, global_window=window.GlobalWindow()):
-  # type: (...) -> window.GlobalWindow
+def _global_window_mapping_fn(
+    w, global_window=window.GlobalWindow()) -> window.GlobalWindow:
   return global_window
 
 
-def default_window_mapping_fn(target_window_fn):
-  # type: (window.WindowFn) -> WindowMappingFn
+def default_window_mapping_fn(
+    target_window_fn: window.WindowFn) -> WindowMappingFn:
   if target_window_fn == window.GlobalWindows():
     return _global_window_mapping_fn
 
   if isinstance(target_window_fn, window.Sessions):
     raise RuntimeError("Sessions is not allowed in side inputs")
 
-  def map_via_end(source_window):
-    # type: (window.BoundedWindow) -> window.BoundedWindow
+  def map_via_end(source_window: window.BoundedWindow) -> window.BoundedWindow:
     return list(
         target_window_fn.assign(
-            window.WindowFn.AssignContext(source_window.max_timestamp())))[-1]
+            window.WindowFn.AssignContext(
+                source_window.max_timestamp(), window=source_window)))[-1]
 
   return map_via_end
 
 
-def get_sideinput_index(tag):
-  # type: (str) -> int
+def get_sideinput_index(tag: str) -> int:
   match = re.match(SIDE_INPUT_REGEX, tag, re.DOTALL)
   if match:
     return int(match.group(1))
@@ -78,28 +77,22 @@ def get_sideinput_index(tag):
 
 class SideInputMap(object):
   """Represents a mapping of windows to side input values."""
-  def __init__(
-      self,
-      view_class,  # type: pvalue.AsSideInput
-      view_options,
-      iterable):
+  def __init__(self, view_class: 'pvalue.AsSideInput', view_options, iterable):
     self._window_mapping_fn = view_options.get(
         'window_mapping_fn', _global_window_mapping_fn)
     self._view_class = view_class
     self._view_options = view_options
     self._iterable = iterable
-    self._cache = {}  # type: Dict[window.BoundedWindow, Any]
+    self._cache: dict[window.BoundedWindow, Any] = {}
 
-  def __getitem__(self, window):
-    # type: (window.BoundedWindow) -> Any
+  def __getitem__(self, window: window.BoundedWindow) -> Any:
     if window not in self._cache:
       target_window = self._window_mapping_fn(window)
       self._cache[window] = self._view_class._from_runtime_iterable(
           _FilteringIterable(self._iterable, target_window), self._view_options)
     return self._cache[window]
 
-  def is_globally_windowed(self):
-    # type: () -> bool
+  def is_globally_windowed(self) -> bool:
     return self._window_mapping_fn == _global_window_mapping_fn
 
 
@@ -118,3 +111,7 @@ class _FilteringIterable(object):
   def __reduce__(self):
     # Pickle self as an already filtered list.
     return list, (list(self), )
+
+
+coder_impl.FastPrimitivesCoderImpl.register_iterable_like_type(
+    _FilteringIterable)

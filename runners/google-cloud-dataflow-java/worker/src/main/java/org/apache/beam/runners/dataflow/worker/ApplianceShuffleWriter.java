@@ -28,7 +28,7 @@ import org.apache.beam.runners.dataflow.worker.util.common.worker.OperationConte
  */
 @ThreadSafe
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public final class ApplianceShuffleWriter implements ShuffleWriter {
   static {
@@ -55,8 +55,16 @@ public final class ApplianceShuffleWriter implements ShuffleWriter {
   }
 
   @Override
+  @SuppressWarnings("Finalize")
   protected void finalize() {
-    destroy();
+    destroySynchronized();
+  }
+
+  public synchronized void destroySynchronized() {
+    if (nativePointer != 0L) {
+      destroy();
+      nativePointer = 0L;
+    }
   }
 
   /** Native methods for interacting with the underlying native shuffle writer code. */

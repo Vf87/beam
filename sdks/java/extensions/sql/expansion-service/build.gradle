@@ -27,21 +27,35 @@ applyJavaNature(
   }
 )
 
+configurations.runtimeClasspath {
+  // Pin avro to 1.11.4 due to https://github.com/apache/beam/issues/34968
+  // cannot upgrade this to the latest version due to https://github.com/apache/beam/issues/34993
+  resolutionStrategy.force 'org.apache.avro:avro:1.11.4'
+}
+
 description = "Apache Beam :: SDKs :: Java :: SQL :: Expansion Service"
 ext.summary = """Contains code to run a SQL Expansion Service."""
 
 
 dependencies {
-  compile project(path: ":sdks:java:core", configuration: "shadow")
-  compile project(path: ":sdks:java:expansion-service")
+  implementation project(path: ":sdks:java:core", configuration: "shadow")
+  implementation project(path: ":sdks:java:expansion-service")
   permitUnusedDeclared project(path: ":sdks:java:expansion-service") // BEAM-11761
-  compile project(path: ":sdks:java:extensions:sql")
-  compile project(path: ":sdks:java:extensions:sql:zetasql")
-  compile library.java.vendored_guava_26_0_jre
+  implementation project(path: ":sdks:java:extensions:sql")
+  implementation library.java.vendored_guava_32_1_2_jre
+  testImplementation project(path: ":sdks:java:core", configuration: "shadowTest")
+  testImplementation library.java.junit
+  testRuntimeOnly project(path: ":runners:direct-java", configuration: "shadow")
 }
 
 task runExpansionService (type: JavaExec) {
-  main = "org.apache.beam.sdk.expansion.service.ExpansionService"
+  mainClass = "org.apache.beam.sdk.expansion.service.ExpansionService"
   classpath = sourceSets.main.runtimeClasspath
   args = [project.findProperty("constructionService.port") ?: "8097"]
+}
+
+shadowJar {
+  manifest {
+    attributes(["Multi-Release": true])
+  }
 }

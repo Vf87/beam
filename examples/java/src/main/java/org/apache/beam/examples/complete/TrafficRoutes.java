@@ -17,6 +17,26 @@
  */
 package org.apache.beam.examples.complete;
 
+// beam-playground:
+//   name: TrafficRoutes
+//   description: An example that analyzes traffic sensor data using SlidingWindows.
+//     For each window, it calculates the average speed over the window for some small set
+//     of predefined 'routes', and looks for 'slowdowns' in those routes. It writes its
+//     results to a BigQuery table.
+//   multifile: true
+//   context_line: 411
+//   categories:
+//     - Combiners
+//     - Streaming
+//     - Options
+//     - Windowing
+//   complexity: ADVANCED
+//   tags:
+//     - windowing
+//     - timestamp
+//     - batch
+//     - streaming
+
 import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableReference;
 import com.google.api.services.bigquery.model.TableRow;
@@ -35,14 +55,17 @@ import org.apache.beam.examples.common.ExampleOptions;
 import org.apache.beam.examples.common.ExampleUtils;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
-import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.coders.DefaultCoder;
+import org.apache.beam.sdk.extensions.avro.coders.AvroCoder;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.options.Default;
 import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.DoFn.Element;
+import org.apache.beam.sdk.transforms.DoFn.OutputReceiver;
+import org.apache.beam.sdk.transforms.DoFn.Timestamp;
 import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -51,7 +74,7 @@ import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.joda.time.format.DateTimeFormat;
@@ -78,7 +101,7 @@ import org.joda.time.format.DateTimeFormatter;
  * and then exits.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class TrafficRoutes {
 
@@ -120,7 +143,7 @@ public class TrafficRoutes {
       if (object == null) {
         return false;
       }
-      if (object.getClass() != getClass()) {
+      if (!(object instanceof StationSpeed)) {
         return false;
       }
       StationSpeed otherStationSpeed = (StationSpeed) object;
@@ -167,12 +190,13 @@ public class TrafficRoutes {
         DateTimeFormat.forPattern("MM/dd/yyyy HH:mm:ss");
 
     @ProcessElement
-    public void processElement(DoFn<String, String>.ProcessContext c) throws Exception {
-      String[] items = c.element().split(",");
+    public void processElement(@Element String element, OutputReceiver<String> receiver)
+        throws Exception {
+      String[] items = element.split(",");
       String timestamp = tryParseTimestamp(items);
       if (timestamp != null) {
         try {
-          c.outputWithTimestamp(c.element(), new Instant(dateTimeFormat.parseMillis(timestamp)));
+          receiver.outputWithTimestamp(element, new Instant(dateTimeFormat.parseMillis(timestamp)));
         } catch (IllegalArgumentException e) {
           // Skip the invalid input.
         }
@@ -187,8 +211,11 @@ public class TrafficRoutes {
   static class ExtractStationSpeedFn extends DoFn<String, KV<String, StationSpeed>> {
 
     @ProcessElement
-    public void processElement(ProcessContext c) {
-      String[] items = c.element().split(",");
+    public void processElement(
+        @Timestamp Instant timestamp,
+        @Element String element,
+        OutputReceiver<KV<String, StationSpeed>> receiver) {
+      String[] items = element.split(",");
       String stationType = tryParseStationType(items);
       // For this analysis, use only 'main line' station types
       if ("ML".equals(stationType)) {
@@ -196,11 +223,10 @@ public class TrafficRoutes {
         String stationId = tryParseStationId(items);
         // For this simple example, filter out everything but some hardwired routes.
         if (avgSpeed != null && stationId != null && sdStations.containsKey(stationId)) {
-          StationSpeed stationSpeed =
-              new StationSpeed(stationId, avgSpeed, c.timestamp().getMillis());
+          StationSpeed stationSpeed = new StationSpeed(stationId, avgSpeed, timestamp.getMillis());
           // The tuple key is the 'route' name stored in the 'sdStations' hash.
           KV<String, StationSpeed> outputValue = KV.of(sdStations.get(stationId), stationSpeed);
-          c.output(outputValue);
+          receiver.output(outputValue);
         }
       }
     }
@@ -214,13 +240,16 @@ public class TrafficRoutes {
    */
   static class GatherStats extends DoFn<KV<String, Iterable<StationSpeed>>, KV<String, RouteInfo>> {
     @ProcessElement
-    public void processElement(ProcessContext c) throws IOException {
-      String route = c.element().getKey();
+    public void processElement(
+        @Element KV<String, Iterable<StationSpeed>> element,
+        OutputReceiver<KV<String, RouteInfo>> receiver)
+        throws IOException {
+      String route = element.getKey();
       double speedSum = 0.0;
       int speedCount = 0;
       int speedups = 0;
       int slowdowns = 0;
-      List<StationSpeed> infoList = Lists.newArrayList(c.element().getValue());
+      List<StationSpeed> infoList = Lists.newArrayList(element.getValue());
       // StationSpeeds sort by embedded timestamp.
       Collections.sort(infoList);
       Map<String, Double> prevSpeeds = new HashMap<>();
@@ -248,22 +277,25 @@ public class TrafficRoutes {
       double speedAvg = speedSum / speedCount;
       boolean slowdownEvent = slowdowns >= 2 * speedups;
       RouteInfo routeInfo = new RouteInfo(route, speedAvg, slowdownEvent);
-      c.output(KV.of(route, routeInfo));
+      receiver.output(KV.of(route, routeInfo));
     }
   }
 
   /** Format the results of the slowdown calculations to a TableRow, to save to BigQuery. */
   static class FormatStatsFn extends DoFn<KV<String, RouteInfo>, TableRow> {
     @ProcessElement
-    public void processElement(ProcessContext c) {
-      RouteInfo routeInfo = c.element().getValue();
+    public void processElement(
+        @Element KV<String, RouteInfo> element,
+        @Timestamp Instant timestamp,
+        OutputReceiver<TableRow> receiver) {
+      RouteInfo routeInfo = element.getValue();
       TableRow row =
           new TableRow()
               .set("avg_speed", routeInfo.getAvgSpeed())
               .set("slowdown_event", routeInfo.getSlowdownEvent())
-              .set("route", c.element().getKey())
-              .set("window_timestamp", c.timestamp().toString());
-      c.output(row);
+              .set("route", element.getKey())
+              .set("window_timestamp", timestamp.toString());
+      receiver.output(row);
     }
 
     /** Defines the BigQuery schema used for the output. */
@@ -380,15 +412,17 @@ public class TrafficRoutes {
     TrafficRoutesOptions options =
         PipelineOptionsFactory.fromArgs(args).withValidation().as(TrafficRoutesOptions.class);
 
-    options.setBigQuerySchema(FormatStatsFn.getSchema());
-
     runTrafficRoutes(options);
   }
 
   private static Double tryParseAvgSpeed(String[] inputItems) {
     try {
-      return Double.parseDouble(tryParseString(inputItems, 9));
-    } catch (NumberFormatException | NullPointerException e) {
+      String parsed = tryParseString(inputItems, 9);
+      if (parsed == null) {
+        return null;
+      }
+      return Double.parseDouble(parsed);
+    } catch (NumberFormatException e) {
       return null;
     }
   }

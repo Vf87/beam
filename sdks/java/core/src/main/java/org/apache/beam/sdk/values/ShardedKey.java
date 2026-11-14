@@ -21,7 +21,13 @@ import java.io.Serializable;
 import java.util.Objects;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
-/** A key and a shard number. */
+/**
+ * A key and a shard number.
+ *
+ * @deprecated
+ *     <p>Use {@link org.apache.beam.sdk.util.ShardedKey} instead.
+ */
+@Deprecated
 public class ShardedKey<K> implements Serializable {
   private static final long serialVersionUID = 1L;
   private final K key;
@@ -55,7 +61,7 @@ public class ShardedKey<K> implements Serializable {
       return false;
     }
     ShardedKey<K> other = (ShardedKey<K>) o;
-    return Objects.equals(key, other.key) && Objects.equals(shardNumber, other.shardNumber);
+    return Objects.equals(key, other.key) && shardNumber == other.shardNumber;
   }
 
   @Override

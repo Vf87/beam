@@ -34,7 +34,10 @@ import java.nio.ByteBuffer;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,7 +46,9 @@ import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 import org.apache.avro.Conversions;
 import org.apache.avro.LogicalTypes;
 import org.apache.avro.generic.GenericData;
@@ -52,22 +57,29 @@ import org.apache.avro.util.Utf8;
 import org.apache.beam.runners.core.metrics.GcpResourceIdentifiers;
 import org.apache.beam.runners.core.metrics.MonitoringInfoConstants;
 import org.apache.beam.runners.core.metrics.ServiceCallMetric;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
+import org.apache.beam.sdk.metrics.Counter;
+import org.apache.beam.sdk.metrics.MetricName;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.Field;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
+import org.apache.beam.sdk.schemas.Schema.LogicalType;
 import org.apache.beam.sdk.schemas.Schema.TypeName;
 import org.apache.beam.sdk.schemas.logicaltypes.EnumerationType;
+import org.apache.beam.sdk.schemas.logicaltypes.PassThroughLogicalType;
 import org.apache.beam.sdk.schemas.logicaltypes.SqlTypes;
+import org.apache.beam.sdk.schemas.logicaltypes.Timestamp;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.SerializableFunctions;
+import org.apache.beam.sdk.util.Preconditions;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.BaseEncoding;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.BaseEncoding;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
@@ -78,9 +90,6 @@ import org.joda.time.format.DateTimeFormatter;
 import org.joda.time.format.DateTimeFormatterBuilder;
 
 /** Utility methods for BigQuery related operations. */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class BigQueryUtils {
 
   // For parsing the format returned on the API proto:
@@ -93,8 +102,17 @@ public class BigQueryUtils {
   // For parsing the format used to refer to tables parameters in BigQueryIO.
   // "{project_id}:{dataset_id}.{table_id}" or
   // "{project_id}.{dataset_id}.{table_id}"
+  // following documentation in
+  // https://cloud.google.com/resource-manager/docs/creating-managing-projects#before_you_begin,
+  // https://cloud.google.com/bigquery/docs/datasets#dataset-naming, and
+  // https://cloud.google.com/bigquery/docs/tables#table_naming
   private static final Pattern SIMPLE_TABLE_PATTERN =
-      Pattern.compile("^(?<PROJECT>[^\\.:]+)[\\.:](?<DATASET>[^\\.:]+)[\\.](?<TABLE>[^\\.:]+)$");
+      Pattern.compile(
+          "^(?<PROJECT>[a-z][a-z0-9.\\-:]{4,28}[a-z0-9])[\\:.]"
+              + "(?<DATASET>[a-zA-Z0-9_]{1,1024})[\\.]"
+              + "(?<TABLE>[\\p{L}\\p{M}\\p{N}\\p{Pc}\\p{Pd}\\p{Zs}$]{1,1024})$");
+
+  private static final long PICOSECOND_PRECISION = 12L;
 
   /** Options for how to convert BigQuery data to Beam data. */
   @AutoValue
@@ -139,8 +157,25 @@ public class BigQueryUtils {
      */
     public abstract boolean getInferMaps();
 
+    /**
+     * Controls how BigQuery {@code TIMESTAMP(12)} (picosecond precision) columns are mapped to Beam
+     * schema types.
+     *
+     * <p>Standard TIMESTAMP(6) columns are mapped to FieldType.DATETIME, which only support up to
+     * millisecond precision. This option allows mapping TIMESTAMP(12) columns to logical types
+     * Timestamp.MILLIS, Timestamp.MICROS, Timestamp.NANOS or preserve full picosecond precision as
+     * a STRING type.
+     *
+     * <p>This option has no effect on {@code TIMESTAMP(6)} (microsecond) columns.
+     *
+     * <p>Defaults to {@link TimestampPrecision#NANOS}.
+     */
+    public abstract TimestampPrecision getPicosecondTimestampMapping();
+
     public static Builder builder() {
-      return new AutoValue_BigQueryUtils_SchemaConversionOptions.Builder().setInferMaps(false);
+      return new AutoValue_BigQueryUtils_SchemaConversionOptions.Builder()
+          .setInferMaps(false)
+          .setPicosecondTimestampMapping(TimestampPrecision.NANOS);
     }
 
     /** Builder for {@link SchemaConversionOptions}. */
@@ -148,21 +183,58 @@ public class BigQueryUtils {
     public abstract static class Builder {
       public abstract Builder setInferMaps(boolean inferMaps);
 
+      public abstract Builder setPicosecondTimestampMapping(TimestampPrecision conversion);
+
       public abstract SchemaConversionOptions build();
     }
   }
 
   private static final String BIGQUERY_TIME_PATTERN = "HH:mm:ss[.SSSSSS]";
-  private static final java.time.format.DateTimeFormatter BIGQUERY_TIME_FORMATTER =
+  static final java.time.format.DateTimeFormatter BIGQUERY_TIME_FORMATTER =
       java.time.format.DateTimeFormatter.ofPattern(BIGQUERY_TIME_PATTERN);
-  private static final java.time.format.DateTimeFormatter BIGQUERY_DATETIME_FORMATTER =
+  static final java.time.format.DateTimeFormatter BIGQUERY_DATETIME_FORMATTER =
       java.time.format.DateTimeFormatter.ofPattern("uuuu-MM-dd'T'" + BIGQUERY_TIME_PATTERN);
+
+  // Custom formatter that accepts "2022-05-09 18:04:59.123456"
+  // The old dremel parser accepts this format, and so does insertall. We need to accept it
+  // for backwards compatibility, and it is based on UTC time.
+  static final java.time.format.DateTimeFormatter DATETIME_SPACE_FORMATTER =
+      new java.time.format.DateTimeFormatterBuilder()
+          .append(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE)
+          .optionalStart()
+          .appendLiteral(' ')
+          .optionalEnd()
+          .optionalStart()
+          .appendLiteral('T')
+          .optionalEnd()
+          .append(java.time.format.DateTimeFormatter.ISO_LOCAL_TIME)
+          .toFormatter()
+          .withZone(ZoneOffset.UTC);
+
+  static final java.time.format.DateTimeFormatter TIMESTAMP_FORMATTER =
+      new java.time.format.DateTimeFormatterBuilder()
+          // 'yyyy-MM-dd(T| )HH:mm:ss.SSSSSSSSS'
+          .append(DATETIME_SPACE_FORMATTER)
+          // 'yyyy-MM-dd(T| )HH:mm:ss.SSSSSSSSS(+HH:mm:ss|Z)'
+          .optionalStart()
+          .appendOffsetId()
+          .optionalEnd()
+          .optionalStart()
+          .appendOffset("+HH:mm", "+00:00")
+          .optionalEnd()
+          // 'yyyy-MM-dd(T| )HH:mm:ss.SSSSSSSSS [time_zone]', time_zone -> UTC, Asia/Kolkata, etc
+          // if both an offset and a time zone are provided, the offset takes precedence
+          .optionalStart()
+          .appendLiteral(' ')
+          .parseCaseSensitive()
+          .appendZoneRegionId()
+          .toFormatter();
 
   private static final DateTimeFormatter BIGQUERY_TIMESTAMP_PRINTER;
 
   /**
    * Native BigQuery formatter for it's timestamp format, depending on the milliseconds stored in
-   * the column, the milli second part will be 6, 3 or absent. Example {@code 2019-08-16
+   * the column, the milli second part will be 6 to 1 or absent. Example {@code 2019-08-16
    * 00:52:07[.123]|[.123456] UTC}
    */
   private static final DateTimeFormatter BIGQUERY_TIMESTAMP_PARSER;
@@ -189,7 +261,7 @@ public class BigQueryUtils {
             .appendOptional(
                 new DateTimeFormatterBuilder()
                     .appendLiteral('.')
-                    .appendFractionOfSecond(3, 6)
+                    .appendFractionOfSecond(1, 6)
                     .toParser())
             .appendLiteral(" UTC")
             .toFormatter()
@@ -201,6 +273,21 @@ public class BigQueryUtils {
             .appendFractionOfSecond(3, 3)
             .appendLiteral(" UTC")
             .toFormatter();
+  }
+
+  private static final java.time.format.DateTimeFormatter VAR_PRECISION_FORMATTER;
+
+  static {
+    VAR_PRECISION_FORMATTER =
+        new java.time.format.DateTimeFormatterBuilder()
+            .appendPattern("yyyy-MM-dd HH:mm:ss")
+
+            // Variable Nano-of-second (0 to 9 digits)
+            // The 'true' argument means: "Expect a decimal point only if fractions exist"
+            .appendFraction(java.time.temporal.ChronoField.NANO_OF_SECOND, 0, 9, true)
+            .appendLiteral(" UTC")
+            .toFormatter()
+            .withZone(ZoneOffset.UTC);
   }
 
   private static final Map<TypeName, StandardSQLTypeName> BEAM_TO_BIGQUERY_TYPE_MAPPING =
@@ -221,8 +308,8 @@ public class BigQueryUtils {
           .put(TypeName.BYTES, StandardSQLTypeName.BYTES)
           .build();
 
-  private static final Map<TypeName, Function<String, Object>> JSON_VALUE_PARSERS =
-      ImmutableMap.<TypeName, Function<String, Object>>builder()
+  private static final Map<TypeName, Function<String, @Nullable Object>> JSON_VALUE_PARSERS =
+      ImmutableMap.<TypeName, Function<String, @Nullable Object>>builder()
           .put(TypeName.BYTE, Byte::valueOf)
           .put(TypeName.INT16, Short::valueOf)
           .put(TypeName.INT32, Integer::valueOf)
@@ -255,8 +342,8 @@ public class BigQueryUtils {
           .put(SqlTypes.DATE.getIdentifier(), StandardSQLTypeName.DATE)
           .put(SqlTypes.TIME.getIdentifier(), StandardSQLTypeName.TIME)
           .put(SqlTypes.DATETIME.getIdentifier(), StandardSQLTypeName.DATETIME)
+          .put(SqlTypes.TIMESTAMP.getIdentifier(), StandardSQLTypeName.TIMESTAMP)
           .put("SqlTimeWithLocalTzType", StandardSQLTypeName.TIME)
-          .put("SqlCharType", StandardSQLTypeName.STRING)
           .put("Enum", StandardSQLTypeName.STRING)
           .build();
 
@@ -270,11 +357,16 @@ public class BigQueryUtils {
   static StandardSQLTypeName toStandardSQLTypeName(FieldType fieldType) {
     StandardSQLTypeName ret;
     if (fieldType.getTypeName().isLogicalType()) {
-      ret = BEAM_TO_BIGQUERY_LOGICAL_MAPPING.get(fieldType.getLogicalType().getIdentifier());
+      Schema.LogicalType<?, ?> logicalType =
+          Preconditions.checkArgumentNotNull(fieldType.getLogicalType());
+      ret = BEAM_TO_BIGQUERY_LOGICAL_MAPPING.get(logicalType.getIdentifier());
       if (ret == null) {
+        if (logicalType instanceof PassThroughLogicalType) {
+          return toStandardSQLTypeName(logicalType.getBaseType());
+        }
         throw new IllegalArgumentException(
             "Cannot convert Beam logical type: "
-                + fieldType.getLogicalType().getIdentifier()
+                + logicalType.getIdentifier()
                 + " to BigQuery type.");
       }
     } else {
@@ -288,56 +380,143 @@ public class BigQueryUtils {
   }
 
   /**
+   * Represents a timestamp with picosecond precision, split into seconds and picoseconds
+   * components.
+   */
+  public static class TimestampPicos {
+    final long seconds;
+    final long picoseconds;
+
+    TimestampPicos(long seconds, long picoseconds) {
+      this.seconds = seconds;
+      this.picoseconds = picoseconds;
+    }
+
+    /**
+     * Parses a timestamp string into seconds and picoseconds components.
+     *
+     * <p>Handles two formats:
+     *
+     * <ul>
+     *   <li>ISO format with exactly 12 fractional digits ending in Z (picosecond precision): e.g.,
+     *       "2024-01-15T10:30:45.123456789012Z"
+     *   <li>UTC format with 0-9 fractional digits ending in "UTC" (up to nanosecond precision):
+     *       e.g., "2024-01-15 10:30:45.123456789 UTC", "2024-01-15 10:30:45 UTC"
+     * </ul>
+     */
+    public static TimestampPicos fromString(String timestampString) {
+      // Check for ISO picosecond format up to 12 fractional digits before Z
+      // Format: "2024-01-15T10:30:45.123456789012Z"
+      if (timestampString.endsWith("Z")) {
+        int dotIndex = timestampString.lastIndexOf('.');
+
+        if (dotIndex > 0) {
+          String fractionalPart =
+              timestampString.substring(dotIndex + 1, timestampString.length() - 1);
+
+          if ((long) fractionalPart.length() == PICOSECOND_PRECISION) {
+            // ISO timestamp with 12 decimal digits (picosecond precision)
+            // Parse the datetime part (without fractional seconds)
+            String dateTimePart = timestampString.substring(0, dotIndex) + "Z";
+            java.time.Instant baseInstant = java.time.Instant.parse(dateTimePart);
+
+            // Parse all 12 digits directly as picoseconds (subsecond portion)
+            long picoseconds = Long.parseLong(fractionalPart);
+
+            return new TimestampPicos(baseInstant.getEpochSecond(), picoseconds);
+          }
+        }
+
+        // ISO format with 0-9 fractional digits - Instant.parse handles this
+        java.time.Instant timestamp = java.time.Instant.parse(timestampString);
+        return new TimestampPicos(timestamp.getEpochSecond(), timestamp.getNano() * 1000L);
+      }
+
+      // UTC format: "2024-01-15 10:30:45.123456789 UTC"
+      // Use TIMESTAMP_FORMATTER which handles space separator and "UTC" suffix
+      java.time.Instant timestamp =
+          java.time.Instant.from(TIMESTAMP_FORMATTER.parse(timestampString));
+      return new TimestampPicos(timestamp.getEpochSecond(), timestamp.getNano() * 1000L);
+    }
+  }
+
+  /**
    * Get the Beam {@link FieldType} from a BigQuery type name.
    *
    * <p>Supports both standard and legacy SQL types.
    *
-   * @param typeName Name of the type
-   * @param nestedFields Nested fields for the given type (eg. RECORD type)
+   * @param schema Schema of the type returned
+   * @param options Options for schema conversion
    * @return Corresponding Beam {@link FieldType}
    */
-  @Experimental(Kind.SCHEMAS)
   private static FieldType fromTableFieldSchemaType(
-      String typeName, List<TableFieldSchema> nestedFields, SchemaConversionOptions options) {
+      TableFieldSchema schema, SchemaConversionOptions options) {
+    // see
+    // https://googleapis.dev/java/google-api-services-bigquery/latest/com/google/api/services/bigquery/model/TableFieldSchema.html#getType--
+    String typeName = schema.getType();
     switch (typeName) {
       case "STRING":
         return FieldType.STRING;
       case "BYTES":
         return FieldType.BYTES;
-      case "INT64":
       case "INTEGER":
+      case "INT64":
         return FieldType.INT64;
-      case "FLOAT64":
       case "FLOAT":
+      case "FLOAT64":
         return FieldType.DOUBLE;
-      case "BOOL":
       case "BOOLEAN":
+      case "BOOL":
         return FieldType.BOOLEAN;
-      case "NUMERIC":
-        return FieldType.DECIMAL;
       case "TIMESTAMP":
-        return FieldType.DATETIME;
-      case "TIME":
-        return FieldType.logicalType(SqlTypes.TIME);
+        // Timestamp columns can only have 6 (micros) or 12 (picos) precision.
+        // BigQuerySchema currently returns null for all microsecond timestamp
+        // columns but this cannot be guaranteed forever.
+        if ((schema.getTimestampPrecision() == null)
+            || Long.valueOf(6L).equals(schema.getTimestampPrecision())) {
+          return FieldType.DATETIME;
+        }
+        switch (options.getPicosecondTimestampMapping()) {
+          case MILLIS:
+            return FieldType.logicalType(Timestamp.MILLIS);
+          case MICROS:
+            return FieldType.logicalType(Timestamp.MICROS);
+          case NANOS:
+            return FieldType.logicalType(Timestamp.NANOS);
+          case PICOS:
+            return FieldType.STRING;
+          default:
+            throw new UnsupportedOperationException(
+                "Converting BigQuery type " + typeName + " to Beam type is unsupported");
+        }
       case "DATE":
         return FieldType.logicalType(SqlTypes.DATE);
+      case "TIME":
+        return FieldType.logicalType(SqlTypes.TIME);
       case "DATETIME":
         return FieldType.logicalType(SqlTypes.DATETIME);
-      case "STRUCT":
+      case "NUMERIC":
+      case "BIGNUMERIC":
+        return FieldType.DECIMAL;
+      case "GEOGRAPHY":
+      case "JSON":
+        // TODO Add metadata for custom sql types ?
+        return FieldType.STRING;
       case "RECORD":
+      case "STRUCT":
+        List<TableFieldSchema> nestedFields = schema.getFields();
         if (options.getInferMaps() && nestedFields.size() == 2) {
           TableFieldSchema key = nestedFields.get(0);
           TableFieldSchema value = nestedFields.get(1);
           if (BIGQUERY_MAP_KEY_FIELD_NAME.equals(key.getName())
               && BIGQUERY_MAP_VALUE_FIELD_NAME.equals(value.getName())) {
             return FieldType.map(
-                fromTableFieldSchemaType(key.getType(), key.getFields(), options),
-                fromTableFieldSchemaType(value.getType(), value.getFields(), options));
+                fromTableFieldSchemaType(key, options), fromTableFieldSchemaType(value, options));
           }
         }
-
         Schema rowSchema = fromTableFieldSchema(nestedFields, options);
         return FieldType.row(rowSchema);
+      case "RANGE": // TODO add support for range type
       default:
         throw new UnsupportedOperationException(
             "Converting BigQuery type " + typeName + " to Beam type is unsupported");
@@ -348,9 +527,7 @@ public class BigQueryUtils {
       List<TableFieldSchema> tableFieldSchemas, SchemaConversionOptions options) {
     Schema.Builder schemaBuilder = Schema.builder();
     for (TableFieldSchema tableFieldSchema : tableFieldSchemas) {
-      FieldType fieldType =
-          fromTableFieldSchemaType(
-              tableFieldSchema.getType(), tableFieldSchema.getFields(), options);
+      FieldType fieldType = fromTableFieldSchemaType(tableFieldSchema, options);
 
       Optional<Mode> fieldMode = Optional.ofNullable(tableFieldSchema.getMode()).map(Mode::valueOf);
       if (fieldMode.filter(m -> m == Mode.REPEATED).isPresent()
@@ -385,27 +562,39 @@ public class BigQueryUtils {
         field.setMode(Mode.REQUIRED.toString());
       }
       if (type.getTypeName().isCollectionType()) {
-        type = type.getCollectionElementType();
+        type = Preconditions.checkArgumentNotNull(type.getCollectionElementType());
         if (type.getTypeName().isCollectionType() || type.getTypeName().isMapType()) {
           throw new IllegalArgumentException("Array of collection is not supported in BigQuery.");
         }
         field.setMode(Mode.REPEATED.toString());
       }
       if (TypeName.ROW == type.getTypeName()) {
-        Schema subType = type.getRowSchema();
+        Schema subType = Preconditions.checkArgumentNotNull(type.getRowSchema());
         field.setFields(toTableFieldSchema(subType));
       }
       if (TypeName.MAP == type.getTypeName()) {
+        FieldType mapKeyType = Preconditions.checkArgumentNotNull(type.getMapKeyType());
+        FieldType mapValueType = Preconditions.checkArgumentNotNull(type.getMapValueType());
         Schema mapSchema =
             Schema.builder()
-                .addField(BIGQUERY_MAP_KEY_FIELD_NAME, type.getMapKeyType())
-                .addField(BIGQUERY_MAP_VALUE_FIELD_NAME, type.getMapValueType())
+                .addField(BIGQUERY_MAP_KEY_FIELD_NAME, mapKeyType)
+                .addField(BIGQUERY_MAP_VALUE_FIELD_NAME, mapValueType)
                 .build();
         type = FieldType.row(mapSchema);
         field.setFields(toTableFieldSchema(mapSchema));
         field.setMode(Mode.REPEATED.toString());
       }
-      field.setType(toStandardSQLTypeName(type).toString());
+      Schema.LogicalType<?, ?> logicalType = type.getLogicalType();
+      if (logicalType != null && Timestamp.IDENTIFIER.equals(logicalType.getIdentifier())) {
+        int precision = Preconditions.checkArgumentNotNull(logicalType.getArgument());
+        if (precision != 9) {
+          throw new IllegalArgumentException(
+              "Unsupported precision for Timestamp logical type " + precision);
+        }
+        field.setType(StandardSQLTypeName.TIMESTAMP.toString()).setTimestampPrecision(12L);
+      } else {
+        field.setType(toStandardSQLTypeName(type).toString());
+      }
 
       fields.add(field);
     }
@@ -413,28 +602,52 @@ public class BigQueryUtils {
   }
 
   /** Convert a Beam {@link Schema} to a BigQuery {@link TableSchema}. */
-  @Experimental(Kind.SCHEMAS)
   public static TableSchema toTableSchema(Schema schema) {
     return new TableSchema().setFields(toTableFieldSchema(schema));
   }
 
   /** Convert a BigQuery {@link TableSchema} to a Beam {@link Schema}. */
-  @Experimental(Kind.SCHEMAS)
   public static Schema fromTableSchema(TableSchema tableSchema) {
     return fromTableSchema(tableSchema, SchemaConversionOptions.builder().build());
   }
 
   /** Convert a BigQuery {@link TableSchema} to a Beam {@link Schema}. */
-  @Experimental(Kind.SCHEMAS)
   public static Schema fromTableSchema(TableSchema tableSchema, SchemaConversionOptions options) {
     return fromTableFieldSchema(tableSchema.getFields(), options);
   }
 
+  /** Convert a BigQuery {@link TableSchema} to Avro {@link org.apache.avro.Schema}. */
+  public static org.apache.avro.Schema toGenericAvroSchema(TableSchema tableSchema) {
+    return toGenericAvroSchema(tableSchema, false);
+  }
+
+  /** Convert an Avro {@link org.apache.avro.Schema} to a BigQuery {@link TableSchema}. */
+  public static TableSchema fromGenericAvroSchema(org.apache.avro.Schema schema) {
+    return fromGenericAvroSchema(schema, false);
+  }
+
+  /** Convert an Avro {@link org.apache.avro.Schema} to a BigQuery {@link TableSchema}. */
+  public static TableSchema fromGenericAvroSchema(
+      org.apache.avro.Schema schema, Boolean useAvroLogicalTypes) {
+    return BigQueryAvroUtils.fromGenericAvroSchema(schema, useAvroLogicalTypes);
+  }
+
+  /** Convert a BigQuery {@link TableSchema} to Avro {@link org.apache.avro.Schema}. */
+  public static org.apache.avro.Schema toGenericAvroSchema(
+      TableSchema tableSchema, Boolean useAvroLogicalTypes) {
+    return toGenericAvroSchema("root", tableSchema.getFields(), useAvroLogicalTypes);
+  }
+
   /** Convert a list of BigQuery {@link TableFieldSchema} to Avro {@link org.apache.avro.Schema}. */
-  @Experimental(Kind.SCHEMAS)
   public static org.apache.avro.Schema toGenericAvroSchema(
       String schemaName, List<TableFieldSchema> fieldSchemas) {
-    return BigQueryAvroUtils.toGenericAvroSchema(schemaName, fieldSchemas);
+    return toGenericAvroSchema(schemaName, fieldSchemas, false);
+  }
+
+  /** Convert a list of BigQuery {@link TableFieldSchema} to Avro {@link org.apache.avro.Schema}. */
+  public static org.apache.avro.Schema toGenericAvroSchema(
+      String schemaName, List<TableFieldSchema> fieldSchemas, Boolean useAvroLogicalTypes) {
+    return BigQueryAvroUtils.toGenericAvroSchema(schemaName, fieldSchemas, useAvroLogicalTypes);
   }
 
   private static final BigQueryIO.TypedRead.ToBeamRowFunction<TableRow>
@@ -479,14 +692,16 @@ public class BigQueryUtils {
     }
   }
 
-  @Experimental(Kind.SCHEMAS)
   public static Row toBeamRow(GenericRecord record, Schema schema, ConversionOptions options) {
-    List<Object> valuesInOrder =
+    List<@Nullable Object> valuesInOrder =
         schema.getFields().stream()
-            .map(
+            .<@Nullable Object>map(
                 field -> {
                   try {
-                    return convertAvroFormat(field.getType(), record.get(field.getName()), options);
+                    org.apache.avro.Schema.Field avroField =
+                        record.getSchema().getField(field.getName());
+                    @Nullable Object value = avroField != null ? record.get(avroField.pos()) : null;
+                    return convertAvroFormat(field.getType(), value, options);
                   } catch (Exception cause) {
                     throw new IllegalArgumentException(
                         "Error converting field " + field + ": " + cause.getMessage(), cause);
@@ -497,23 +712,37 @@ public class BigQueryUtils {
     return Row.withSchema(schema).addValues(valuesInOrder).build();
   }
 
+  /**
+   * Convert generic record to Bq TableRow.
+   *
+   * @deprecated use {@link #convertGenericRecordToTableRow(GenericRecord)}
+   */
+  @Deprecated
   public static TableRow convertGenericRecordToTableRow(
       GenericRecord record, TableSchema tableSchema) {
-    return BigQueryAvroUtils.convertGenericRecordToTableRow(record, tableSchema);
+    return convertGenericRecordToTableRow(record);
   }
 
-  /** Convert a BigQuery TableRow to a Beam Row. */
+  /** Convert generic record to Bq TableRow. */
+  public static TableRow convertGenericRecordToTableRow(GenericRecord record) {
+    return BigQueryAvroUtils.convertGenericRecordToTableRow(record);
+  }
+
+  /** Convert a Beam Row to a BigQuery TableRow. */
   public static TableRow toTableRow(Row row) {
     TableRow output = new TableRow();
     for (int i = 0; i < row.getFieldCount(); i++) {
-      Object value = row.getValue(i);
+      @Nullable Object value = row.getValue(i);
       Field schemaField = row.getSchema().getField(i);
-      output = output.set(schemaField.getName(), fromBeamField(schemaField.getType(), value));
+      @SuppressWarnings("nullness") // TableRow.set is not annotated, but accepts nulls
+      TableRow updated =
+          output.set(schemaField.getName(), fromBeamField(schemaField.getType(), value));
+      output = updated;
     }
     return output;
   }
 
-  private static @Nullable Object fromBeamField(FieldType fieldType, Object fieldValue) {
+  private static @Nullable Object fromBeamField(FieldType fieldType, @Nullable Object fieldValue) {
     if (fieldValue == null) {
       if (!fieldType.getNullable()) {
         throw new IllegalArgumentException("Field is not nullable.");
@@ -524,26 +753,31 @@ public class BigQueryUtils {
     switch (fieldType.getTypeName()) {
       case ARRAY:
       case ITERABLE:
-        FieldType elementType = fieldType.getCollectionElementType();
+        FieldType elementType =
+            Preconditions.checkArgumentNotNull(fieldType.getCollectionElementType());
         Iterable<?> items = (Iterable<?>) fieldValue;
-        List<Object> convertedItems = Lists.newArrayListWithCapacity(Iterables.size(items));
+        List<@Nullable Object> convertedItems =
+            Lists.newArrayListWithCapacity(Iterables.size(items));
         for (Object item : items) {
           convertedItems.add(fromBeamField(elementType, item));
         }
         return convertedItems;
 
       case MAP:
-        FieldType keyElementType = fieldType.getMapKeyType();
-        FieldType valueElementType = fieldType.getMapValueType();
+        FieldType keyElementType = Preconditions.checkArgumentNotNull(fieldType.getMapKeyType());
+        FieldType valueElementType =
+            Preconditions.checkArgumentNotNull(fieldType.getMapValueType());
         Map<?, ?> pairs = (Map<?, ?>) fieldValue;
         convertedItems = Lists.newArrayListWithCapacity(pairs.size());
         for (Map.Entry<?, ?> pair : pairs.entrySet()) {
-          convertedItems.add(
+          @SuppressWarnings("nullness") // TableRow.set is not annotated, but accepts nulls
+          TableRow convertedPair =
               new TableRow()
                   .set(BIGQUERY_MAP_KEY_FIELD_NAME, fromBeamField(keyElementType, pair.getKey()))
                   .set(
                       BIGQUERY_MAP_VALUE_FIELD_NAME,
-                      fromBeamField(valueElementType, pair.getValue())));
+                      fromBeamField(valueElementType, pair.getValue()));
+          convertedItems.add(convertedPair);
         }
         return convertedItems;
 
@@ -557,12 +791,18 @@ public class BigQueryUtils {
 
       case INT16:
       case INT32:
-      case INT64:
       case FLOAT:
-      case DOUBLE:
-      case STRING:
       case BOOLEAN:
+      case DOUBLE:
+        // The above types have native representations in JSON for all their
+        // possible values.
+        return fieldValue.toString();
+
+      case STRING:
+      case INT64:
       case DECIMAL:
+        // The above types must be cast to string to be safely encoded in
+        // JSON (due to JSON's float-based representation of all numbers).
         return fieldValue.toString();
 
       case BYTES:
@@ -571,7 +811,8 @@ public class BigQueryUtils {
       case LOGICAL_TYPE:
         // For the JSON formats of DATE/DATETIME/TIME/TIMESTAMP types that BigQuery accepts, see
         // https://cloud.google.com/bigquery/docs/loading-data-cloud-storage-json#details_of_loading_json_data
-        String identifier = fieldType.getLogicalType().getIdentifier();
+        String identifier =
+            Preconditions.checkArgumentNotNull(fieldType.getLogicalType()).getIdentifier();
         if (SqlTypes.DATE.getIdentifier().equals(identifier)) {
           return fieldValue.toString();
         } else if (SqlTypes.TIME.getIdentifier().equals(identifier)) {
@@ -594,6 +835,8 @@ public class BigQueryUtils {
           java.time.format.DateTimeFormatter localDateTimeFormatter =
               (0 == localDateTime.getNano()) ? ISO_LOCAL_DATE_TIME : BIGQUERY_DATETIME_FORMATTER;
           return localDateTimeFormatter.format(localDateTime);
+        } else if (Timestamp.IDENTIFIER.equals(identifier)) {
+          return BigQueryAvroUtils.formatTimestamp((java.time.Instant) fieldValue);
         } else if ("Enum".equals(identifier)) {
           return fieldType
               .getLogicalType(EnumerationType.class)
@@ -610,7 +853,6 @@ public class BigQueryUtils {
    *
    * <p>Only supports basic types and arrays. Doesn't support date types or structs.
    */
-  @Experimental(Kind.SCHEMAS)
   public static Row toBeamRow(Schema rowSchema, TableRow jsonBqRow) {
     // TODO deprecate toBeamRow(Schema, TableSchema, TableRow) function in favour of this function.
     // This function attempts to convert TableRows without  having access to the
@@ -619,21 +861,8 @@ public class BigQueryUtils {
     // 2. TableSchema objects are not serializable and are therefore harder to propagate through a
     // pipeline.
     return rowSchema.getFields().stream()
-        .map(field -> toBeamRowFieldValue(field, jsonBqRow.get(field.getName())))
+        .<@Nullable Object>map(field -> toBeamValue(field, jsonBqRow.get(field.getName())))
         .collect(toRow(rowSchema));
-  }
-
-  private static Object toBeamRowFieldValue(Field field, Object bqValue) {
-    if (bqValue == null) {
-      if (field.getType().getNullable()) {
-        return null;
-      } else {
-        throw new IllegalArgumentException(
-            "Received null value for non-nullable field " + field.getName());
-      }
-    }
-
-    return toBeamValue(field.getType(), bqValue);
   }
 
   /**
@@ -641,7 +870,6 @@ public class BigQueryUtils {
    *
    * <p>Only supports basic types and arrays. Doesn't support date types.
    */
-  @Experimental(Kind.SCHEMAS)
   public static Row toBeamRow(Schema rowSchema, TableSchema bqSchema, TableRow jsonBqRow) {
     List<TableFieldSchema> bqFields = bqSchema.getFields();
 
@@ -652,17 +880,32 @@ public class BigQueryUtils {
 
     List<Object> rawJsonValues =
         rowSchema.getFields().stream()
-            .map(field -> bqFieldIndices.get(field.getName()))
+            .map(field -> Preconditions.checkArgumentNotNull(bqFieldIndices.get(field.getName())))
             .map(index -> jsonBqRow.getF().get(index).getV())
             .collect(toList());
 
     return IntStream.range(0, rowSchema.getFieldCount())
         .boxed()
-        .map(index -> toBeamValue(rowSchema.getField(index).getType(), rawJsonValues.get(index)))
+        .<@Nullable Object>map(
+            index -> toBeamValue(rowSchema.getField(index), rawJsonValues.get(index)))
         .collect(toRow(rowSchema));
   }
 
-  private static Object toBeamValue(FieldType fieldType, Object jsonBQValue) {
+  private static @Nullable Object toBeamValue(Field field, @Nullable Object jsonBQValue) {
+    FieldType fieldType = field.getType();
+
+    if (jsonBQValue == null) {
+      if (fieldType.getNullable()) {
+        return null;
+      } else {
+        if (fieldType.getTypeName().isCollectionType()) {
+          return Collections.emptyList();
+        }
+        throw new IllegalArgumentException(
+            "Received null value for non-nullable field \"" + field.getName() + "\"");
+      }
+    }
+
     if (jsonBQValue instanceof String
         || jsonBQValue instanceof Number
         || jsonBQValue instanceof Boolean) {
@@ -670,26 +913,79 @@ public class BigQueryUtils {
       if (JSON_VALUE_PARSERS.containsKey(fieldType.getTypeName())) {
         return JSON_VALUE_PARSERS.get(fieldType.getTypeName()).apply(jsonBQString);
       } else if (fieldType.isLogicalType(SqlTypes.DATETIME.getIdentifier())) {
-        return LocalDateTime.parse(jsonBQString, BIGQUERY_DATETIME_FORMATTER);
+        try {
+          // Handle if datetime value is in micros ie. 123456789
+          Long value = Long.parseLong(jsonBQString);
+          return CivilTimeEncoder.decodePacked64DatetimeMicrosAsJavaTime(value);
+        } catch (NumberFormatException e) {
+          // Handle as a String, ie. "2023-02-16 12:00:00"
+          try {
+            return LocalDateTime.parse(jsonBQString);
+          } catch (DateTimeParseException e2) {
+            return LocalDateTime.parse(jsonBQString, DATETIME_SPACE_FORMATTER);
+          }
+        }
       } else if (fieldType.isLogicalType(SqlTypes.DATE.getIdentifier())) {
         return LocalDate.parse(jsonBQString);
       } else if (fieldType.isLogicalType(SqlTypes.TIME.getIdentifier())) {
         return LocalTime.parse(jsonBQString);
+      } else if (fieldType.isLogicalType(SqlTypes.TIMESTAMP.getIdentifier())) {
+        try {
+          long micros = Long.parseLong(jsonBQString);
+          long seconds = micros / 1_000_000;
+          long nanos = (micros % 1_000_000) * 1_000;
+          return java.time.Instant.ofEpochSecond(seconds, nanos);
+        } catch (NumberFormatException e) {
+          return java.time.Instant.parse(jsonBQString);
+        }
+      } else if (fieldType.isLogicalType(Timestamp.IDENTIFIER)) {
+        if (!jsonBQString.contains("UTC")) {
+          BigDecimal bd = new BigDecimal(jsonBQString);
+          long seconds = bd.longValue();
+          long nanos = bd.subtract(BigDecimal.valueOf(seconds)).movePointRight(9).longValue();
+          return java.time.Instant.ofEpochSecond(seconds, nanos);
+        }
+        return VAR_PRECISION_FORMATTER.parse(jsonBQString, java.time.Instant::from);
       }
     }
 
+    if (jsonBQValue instanceof byte[] && fieldType.getTypeName() == TypeName.BYTES) {
+      return jsonBQValue;
+    }
+
     if (jsonBQValue instanceof List) {
-      return ((List<Object>) jsonBQValue)
+      FieldType collectionElementType = fieldType.getCollectionElementType();
+      if (collectionElementType == null) {
+        throw new IllegalArgumentException(
+            "Cannot convert BigQuery type '"
+                + jsonBQValue.getClass()
+                + "' to '"
+                + fieldType
+                + "' because the BigQuery type is a List, while the output type is not a"
+                + " collection.");
+      }
+
+      boolean innerTypeIsMap = collectionElementType.getTypeName().isMapType();
+
+      return ((List<@Nullable Object>) jsonBQValue)
           .stream()
-              .map(v -> ((Map<String, Object>) v).get("v"))
-              .map(v -> toBeamValue(fieldType.getCollectionElementType(), v))
+              // Old BigQuery client returns arrays as lists of maps {"v": <value>}.
+              // If this is the case, unwrap the value first
+              .<@Nullable Object>map(
+                  v ->
+                      (!innerTypeIsMap
+                              && v instanceof Map
+                              && ((Map<String, Object>) v).keySet().equals(Sets.newHashSet("v")))
+                          ? ((Map<String, Object>) v).get("v")
+                          : v)
+              .<@Nullable Object>map(v -> toBeamValue(field.withType(collectionElementType), v))
               .collect(toList());
     }
 
     if (jsonBQValue instanceof Map) {
       TableRow tr = new TableRow();
       tr.putAll((Map<String, Object>) jsonBQValue);
-      return toBeamRow(fieldType.getRowSchema(), tr);
+      return toBeamRow(Preconditions.checkArgumentNotNull(fieldType.getRowSchema()), tr);
     }
 
     throw new UnsupportedOperationException(
@@ -702,7 +998,6 @@ public class BigQueryUtils {
 
   // TODO: BigQuery shouldn't know about SQL internal logical types.
   private static final Set<String> SQL_DATE_TIME_TYPES = ImmutableSet.of("SqlTimeWithLocalTzType");
-  private static final Set<String> SQL_STRING_TYPES = ImmutableSet.of("SqlCharType");
 
   /**
    * Tries to convert an Avro decoded value to a Beam field value based on the target type of the
@@ -712,8 +1007,10 @@ public class BigQueryUtils {
    * https://cloud.google.com/bigquery/docs/exporting-data#avro_export_details and
    * https://cloud.google.com/bigquery/docs/loading-data-cloud-storage-avro#avro_conversions
    */
-  public static Object convertAvroFormat(
-      FieldType beamFieldType, Object avroValue, BigQueryUtils.ConversionOptions options) {
+  public static @Nullable Object convertAvroFormat(
+      FieldType beamFieldType,
+      @Nullable Object avroValue,
+      BigQueryUtils.ConversionOptions options) {
     TypeName beamFieldTypeName = beamFieldType.getTypeName();
     if (avroValue == null) {
       if (beamFieldType.getNullable()) {
@@ -750,7 +1047,9 @@ public class BigQueryUtils {
       case ARRAY:
         return convertAvroArray(beamFieldType, avroValue, options);
       case LOGICAL_TYPE:
-        String identifier = beamFieldType.getLogicalType().getIdentifier();
+        LogicalType<?, ?> logicalType =
+            Preconditions.checkArgumentNotNull(beamFieldType.getLogicalType());
+        String identifier = logicalType.getIdentifier();
         if (SqlTypes.DATE.getIdentifier().equals(identifier)) {
           return convertAvroDate(avroValue);
         } else if (SqlTypes.TIME.getIdentifier().equals(identifier)) {
@@ -768,8 +1067,8 @@ public class BigQueryUtils {
                   String.format(
                       "Unknown timestamp truncation option: %s", options.getTruncateTimestamps()));
           }
-        } else if (SQL_STRING_TYPES.contains(identifier)) {
-          return convertAvroPrimitiveTypes(TypeName.STRING, avroValue);
+        } else if (logicalType instanceof PassThroughLogicalType) {
+          return convertAvroFormat(logicalType.getBaseType(), avroValue, options);
         } else {
           throw new RuntimeException("Unknown logical type " + identifier);
         }
@@ -811,8 +1110,9 @@ public class BigQueryUtils {
       FieldType beamField, Object value, BigQueryUtils.ConversionOptions options) {
     // Check whether the type of array element is equal.
     List<Object> values = (List<Object>) value;
-    List<Object> ret = new ArrayList<>();
-    FieldType collectionElement = beamField.getCollectionElementType();
+    List<@Nullable Object> ret = new ArrayList<>();
+    FieldType collectionElement =
+        Preconditions.checkArgumentNotNull(beamField.getCollectionElementType());
     for (Object v : values) {
       ret.add(convertAvroFormat(collectionElement, v, options));
     }
@@ -823,17 +1123,19 @@ public class BigQueryUtils {
       FieldType beamField, Object value, BigQueryUtils.ConversionOptions options) {
     List<GenericData.Record> records = (List<GenericData.Record>) value;
     ImmutableMap.Builder<Object, Object> ret = ImmutableMap.builder();
-    FieldType keyElement = beamField.getMapKeyType();
-    FieldType valueElement = beamField.getMapValueType();
+    FieldType keyElement = Preconditions.checkArgumentNotNull(beamField.getMapKeyType());
+    FieldType valueElement = Preconditions.checkArgumentNotNull(beamField.getMapValueType());
     for (GenericData.Record record : records) {
+      // A map entry with a null key or value cannot be represented in an ImmutableMap.
       ret.put(
-          convertAvroFormat(keyElement, record.get(0), options),
-          convertAvroFormat(valueElement, record.get(1), options));
+          Preconditions.checkArgumentNotNull(convertAvroFormat(keyElement, record.get(0), options)),
+          Preconditions.checkArgumentNotNull(
+              convertAvroFormat(valueElement, record.get(1), options)));
     }
     return ret.build();
   }
 
-  private static Object convertAvroPrimitiveTypes(TypeName beamType, Object value) {
+  private static @Nullable Object convertAvroPrimitiveTypes(TypeName beamType, Object value) {
     switch (beamType) {
       case BYTE:
         return ((Long) value).byteValue();
@@ -860,7 +1162,7 @@ public class BigQueryUtils {
     }
   }
 
-  private static Object convertAvroString(Object value) {
+  private static @Nullable Object convertAvroString(@Nullable Object value) {
     if (value == null) {
       return null;
     } else if (value instanceof Utf8) {
@@ -873,7 +1175,7 @@ public class BigQueryUtils {
     }
   }
 
-  private static Object convertAvroBytes(Object value) {
+  private static @Nullable Object convertAvroBytes(@Nullable Object value) {
     if (value == null) {
       return null;
     } else if (value instanceof ByteBuffer) {
@@ -887,7 +1189,7 @@ public class BigQueryUtils {
     }
   }
 
-  private static Object convertAvroDate(Object value) {
+  private static @Nullable Object convertAvroDate(@Nullable Object value) {
     if (value == null) {
       return null;
     } else if (value instanceof Integer) {
@@ -898,7 +1200,7 @@ public class BigQueryUtils {
     }
   }
 
-  private static Object convertAvroTime(Object value) {
+  private static @Nullable Object convertAvroTime(@Nullable Object value) {
     if (value == null) {
       return null;
     } else if (value instanceof Long) {
@@ -909,7 +1211,7 @@ public class BigQueryUtils {
     }
   }
 
-  private static Object convertAvroDateTime(Object value) {
+  private static @Nullable Object convertAvroDateTime(@Nullable Object value) {
     if (value == null) {
       return null;
     } else if (value instanceof Utf8) {
@@ -920,13 +1222,18 @@ public class BigQueryUtils {
     }
   }
 
-  private static Object convertAvroNumeric(Object value) {
+  private static @Nullable Object convertAvroNumeric(@Nullable Object value) {
     if (value == null) {
       return null;
     } else if (value instanceof ByteBuffer) {
       // BigQuery NUMERIC type has precision 38 and scale 9
-      return new Conversions.DecimalConversion()
-          .fromBytes((ByteBuffer) value, null, LogicalTypes.decimal(38, 9));
+      // DecimalConversion is not annotated, but fromBytes ignores the writer schema argument
+      // and accepts null for it.
+      @SuppressWarnings("nullness")
+      BigDecimal decimal =
+          new Conversions.DecimalConversion()
+              .fromBytes((ByteBuffer) value, null, LogicalTypes.decimal(38, 9));
+      return decimal;
     } else {
       throw new RuntimeException(
           "Does not support converting avro format: " + value.getClass().getName());
@@ -934,6 +1241,9 @@ public class BigQueryUtils {
   }
 
   /**
+   * Returns a {@link TableReference} by parsing the {@code fullTableId}. If it cannot be parsed
+   * properly null is returned.
+   *
    * @param fullTableId - Is one of the two forms commonly used to refer to bigquery tables in the
    *     beam codebase:
    *     <ul>
@@ -941,19 +1251,17 @@ public class BigQueryUtils {
    *       <li>myproject:mydataset.mytable
    *       <li>myproject.mydataset.mytable
    *     </ul>
-   *
-   * @return a BigQueryTableIdentifier by parsing the fullTableId. If it cannot be parsed properly
-   *     null is returned.
    */
   public static @Nullable TableReference toTableReference(String fullTableId) {
     // Try parsing the format:
     // "projects/{project_id}/datasets/{dataset_id}/tables/{table_id}"
     Matcher m = TABLE_RESOURCE_PATTERN.matcher(fullTableId);
     if (m.matches()) {
+      // The named groups are not optional, so they are non-null whenever the pattern matches.
       return new TableReference()
-          .setProjectId(m.group("PROJECT"))
-          .setDatasetId(m.group("DATASET"))
-          .setTableId(m.group("TABLE"));
+          .setProjectId(Preconditions.checkStateNotNull(m.group("PROJECT")))
+          .setDatasetId(Preconditions.checkStateNotNull(m.group("DATASET")))
+          .setTableId(Preconditions.checkStateNotNull(m.group("TABLE")));
     }
 
     // If that failed, try the format:
@@ -961,56 +1269,169 @@ public class BigQueryUtils {
     // "{project_id}.{dataset_id}.{table_id}"
     m = SIMPLE_TABLE_PATTERN.matcher(fullTableId);
     if (m.matches()) {
+      // The named groups are not optional, so they are non-null whenever the pattern matches.
       return new TableReference()
-          .setProjectId(m.group("PROJECT"))
-          .setDatasetId(m.group("DATASET"))
-          .setTableId(m.group("TABLE"));
+          .setProjectId(Preconditions.checkStateNotNull(m.group("PROJECT")))
+          .setDatasetId(Preconditions.checkStateNotNull(m.group("DATASET")))
+          .setTableId(Preconditions.checkStateNotNull(m.group("TABLE")));
     }
     return null;
+  }
+
+  /**
+   * Returns a String representation of the table destination in the form:
+   * `myproject.mydataset.mytable`.
+   *
+   * @param tableReference - a BigQueryTableIdentifier that may or may not include the project.
+   */
+  public static @Nullable String toTableSpec(TableReference tableReference) {
+    if (tableReference.getDatasetId() == null || tableReference.getTableId() == null) {
+      throw new IllegalArgumentException(
+          String.format(
+              "Table reference [%s] must include at least a dataset and a table.", tableReference));
+    }
+    String tableSpec =
+        String.format("%s.%s", tableReference.getDatasetId(), tableReference.getTableId());
+    if (!Strings.isNullOrEmpty(tableReference.getProjectId())) {
+      tableSpec = String.format("%s.%s", tableReference.getProjectId(), tableSpec);
+    }
+    return tableSpec;
+  }
+
+  static TableSchema trimSchema(TableSchema schema, @Nullable List<String> selectedFields) {
+    if (selectedFields == null || selectedFields.isEmpty()) {
+      return schema;
+    }
+
+    List<TableFieldSchema> trimmedFields =
+        schema.getFields().stream()
+            .flatMap(f -> trimField(f, selectedFields))
+            .collect(Collectors.toList());
+    return new TableSchema().setFields(trimmedFields);
+  }
+
+  private static Stream<TableFieldSchema> trimField(
+      TableFieldSchema field, List<String> selectedFields) {
+    String name = field.getName();
+    if (selectedFields.contains(name)) {
+      return Stream.of(field);
+    }
+
+    if (field.getFields() != null) {
+      // record
+      List<String> selectedChildren =
+          selectedFields.stream()
+              .filter(sf -> sf.startsWith(name + "."))
+              .map(sf -> sf.substring(name.length() + 1))
+              .collect(toList());
+
+      if (!selectedChildren.isEmpty()) {
+        List<TableFieldSchema> trimmedChildren =
+            field.getFields().stream()
+                .flatMap(c -> trimField(c, selectedChildren))
+                .collect(toList());
+
+        if (!trimmedChildren.isEmpty()) {
+          return Stream.of(field.clone().setFields(trimmedChildren));
+        }
+      }
+    }
+
+    return Stream.empty();
   }
 
   private static ServiceCallMetric callMetricForMethod(
       TableReference tableReference, String method) {
-    if (tableReference != null) {
-      // TODO(ajamato): Add Ptransform label. Populate it as empty for now to prevent the
-      // SpecMonitoringInfoValidator from dropping the MonitoringInfo.
-      HashMap<String, String> baseLabels = new HashMap<String, String>();
-      baseLabels.put(MonitoringInfoConstants.Labels.PTRANSFORM, "");
-      baseLabels.put(MonitoringInfoConstants.Labels.SERVICE, "BigQuery");
-      baseLabels.put(MonitoringInfoConstants.Labels.METHOD, method);
-      baseLabels.put(
-          MonitoringInfoConstants.Labels.RESOURCE,
-          GcpResourceIdentifiers.bigQueryTable(
-              tableReference.getProjectId(),
-              tableReference.getDatasetId(),
-              tableReference.getTableId()));
-      baseLabels.put(
-          MonitoringInfoConstants.Labels.BIGQUERY_PROJECT_ID, tableReference.getProjectId());
-      baseLabels.put(
-          MonitoringInfoConstants.Labels.BIGQUERY_DATASET, tableReference.getDatasetId());
-      baseLabels.put(MonitoringInfoConstants.Labels.BIGQUERY_TABLE, tableReference.getTableId());
-      return new ServiceCallMetric(MonitoringInfoConstants.Urns.API_REQUEST_COUNT, baseLabels);
-    }
-    return null;
+    // TODO(ajamato): Add Ptransform label. Populate it as empty for now to prevent the
+    // SpecMonitoringInfoValidator from dropping the MonitoringInfo.
+    HashMap<String, String> baseLabels = new HashMap<String, String>();
+    baseLabels.put(MonitoringInfoConstants.Labels.PTRANSFORM, "");
+    baseLabels.put(MonitoringInfoConstants.Labels.SERVICE, "BigQuery");
+    baseLabels.put(MonitoringInfoConstants.Labels.METHOD, method);
+    baseLabels.put(
+        MonitoringInfoConstants.Labels.RESOURCE,
+        GcpResourceIdentifiers.bigQueryTable(
+            tableReference.getProjectId(),
+            tableReference.getDatasetId(),
+            tableReference.getTableId()));
+    baseLabels.put(
+        MonitoringInfoConstants.Labels.BIGQUERY_PROJECT_ID, tableReference.getProjectId());
+    baseLabels.put(MonitoringInfoConstants.Labels.BIGQUERY_DATASET, tableReference.getDatasetId());
+    baseLabels.put(MonitoringInfoConstants.Labels.BIGQUERY_TABLE, tableReference.getTableId());
+    return new ServiceCallMetric(MonitoringInfoConstants.Urns.API_REQUEST_COUNT, baseLabels);
   }
 
   /**
+   * Returns a ServiceCallMetric for recording statuses for all BQ API responses related to reading
+   * elements directly from BigQuery in a process-wide metric. Such as: calls to readRows,
+   * splitReadStream, createReadSession.
+   *
    * @param tableReference - The table being read from. Can be a temporary BQ table used to read
    *     from a SQL query.
-   * @return a ServiceCallMetric for recording statuses for all BQ API responses related to reading
-   *     elements directly from BigQuery in a process-wide metric. Such as: calls to readRows,
-   *     splitReadStream, createReadSession.
    */
-  public static ServiceCallMetric readCallMetric(TableReference tableReference) {
+  public static @Nullable ServiceCallMetric readCallMetric(
+      @Nullable TableReference tableReference) {
+    if (tableReference == null) {
+      return null;
+    }
     return callMetricForMethod(tableReference, "BigQueryBatchRead");
   }
 
   /**
+   * Returns a ServiceCallMetric for recording statuses for all BQ responses related to writing
+   * elements directly to BigQuery in a process-wide metric. Such as: insertAll.
+   *
    * @param tableReference - The table being written to.
-   * @return a ServiceCallMetric for recording statuses for all BQ responses related to writing
-   *     elements directly to BigQuery in a process-wide metric. Such as: insertAll.
    */
   public static ServiceCallMetric writeCallMetric(TableReference tableReference) {
     return callMetricForMethod(tableReference, "BigQueryBatchWrite");
+  }
+
+  /**
+   * A counter holding a list of counters. Increment the counter will increment every sub-counter it
+   * holds.
+   */
+  static class NestedCounter implements Counter, Serializable {
+
+    private final MetricName name;
+    private final ImmutableList<Counter> counters;
+
+    public NestedCounter(MetricName name, Counter... counters) {
+      this.name = name;
+      this.counters = ImmutableList.copyOf(counters);
+    }
+
+    @Override
+    public void inc() {
+      for (Counter counter : counters) {
+        counter.inc();
+      }
+    }
+
+    @Override
+    public void inc(long n) {
+      for (Counter counter : counters) {
+        counter.inc(n);
+      }
+    }
+
+    @Override
+    public void dec() {
+      for (Counter counter : counters) {
+        counter.dec();
+      }
+    }
+
+    @Override
+    public void dec(long n) {
+      for (Counter counter : counters) {
+        counter.dec(n);
+      }
+    }
+
+    @Override
+    public MetricName getName() {
+      return name;
+    }
   }
 }

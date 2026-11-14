@@ -17,6 +17,8 @@
  */
 package org.apache.beam.sdk.io.gcp.pubsub;
 
+import static org.apache.beam.sdk.util.Preconditions.checkArgumentNotNull;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -24,15 +26,15 @@ import org.apache.beam.sdk.coders.ByteArrayCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CustomCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 
 /**
  * A coder for PubsubMessage treating the raw bytes being decoded as the message's payload, with the
  * message id from the PubSub server.
+ *
+ * <p>Maintainers should prefer {@link PubsubMessageSchemaCoder} over this coder when adding
+ * features to {@link PubsubIO}.
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class PubsubMessageWithMessageIdCoder extends CustomCoder<PubsubMessage> {
   private static final Coder<byte[]> PAYLOAD_CODER = ByteArrayCoder.of();
   // A message's messageId cannot be null
@@ -45,7 +47,9 @@ public class PubsubMessageWithMessageIdCoder extends CustomCoder<PubsubMessage> 
   @Override
   public void encode(PubsubMessage value, OutputStream outStream) throws IOException {
     PAYLOAD_CODER.encode(value.getPayload(), outStream);
-    MESSAGE_ID_CODER.encode(value.getMessageId(), outStream);
+    MESSAGE_ID_CODER.encode(
+        checkArgumentNotNull(value.getMessageId(), "Cannot encode PubsubMessage without messageId"),
+        outStream);
   }
 
   @Override

@@ -23,10 +23,16 @@ Options:
   --job_port [port for job endpoint, default 8099]
   --artifact_port [port for artifact service, default 8098]
   --job_server_jar [path to job server jar]
+  --jvm_args [additional JVM arguments, e.g. --add-opens flags]
 END
 
 JOB_PORT=8099
 ARTIFACT_PORT=8098
+if [[ -n "$JAVA_HOME" ]]; then
+  JAVA_CMD="$JAVA_HOME/bin/java"
+else
+  JAVA_CMD="java"
+fi
 
 while [[ $# -gt 0 ]]; do
   key="$1"
@@ -48,6 +54,16 @@ while [[ $# -gt 0 ]]; do
       ;;
     --job_server_jar)
       JOB_SERVER_JAR="$2"
+      shift
+      shift
+      ;;
+    --additional_args)
+      ADDITIONAL_ARGS="$2"
+      shift
+      shift
+      ;;
+    --jvm_args)
+      JVM_ARGS="$2"
       shift
       shift
       ;;
@@ -97,7 +113,7 @@ case $STARTSTOP in
     fi
 
     echo "Launching job server @ $JOB_PORT ..."
-    java -jar $JOB_SERVER_JAR --job-port=$JOB_PORT --artifact-port=$ARTIFACT_PORT --expansion-port=0 >$TEMP_DIR/$FILE_BASE.log 2>&1 </dev/null &
+    "$JAVA_CMD" $JVM_ARGS -jar $JOB_SERVER_JAR --job-port=$JOB_PORT --artifact-port=$ARTIFACT_PORT --expansion-port=0 $ADDITIONAL_ARGS >$TEMP_DIR/$FILE_BASE.log 2>&1 </dev/null &
     mypid=$!
     if kill -0 $mypid >/dev/null 2>&1; then
       echo $mypid >> $pid

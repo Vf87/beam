@@ -38,7 +38,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
-import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.CustomCoder;
@@ -50,8 +49,11 @@ import org.apache.beam.sdk.io.UnboundedSource.CheckpointMark;
 import org.apache.beam.sdk.io.UnboundedSource.UnboundedReader;
 import org.apache.beam.sdk.options.ExperimentalOptions;
 import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.sdk.options.StreamingOptions;
 import org.apache.beam.sdk.testing.NeedsRunner;
 import org.apache.beam.sdk.testing.PAssert;
+import org.apache.beam.sdk.testing.TestOutputReceiver;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.testing.UsesUnboundedPCollections;
 import org.apache.beam.sdk.testing.UsesUnboundedSplittableParDo;
@@ -66,8 +68,9 @@ import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -81,7 +84,7 @@ import org.junit.runners.JUnit4;
 /** Tests for {@link Read}. */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class ReadTest implements Serializable {
 
@@ -176,15 +179,11 @@ public class ReadTest implements Serializable {
     PAssert.that(input)
         .containsInAnyOrder(
             LongStream.rangeClosed(1L, numElements).boxed().collect(Collectors.toList()));
-    // TODO(BEAM-10670): Remove additional experiments when SDF read is default.
+    // TODO(https://github.com/apache/beam/issues/20530): Remove additional experiments when SDF
+    // read is default.
     ExperimentalOptions.addExperiment(
         pipeline.getOptions().as(ExperimentalOptions.class), "use_sdf_read");
-    // Force the pipeline to run with one thread to ensure the reader will be reused on one DoFn
-    // instance.
-    // We are not able to use DirectOptions because of circular dependency.
-    pipeline
-        .runWithAdditionalOptionArgs(ImmutableList.of("--targetParallelism=1"))
-        .waitUntilFinish();
+    pipeline.run().waitUntilFinish();
   }
 
   @Test
@@ -207,7 +206,7 @@ public class ReadTest implements Serializable {
                 newUnboundedReadInterceptingWatermark(
                     numElements,
                     (Serializable & Consumer<Instant>)
-                        (instant -> STATIC_INSTANT_LIST_MAP.get(uuid).add(instant))))
+                        instant -> STATIC_INSTANT_LIST_MAP.get(uuid).add(instant)))
             .apply(
                 Window.<Long>into(new GlobalWindows())
                     .discardingFiredPanes()
@@ -224,6 +223,39 @@ public class ReadTest implements Serializable {
           !watermark.isAfter(interceptedWatermark.get(i)));
       watermark = interceptedWatermark.get(i);
     }
+  }
+
+  @Test
+  public void testUnboundedSdfSplitRestrictionDesiredNumSplits() throws Exception {
+    List<Integer> recordedDesiredNumSplits = new ArrayList<>();
+    CustomUnboundedSource source =
+        new CustomUnboundedSource() {
+          @Override
+          public List<? extends UnboundedSource<String, NoOpCheckpointMark>> split(
+              int desiredNumSplits, PipelineOptions options) {
+            recordedDesiredNumSplits.add(desiredNumSplits);
+            return Collections.singletonList(this);
+          }
+        };
+
+    Read.UnboundedSourceAsSDFWrapperFn<String, NoOpCheckpointMark> wrapperFn =
+        new Read.UnboundedSourceAsSDFWrapperFn<>(null);
+    Read.UnboundedSourceAsSDFWrapperFn.UnboundedSourceRestriction<String, NoOpCheckpointMark>
+        restriction = wrapperFn.initialRestriction(source);
+    TestOutputReceiver<
+            Read.UnboundedSourceAsSDFWrapperFn.UnboundedSourceRestriction<
+                String, NoOpCheckpointMark>>
+        receiver = new TestOutputReceiver<>();
+
+    PipelineOptions defaultOptions = PipelineOptionsFactory.create();
+    wrapperFn.splitRestriction(restriction, receiver, defaultOptions);
+    assertEquals(Collections.singletonList(20), recordedDesiredNumSplits);
+
+    recordedDesiredNumSplits.clear();
+    PipelineOptions customOptions = PipelineOptionsFactory.create();
+    customOptions.as(StreamingOptions.class).setDesiredNumUnboundedSourceSplits(5);
+    wrapperFn.splitRestriction(restriction, receiver, customOptions);
+    assertEquals(Collections.singletonList(5), recordedDesiredNumSplits);
   }
 
   private <T extends Serializable & Consumer<Instant>>
@@ -342,16 +374,18 @@ public class ReadTest implements Serializable {
 
     @Override
     public Coder<CounterMark> getCheckpointMarkCoder() {
-      return AvroCoder.of(CountingSource.CounterMark.class);
+      return new CountingSource.CounterMarkCoder();
     }
   }
 
   private static class ExpectCacheReader extends UnboundedReader<Long> {
     private long current;
+    private boolean started;
     private ExpectCacheUnboundedSource source;
 
     ExpectCacheReader(ExpectCacheUnboundedSource source, CounterMark checkpointMark) {
       this.source = source;
+      this.started = false;
       if (checkpointMark == null) {
         current = 0L;
       } else {
@@ -361,11 +395,14 @@ public class ReadTest implements Serializable {
 
     @Override
     public boolean start() throws IOException {
+      Preconditions.checkState(!started);
+      started = true;
       return advance();
     }
 
     @Override
     public boolean advance() throws IOException {
+      Preconditions.checkState(started);
       current += 1;
       if (current > source.numElements) {
         return false;
@@ -529,7 +566,7 @@ public class ReadTest implements Serializable {
 
       @Override
       public Instant getCurrentTimestamp() throws NoSuchElementException {
-        return current < 0 ? now : now.plus(current);
+        return current < 0 ? now : now.plus(Duration.millis(current));
       }
 
       @Override

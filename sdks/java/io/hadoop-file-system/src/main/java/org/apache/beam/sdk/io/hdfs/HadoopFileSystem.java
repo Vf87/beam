@@ -38,8 +38,9 @@ import org.apache.beam.sdk.io.fs.MatchResult;
 import org.apache.beam.sdk.io.fs.MatchResult.Metadata;
 import org.apache.beam.sdk.io.fs.MatchResult.Status;
 import org.apache.beam.sdk.io.fs.MoveOptions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.sdk.metrics.Lineage;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSInputStream;
@@ -78,8 +79,8 @@ class HadoopFileSystem extends FileSystem<HadoopResourceId> {
 
   private static final Logger LOG = LoggerFactory.getLogger(HadoopFileSystem.class);
 
-  @VisibleForTesting static final String LOG_CREATE_DIRECTORY = "Creating directory %s";
-  @VisibleForTesting static final String LOG_DELETING_EXISTING_FILE = "Deleting existing file %s";
+  @VisibleForTesting static final String LOG_CREATE_DIRECTORY = "Creating directory {}";
+  @VisibleForTesting static final String LOG_DELETING_EXISTING_FILE = "Deleting existing file {}";
 
   private final String scheme;
 
@@ -269,9 +270,7 @@ class HadoopFileSystem extends FileSystem<HadoopResourceId> {
       // This should be the exceptional case, so handle here rather than incur the overhead of
       // testing first
       if (!success && fs.exists(srcPath) && fs.exists(destPath)) {
-        LOG.debug(
-            String.format(
-                LOG_DELETING_EXISTING_FILE, Path.getPathWithoutSchemeAndAuthority(destPath)));
+        LOG.debug(LOG_DELETING_EXISTING_FILE, Path.getPathWithoutSchemeAndAuthority(destPath));
         fs.delete(destPath, false); // not recursive
         success = fs.rename(srcPath, destPath);
       }
@@ -303,9 +302,7 @@ class HadoopFileSystem extends FileSystem<HadoopResourceId> {
     final org.apache.hadoop.fs.FileSystem fs = filePath.getFileSystem(configuration);
     final Path targetDirectory = filePath.getParent();
     if (!fs.exists(targetDirectory)) {
-      LOG.debug(
-          String.format(
-              LOG_CREATE_DIRECTORY, Path.getPathWithoutSchemeAndAuthority(targetDirectory)));
+      LOG.debug(LOG_CREATE_DIRECTORY, Path.getPathWithoutSchemeAndAuthority(targetDirectory));
       if (!fs.mkdirs(targetDirectory)) {
         throw new IOException(
             String.format(
@@ -338,6 +335,22 @@ class HadoopFileSystem extends FileSystem<HadoopResourceId> {
   @Override
   protected String getScheme() {
     return scheme;
+  }
+
+  @Override
+  protected void reportLineage(HadoopResourceId resourceId, Lineage lineage, LineageLevel level) {
+    URI uri = resourceId.toPath().toUri();
+    ImmutableList.Builder<String> segments = ImmutableList.builder();
+    if (uri.getAuthority() != null && !uri.getAuthority().isEmpty()) {
+      segments.add(uri.getAuthority());
+    }
+    if (level != LineageLevel.TOP_LEVEL
+        && uri.getPath() != null
+        && !uri.getPath().isEmpty()
+        && !uri.getPath().equals("/")) {
+      segments.add(uri.getPath());
+    }
+    lineage.add(scheme, segments.build(), "/");
   }
 
   /** An adapter around {@link FSDataInputStream} that implements {@link SeekableByteChannel}. */

@@ -17,9 +17,10 @@
  */
 package org.apache.beam.sdk.io.gcp.testing;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
+import com.google.api.client.http.AbstractInputStreamContent;
 import com.google.api.client.json.JsonFactory;
 import com.google.api.client.util.BackOff;
 import com.google.api.client.util.BackOffUtils;
@@ -81,15 +82,15 @@ import org.apache.beam.sdk.io.gcp.bigquery.TableRowJsonCoder;
 import org.apache.beam.sdk.util.FluentBackoff;
 import org.apache.beam.sdk.util.MimeTypes;
 import org.apache.beam.sdk.values.KV;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.HashBasedTable;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.HashBasedTable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.joda.time.Duration;
 
 /** A fake implementation of BigQuery's job service. */
 @Internal
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class FakeJobService implements JobService, Serializable {
   private static final JsonFactory JSON_FACTORY = Transport.getJsonFactory();
@@ -115,15 +116,15 @@ public class FakeJobService implements JobService, Serializable {
     }
   }
 
-  private static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Table<
+  private static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Table<
           String, String, JobInfo>
       allJobs;
   private static int numExtractJobCalls;
 
-  private static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Table<
+  private static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Table<
           String, String, List<ResourceId>>
       filesForLoadJobs;
-  private static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Table<
+  private static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Table<
           String, String, JobStatistics>
       dryRunQueryResults;
 
@@ -150,7 +151,7 @@ public class FakeJobService implements JobService, Serializable {
   @Override
   public void startLoadJob(JobReference jobRef, JobConfigurationLoad loadConfig)
       throws IOException {
-    synchronized (allJobs) {
+    synchronized (FakeJobService.class) {
       verifyUniqueJobId(jobRef.getJobId());
       Job job = new Job();
       job.setJobReference(jobRef);
@@ -178,11 +179,20 @@ public class FakeJobService implements JobService, Serializable {
   }
 
   @Override
+  public void startLoadJob(
+      JobReference jobRef,
+      JobConfigurationLoad loadConfig,
+      AbstractInputStreamContent streamContent)
+      throws InterruptedException, IOException {
+    // TODO
+  }
+
+  @Override
   public void startExtractJob(JobReference jobRef, JobConfigurationExtract extractConfig)
       throws IOException {
     checkArgument(
         "AVRO".equals(extractConfig.getDestinationFormat()), "Only extract to AVRO is supported");
-    synchronized (allJobs) {
+    synchronized (FakeJobService.class) {
       verifyUniqueJobId(jobRef.getJobId());
       ++numExtractJobCalls;
 
@@ -196,14 +206,14 @@ public class FakeJobService implements JobService, Serializable {
   }
 
   public int getNumExtractJobCalls() {
-    synchronized (allJobs) {
+    synchronized (FakeJobService.class) {
       return numExtractJobCalls;
     }
   }
 
   @Override
   public void startQueryJob(JobReference jobRef, JobConfigurationQuery query) {
-    synchronized (allJobs) {
+    synchronized (FakeJobService.class) {
       Job job = new Job();
       job.setJobReference(jobRef);
       job.setConfiguration(new JobConfiguration().setQuery(query));
@@ -216,7 +226,7 @@ public class FakeJobService implements JobService, Serializable {
   @Override
   public void startCopyJob(JobReference jobRef, JobConfigurationTableCopy copyConfig)
       throws IOException {
-    synchronized (allJobs) {
+    synchronized (FakeJobService.class) {
       verifyUniqueJobId(jobRef.getJobId());
       Job job = new Job();
       job.setJobReference(jobRef);
@@ -255,14 +265,14 @@ public class FakeJobService implements JobService, Serializable {
   }
 
   public void expectDryRunQuery(String projectId, String query, JobStatistics result) {
-    synchronized (dryRunQueryResults) {
+    synchronized (FakeJobService.class) {
       dryRunQueryResults.put(projectId, query, result);
     }
   }
 
   @Override
   public JobStatistics dryRunQuery(String projectId, JobConfigurationQuery query, String location) {
-    synchronized (dryRunQueryResults) {
+    synchronized (FakeJobService.class) {
       JobStatistics result = dryRunQueryResults.get(projectId, query.getQuery());
       if (result != null) {
         return result;
@@ -272,7 +282,7 @@ public class FakeJobService implements JobService, Serializable {
   }
 
   public Collection<Job> getAllJobs() {
-    synchronized (allJobs) {
+    synchronized (FakeJobService.class) {
       return allJobs.values().stream().map(j -> j.job).collect(Collectors.toList());
     }
   }
@@ -280,7 +290,7 @@ public class FakeJobService implements JobService, Serializable {
   @Override
   public Job getJob(JobReference jobRef) {
     try {
-      synchronized (allJobs) {
+      synchronized (FakeJobService.class) {
         JobInfo job = allJobs.get(jobRef.getProjectId(), jobRef.getJobId());
         if (job == null) {
           return null;
@@ -310,7 +320,9 @@ public class FakeJobService implements JobService, Serializable {
                               "Job %s failed: %s", job.job.getConfiguration(), e.toString())));
           List<ResourceId> sourceFiles =
               filesForLoadJobs.get(jobRef.getProjectId(), jobRef.getJobId());
-          FileSystems.delete(sourceFiles);
+          if (sourceFiles != null) {
+            FileSystems.delete(sourceFiles);
+          }
         }
         return JSON_FACTORY.fromString(JSON_FACTORY.toString(job.job), Job.class);
       }
@@ -364,12 +376,16 @@ public class FakeJobService implements JobService, Serializable {
       throws InterruptedException, IOException {
     TableReference destination = load.getDestinationTable();
     TableSchema schema = load.getSchema();
-    checkArgument(schema != null, "No schema specified");
     List<ResourceId> sourceFiles = filesForLoadJobs.get(jobRef.getProjectId(), jobRef.getJobId());
     WriteDisposition writeDisposition = WriteDisposition.valueOf(load.getWriteDisposition());
     CreateDisposition createDisposition = CreateDisposition.valueOf(load.getCreateDisposition());
 
     Table existingTable = datasetService.getTable(destination);
+    if (schema == null) {
+      schema = existingTable.getSchema();
+    }
+    checkArgument(schema != null, "No schema specified");
+
     if (!validateDispositions(existingTable, createDisposition, writeDisposition)) {
       return new JobStatus().setState("FAILED").setErrorResult(new ErrorProto());
     }

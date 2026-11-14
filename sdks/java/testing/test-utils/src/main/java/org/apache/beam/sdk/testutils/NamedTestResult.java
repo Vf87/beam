@@ -18,8 +18,12 @@
 package org.apache.beam.sdk.testutils;
 
 import com.google.cloud.bigquery.LegacySQLTypeName;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.Map;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.sdk.testutils.publishing.InfluxDBPublisher;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Represents a schema and corresponding test result. Each test may have multiple named results
@@ -43,6 +47,8 @@ public class NamedTestResult implements TestResult {
           .put("value", LegacySQLTypeName.FLOAT.name())
           .build();
 
+  private static final Logger LOG = LoggerFactory.getLogger(NamedTestResult.class);
+
   private NamedTestResult(String testId, String timestamp, String metric, double value) {
     this.testId = testId;
     this.timestamp = timestamp;
@@ -57,23 +63,33 @@ public class NamedTestResult implements TestResult {
    * @param timestamp Time at which this result was sampled. Should be in a BigQuery supported
    *     timestamp format.
    * @param metric Name of this result's value.
-   * @param value The actual sampled value.
+   * @param value The actual sampled value. Values should be non-negative or -1.0 (imply the value
+   *     is not applicable). Other negative values will be reset to -1.0.
    */
   public static NamedTestResult create(
       String testId, String timestamp, String metric, double value) {
+    if (value < 0.0 && value != -1.0) {
+      LOG.warn("Reset invalid NamedTestResult value {} to -1.0.", value);
+      value = -1.0;
+    }
     return new NamedTestResult(testId, timestamp, metric, value);
   }
 
   @Override
   public Map<String, Object> toMap() {
     return ImmutableMap.<String, Object>builder()
-        .put("test_id", testId)
+        .putAll(tags())
+        .putAll(fields())
         .put("timestamp", timestamp)
-        .put("metric", metric)
-        .put("value", value)
         .build();
   }
 
+  @SuppressFBWarnings(
+      value = "MS_EXPOSE_REP",
+      justification =
+          "Returns a Guava ImmutableMap."
+              + " Spotbugs matches its known-immutable list by fully qualified name, so it cannot recognise collections relocated into org.apache.beam.vendor.guava."
+              + " See https://github.com/spotbugs/spotbugs/issues/1601.")
   public static Map<String, String> getSchema() {
     return schema;
   }
@@ -84,5 +100,18 @@ public class NamedTestResult implements TestResult {
 
   public double getValue() {
     return value;
+  }
+
+  public Map<String, String> tags() {
+    return ImmutableMap.of("test_id", testId, "metric", metric);
+  }
+
+  public Map<String, Number> fields() {
+    return ImmutableMap.of("value", value);
+  }
+
+  /** Convert this result to InfluxDB data point. */
+  public InfluxDBPublisher.DataPoint toInfluxDBDataPoint(String measurement) {
+    return InfluxDBPublisher.dataPoint(measurement, tags(), fields(), null);
   }
 }

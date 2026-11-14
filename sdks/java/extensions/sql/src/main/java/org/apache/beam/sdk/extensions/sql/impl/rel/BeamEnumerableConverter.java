@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.extensions.sql.impl.rel;
 
-import static org.apache.beam.vendor.calcite.v1_26_0.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.io.IOException;
 import java.time.LocalDate;
@@ -28,16 +28,18 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 import org.apache.beam.runners.direct.DirectOptions;
+import org.apache.beam.runners.direct.DirectRunner;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.Pipeline.PipelineVisitor;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.PipelineResult.State;
-import org.apache.beam.sdk.extensions.sql.impl.utils.CalciteUtils.CharType;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.MetricNameFilter;
@@ -50,6 +52,8 @@ import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.runners.TransformHierarchy.Node;
 import org.apache.beam.sdk.schemas.Schema;
+import org.apache.beam.sdk.schemas.Schema.LogicalType;
+import org.apache.beam.sdk.schemas.logicaltypes.PassThroughLogicalType;
 import org.apache.beam.sdk.schemas.logicaltypes.SqlTypes;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -57,24 +61,25 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollection.IsBounded;
 import org.apache.beam.sdk.values.PValue;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.adapter.enumerable.EnumerableRel;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.adapter.enumerable.EnumerableRelImplementor;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.adapter.enumerable.PhysType;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.adapter.enumerable.PhysTypeImpl;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.linq4j.Enumerable;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.linq4j.Linq4j;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.linq4j.tree.BlockBuilder;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.linq4j.tree.Expression;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.linq4j.tree.Expressions;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.ConventionTraitDef;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelOptCluster;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelOptCost;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelOptPlanner;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelTraitSet;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.RelNode;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.convert.ConverterImpl;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.metadata.RelMetadataQuery;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.type.RelDataType;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.DataContext;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.adapter.enumerable.EnumerableRel;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.adapter.enumerable.EnumerableRelImplementor;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.adapter.enumerable.PhysType;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.adapter.enumerable.PhysTypeImpl;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.Enumerable;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.Linq4j;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.tree.BlockBuilder;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.tree.Expression;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.tree.Expressions;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.ConventionTraitDef;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptCluster;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptCost;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptPlanner;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelTraitSet;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.convert.ConverterImpl;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.metadata.RelMetadataQuery;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataType;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.ReadableInstant;
@@ -83,7 +88,7 @@ import org.slf4j.LoggerFactory;
 
 /** BeamRelNode to replace a {@code Enumerable} node. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class BeamEnumerableConverter extends ConverterImpl implements EnumerableRel {
   private static final Logger LOG = LoggerFactory.getLogger(BeamEnumerableConverter.class);
@@ -110,16 +115,18 @@ public class BeamEnumerableConverter extends ConverterImpl implements Enumerable
     final PhysType physType =
         PhysTypeImpl.of(implementor.getTypeFactory(), rowType, prefer.preferArray());
     final Expression node = implementor.stash((BeamRelNode) getInput(), BeamRelNode.class);
-    list.add(Expressions.call(BeamEnumerableConverter.class, "toEnumerable", node));
+    list.add(
+        Expressions.call(
+            BeamEnumerableConverter.class, "toEnumerable", node, implementor.getRootExpression()));
     return implementor.result(physType, list.toBlock());
   }
 
-  public static Enumerable<Object> toEnumerable(BeamRelNode node) {
+  public static Enumerable<Object> toEnumerable(BeamRelNode node, DataContext root) {
     final ClassLoader originalClassLoader = Thread.currentThread().getContextClassLoader();
     try {
       Thread.currentThread().setContextClassLoader(BeamEnumerableConverter.class.getClassLoader());
       final PipelineOptions options = createPipelineOptions(node.getPipelineOptions());
-      return toEnumerable(options, node);
+      return toEnumerable(options, node, DataContext.Variable.CANCEL_FLAG.get(root));
     } finally {
       Thread.currentThread().setContextClassLoader(originalClassLoader);
     }
@@ -160,16 +167,21 @@ public class BeamEnumerableConverter extends ConverterImpl implements Enumerable
     } else if (isLimitQuery(node)) {
       throw new UnsupportedOperationException("Does not support queries with LIMIT in toRowList.");
     }
-    return collectRows(options, node).stream().collect(Collectors.toList());
+    return collectRows(options, node, new AtomicBoolean()).stream().collect(Collectors.toList());
   }
 
-  static Enumerable<Object> toEnumerable(PipelineOptions options, BeamRelNode node) {
+  /**
+   * Runs the pipeline for {@code node}. Calcite sets {@code cancelFlag} when the JDBC statement is
+   * cancelled (e.g. with Ctrl+C in the SQL shell), which cancels the pipeline.
+   */
+  static Enumerable<Object> toEnumerable(
+      PipelineOptions options, BeamRelNode node, AtomicBoolean cancelFlag) {
     if (node instanceof BeamIOSinkRel) {
-      return count(options, node);
+      return count(options, node, cancelFlag);
     } else if (isLimitQuery(node)) {
-      return limitCollect(options, node);
+      return limitCollect(options, node, cancelFlag);
     }
-    return Linq4j.asEnumerable(rowToAvaticaAndUnboxValues((collectRows(options, node))));
+    return Linq4j.asEnumerable(rowToAvaticaAndUnboxValues(collectRows(options, node, cancelFlag)));
   }
 
   private static PipelineResult limitRun(
@@ -177,7 +189,8 @@ public class BeamEnumerableConverter extends ConverterImpl implements Enumerable
       BeamRelNode node,
       DoFn<Row, Void> doFn,
       Queue<Row> values,
-      int limitCount) {
+      int limitCount,
+      AtomicBoolean cancelFlag) {
     options.as(DirectOptions.class).setBlockOnRun(false);
     Pipeline pipeline = Pipeline.create(options);
     PCollection<Row> resultCollection = BeamSqlRelUtils.toPCollection(pipeline, node);
@@ -197,30 +210,87 @@ public class BeamEnumerableConverter extends ConverterImpl implements Enumerable
       }
 
       try {
-        if (values.size() >= limitCount) {
+        if (values.size() >= limitCount || cancelFlag.get()) {
           result.cancel();
           break;
         }
       } catch (IOException e) {
-        LOG.warn(e.toString());
+        LOG.warn("{}", e.toString());
         break;
       }
     }
+    checkNotCancelled(cancelFlag);
 
     return result;
   }
 
-  private static void runCollector(PipelineOptions options, BeamRelNode node) {
+  private static void runCollector(
+      PipelineOptions options, BeamRelNode node, AtomicBoolean cancelFlag) {
     Pipeline pipeline = Pipeline.create(options);
     PCollection<Row> resultCollection = BeamSqlRelUtils.toPCollection(pipeline, node);
     resultCollection.apply(ParDo.of(new Collector()));
-    PipelineResult result = pipeline.run();
-    if (PipelineResult.State.FAILED.equals(result.waitUntilFinish())) {
+    PipelineResult result = run(pipeline, cancelFlag);
+    if (PipelineResult.State.FAILED.equals(waitUntilFinish(result, cancelFlag))) {
       throw new RuntimeException("Pipeline failed for unknown reason");
     }
   }
 
-  private static Queue<Row> collectRows(PipelineOptions options, BeamRelNode node) {
+  /**
+   * Runs the pipeline. If the DirectRunner would block in {@code run()} until the pipeline
+   * finishes, waits here instead, where the wait can be cancelled.
+   */
+  private static PipelineResult run(Pipeline pipeline, AtomicBoolean cancelFlag) {
+    DirectOptions options = pipeline.getOptions().as(DirectOptions.class);
+    boolean blockOnRun =
+        options.isBlockOnRun()
+            && options.getRunner().getCanonicalName().equals(DirectRunner.class.getName());
+    options.setBlockOnRun(false);
+    PipelineResult result = pipeline.run();
+    if (blockOnRun) {
+      waitUntilFinish(result, cancelFlag);
+    }
+    return result;
+  }
+
+  /**
+   * Waits for the pipeline to finish. If {@code cancelFlag} is set while waiting, cancels the
+   * pipeline so that the wait returns, and throws.
+   */
+  private static State waitUntilFinish(PipelineResult result, AtomicBoolean cancelFlag) {
+    Thread canceller =
+        new Thread(
+            () -> {
+              try {
+                while (!cancelFlag.get()) {
+                  Thread.sleep(100);
+                }
+                result.cancel();
+              } catch (InterruptedException e) {
+                // The pipeline finished.
+              } catch (IOException | RuntimeException e) {
+                LOG.warn("Failed to cancel the pipeline", e);
+              }
+            },
+            "BeamSqlPipelineCanceller");
+    canceller.setDaemon(true);
+    canceller.start();
+    try {
+      State state = result.waitUntilFinish();
+      checkNotCancelled(cancelFlag);
+      return state;
+    } finally {
+      canceller.interrupt();
+    }
+  }
+
+  private static void checkNotCancelled(AtomicBoolean cancelFlag) {
+    if (cancelFlag.get()) {
+      throw new CancellationException("Statement canceled");
+    }
+  }
+
+  private static Queue<Row> collectRows(
+      PipelineOptions options, BeamRelNode node, AtomicBoolean cancelFlag) {
     long id = options.getOptionsId();
     Queue<Row> values = new ConcurrentLinkedQueue<>();
 
@@ -232,14 +302,16 @@ public class BeamEnumerableConverter extends ConverterImpl implements Enumerable
         "collectRowList is only available in direct runner.");
 
     Collector.globalValues.put(id, values);
-
-    runCollector(options, node);
-
-    Collector.globalValues.remove(id);
+    try {
+      runCollector(options, node, cancelFlag);
+    } finally {
+      Collector.globalValues.remove(id);
+    }
     return values;
   }
 
-  private static Enumerable<Object> limitCollect(PipelineOptions options, BeamRelNode node) {
+  private static Enumerable<Object> limitCollect(
+      PipelineOptions options, BeamRelNode node, AtomicBoolean cancelFlag) {
     long id = options.getOptionsId();
     ConcurrentLinkedQueue<Row> values = new ConcurrentLinkedQueue<>();
 
@@ -253,8 +325,11 @@ public class BeamEnumerableConverter extends ConverterImpl implements Enumerable
     int limitCount = getLimitCount(node);
 
     Collector.globalValues.put(id, values);
-    limitRun(options, node, new Collector(), values, limitCount);
-    Collector.globalValues.remove(id);
+    try {
+      limitRun(options, node, new Collector(), values, limitCount, cancelFlag);
+    } finally {
+      Collector.globalValues.remove(id);
+    }
 
     // remove extra retrieved values
     while (values.size() > limitCount) {
@@ -318,7 +393,9 @@ public class BeamEnumerableConverter extends ConverterImpl implements Enumerable
 
     switch (type.getTypeName()) {
       case LOGICAL_TYPE:
-        String logicalId = type.getLogicalType().getIdentifier();
+        LogicalType<?, ?> logicalType = type.getLogicalType();
+        assert logicalType != null;
+        String logicalId = logicalType.getIdentifier();
         if (SqlTypes.TIME.getIdentifier().equals(logicalId)) {
           if (beamValue instanceof Long) { // base type
             return (Long) beamValue;
@@ -329,9 +406,9 @@ public class BeamEnumerableConverter extends ConverterImpl implements Enumerable
           if (beamValue instanceof Long) { // base type
             return ((Long) beamValue).intValue();
           } else { // input type
-            return (int) (((LocalDate) beamValue).toEpochDay());
+            return (int) ((LocalDate) beamValue).toEpochDay();
           }
-        } else if (CharType.IDENTIFIER.equals(logicalId)) {
+        } else if (logicalType instanceof PassThroughLogicalType) {
           return beamValue;
         } else {
           throw new UnsupportedOperationException("Unknown DateTime type " + logicalId);
@@ -375,14 +452,15 @@ public class BeamEnumerableConverter extends ConverterImpl implements Enumerable
     }
   }
 
-  private static Enumerable<Object> count(PipelineOptions options, BeamRelNode node) {
+  private static Enumerable<Object> count(
+      PipelineOptions options, BeamRelNode node, AtomicBoolean cancelFlag) {
     Pipeline pipeline = Pipeline.create(options);
     BeamSqlRelUtils.toPCollection(pipeline, node).apply(ParDo.of(new RowCounter()));
-    PipelineResult result = pipeline.run();
+    PipelineResult result = run(pipeline, cancelFlag);
 
     long count = 0;
     if (!containsUnboundedPCollection(pipeline)) {
-      if (PipelineResult.State.FAILED.equals(result.waitUntilFinish())) {
+      if (PipelineResult.State.FAILED.equals(waitUntilFinish(result, cancelFlag))) {
         throw new RuntimeException("Pipeline failed for unknown reason");
       }
       MetricQueryResults metrics =
@@ -404,7 +482,7 @@ public class BeamEnumerableConverter extends ConverterImpl implements Enumerable
     final Counter rows = Metrics.counter(BeamEnumerableConverter.class, "rows");
 
     @ProcessElement
-    public void processElement(ProcessContext context) {
+    public void processElement(@SuppressWarnings("unused") ProcessContext context) {
       rows.inc();
     }
   }

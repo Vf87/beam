@@ -25,6 +25,7 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -37,23 +38,42 @@ import (
 	pipepb "github.com/apache/beam/sdks/v2/go/pkg/beam/model/pipeline_v1"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/util/errorx"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/util/grpcx"
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 // TODO(lostluck): 2018/05/28 Extract these from their enum descriptors in the pipeline_v1 proto
 const (
 	URNFileArtifact        = "beam:artifact:type:file:v1"
+	URNUrlArtifact         = "beam:artifact:type:url:v1"
+	URNGoWorkerBinaryRole  = "beam:artifact:role:go_worker_binary:v1"
 	URNPipRequirementsFile = "beam:artifact:role:pip_requirements_file:v1"
 	URNStagingTo           = "beam:artifact:role:staging_to:v1"
 	NoArtifactsStaged      = "__no_artifacts_staged__"
 )
 
+type validationKey string
+
+const artifactValidationKey validationKey = "artifact_validation_enabled"
+
+// WithArtifactValidation returns a new context carrying the artifact validation enabled state.
+func WithArtifactValidation(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, artifactValidationKey, enabled)
+}
+
+// isArtifactValidationEnabled parses pipeline options to check if "disable_integrity_checks" is enabled.
+func isArtifactValidationEnabled(ctx context.Context) bool {
+	if val, ok := ctx.Value(artifactValidationKey).(bool); ok {
+		return val
+	}
+	return true
+}
+
 // Materialize is a convenience helper for ensuring that all artifacts are
 // present and uncorrupted. It interprets each artifact name as a relative
 // path under the dest directory. It does not retrieve valid artifacts already
 // present.
-// TODO(BEAM-9577): Return a mapping of filename to dependency, rather than []*jobpb.ArtifactMetadata.
-// TODO(BEAM-9577): Leverage richness of roles rather than magic names to understand artifacts.
+// TODO(https://github.com/apache/beam/issues/20267): Return a mapping of filename to dependency, rather than []*jobpb.ArtifactMetadata.
+// TODO(https://github.com/apache/beam/issues/20267): Leverage richness of roles rather than magic names to understand artifacts.
 func Materialize(ctx context.Context, endpoint string, dependencies []*pipepb.ArtifactInformation, rt string, dest string) ([]*pipepb.ArtifactInformation, error) {
 	if len(dependencies) > 0 {
 		return newMaterialize(ctx, endpoint, dependencies, dest)
@@ -96,6 +116,12 @@ func newMaterializeWithClient(ctx context.Context, client jobpb.ArtifactRetrieva
 				return nil, errors.Wrap(err, "failed to parse artifact file payload")
 			}
 			filePayload.Sha256 = typePayload.Sha256
+		} else if dep.TypeUrn == URNUrlArtifact {
+			typePayload := pipepb.ArtifactUrlPayload{}
+			if err := proto.Unmarshal(dep.TypePayload, &typePayload); err != nil {
+				return nil, errors.Wrap(err, "failed to parse artifact url payload")
+			}
+			filePayload.Sha256 = typePayload.Sha256
 		}
 		newTypePayload, err := proto.Marshal(&filePayload)
 		if err != nil {
@@ -122,6 +148,7 @@ func newMaterializeWithClient(ctx context.Context, client jobpb.ArtifactRetrieva
 				RoleUrn:     URNStagingTo,
 				RolePayload: rolePayload,
 			},
+			expectedSha256: filePayload.Sha256,
 		})
 	}
 
@@ -150,6 +177,12 @@ func extractStagingToPath(artifact *pipepb.ArtifactInformation) (string, error) 
 			return "", err
 		}
 		stagedName = generateId() + "-" + filepath.Base(ty.Path)
+	} else if artifact.TypeUrn == URNUrlArtifact {
+		ty := pipepb.ArtifactUrlPayload{}
+		if err := proto.Unmarshal(artifact.TypePayload, &ty); err != nil {
+			return "", err
+		}
+		stagedName = generateId() + "-" + path.Base(ty.Url)
 	} else {
 		return "", errors.Errorf("failed to extract staging path for artifact type %v role %v", artifact.TypeUrn, artifact.RoleUrn)
 	}
@@ -158,18 +191,19 @@ func extractStagingToPath(artifact *pipepb.ArtifactInformation) (string, error) 
 
 func MustExtractFilePayload(artifact *pipepb.ArtifactInformation) (string, string) {
 	if artifact.TypeUrn != URNFileArtifact {
-		log.Fatalf("Unsupported artifact type #{artifact.TypeUrn}")
+		log.Fatalf("Unsupported artifact type %v", artifact.TypeUrn)
 	}
 	ty := pipepb.ArtifactFilePayload{}
 	if err := proto.Unmarshal(artifact.TypePayload, &ty); err != nil {
-		log.Fatalf("failed to parse artifact file payload: #{err}")
+		log.Fatalf("failed to parse artifact file payload: %v", err)
 	}
 	return ty.Path, ty.Sha256
 }
 
 type artifact struct {
-	client jobpb.ArtifactRetrievalServiceClient
-	dep    *pipepb.ArtifactInformation
+	client         jobpb.ArtifactRetrievalServiceClient
+	dep            *pipepb.ArtifactInformation
+	expectedSha256 string
 }
 
 func (a artifact) retrieve(ctx context.Context, dest string) error {
@@ -216,7 +250,19 @@ func (a artifact) retrieve(ctx context.Context, dest string) error {
 	stat, _ := fd.Stat()
 	log.Printf("Downloaded: %v (sha256: %v, size: %v)", filename, sha256Hash, stat.Size())
 
-	return fd.Close()
+	if err := fd.Close(); err != nil {
+		return err
+	}
+
+	if isArtifactValidationEnabled(ctx) {
+		if a.expectedSha256 == "" {
+			log.Printf("WARN: Artifact validation skipped for file: %v", filename)
+		} else if sha256Hash != a.expectedSha256 {
+			return errors.Errorf("bad SHA256 for %v: %v, want %v", filename, sha256Hash, a.expectedSha256)
+		}
+	}
+
+	return nil
 }
 
 func writeChunks(stream jobpb.ArtifactRetrievalService_GetArtifactClient, w io.Writer) (string, error) {
@@ -427,8 +473,12 @@ func retrieve(ctx context.Context, client jobpb.LegacyArtifactRetrievalServiceCl
 	}
 
 	// Artifact Sha256 hash is an optional field in metadata so we should only validate when its present.
-	if a.Sha256 != "" && sha256Hash != a.Sha256 {
-		return errors.Errorf("bad SHA256 for %v: %v, want %v", filename, sha256Hash, a.Sha256)
+	if isArtifactValidationEnabled(ctx) {
+		if a.Sha256 == "" {
+			log.Printf("WARN: Artifact validation skipped for file: %v", filename)
+		} else if sha256Hash != a.Sha256 {
+			return errors.Errorf("bad SHA256 for %v: %v, want %v", filename, sha256Hash, a.Sha256)
+		}
 	}
 	return nil
 }

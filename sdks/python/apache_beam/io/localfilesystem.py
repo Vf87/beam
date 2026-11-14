@@ -121,7 +121,7 @@ class LocalFileSystem(FileSystem):
     try:
       for f in list_files(dir_or_prefix):
         try:
-          yield FileMetadata(f, os.path.getsize(f))
+          yield FileMetadata(f, os.path.getsize(f), os.path.getmtime(f))
         except OSError:
           # Files may disappear, such as when listing /tmp.
           pass
@@ -147,9 +147,7 @@ class LocalFileSystem(FileSystem):
       self,
       path,
       mime_type='application/octet-stream',
-      compression_type=CompressionTypes.AUTO):
-    # type: (...) -> BinaryIO
-
+      compression_type=CompressionTypes.AUTO) -> BinaryIO:
     """Returns a write channel for the given file path.
 
     Args:
@@ -159,16 +157,16 @@ class LocalFileSystem(FileSystem):
 
     Returns: file handle with a close function for the user to use
     """
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    dirname = os.path.dirname(path)
+    if dirname:
+      os.makedirs(os.path.dirname(path), exist_ok=True)
     return self._path_open(path, 'wb', mime_type, compression_type)
 
   def open(
       self,
       path,
       mime_type='application/octet-stream',
-      compression_type=CompressionTypes.AUTO):
-    # type: (...) -> BinaryIO
-
+      compression_type=CompressionTypes.AUTO) -> BinaryIO:
     """Returns a read channel for the given file path.
 
     Args:
@@ -311,6 +309,22 @@ class LocalFileSystem(FileSystem):
       raise BeamIOError('Path does not exist: %s' % path)
     return str(os.path.getsize(path))
 
+  def metadata(self, path):
+    """Fetch metadata fields of a file on the FileSystem.
+
+    Args:
+      path: string path of a file.
+
+    Returns:
+      :class:`~apache_beam.io.filesystem.FileMetadata`.
+
+    Raises:
+      ``BeamIOError``: if path isn't a file or doesn't exist.
+    """
+    if not self.exists(path):
+      raise BeamIOError('Path does not exist: %s' % path)
+    return FileMetadata(path, os.path.getsize(path), os.path.getmtime(path))
+
   def delete(self, paths):
     """Deletes files or directories at the provided paths.
     Directories will be deleted recursively.
@@ -352,3 +366,6 @@ class LocalFileSystem(FileSystem):
 
     if exceptions:
       raise BeamIOError("Delete operation failed", exceptions)
+
+  def report_lineage(self, path, lineage):
+    lineage.add('filesystem', 'localhost', path, last_segment_sep='/')

@@ -19,7 +19,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash"
-	"hash/fnv"
+	"hash/maphash"
 	"math"
 	"reflect"
 
@@ -31,13 +31,19 @@ import (
 // Infrastructure for hashing values for lifted combines.
 
 type elementHasher interface {
-	Hash(element interface{}, w typex.Window) (uint64, error)
+	Hash(element any, w typex.Window) (uint64, error)
 }
 
 func makeElementHasher(c *coder.Coder, wc *coder.WindowCoder) elementHasher {
-	// TODO(lostluck): move to a faster hashing library once we can take dependencies easily.
-	hasher := fnv.New64a()
+	hasher := &maphash.Hash{}
 	we := MakeWindowEncoder(wc)
+
+	// Unwrap length prefix coders.
+	// A length prefix changes the hash itself, but shouldn't affect
+	// that identical elements have the same hash, so skip them here.
+	if c.Kind == coder.LP {
+		c = c.Components[0]
+	}
 	switch c.Kind {
 	case coder.Bytes:
 		return &bytesHasher{hash: hasher, we: we}
@@ -82,7 +88,7 @@ type bytesHasher struct {
 	we   WindowEncoder
 }
 
-func (h *bytesHasher) Hash(element interface{}, w typex.Window) (uint64, error) {
+func (h *bytesHasher) Hash(element any, w typex.Window) (uint64, error) {
 	h.hash.Reset()
 	h.hash.Write(element.([]byte))
 	h.we.EncodeSingle(w, h.hash)
@@ -94,7 +100,7 @@ type stringHasher struct {
 	we   WindowEncoder
 }
 
-func (h *stringHasher) Hash(element interface{}, w typex.Window) (uint64, error) {
+func (h *stringHasher) Hash(element any, w typex.Window) (uint64, error) {
 	h.hash.Reset()
 	s := element.(string)
 	var b [64]byte
@@ -124,11 +130,11 @@ func newNumberHasher(hash hash.Hash64, we WindowEncoder) *numberHasher {
 		hash: hash,
 		we:   we,
 		// Pre allocate slice to avoid re-allocations.
-		cache: make([]byte, 8, 8),
+		cache: make([]byte, 8),
 	}
 }
 
-func (h *numberHasher) Hash(element interface{}, w typex.Window) (uint64, error) {
+func (h *numberHasher) Hash(element any, w typex.Window) (uint64, error) {
 	h.hash.Reset()
 	var val uint64
 	switch n := element.(type) {
@@ -172,7 +178,7 @@ type rowHasher struct {
 	fv    FullValue
 }
 
-func (h *rowHasher) Hash(element interface{}, w typex.Window) (uint64, error) {
+func (h *rowHasher) Hash(element any, w typex.Window) (uint64, error) {
 	h.hash.Reset()
 	h.fv.Elm = element
 	if err := h.coder.Encode(&h.fv, h.hash); err != nil {
@@ -190,7 +196,7 @@ type customEncodedHasher struct {
 	we    WindowEncoder
 }
 
-func (h *customEncodedHasher) Hash(element interface{}, w typex.Window) (uint64, error) {
+func (h *customEncodedHasher) Hash(element any, w typex.Window) (uint64, error) {
 	h.hash.Reset()
 	b, err := h.coder.Encode(h.t, element)
 	if err != nil {

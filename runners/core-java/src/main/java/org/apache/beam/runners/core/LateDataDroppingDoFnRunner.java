@@ -25,10 +25,13 @@ import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.util.WindowTracing;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.CausedByDrain;
 import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
 /**
@@ -44,7 +47,7 @@ import org.joda.time.Instant;
  * @param <OutputT> output value element type
  * @param <W> window type
  */
-@SuppressWarnings({"nullness", "keyfor"}) // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+@SuppressWarnings({"nullness", "keyfor"}) // TODO(https://github.com/apache/beam/issues/20497)
 public class LateDataDroppingDoFnRunner<K, InputT, OutputT, W extends BoundedWindow>
     implements DoFnRunner<KeyedWorkItem<K, InputT>, KV<K, OutputT>> {
   private final DoFnRunner<KeyedWorkItem<K, InputT>, KV<K, OutputT>> doFnRunner;
@@ -55,9 +58,9 @@ public class LateDataDroppingDoFnRunner<K, InputT, OutputT, W extends BoundedWin
   public LateDataDroppingDoFnRunner(
       DoFnRunner<KeyedWorkItem<K, InputT>, KV<K, OutputT>> doFnRunner,
       WindowingStrategy<?, ?> windowingStrategy,
-      TimerInternals timerInternals) {
+      StepContext stepContext) {
     this.doFnRunner = doFnRunner;
-    lateDataFilter = new LateDataFilter(windowingStrategy, timerInternals);
+    lateDataFilter = new LateDataFilter(windowingStrategy, stepContext);
   }
 
   @Override
@@ -88,13 +91,20 @@ public class LateDataDroppingDoFnRunner<K, InputT, OutputT, W extends BoundedWin
       BoundedWindow window,
       Instant timestamp,
       Instant outputTimestamp,
-      TimeDomain timeDomain) {
-    doFnRunner.onTimer(timerId, timerFamilyId, key, window, timestamp, outputTimestamp, timeDomain);
+      TimeDomain timeDomain,
+      CausedByDrain causedByDrain) {
+    doFnRunner.onTimer(
+        timerId, timerFamilyId, key, window, timestamp, outputTimestamp, timeDomain, causedByDrain);
   }
 
   @Override
   public void finishBundle() {
     doFnRunner.finishBundle();
+  }
+
+  @Override
+  public <KeyT extends @Nullable Object> void finishKey(KeyT key) {
+    doFnRunner.finishKey(key);
   }
 
   @Override
@@ -106,13 +116,12 @@ public class LateDataDroppingDoFnRunner<K, InputT, OutputT, W extends BoundedWin
   @VisibleForTesting
   static class LateDataFilter {
     private final WindowingStrategy<?, ?> windowingStrategy;
-    private final TimerInternals timerInternals;
+    private final StepContext stepContext;
     private final Counter droppedDueToLateness;
 
-    public LateDataFilter(
-        WindowingStrategy<?, ?> windowingStrategy, TimerInternals timerInternals) {
+    public LateDataFilter(WindowingStrategy<?, ?> windowingStrategy, StepContext stepContext) {
       this.windowingStrategy = windowingStrategy;
-      this.timerInternals = timerInternals;
+      this.stepContext = stepContext;
       this.droppedDueToLateness =
           Metrics.counter(LateDataDroppingDoFnRunner.class, DROPPED_DUE_TO_LATENESS);
     }
@@ -136,12 +145,20 @@ public class LateDataDroppingDoFnRunner<K, InputT, OutputT, W extends BoundedWin
                 element.getTimestamp(),
                 key,
                 window,
-                timerInternals.currentInputWatermarkTime(),
-                timerInternals.currentOutputWatermarkTime());
+                stepContext.timerInternals().currentInputWatermarkTime(),
+                stepContext.timerInternals().currentOutputWatermarkTime());
           } else {
             nonLateElements.add(
-                WindowedValue.of(
-                    element.getValue(), element.getTimestamp(), window, element.getPane()));
+                WindowedValues.of(
+                    element.getValue(),
+                    element.getTimestamp(),
+                    window,
+                    element.getPaneInfo(),
+                    element.getRecordId(),
+                    element.getRecordOffset(),
+                    element.causedByDrain(),
+                    element.getOpenTelemetryContext(),
+                    element.getValueKind()));
           }
         }
       }
@@ -155,7 +172,7 @@ public class LateDataDroppingDoFnRunner<K, InputT, OutputT, W extends BoundedWin
      * @return True if element can be dropped.
      */
     private boolean canDropDueToExpiredWindow(BoundedWindow window) {
-      Instant inputWM = timerInternals.currentInputWatermarkTime();
+      Instant inputWM = stepContext.timerInternals().currentInputWatermarkTime();
       return LateDataUtils.garbageCollectionTime(window, windowingStrategy).isBefore(inputWM);
     }
   }

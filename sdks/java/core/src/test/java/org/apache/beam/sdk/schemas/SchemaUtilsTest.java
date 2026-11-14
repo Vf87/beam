@@ -18,8 +18,15 @@
 package org.apache.beam.sdk.schemas;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
+import org.apache.beam.sdk.values.Row;
 import org.junit.Test;
 
 /** Tests for {@link org.apache.beam.sdk.schemas.SchemaUtils}. */
@@ -103,5 +110,108 @@ public class SchemaUtilsTest {
                 "field1", FieldType.INT32.withNullable(true), FieldType.INT32.withNullable(true))
             .build();
     assertEquals(expected, SchemaUtils.mergeWideningNullable(schema1, schema2));
+  }
+
+  @Test
+  public void testToPrettyStringRendersNullInsideArray() {
+    Schema schema =
+        Schema.builder().addArrayField("a", FieldType.STRING.withNullable(true)).build();
+    Row row = Row.withSchema(schema).addValue(Arrays.asList("x", null)).build();
+    assertTrue(row.toString(), row.toString().contains("null"));
+  }
+
+  @Test
+  public void testToPrettyStringRendersNullMapValue() {
+    Schema schema =
+        Schema.builder()
+            .addMapField("m", FieldType.STRING, FieldType.STRING.withNullable(true))
+            .build();
+    Map<String, String> map = new HashMap<>();
+    map.put("k", null);
+    Row row = Row.withSchema(schema).addValue(map).build();
+    assertTrue(row.toString(), row.toString().contains("null"));
+  }
+
+  @Test
+  public void testToPrettyStringRendersNullRowInsideArray() {
+    Schema inner = Schema.builder().addStringField("s").build();
+    Schema schema =
+        Schema.builder().addArrayField("a", FieldType.row(inner).withNullable(true)).build();
+    Row row = Row.withSchema(schema).addValue(Arrays.asList((Row) null)).build();
+    assertTrue(row.toString(), row.toString().contains("null"));
+  }
+
+  @Test
+  public void testToPrettyStringRendersNullInsideArrayOfInts() {
+    Schema schema = Schema.builder().addArrayField("a", FieldType.INT32.withNullable(true)).build();
+    Row row = Row.withSchema(schema).addValue(Arrays.asList(1, null)).build();
+    String rendered = row.toString();
+    assertTrue(rendered, rendered.contains("1"));
+    assertTrue(rendered, rendered.contains("null"));
+  }
+
+  @Test
+  public void testToPrettyStringRendersIterableThatIsNotAList() {
+    Schema schema =
+        Schema.builder().addStringField("k").addIterableField("vals", FieldType.STRING).build();
+    // A bare Iterable, which is exactly what an ITERABLE field declares.
+    Iterable<String> bare = () -> Arrays.asList("p", "q").iterator();
+    Row row = Row.withSchema(schema).attachValues("k1", bare);
+
+    // The precondition that makes this test meaningful: if the value ever starts arriving as a
+    // List, the assertion below would pass for the wrong reason.
+    assertTrue(!(row.getValue("vals") instanceof java.util.List));
+
+    String rendered = row.toString();
+    assertTrue(rendered, rendered.contains("p"));
+    assertTrue(rendered, rendered.contains("q"));
+  }
+
+  @Test
+  public void testToPrettyStringStillRendersAListArray() {
+    // Control: the ordinary List case must be unchanged.
+    Schema schema = Schema.builder().addArrayField("vals", FieldType.STRING).build();
+    Row row = Row.withSchema(schema).attachValues((Object) Arrays.asList("p", "q"));
+
+    String rendered = row.toString();
+    assertTrue(rendered, rendered.contains("p"));
+    assertTrue(rendered, rendered.contains("q"));
+  }
+
+  @Test
+  public void testToPrettyStringRendersAnIterableThatCanOnlyBeReadOnce() {
+    Schema schema =
+        Schema.builder().addStringField("k").addIterableField("vals", FieldType.STRING).build();
+    // Hands out its iterator exactly once and fails loudly on a second attempt. Rendering asks
+    // the collection for one traversal now; asking for isEmpty(), then size(), then iterating
+    // would trip the guard below.
+    Iterable<String> onceOnly =
+        new Iterable<String>() {
+          private boolean taken = false;
+
+          @Override
+          public Iterator<String> iterator() {
+            if (taken) {
+              throw new IllegalStateException("iterated more than once");
+            }
+            taken = true;
+            return Arrays.asList("p", "q").iterator();
+          }
+        };
+    Row row = Row.withSchema(schema).attachValues("k1", onceOnly);
+
+    String rendered = row.toString();
+    assertTrue(rendered, rendered.contains("p"));
+    assertTrue(rendered, rendered.contains("q"));
+  }
+
+  @Test
+  public void testToPrettyStringRendersAnEmptyIterableAsEmptyBrackets() {
+    Schema schema = Schema.builder().addIterableField("vals", FieldType.STRING).build();
+    Iterable<String> empty = Collections::emptyIterator;
+    Row row = Row.withSchema(schema).attachValues((Object) empty);
+
+    String rendered = row.toString();
+    assertTrue(rendered, rendered.contains("[]"));
   }
 }

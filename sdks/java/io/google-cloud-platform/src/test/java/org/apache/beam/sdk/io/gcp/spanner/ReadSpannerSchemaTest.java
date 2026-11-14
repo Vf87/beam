@@ -20,10 +20,11 @@ package org.apache.beam.sdk.io.gcp.spanner;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.junit.Assert.assertEquals;
-import static org.mockito.Matchers.argThat;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.google.cloud.spanner.Dialect;
 import com.google.cloud.spanner.ReadOnlyTransaction;
 import com.google.cloud.spanner.ResultSets;
 import com.google.cloud.spanner.Statement;
@@ -31,7 +32,14 @@ import com.google.cloud.spanner.Struct;
 import com.google.cloud.spanner.Type;
 import java.util.Arrays;
 import java.util.List;
-import org.apache.beam.sdk.transforms.DoFnTester;
+import org.apache.beam.sdk.testing.PAssert;
+import org.apache.beam.sdk.testing.TestPipeline;
+import org.apache.beam.sdk.transforms.Create;
+import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.View;
+import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.PCollectionView;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -46,8 +54,9 @@ public class ReadSpannerSchemaTest {
 
   @Rule public final transient ExpectedException thrown = ExpectedException.none();
 
+  @Rule public final transient TestPipeline pipeline = TestPipeline.create();
+
   private FakeServiceFactory serviceFactory;
-  private ReadOnlyTransaction mockTx;
 
   private static Struct columnMetadata(String tableName, String columnName, String type) {
     return Struct.newBuilder()
@@ -86,7 +95,7 @@ public class ReadSpannerSchemaTest {
 
                   @Override
                   public boolean matches(Statement argument) {
-                    if (!(argument instanceof Statement)) {
+                    if (argument == null) {
                       return false;
                     }
                     Statement st = (Statement) argument;
@@ -108,7 +117,7 @@ public class ReadSpannerSchemaTest {
 
                   @Override
                   public boolean matches(Statement argument) {
-                    if (!(argument instanceof Statement)) {
+                    if (argument == null) {
                       return false;
                     }
                     Statement st = (Statement) argument;
@@ -118,11 +127,34 @@ public class ReadSpannerSchemaTest {
         .thenReturn(ResultSets.forRows(type, rows));
   }
 
+  private PCollection<SpannerSchema> readSchema(SpannerConfig config, Dialect dialect) {
+    PCollectionView<Dialect> dialectView =
+        pipeline.apply("Create dialect", Create.of(dialect)).apply(View.asSingleton());
+    return pipeline
+        .apply("Create seed", Create.of((Void) null))
+        .apply(ParDo.of(new ReadSpannerSchema(config, dialectView)).withSideInputs(dialectView));
+  }
+
+  private static Void assertSingleInt64KeyTable(Iterable<SpannerSchema> schemas) {
+    List<SpannerSchema> schemaList = Lists.newArrayList(schemas);
+    assertEquals(1, schemaList.size());
+
+    SpannerSchema schema = schemaList.get(0);
+
+    assertEquals(1, schema.getTables().size());
+
+    SpannerSchema.Column column = SpannerSchema.Column.create("key", Type.int64());
+    SpannerSchema.KeyPart keyPart = SpannerSchema.KeyPart.create("key", false);
+
+    assertThat(schema.getColumns("test"), contains(column));
+    assertThat(schema.getKeyParts("test"), contains(keyPart));
+    return null;
+  }
+
   @Before
   @SuppressWarnings("unchecked")
   public void setUp() throws Exception {
     serviceFactory = new FakeServiceFactory();
-    mockTx = mock(ReadOnlyTransaction.class);
   }
 
   @Test
@@ -141,19 +173,29 @@ public class ReadSpannerSchemaTest {
             .withDatabaseId("test-database")
             .withServiceFactory(serviceFactory);
 
-    DoFnTester<Void, SpannerSchema> tester = DoFnTester.of(new ReadSpannerSchema(config));
-    List<SpannerSchema> schemas = tester.processBundle(Arrays.asList((Void) null));
+    PAssert.that(readSchema(config, Dialect.GOOGLE_STANDARD_SQL))
+        .satisfies(ReadSpannerSchemaTest::assertSingleInt64KeyTable);
+    pipeline.run();
+  }
 
-    assertEquals(1, schemas.size());
+  @Test
+  public void pgSimple() throws Exception {
+    // Simplest schema: a table with bigint key
+    ReadOnlyTransaction tx = mock(ReadOnlyTransaction.class);
+    when(serviceFactory.mockDatabaseClient().readOnlyTransaction()).thenReturn(tx);
 
-    SpannerSchema schema = schemas.get(0);
+    preparePkMetadata(tx, Arrays.asList(pkMetadata("test", "key", "ASC")));
+    prepareColumnMetadata(tx, Arrays.asList(columnMetadata("test", "key", "bigint")));
 
-    assertEquals(1, schema.getTables().size());
+    SpannerConfig config =
+        SpannerConfig.create()
+            .withProjectId("test-project")
+            .withInstanceId("test-instance")
+            .withDatabaseId("test-database")
+            .withServiceFactory(serviceFactory);
 
-    SpannerSchema.Column column = SpannerSchema.Column.create("key", Type.int64());
-    SpannerSchema.KeyPart keyPart = SpannerSchema.KeyPart.create("key", false);
-
-    assertThat(schema.getColumns("test"), contains(column));
-    assertThat(schema.getKeyParts("test"), contains(keyPart));
+    PAssert.that(readSchema(config, Dialect.POSTGRESQL))
+        .satisfies(ReadSpannerSchemaTest::assertSingleInt64KeyTable);
+    pipeline.run();
   }
 }

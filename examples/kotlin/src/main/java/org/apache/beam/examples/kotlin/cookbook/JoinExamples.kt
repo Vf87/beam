@@ -26,6 +26,8 @@ import org.apache.beam.sdk.options.PipelineOptions
 import org.apache.beam.sdk.options.PipelineOptionsFactory
 import org.apache.beam.sdk.options.Validation
 import org.apache.beam.sdk.transforms.DoFn
+import org.apache.beam.sdk.transforms.DoFn.Element
+import org.apache.beam.sdk.transforms.DoFn.OutputReceiver
 import org.apache.beam.sdk.transforms.ParDo
 import org.apache.beam.sdk.transforms.join.CoGbkResult
 import org.apache.beam.sdk.transforms.join.CoGroupByKey
@@ -60,7 +62,7 @@ import org.apache.beam.sdk.values.TupleTag
 object JoinExamples {
 
     // A 1000-row sample of the GDELT data here: gdelt-bq:full.events.
-    private const val GDELT_EVENTS_TABLE = "clouddataflow-readonly:samples.gdelt_sample"
+    private const val GDELT_EVENTS_TABLE = "apache-beam-testing.samples.gdelt_sample"
     // A table that maps country codes to country names.
     private const val COUNTRY_CODES = "gdelt-bq:full.crosswalk_geocountrycodetohuman"
 
@@ -89,13 +91,14 @@ object JoinExamples {
                 ParDo.of(
                         object : DoFn<KV<String, CoGbkResult>, KV<String, String>>() {
                             @ProcessElement
-                            fun processElement(c: ProcessContext) {
-                                val e = c.element()
-                                val countryCode = e.key
-                                val countryName = e.value.getOnly(countryInfoTag)
-                                for (ei in c.element().value.getAll(eventInfoTag)) {
+                            fun processElement(
+                                    @Element element: KV<String, CoGbkResult>,
+                                    receiver: OutputReceiver<KV<String, String>>) {
+                                val countryCode = element.key
+                                val countryName = element.value.getOnly(countryInfoTag)
+                                for (ei in element.value.getAll(eventInfoTag)) {
                                     // Generate a string that combines information from both collection values
-                                    c.output(
+                                    receiver.output(
                                             KV.of<String, String>(
                                                     countryCode,
                                                     "Country name: $countryName, Event info: $ei"))
@@ -109,9 +112,9 @@ object JoinExamples {
                 ParDo.of(
                         object : DoFn<KV<String, String>, String>() {
                             @ProcessElement
-                            fun processElement(c: ProcessContext) {
-                                val outputString = "Country code: ${c.element().key}, ${c.element().value}"
-                                c.output(outputString)
+                            fun processElement(@Element element: KV<String, String>, receiver: OutputReceiver<String>) {
+                                val outputString = "Country code: ${element.key}, ${element.value}"
+                                receiver.output(outputString)
                             }
                         }))
     }
@@ -122,14 +125,13 @@ object JoinExamples {
      */
     internal class ExtractEventDataFn : DoFn<TableRow, KV<String, String>>() {
         @ProcessElement
-        fun processElement(c: ProcessContext) {
-            val row = c.element()
+        fun processElement(@Element row: TableRow, receiver: OutputReceiver<KV<String, String>>) {
             val countryCode = row["ActionGeo_CountryCode"] as String
             val sqlDate = row["SQLDATE"] as String
             val actor1Name = row["Actor1Name"] as String
             val sourceUrl = row["SOURCEURL"] as String
             val eventInfo = "Date: $sqlDate, Actor1: $actor1Name, url: $sourceUrl"
-            c.output(KV.of(countryCode, eventInfo))
+            receiver.output(KV.of(countryCode, eventInfo))
         }
     }
 
@@ -139,11 +141,10 @@ object JoinExamples {
      */
     internal class ExtractCountryInfoFn : DoFn<TableRow, KV<String, String>>() {
         @ProcessElement
-        fun processElement(c: ProcessContext) {
-            val row = c.element()
+        fun processElement(@Element row: TableRow, receiver: OutputReceiver<KV<String, String>>) {
             val countryCode = row["FIPSCC"] as String
             val countryName = row["HumanName"] as String
-            c.output(KV.of(countryCode, countryName))
+            receiver.output(KV.of(countryCode, countryName))
         }
     }
 

@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.io;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -55,7 +55,7 @@ import org.slf4j.LoggerFactory;
  * @see RangeTracker
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public abstract class OffsetBasedSource<T> extends BoundedSource<T> {
   private final long startOffset;
@@ -219,7 +219,9 @@ public abstract class OffsetBasedSource<T> extends BoundedSource<T> {
     /** The {@link OffsetRangeTracker} managing the range and current position of the source. */
     private final OffsetRangeTracker rangeTracker;
 
-    /** @param source the {@link OffsetBasedSource} to be read by the current reader. */
+    /**
+     * @param source the {@link OffsetBasedSource} to be read by the current reader.
+     */
     public OffsetBasedReader(OffsetBasedSource<T> source) {
       this.source = source;
       this.rangeTracker = new OffsetRangeTracker(source.getStartOffset(), source.getEndOffset());

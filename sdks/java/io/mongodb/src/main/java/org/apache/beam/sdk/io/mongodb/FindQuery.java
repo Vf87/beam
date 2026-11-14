@@ -17,37 +17,35 @@
  */
 package org.apache.beam.sdk.io.mongodb;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.auto.value.AutoValue;
 import com.mongodb.BasicDBObject;
-import com.mongodb.MongoClient;
+import com.mongodb.MongoClientSettings;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoCursor;
 import com.mongodb.client.model.Projections;
 import java.util.Collections;
 import java.util.List;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.bson.BsonDocument;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.checkerframework.checker.nullness.qual.Nullable;
+import org.checkerframework.dataflow.qual.Pure;
 
 /** Builds a MongoDB FindQuery object. */
-@Experimental(Kind.SOURCE_SINK)
 @AutoValue
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public abstract class FindQuery
     implements SerializableFunction<MongoCollection<Document>, MongoCursor<Document>> {
 
+  @Pure
   abstract @Nullable BsonDocument filters();
 
+  @Pure
   abstract int limit();
 
+  @Pure
   abstract List<String> projection();
 
   private static Builder builder() {
@@ -81,7 +79,8 @@ public abstract class FindQuery
 
   /** Convert the Bson filters into a BsonDocument via default encoding. */
   static BsonDocument bson2BsonDocument(Bson filters) {
-    return filters.toBsonDocument(BasicDBObject.class, MongoClient.getDefaultCodecRegistry());
+    return filters.toBsonDocument(
+        BasicDBObject.class, MongoClientSettings.getDefaultCodecRegistry());
   }
 
   /** Sets the filters to find. */

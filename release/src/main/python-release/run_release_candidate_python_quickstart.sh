@@ -75,7 +75,7 @@ function verify_hash() {
   wget https://dist.apache.org/repos/dist/dev/beam/KEYS
   gpg --import KEYS
   gpg --verify $ASC_FILE_NAME $BEAM_PYTHON_SDK
-  gsutil version -l
+  gcloud version
 }
 
 
@@ -122,7 +122,7 @@ function verify_wordcount_dataflow() {
 
   # verify results.
   wordcount_output_in_gcs="gs://$BUCKET_NAME/$WORDCOUNT_OUTPUT"
-  gcs_pull_result=$(gsutil ls gs://$BUCKET_NAME)
+  gcs_pull_result=$(gcloud storage ls gs://$BUCKET_NAME)
   if [[ $gcs_pull_result != *$wordcount_output_in_gcs* ]]; then
     echo "ERROR: The wordcount example failed on DataflowRunner".
     complete "failed when running wordcount example with DataflowRunner."
@@ -130,7 +130,7 @@ function verify_wordcount_dataflow() {
   fi
 
   # clean output files from GCS
-  gsutil rm gs://$BUCKET_NAME/$WORDCOUNT_OUTPUT-*
+  gcloud storage rm gs://$BUCKET_NAME/$WORDCOUNT_OUTPUT-*
   echo "SUCCEED: wordcount successfully run on DataflowRunner."
 }
 
@@ -155,7 +155,7 @@ function verify_streaming_wordcount_direct() {
 
   # verify result
   run_pubsub_publish
-  verify_steaming_result "DirectRunner" $pid
+  verify_streaming_result "DirectRunner" $pid
 
   kill -9 $pid
   sleep 10
@@ -194,7 +194,7 @@ function verify_streaming_wordcount_dataflow() {
   # verify result
   run_pubsub_publish
   sleep 420
-  verify_steaming_result "DataflowRunner" $pid $running_job
+  verify_streaming_result "DataflowRunner" $pid $running_job
 
   kill -9 $pid
   gcloud dataflow jobs cancel $running_job

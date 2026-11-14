@@ -18,7 +18,7 @@
 package org.apache.beam.examples.complete.datatokenization.utils;
 
 import static org.apache.beam.sdk.io.gcp.bigquery.BigQueryUtils.fromTableSchema;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.api.services.bigquery.model.TableSchema;
 import java.io.IOException;
@@ -37,8 +37,8 @@ import org.apache.beam.sdk.io.fs.MatchResult;
 import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryHelpers;
 import org.apache.beam.sdk.schemas.Schema;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.ByteStreams;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.CharStreams;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.ByteStreams;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.CharStreams;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,12 +48,12 @@ import org.slf4j.LoggerFactory;
  */
 @SuppressWarnings({
   "initialization.fields.uninitialized",
-  "method.invocation.invalid",
+  "method.invocation",
   "dereference.of.nullable",
-  "argument.type.incompatible",
-  "return.type.incompatible"
+  "argument",
+  "return"
 })
-public class SchemasUtils {
+public final class SchemasUtils {
 
   /* Logger for class.*/
   private static final Logger LOG = LoggerFactory.getLogger(SchemasUtils.class);
@@ -73,7 +73,7 @@ public class SchemasUtils {
       byte[] encoded = Files.readAllBytes(Paths.get(path));
       parseJson(new String(encoded, encoding));
     }
-    LOG.info("Extracted schema: " + bigQuerySchema.toPrettyString());
+    LOG.info("Extracted schema: {}", bigQuerySchema.toPrettyString());
   }
 
   public TableSchema getBigQuerySchema() {
@@ -88,11 +88,15 @@ public class SchemasUtils {
   }
 
   private void validateSchemaTypes(TableSchema bigQuerySchema) {
+    if (bigQuerySchema == null) {
+      LOG.error("Provided BigQuery schema is null. Please check your input.");
+      return;
+    }
     try {
       beamSchema = fromTableSchema(bigQuerySchema);
     } catch (UnsupportedOperationException exception) {
-      LOG.error("Check json schema, {}", exception.getMessage());
-    } catch (NullPointerException npe) {
+      LOG.error("Check json schema", exception);
+    } catch (Exception e) {
       LOG.error("Missing schema keywords, please check what all required fields presented");
     }
   }
@@ -128,7 +132,6 @@ public class SchemasUtils {
    *
    * @param filePath path to file in GCS
    * @return contents of the file as a string
-   * @throws IOException thrown if not able to read file
    */
   public static String getGcsFileAsString(String filePath) {
     MatchResult result;
@@ -136,14 +139,15 @@ public class SchemasUtils {
       result = FileSystems.match(filePath);
       checkArgument(
           result.status() == MatchResult.Status.OK && !result.metadata().isEmpty(),
-          "Failed to match any files with the pattern: " + filePath);
+          "Failed to match any files with the pattern: %s",
+          filePath);
 
       List<ResourceId> rId =
           result.metadata().stream()
               .map(MatchResult.Metadata::resourceId)
               .collect(Collectors.toList());
 
-      checkArgument(rId.size() == 1, "Expected exactly 1 file, but got " + rId.size() + " files.");
+      checkArgument(rId.size() == 1, "Expected exactly 1 file, but got %s files.", rId.size());
 
       Reader reader =
           Channels.newReader(FileSystems.open(rId.get(0)), StandardCharsets.UTF_8.name());
@@ -151,7 +155,7 @@ public class SchemasUtils {
       return CharStreams.toString(reader);
 
     } catch (IOException ioe) {
-      LOG.error("File system i/o error: " + ioe.getMessage());
+      LOG.error("File system i/o error", ioe);
       throw new RuntimeException(ioe);
     }
   }

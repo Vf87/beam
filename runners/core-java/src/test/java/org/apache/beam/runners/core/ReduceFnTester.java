@@ -32,7 +32,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.beam.runners.core.TimerInternals.TimerData;
-import org.apache.beam.runners.core.construction.TriggerTranslation;
 import org.apache.beam.runners.core.triggers.ExecutableTriggerStateMachine;
 import org.apache.beam.runners.core.triggers.TriggerStateMachine;
 import org.apache.beam.runners.core.triggers.TriggerStateMachineRunner;
@@ -48,6 +47,7 @@ import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.transforms.Combine.CombineFn;
 import org.apache.beam.sdk.transforms.CombineWithContext.CombineFnWithContext;
+import org.apache.beam.sdk.transforms.DoFn.BundleFinalizer;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
@@ -58,17 +58,20 @@ import org.apache.beam.sdk.transforms.windowing.WindowFn;
 import org.apache.beam.sdk.util.AppliedCombineFn;
 import org.apache.beam.sdk.util.SerializableUtils;
 import org.apache.beam.sdk.util.WindowTracing;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.WindowedValueReceiver;
+import org.apache.beam.sdk.util.construction.TriggerTranslation;
+import org.apache.beam.sdk.values.CausedByDrain;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.TimestampedValue;
-import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.sdk.values.WindowingStrategy;
 import org.apache.beam.sdk.values.WindowingStrategy.AccumulationMode;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Equivalence;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.FluentIterable;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Sets;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Equivalence;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.FluentIterable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -84,7 +87,7 @@ import org.joda.time.Instant;
  * @param <W> The type of windows being used.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class ReduceFnTester<InputT, OutputT, W extends BoundedWindow> {
   private static final String KEY = "TEST_KEY";
@@ -92,9 +95,26 @@ public class ReduceFnTester<InputT, OutputT, W extends BoundedWindow> {
   private final TestInMemoryStateInternals<String> stateInternals =
       new TestInMemoryStateInternals<>(KEY);
   private final InMemoryTimerInternals timerInternals = new InMemoryTimerInternals();
+  private final StepContext stepContext =
+      new StepContext() {
+        @Override
+        public StateInternals stateInternals() {
+          return stateInternals;
+        }
+
+        @Override
+        public TimerInternals timerInternals() {
+          return timerInternals;
+        }
+
+        @Override
+        public BundleFinalizer bundleFinalizer() {
+          throw new UnsupportedOperationException();
+        }
+      };
 
   private final WindowFn<Object, W> windowFn;
-  private final TestOutputWindowedValue testOutputter;
+  private final TestWindowedValueReceiver testOutputter;
   private final SideInputReader sideInputReader;
   private final Coder<OutputT> outputCoder;
   private final WindowingStrategy<Object, W> objectStrategy;
@@ -124,6 +144,19 @@ public class ReduceFnTester<InputT, OutputT, W extends BoundedWindow> {
         SystemReduceFn.buffering(VarIntCoder.of()),
         IterableCoder.of(VarIntCoder.of()),
         PipelineOptionsFactory.create(),
+        NullSideInputReader.empty());
+  }
+
+  public static <W extends BoundedWindow>
+      ReduceFnTester<Integer, Iterable<Integer>, W> nonCombining(
+          WindowingStrategy<?, W> windowingStrategy, PipelineOptions options) throws Exception {
+    return new ReduceFnTester<>(
+        windowingStrategy,
+        TriggerStateMachines.stateMachineForTrigger(
+            TriggerTranslation.toProto(windowingStrategy.getTrigger())),
+        SystemReduceFn.buffering(VarIntCoder.of()),
+        IterableCoder.of(VarIntCoder.of()),
+        options,
         NullSideInputReader.empty());
   }
 
@@ -276,7 +309,7 @@ public class ReduceFnTester<InputT, OutputT, W extends BoundedWindow> {
     this.objectStrategy = objectStrategy;
     this.reduceFn = reduceFn;
     this.windowFn = objectStrategy.getWindowFn();
-    this.testOutputter = new TestOutputWindowedValue();
+    this.testOutputter = new TestWindowedValueReceiver();
     this.sideInputReader = sideInputReader;
     this.executableTriggerStateMachine = ExecutableTriggerStateMachine.create(triggerStateMachine);
     this.outputCoder = outputCoder;
@@ -316,7 +349,7 @@ public class ReduceFnTester<InputT, OutputT, W extends BoundedWindow> {
   public final void assertHasOnlyGlobalAndFinishedSetsFor(W... expectedWindows) {
     assertHasOnlyGlobalAndAllowedTags(
         ImmutableSet.copyOf(expectedWindows),
-        ImmutableSet.of(TriggerStateMachineRunner.FINISHED_BITS_TAG));
+        ImmutableSet.of(TriggerStateMachineRunner.FINISHED_BITS_TAG, ReduceFnRunner.METADATA_TAG));
   }
 
   @SafeVarargs
@@ -329,7 +362,8 @@ public class ReduceFnTester<InputT, OutputT, W extends BoundedWindow> {
             PaneInfoTracker.PANE_INFO_TAG,
             WatermarkHold.watermarkHoldTagForTimestampCombiner(
                 objectStrategy.getTimestampCombiner()),
-            WatermarkHold.EXTRA_HOLD_TAG));
+            WatermarkHold.EXTRA_HOLD_TAG,
+            ReduceFnRunner.METADATA_TAG));
   }
 
   @SafeVarargs
@@ -360,8 +394,8 @@ public class ReduceFnTester<InputT, OutputT, W extends BoundedWindow> {
   }
 
   /**
-   * Verifies that the the set of windows that have any state stored is exactly {@code
-   * expectedWindows} and that each of these windows has only tags from {@code allowedTags}.
+   * Verifies that the set of windows that have any state stored is exactly {@code expectedWindows}
+   * and that each of these windows has only tags from {@code allowedTags}.
    */
   private void assertHasOnlyGlobalAndAllowedTags(
       Set<W> expectedWindows, Set<StateTag<?>> allowedTags) {
@@ -552,7 +586,7 @@ public class ReduceFnTester<InputT, OutputT, W extends BoundedWindow> {
                         windowFn.assignWindows(
                             new TestAssignContext<W>(
                                 windowFn, value, timestamp, GlobalWindow.INSTANCE));
-                    return WindowedValue.of(value, timestamp, windows, PaneInfo.NO_FIRING);
+                    return WindowedValues.of(value, timestamp, windows, PaneInfo.NO_FIRING);
                   } catch (Exception e) {
                     throw new RuntimeException(e);
                   }
@@ -561,7 +595,7 @@ public class ReduceFnTester<InputT, OutputT, W extends BoundedWindow> {
 
     ReduceFnRunner<String, InputT, OutputT, W> runner = createRunner();
     runner.processElements(
-        new LateDataDroppingDoFnRunner.LateDataFilter(objectStrategy, timerInternals)
+        new LateDataDroppingDoFnRunner.LateDataFilter(objectStrategy, stepContext)
             .filter(KEY, inputs));
 
     // Persist after each bundle.
@@ -573,7 +607,11 @@ public class ReduceFnTester<InputT, OutputT, W extends BoundedWindow> {
     ArrayList<TimerData> timers = new ArrayList<>(1);
     timers.add(
         TimerData.of(
-            StateNamespaces.window(windowFn.windowCoder(), window), timestamp, timestamp, domain));
+            StateNamespaces.window(windowFn.windowCoder(), window),
+            timestamp,
+            timestamp,
+            domain,
+            CausedByDrain.NORMAL));
     runner.onTimers(timers);
     runner.persist();
   }
@@ -587,41 +625,25 @@ public class ReduceFnTester<InputT, OutputT, W extends BoundedWindow> {
               StateNamespaces.window(windowFn.windowCoder(), window),
               timer.getTimestamp(),
               timer.getTimestamp(),
-              timer.getValue()));
+              timer.getValue(),
+              CausedByDrain.NORMAL));
     }
     runner.onTimers(timerData);
     runner.persist();
   }
 
-  /**
-   * Convey the simulated state and implement {@link #outputWindowedValue} to capture all output
-   * elements.
-   */
-  private class TestOutputWindowedValue implements OutputWindowedValue<KV<String, OutputT>> {
+  private class TestWindowedValueReceiver implements WindowedValueReceiver<KV<String, OutputT>> {
     private List<WindowedValue<KV<String, OutputT>>> outputs = new ArrayList<>();
 
     @Override
-    public void outputWindowedValue(
-        KV<String, OutputT> output,
-        Instant timestamp,
-        Collection<? extends BoundedWindow> windows,
-        PaneInfo pane) {
+    public void output(WindowedValue<KV<String, OutputT>> output) {
       // Copy the output value (using coders) before capturing it.
       KV<String, OutputT> copy =
           SerializableUtils.ensureSerializableByCoder(
-              KvCoder.of(StringUtf8Coder.of(), outputCoder), output, "outputForWindow");
-      WindowedValue<KV<String, OutputT>> value = WindowedValue.of(copy, timestamp, windows, pane);
+              KvCoder.of(StringUtf8Coder.of(), outputCoder), output.getValue(), "outputForWindow");
+      WindowedValue<KV<String, OutputT>> value =
+          WindowedValues.of(copy, output.getTimestamp(), output.getWindows(), output.getPaneInfo());
       outputs.add(value);
-    }
-
-    @Override
-    public <AdditionalOutputT> void outputWindowedValue(
-        TupleTag<AdditionalOutputT> tag,
-        AdditionalOutputT output,
-        Instant timestamp,
-        Collection<? extends BoundedWindow> windows,
-        PaneInfo pane) {
-      throw new UnsupportedOperationException("GroupAlsoByWindow should not use tagged outputs");
     }
   }
 

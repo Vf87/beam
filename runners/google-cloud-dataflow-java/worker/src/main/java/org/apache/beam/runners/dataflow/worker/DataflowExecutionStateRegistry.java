@@ -17,7 +17,7 @@
  */
 package org.apache.beam.runners.dataflow.worker;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Predicates.notNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Predicates.notNull;
 
 import com.google.api.services.dataflow.model.CounterUpdate;
 import java.util.Map;
@@ -26,12 +26,12 @@ import org.apache.beam.runners.core.metrics.ExecutionStateTracker.ExecutionState
 import org.apache.beam.runners.dataflow.worker.counters.NameContext;
 import org.apache.beam.runners.dataflow.worker.profiler.ScopedProfiler.ProfileScope;
 import org.apache.beam.sdk.metrics.MetricsContainer;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.FluentIterable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.FluentIterable;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Manages the instances of {@link ExecutionState} */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public abstract class DataflowExecutionStateRegistry {
 
@@ -51,7 +51,7 @@ public abstract class DataflowExecutionStateRegistry {
   public DataflowOperationContext.DataflowExecutionState getState(
       final NameContext nameContext,
       final String stateName,
-      final MetricsContainer container,
+      final @Nullable MetricsContainer container,
       final ProfileScope profileScope) {
     return getStateInternal(nameContext, stateName, null, null, container, profileScope);
   }
@@ -60,7 +60,7 @@ public abstract class DataflowExecutionStateRegistry {
    * Get an existing state or create a {@link DataflowOperationContext.DataflowExecutionState} that
    * represents the consumption of some kind of IO, such as reading of Side Input, or Shuffle data.
    *
-   * <p>An IO-related ExcecutionState may represent: * A Side Input collection as declaringStep +
+   * <p>An IO-related ExecutionState may represent: * A Side Input collection as declaringStep +
    * inputIndex. The consumption of the side input is represented by (declaringStep, inputIndex,
    * requestingStepName), where requestingStepName is the step that causes the IO to occur. * A
    * Shuffle IO as the GBK step for that shuffle. The consumption of the side input is represented

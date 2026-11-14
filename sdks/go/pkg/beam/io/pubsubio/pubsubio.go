@@ -13,20 +13,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package pubsubio provides access to PubSub on Dataflow streaming.
-// Experimental.
+// Package pubsubio provides access to Pub/Sub on Dataflow streaming.
+//
+// This implementation only functions on the Dataflow runner.
+//
+// See https://cloud.google.com/dataflow/docs/concepts/streaming-with-cloud-pubsub
+// for details on using Pub/Sub with Dataflow.
 package pubsubio
 
 import (
+	"fmt"
 	"reflect"
 
+	pb "cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/typex"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/util/protox"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/util/reflectx"
 	pipepb "github.com/apache/beam/sdks/v2/go/pkg/beam/model/pipeline_v1"
+	"github.com/apache/beam/sdks/v2/go/pkg/beam/register"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/util/pubsubx"
-	pb "google.golang.org/genproto/googleapis/pubsub/v1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -36,52 +42,95 @@ var (
 )
 
 func init() {
-	beam.RegisterType(reflect.TypeOf((*pb.PubsubMessage)(nil)).Elem())
-	beam.RegisterFunction(unmarshalMessageFn)
+	register.Function2x1(unmarshalMessageFn)
+	register.Function2x1(marshalMessageFn)
+	register.Function2x0(wrapInMessage)
+	register.Function2x0(wrapInMessage)
+	register.Emitter1[[]byte]()
+	register.Emitter1[*pb.PubsubMessage]()
 }
 
 // ReadOptions represents options for reading from PubSub.
 type ReadOptions struct {
-	Subscription       string
+	Topic              string // Topic sets the topic to be read from. A new subscription will be generated for the job. Mutually exclusive with setting a Subscription.
+	Subscription       string // Subscription sets the name of an existing subscription to read from. Mutually exclusive with setting a Topic.
 	IDAttribute        string
 	TimestampAttribute string
 	WithAttributes     bool
 }
 
 // Read reads an unbounded number of PubSubMessages from the given
-// pubsub topic. It produces an unbounded PCollecton<*PubSubMessage>,
+// pubsub topic or subscription. It produces an unbounded PCollecton<*PubSubMessage>,
 // if WithAttributes is set, or an unbounded PCollection<[]byte>.
-func Read(s beam.Scope, project, topic string, opts *ReadOptions) beam.PCollection {
+//
+// The topic or subscription is required and must be set with ReadOptions.
+func Read(s beam.Scope, project string, opts ReadOptions) beam.PCollection {
 	s = s.Scope("pubsubio.Read")
 
-	payload := &pipepb.PubSubReadPayload{
-		Topic: pubsubx.MakeQualifiedTopicName(project, topic),
-	}
-	if opts != nil {
-		payload.IdAttribute = opts.IDAttribute
-		payload.TimestampAttribute = opts.TimestampAttribute
-		if opts.Subscription != "" {
-			payload.Subscription = pubsubx.MakeQualifiedSubscriptionName(project, opts.Subscription)
-		}
-		payload.WithAttributes = opts.WithAttributes
+	// Validate: only one of Topic or Subscription should be set
+	if (opts.Topic == "" && opts.Subscription == "") || (opts.Topic != "" && opts.Subscription != "") {
+		panic("Exactly one of Topic or Subscription must be set in ReadOptions")
 	}
 
-	out := beam.External(s, readURN, protox.MustEncode(payload), nil, []beam.FullType{typex.New(reflectx.ByteSlice)}, false)
-	if opts != nil && opts.WithAttributes {
+	payload := &pipepb.PubSubReadPayload{}
+
+	if opts.Topic != "" {
+		payload.Topic = pubsubx.MakeQualifiedTopicName(project, opts.Topic)
+	} else {
+		payload.Subscription = pubsubx.MakeQualifiedSubscriptionName(project, opts.Subscription)
+	}
+
+	payload.IdAttribute = opts.IDAttribute
+	payload.TimestampAttribute = opts.TimestampAttribute
+	payload.WithAttributes = opts.WithAttributes
+
+	out := beam.External(
+		s,
+		readURN,
+		protox.MustEncode(payload),
+		nil,
+		[]beam.FullType{typex.New(reflectx.ByteSlice)},
+		false,
+	)
+
+	if opts.WithAttributes {
 		return beam.ParDo(s, unmarshalMessageFn, out[0])
 	}
 	return out[0]
 }
 
-func unmarshalMessageFn(raw []byte) (*pb.PubsubMessage, error) {
+func unmarshalMessageFn(raw []byte, emit func(*pb.PubsubMessage)) error {
 	var msg pb.PubsubMessage
 	if err := proto.Unmarshal(raw, &msg); err != nil {
-		return nil, err
+		return err
 	}
-	return &msg, nil
+	emit(&msg)
+	return nil
 }
 
-// Write writes PubSubMessages or bytes to the given pubsub topic.
+func wrapInMessage(raw []byte, emit func(*pb.PubsubMessage)) {
+	emit(&pb.PubsubMessage{
+		Data: raw,
+	})
+}
+
+func marshalMessageFn(in *pb.PubsubMessage, emit func([]byte)) error {
+	out, err := proto.Marshal(in)
+	if err != nil {
+		return err
+	}
+	emit(out)
+	return nil
+}
+
+var pubSubMessageT = reflect.TypeOf((*pb.PubsubMessage)(nil))
+
+// Write writes PubSubMessages or []bytes to the given pubsub topic.
+// Panics if the input pcollection type is not one of those two types.
+//
+// When given []bytes, they are first wrapped in PubSubMessages.
+//
+// Note: Doesn't function in batch pipelines.
 func Write(s beam.Scope, project, topic string, col beam.PCollection) {
 	s = s.Scope("pubsubio.Write")
 
@@ -90,8 +139,12 @@ func Write(s beam.Scope, project, topic string, col beam.PCollection) {
 	}
 
 	out := col
-	if col.Type().Type() != reflectx.ByteSlice {
-		out = beam.ParDo(s, proto.Marshal, col)
+	if col.Type().Type() == reflectx.ByteSlice {
+		out = beam.ParDo(s, wrapInMessage, col)
 	}
-	beam.External(s, writeURN, protox.MustEncode(payload), []beam.PCollection{out}, nil, false)
+	if out.Type().Type() != pubSubMessageT {
+		panic(fmt.Sprintf("pubsubio.Write only accepts PCollections of %v and %v, received %v", pubSubMessageT, reflectx.ByteSlice, col.Type().Type()))
+	}
+	marshaled := beam.ParDo(s, marshalMessageFn, out)
+	beam.External(s, writeURN, protox.MustEncode(payload), []beam.PCollection{marshaled}, nil, false)
 }

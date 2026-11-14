@@ -22,15 +22,20 @@ import unittest
 from itertools import chain
 
 import numpy as np
+from numpy.testing import assert_array_equal
 
 import apache_beam as beam
 from apache_beam.coders import RowCoder
+from apache_beam.coders import coder_impl
 from apache_beam.coders.typecoders import registry as coders_registry
 from apache_beam.internal import pickler
 from apache_beam.portability.api import schema_pb2
 from apache_beam.testing.test_pipeline import TestPipeline
 from apache_beam.testing.util import assert_that
 from apache_beam.testing.util import equal_to
+from apache_beam.typehints.schemas import _SCHEMA_OPTION_STATIC_ENCODING
+from apache_beam.typehints.schemas import _static_encoding_option_pb2
+from apache_beam.typehints.schemas import named_tuple_from_schema
 from apache_beam.typehints.schemas import typing_to_runner_api
 from apache_beam.utils.timestamp import Timestamp
 
@@ -40,14 +45,30 @@ Person = typing.NamedTuple(
         ("name", str),
         ("age", np.int32),
         ("address", typing.Optional[str]),
-        ("aliases", typing.List[str]),
+        ("aliases", list[str]),
         ("knows_javascript", bool),
         ("payload", typing.Optional[bytes]),
         ("custom_metadata", typing.Mapping[str, int]),
         ("favorite_time", Timestamp),
     ])
 
-coders_registry.register_coder(Person, RowCoder)
+NullablePerson = typing.NamedTuple(
+    "NullablePerson",
+    [("name", typing.Optional[str]), ("age", np.int32),
+     ("address", typing.Optional[str]), ("aliases", list[str]),
+     ("knows_javascript", bool), ("payload", typing.Optional[bytes]),
+     ("custom_metadata", typing.Mapping[str, int]),
+     ("favorite_time", typing.Optional[Timestamp]),
+     ("one_more_field", typing.Optional[str])])
+
+
+@coders_registry.register_row
+class People(typing.NamedTuple):
+  primary: Person
+  partner: typing.Optional[Person]
+
+
+coders_registry.register_row(Person)
 
 
 class RowCoderTest(unittest.TestCase):
@@ -82,6 +103,23 @@ class RowCoderTest(unittest.TestCase):
           Timestamp.from_rfc3339('2020-08-12T15:51:00.032Z'))
   ]
 
+  def test_row_accepts_trailing_zeros_truncated(self):
+    expected_coder = RowCoder(
+        typing_to_runner_api(NullablePerson).row_type.schema)
+    person = NullablePerson(
+        None,
+        np.int32(25),
+        "Westeros", ["Mother of Dragons"],
+        False,
+        None, {"dragons": 3},
+        None,
+        "NotNull")
+    out = expected_coder.encode(person)
+    # 9 fields, 1 null byte, field 0, 5, 7 are null
+    new_payload = bytes([9, 1, 1 | 1 << 5 | 1 << 7]) + out[4:]
+    new_value = expected_coder.decode(new_payload)
+    self.assertEqual(person, new_value)
+
   def test_create_row_coder_from_named_tuple(self):
     expected_coder = RowCoder(typing_to_runner_api(Person).row_type.schema)
     real_coder = coders_registry.get_coder(Person)
@@ -92,6 +130,19 @@ class RowCoderTest(unittest.TestCase):
 
       self.assertEqual(
           test_case, real_coder.decode(real_coder.encode(test_case)))
+
+  def test_create_row_coder_from_nested_named_tuple(self):
+    expected_coder = RowCoder(typing_to_runner_api(People).row_type.schema)
+    real_coder = coders_registry.get_coder(People)
+
+    for primary in self.PEOPLE:
+      for other in self.PEOPLE + [None]:
+        test_case = People(primary=primary, partner=other)
+        self.assertEqual(
+            expected_coder.encode(test_case), real_coder.encode(test_case))
+
+        self.assertEqual(
+            test_case, real_coder.decode(real_coder.encode(test_case)))
 
   def test_create_row_coder_from_schema(self):
     schema = schema_pb2.Schema(
@@ -154,14 +205,111 @@ class RowCoderTest(unittest.TestCase):
     for test_case in self.PEOPLE:
       self.assertEqual(test_case, coder.decode(coder.encode(test_case)))
 
+  def test_create_row_coder_from_schema_with_parameterized_timestamp(self):
+    # Simulates schemas produced by the Java SDK's parameterized Timestamp
+    # logical type. Subseconds field uses INT16 for
+    # precision < 5 and INT32 otherwise.
+    for precision, subseconds_type in [(3, schema_pb2.INT16),
+                                       (4, schema_pb2.INT16),
+                                       (5, schema_pb2.INT32),
+                                       (6, schema_pb2.INT32),
+                                       (9, schema_pb2.INT32)]:
+      schema = schema_pb2.Schema(
+          id="timestamp_precision_%d" % precision,
+          fields=[
+              schema_pb2.Field(
+                  name="event_time",
+                  type=schema_pb2.FieldType(
+                      logical_type=schema_pb2.LogicalType(
+                          urn="beam:logical_type:timestamp:v1",
+                          representation=schema_pb2.FieldType(
+                              row_type=schema_pb2.RowType(
+                                  schema=schema_pb2.Schema(
+                                      id="timestamp_repr_%d" % precision,
+                                      fields=[
+                                          schema_pb2.Field(
+                                              name="seconds",
+                                              type=schema_pb2.FieldType(
+                                                  atomic_type=schema_pb2.INT64)
+                                          ),
+                                          schema_pb2.Field(
+                                              name="subseconds",
+                                              type=schema_pb2.FieldType(
+                                                  atomic_type=subseconds_type)),
+                                      ]))),
+                          argument_type=schema_pb2.FieldType(
+                              atomic_type=schema_pb2.INT32),
+                          argument=schema_pb2.FieldValue(
+                              atomic_value=schema_pb2.AtomicTypeValue(
+                                  int32=precision))))),
+          ])
+      coder = RowCoder(schema)
+      row = named_tuple_from_schema(schema)
+
+      subseconds = 10**precision - 1
+      for value in [
+          Timestamp(seconds=1500000000,
+                    subseconds=subseconds,
+                    precision=precision),
+          Timestamp(seconds=-2, subseconds=subseconds, precision=precision),
+          Timestamp(seconds=1500000000, precision=precision),
+      ]:
+        test_case = row(event_time=value)
+        decoded = coder.decode(coder.encode(test_case))
+        self.assertEqual(test_case, decoded)
+        self.assertEqual(decoded.event_time.precision(), precision)
+
+  def test_row_coder_negative_varint(self):
+    schema = schema_pb2.Schema(
+        id="negative",
+        fields=[
+            schema_pb2.Field(
+                name="i64",
+                type=schema_pb2.FieldType(atomic_type=schema_pb2.INT64)),
+            schema_pb2.Field(
+                name="i32",
+                type=schema_pb2.FieldType(atomic_type=schema_pb2.INT32))
+        ])
+    coder = RowCoder(schema)
+    Negative = typing.NamedTuple(
+        "Negative", [
+            ("i64", np.int64),
+            ("i32", np.int32),
+        ])
+    test_cases = [
+        Negative(-1, -1023), Negative(-1023, -1), Negative(-2**63, -2**31)
+    ]
+    for test_case in test_cases:
+      self.assertEqual(test_case, coder.decode(coder.encode(test_case)))
+
+  def test_row_coder_underscore_field_name(self):
+    # NamedTuple rejects a leading underscore, as in the CDC metadata column
+    # _change_type.
+    schema = schema_pb2.Schema(
+        id="underscore_field_name",
+        fields=[
+            schema_pb2.Field(
+                name="id",
+                type=schema_pb2.FieldType(atomic_type=schema_pb2.INT64)),
+            schema_pb2.Field(
+                name="_change_type",
+                type=schema_pb2.FieldType(atomic_type=schema_pb2.STRING)),
+        ])
+    coder = RowCoder(schema)
+    row = named_tuple_from_schema(schema)(1, "INSERT")
+    self.assertEqual(row, coder.decode(coder.encode(row)))
+    self.assertEqual(row, pickler.loads(pickler.dumps(row)))
+    self.assertEqual({"id": 1, "_change_type": "INSERT"}, row._asdict())
+
   @unittest.skip(
-      "BEAM-8030 - Overflow behavior in VarIntCoder is currently inconsistent")
+      "https://github.com/apache/beam/issues/19696 - Overflow behavior in "
+      "VarIntCoder is currently inconsistent")
   def test_overflows(self):
     IntTester = typing.NamedTuple(
         'IntTester',
         [
-            # TODO(BEAM-7996): Test int8 and int16 here as well when those
-            # types are supported
+            # TODO(https://github.com/apache/beam/issues/19815): Test int8 and
+            # int16 here as well when those types are supported
             # ('i8', typing.Optional[np.int8]),
             # ('i16', typing.Optional[np.int16]),
             ('i32', typing.Optional[np.int32]),
@@ -256,16 +404,179 @@ class RowCoderTest(unittest.TestCase):
 
     self.assertEqual(value, coder.decode(coder.encode(value)))
 
+  def test_encoding_position_reorder_fields(self):
+    schema1 = schema_pb2.Schema(
+        id="reorder_test_schema1",
+        fields=[
+            schema_pb2.Field(
+                name="f_int32",
+                type=schema_pb2.FieldType(atomic_type=schema_pb2.INT32),
+            ),
+            schema_pb2.Field(
+                name="f_str",
+                type=schema_pb2.FieldType(atomic_type=schema_pb2.STRING),
+            ),
+        ])
+    schema2 = schema_pb2.Schema(
+        id="reorder_test_schema2",
+        encoding_positions_set=True,
+        fields=[
+            schema_pb2.Field(
+                name="f_str",
+                type=schema_pb2.FieldType(atomic_type=schema_pb2.STRING),
+                encoding_position=1,
+            ),
+            schema_pb2.Field(
+                name="f_int32",
+                type=schema_pb2.FieldType(atomic_type=schema_pb2.INT32),
+                encoding_position=0,
+            ),
+        ])
+
+    RowSchema1 = named_tuple_from_schema(schema1)
+    RowSchema2 = named_tuple_from_schema(schema2)
+    roundtripped = RowCoder(schema2).decode(
+        RowCoder(schema1).encode(RowSchema1(42, "Hello World!")))
+
+    self.assertEqual(RowSchema2(f_int32=42, f_str="Hello World!"), roundtripped)
+
+  def test_encoding_position_add_fields_and_reorder(self):
+    old_schema = schema_pb2.Schema(
+        id="add_test_old",
+        fields=[
+            schema_pb2.Field(
+                name="f_int32",
+                type=schema_pb2.FieldType(atomic_type=schema_pb2.INT32),
+            ),
+            schema_pb2.Field(
+                name="f_str",
+                type=schema_pb2.FieldType(atomic_type=schema_pb2.STRING),
+            ),
+        ])
+    new_schema = schema_pb2.Schema(
+        encoding_positions_set=True,
+        id="add_test_new",
+        fields=[
+            schema_pb2.Field(
+                name="f_new_str",
+                type=schema_pb2.FieldType(
+                    atomic_type=schema_pb2.STRING, nullable=True),
+                encoding_position=2,
+            ),
+            schema_pb2.Field(
+                name="f_int32",
+                type=schema_pb2.FieldType(atomic_type=schema_pb2.INT32),
+                encoding_position=0,
+            ),
+            schema_pb2.Field(
+                name="f_str",
+                type=schema_pb2.FieldType(atomic_type=schema_pb2.STRING),
+                encoding_position=1,
+            ),
+        ])
+
+    Old = named_tuple_from_schema(old_schema)
+    New = named_tuple_from_schema(new_schema)
+    roundtripped = RowCoder(new_schema).decode(
+        RowCoder(old_schema).encode(Old(42, "Hello World!")))
+
+    self.assertEqual(
+        New(f_new_str=None, f_int32=42, f_str="Hello World!"), roundtripped)
+
   def test_row_coder_fail_early_bad_schema(self):
     schema_proto = schema_pb2.Schema(
         fields=[
             schema_pb2.Field(
                 name="type_with_no_typeinfo", type=schema_pb2.FieldType())
-        ])
+        ],
+        id='bad-schema')
 
     # Should raise an exception referencing the problem field
     self.assertRaisesRegex(
         ValueError, "type_with_no_typeinfo", lambda: RowCoder(schema_proto))
+
+  def test_batch_encode_decode(self):
+    coder = RowCoder(typing_to_runner_api(Person).row_type.schema).get_impl()
+    seq_out = coder_impl.create_OutputStream()
+    for person in self.PEOPLE:
+      coder.encode_to_stream(person, seq_out, False)
+
+    batch_out = coder_impl.create_OutputStream()
+    columnar = {
+        field: np.array([getattr(person, field) for person in self.PEOPLE],
+                        ndmin=1,
+                        dtype=object)
+        for field in Person._fields
+    }
+    coder.encode_batch_to_stream(columnar, batch_out)
+    if seq_out.get() != batch_out.get():
+      a, b = seq_out.get(), batch_out.get()
+      N = 25
+      for k in range(0, max(len(a), len(b)), N):
+        print(k, a[k:k + N] == b[k:k + N])
+        print(a[k:k + N])
+        print(b[k:k + N])
+    self.assertEqual(seq_out.get(), batch_out.get())
+
+    for size in [len(self.PEOPLE) - 1, len(self.PEOPLE), len(self.PEOPLE) + 1]:
+      dest = {
+          field: np.ndarray((size, ), dtype=a.dtype)
+          for field, a in columnar.items()
+      }
+      n = min(size, len(self.PEOPLE))
+      self.assertEqual(
+          n,
+          coder.decode_batch_from_stream(
+              dest, coder_impl.create_InputStream(seq_out.get())))
+      for field, a in columnar.items():
+        assert_array_equal(a[:n], dest[field][:n])
+
+  def test_row_coder_with_tuples(self):
+    class TupleRecord(typing.NamedTuple):
+      key: str
+      fixed_tuple: tuple[str, int]
+      var_tuple: tuple[int, ...]
+      homo_tuple: tuple[str, str]
+
+    coder = RowCoder(typing_to_runner_api(TupleRecord).row_type.schema)
+    record = TupleRecord("k1", ("hello", 42), (1, 2, 3), ("a", "b"))
+    encoded = coder.encode(record)
+    decoded = coder.decode(encoded)
+
+    self.assertEqual(record, decoded)
+    self.assertIsInstance(decoded.fixed_tuple, tuple)
+    self.assertIsInstance(decoded.var_tuple, tuple)
+    self.assertIsInstance(decoded.homo_tuple, tuple)
+    # Verify hashability as dict keys
+    d = {decoded.homo_tuple: "val1", decoded.fixed_tuple: "val2"}
+    self.assertEqual(d[("a", "b")], "val1")
+    self.assertEqual(d[("hello", 42)], "val2")
+    # Verify length mismatch raises ValueError instead of silent truncation
+    with self.assertRaises(ValueError):
+      coder.encode(
+          TupleRecord("k1", ("hello", 42, "extra"), (1, 2, 3), ("a", "b")))
+    with self.assertRaises(ValueError):
+      coder.encode(TupleRecord("k1", ("hello", ), (1, 2, 3), ("a", "b")))
+
+  def test_static_encoding(self):
+    schema = schema_pb2.Schema(
+        fields=[
+            schema_pb2.Field(
+                name="f_int32",
+                type=schema_pb2.FieldType(atomic_type=schema_pb2.INT32)),
+            schema_pb2.Field(
+                name="f_string",
+                type=schema_pb2.FieldType(atomic_type=schema_pb2.STRING)),
+        ],
+        options=[_static_encoding_option_pb2()])
+    RowType = named_tuple_from_schema(schema)
+    row = RowType(f_int32=42, f_string="hello world!")
+    coder = RowCoder(schema)
+    encoded = coder.encode(row)
+    # VarInt(42) = 1 byte, String("hello world!") = 1 byte len + 12 chars = 13 bytes.
+    # Total = 14 bytes (0 envelope overhead, matching TupleCoder)
+    self.assertEqual(14, len(encoded))
+    self.assertEqual(row, coder.decode(encoded))
 
 
 if __name__ == "__main__":

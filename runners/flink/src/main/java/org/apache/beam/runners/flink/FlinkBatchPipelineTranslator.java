@@ -17,11 +17,11 @@
  */
 package org.apache.beam.runners.flink;
 
-import org.apache.beam.runners.core.construction.PTransformTranslation;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.runners.TransformHierarchy;
 import org.apache.beam.sdk.transforms.PTransform;
+import org.apache.beam.sdk.util.construction.PTransformTranslation;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.ExecutionEnvironment;
 import org.apache.flink.api.java.io.DiscardingOutputFormat;
@@ -31,8 +31,8 @@ import org.slf4j.LoggerFactory;
 
 /** {@link Pipeline.PipelineVisitor} for executing a {@link Pipeline} as a Flink batch job. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 class FlinkBatchPipelineTranslator extends FlinkPipelineTranslator {
 
@@ -119,7 +119,7 @@ class FlinkBatchPipelineTranslator extends FlinkPipelineTranslator {
   }
 
   /** A translator of a {@link PTransform}. */
-  public interface BatchTransformTranslator<TransformT extends PTransform> {
+  public interface BatchTransformTranslator<TransformT extends PTransform<?, ?>> {
 
     default boolean canTranslate(TransformT transform, FlinkBatchTranslationContext context) {
       return true;

@@ -17,57 +17,66 @@
  */
 package org.apache.beam.fn.harness.data;
 
+import java.io.Closeable;
+import java.io.IOException;
+import java.util.List;
+import org.apache.beam.model.fnexecution.v1.BeamFnApi.Elements;
 import org.apache.beam.model.pipeline.v1.Endpoints;
 import org.apache.beam.model.pipeline.v1.Endpoints.ApiServiceDescriptor;
-import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.fn.data.CloseableFnDataReceiver;
-import org.apache.beam.sdk.fn.data.DecodingFnDataReceiver;
 import org.apache.beam.sdk.fn.data.FnDataReceiver;
-import org.apache.beam.sdk.fn.data.InboundDataClient;
-import org.apache.beam.sdk.fn.data.LogicalEndpoint;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
 
 /**
  * The {@link BeamFnDataClient} is able to forward inbound elements to a {@link FnDataReceiver} and
  * provide a receiver of outbound elements. Callers can register themselves as receivers for inbound
  * elements or can get a handle for a receiver of outbound elements.
  */
-public interface BeamFnDataClient {
+public interface BeamFnDataClient extends Closeable {
   /**
-   * Registers the following inbound receiver for the provided instruction id and target.
-   *
-   * <p>The provided coder is used to decode inbound elements. The decoded elements are passed to
-   * the provided receiver. Any failure during decoding or processing of the element will complete
-   * the returned future exceptionally. On successful termination of the stream, the returned future
-   * is completed successfully.
+   * Registers a receiver for the provided instruction id.
    *
    * <p>The receiver is not required to be thread safe.
+   *
+   * <p>Receivers for successfully processed bundles must be unregistered. See {@link
+   * #unregisterReceiver} for details.
+   *
+   * <p>Any failure during {@link FnDataReceiver#accept} will mark the provided {@code
+   * instructionId} as invalid and will ignore any future data. It is expected that if a bundle
+   * fails during processing then the failure will become visible to the {@link BeamFnDataClient}
+   * during a future {@link FnDataReceiver#accept} invocation.
    */
-  default <T> InboundDataClient receive(
-      ApiServiceDescriptor apiServiceDescriptor,
-      LogicalEndpoint inputLocation,
-      Coder<T> coder,
-      FnDataReceiver<T> receiver) {
-    return receive(
-        apiServiceDescriptor, inputLocation, new DecodingFnDataReceiver<T>(coder, receiver));
-  }
-
-  InboundDataClient receive(
-      ApiServiceDescriptor apiServiceDescriptor,
-      LogicalEndpoint inputLocation,
-      FnDataReceiver<ByteString> receiver);
+  void registerReceiver(
+      String instructionId,
+      String dataStreamId,
+      List<ApiServiceDescriptor> apiServiceDescriptors,
+      CloseableFnDataReceiver<Elements> receiver);
 
   /**
-   * Creates a {@link CloseableFnDataReceiver} using the provided instruction id and target.
+   * Receivers are only expected to be unregistered when bundle processing has completed
+   * successfully.
    *
-   * <p>The provided coder is used to encode elements on the outbound stream.
-   *
-   * <p>Closing the returned receiver signals the end of the stream.
-   *
-   * <p>The returned closeable receiver is not thread safe.
+   * <p>It is expected that if a bundle fails during processing then the failure will become visible
+   * to the {@link BeamFnDataClient} during a future {@link FnDataReceiver#accept} invocation or via
+   * a call to {@link #poisonInstructionId}.
    */
-  <T> CloseableFnDataReceiver<T> send(
-      Endpoints.ApiServiceDescriptor apiServiceDescriptor,
-      LogicalEndpoint outputLocation,
-      Coder<T> coder);
+  void unregisterReceiver(
+      String instructionId, String dataStreamId, List<ApiServiceDescriptor> apiServiceDescriptors);
+
+  /**
+   * Poisons the instruction id, indicating that future data arriving for it should be discarded.
+   * Unregisters the receiver if was registered.
+   *
+   * @param instructionId
+   */
+  void poisonInstructionId(String instructionId);
+
+  /** Get the outbound observer for the specified apiServiceDescriptor and dataStreamId. */
+  StreamObserver<Elements> getOutboundObserver(
+      Endpoints.ApiServiceDescriptor apiServiceDescriptor, String dataStreamId);
+
+  @Override
+  default void close() throws IOException {
+    // Default to no-op
+  }
 }

@@ -17,6 +17,9 @@
  */
 package org.apache.beam.runners.dataflow.worker.util.common.worker;
 
+import org.apache.beam.sdk.util.DoFnInfo;
+import org.checkerframework.checker.nullness.qual.Nullable;
+
 /** A partial group-by-key {@link ParDoFn} implementation. */
 public class SimplePartialGroupByKeyParDoFn<K, InputT, AccumT> implements ParDoFn {
   private final GroupingTable<K, InputT, AccumT> groupingTable;
@@ -40,10 +43,18 @@ public class SimplePartialGroupByKeyParDoFn<K, InputT, AccumT> implements ParDoF
   public void processTimers() {}
 
   @Override
+  public void finishKey(@Nullable Object key) throws Exception {}
+
+  @Override
   public void finishBundle() throws Exception {
     groupingTable.flush(receiver);
   }
 
   @Override
   public void abort() {}
+
+  @Override
+  public @Nullable DoFnInfo<?, ?> getDoFnInfo() {
+    return null;
+  }
 }

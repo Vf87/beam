@@ -17,12 +17,13 @@
  */
 package org.apache.beam.sdk.tpcds;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Set;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.SqlNode;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.parser.SqlParseException;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.parser.SqlParser;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Charsets;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.Resources;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.avatica.util.Quoting;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.parser.SqlParseException;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.parser.SqlParser;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Resources;
 
 /**
  * The QueryReader reads query file (the file's extension is '.sql' and content doesn't end with a
@@ -39,7 +40,7 @@ public class QueryReader {
    */
   public static String readQuery(String queryFileName) throws Exception {
     String path = "queries/" + queryFileName + ".sql";
-    return Resources.toString(Resources.getResource(path), Charsets.UTF_8);
+    return Resources.toString(Resources.getResource(path), StandardCharsets.UTF_8);
   }
 
   /**
@@ -50,7 +51,8 @@ public class QueryReader {
    * @throws SqlParseException
    */
   public static Set<String> getQueryIdentifiers(String queryString) throws SqlParseException {
-    SqlParser parser = SqlParser.create(queryString);
+    SqlParser parser =
+        SqlParser.create(queryString, SqlParser.config().withQuoting(Quoting.BACK_TICK));
     SqlNode parsedQuery = parser.parseQuery();
     SqlTransformRunner.SqlIdentifierVisitor sqlVisitor =
         new SqlTransformRunner.SqlIdentifierVisitor();

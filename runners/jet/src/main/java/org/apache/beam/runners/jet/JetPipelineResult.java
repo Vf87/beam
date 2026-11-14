@@ -39,7 +39,7 @@ import org.slf4j.LoggerFactory;
 
 /** Jet specific implementation of {@link PipelineResult}. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class JetPipelineResult implements PipelineResult {
 
@@ -87,12 +87,13 @@ public class JetPipelineResult implements PipelineResult {
       case SUSPENDED_EXPORTING_SNAPSHOT:
         return State.STOPPED;
       default:
-        LOG.warn("Unhandled " + JobStatus.class.getSimpleName() + ": " + status.name() + "!");
+        LOG.warn("Unhandled {}: {}!", JobStatus.class.getSimpleName(), status.name());
         return State.UNKNOWN;
     }
   }
 
   @Override
+  @SuppressWarnings("EmptyCatch")
   public State cancel() throws IOException {
     if (terminalState != null) {
       throw new IllegalStateException("Job already completed");
@@ -125,7 +126,7 @@ public class JetPipelineResult implements PipelineResult {
 
   @Override
   public State waitUntilFinish() {
-    return waitUntilFinish(new Duration(Long.MAX_VALUE));
+    return waitUntilFinish(Duration.millis(Long.MAX_VALUE));
   }
 
   @Override

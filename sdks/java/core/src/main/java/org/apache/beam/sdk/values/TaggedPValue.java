@@ -19,7 +19,8 @@ package org.apache.beam.sdk.values;
 
 import com.google.auto.value.AutoValue;
 import org.apache.beam.sdk.annotations.Internal;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.sdk.util.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 
 /**
  * <b><i>For internal use only; no backwards-compatibility guarantees.</i></b>
@@ -28,14 +29,15 @@ import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterable
  */
 @AutoValue
 @Internal
-@SuppressWarnings("keyfor")
 public abstract class TaggedPValue {
   public static TaggedPValue of(TupleTag<?> tag, PCollection<?> value) {
     return new AutoValue_TaggedPValue(tag, value);
   }
 
   public static TaggedPValue ofExpandedValue(PCollection<?> value) {
-    return of(Iterables.getOnlyElement(value.expand().keySet()), value);
+    return of(
+        Preconditions.checkArgumentNotNull(Iterables.getOnlyElement(value.expand().keySet())),
+        value);
   }
 
   /** Returns the local tag associated with the {@link PValue}. */

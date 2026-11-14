@@ -25,9 +25,13 @@ import inspect
 import logging
 import random
 import sys
+import time
 import traceback
 import types
 import typing
+from collections import defaultdict
+from functools import wraps
+from itertools import dropwhile
 
 from apache_beam import coders
 from apache_beam import pvalue
@@ -35,6 +39,7 @@ from apache_beam import typehints
 from apache_beam.coders import typecoders
 from apache_beam.internal import pickler
 from apache_beam.internal import util
+from apache_beam.options.pipeline_options import SetupOptions
 from apache_beam.options.pipeline_options import TypeOptions
 from apache_beam.portability import common_urns
 from apache_beam.portability import python_urns
@@ -50,11 +55,14 @@ from apache_beam.transforms.sideinputs import get_sideinput_index
 from apache_beam.transforms.userstate import StateSpec
 from apache_beam.transforms.userstate import TimerSpec
 from apache_beam.transforms.window import GlobalWindows
+from apache_beam.transforms.window import SlidingWindows
 from apache_beam.transforms.window import TimestampCombiner
 from apache_beam.transforms.window import TimestampedValue
 from apache_beam.transforms.window import WindowedValue
 from apache_beam.transforms.window import WindowFn
+from apache_beam.typehints import row_type
 from apache_beam.typehints import trivial_inference
+from apache_beam.typehints.batch import BatchConverter
 from apache_beam.typehints.decorators import TypeCheckError
 from apache_beam.typehints.decorators import WithTypeHints
 from apache_beam.typehints.decorators import get_signature
@@ -62,12 +70,15 @@ from apache_beam.typehints.decorators import get_type_hints
 from apache_beam.typehints.decorators import with_input_types
 from apache_beam.typehints.decorators import with_output_types
 from apache_beam.typehints.trivial_inference import element_type
+from apache_beam.typehints.typehints import TypeConstraint
 from apache_beam.typehints.typehints import is_consistent_with
+from apache_beam.typehints.typehints import visit_inner_types
 from apache_beam.utils import urns
 from apache_beam.utils.timestamp import Duration
 
 if typing.TYPE_CHECKING:
   from google.protobuf import message  # pylint: disable=ungrouped-imports
+
   from apache_beam.io import iobase
   from apache_beam.pipeline import Pipeline
   from apache_beam.runners.pipeline_context import PipelineContext
@@ -96,6 +107,7 @@ __all__ = [
     'Windowing',
     'WindowInto',
     'Flatten',
+    'FlattenWith',
     'Create',
     'Impulse',
     'RestrictionProvider',
@@ -117,8 +129,6 @@ class DoFnContext(object):
 
 class DoFnProcessContext(DoFnContext):
   """A processing context passed to DoFn process() during execution.
-
-  Experimental; no backwards-compatibility guarantees.
 
   Most importantly, a DoFn.process method will access context.element
   to get the element it is supposed to process.
@@ -170,8 +180,6 @@ class DoFnProcessContext(DoFnContext):
 class ProcessContinuation(object):
   """An object that may be produced as the last element of a process method
     invocation.
-
-  Experimental; no backwards-compatibility guarantees.
 
   If produced, indicates that there is more work to be done for the current
   input element.
@@ -312,6 +320,9 @@ class RestrictionProvider(object):
 
     The return value must be non-negative.
 
+    Must be thread safe. Will be invoked concurrently during bundle processing
+    due to runner initiated splitting and progress estimation.
+
     This API is required to be implemented.
     """
     raise NotImplementedError
@@ -330,7 +341,7 @@ class RestrictionProvider(object):
   def truncate(self, element, restriction):
     """Truncates the provided restriction into a restriction representing a
     finite amount of work when the pipeline is
-    `draining <https://docs.google.com/document/d/1NExwHlj-2q2WUGhSO4jTu8XGhDPmm3cllSN8IMmWci8/edit#> for additional details about drain.>_`.  # pylint: disable=line-too-long
+    `draining <https://beam.apache.org/documentation/programming-guide/#truncating-during-drain>`_.  # pylint: disable=line-too-long
     By default, if the restriction is bounded then the restriction will be
     returned otherwise None will be returned.
 
@@ -386,8 +397,8 @@ def get_function_args_defaults(f):
       parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD
   ]
   args = [
-      name for name,
-      p in signature.parameters.items() if p.kind in _SUPPORTED_ARG_TYPES
+      name for name, p in signature.parameters.items()
+      if p.kind in _SUPPORTED_ARG_TYPES
   ]
   defaults = [
       p.default for p in signature.parameters.values()
@@ -519,6 +530,70 @@ class _WatermarkEstimatorParam(_DoFnParam):
     self.param_id = 'WatermarkEstimatorProvider'
 
 
+class _ContextParam(_DoFnParam):
+  def __init__(
+      self, context_manager_constructor, args=(), kwargs=None, *, name=None):
+    class_name = self.__class__.__name__.strip('_')
+    if (not callable(context_manager_constructor) or
+        (hasattr(context_manager_constructor, '__enter__') and
+         len(inspect.signature(
+             context_manager_constructor.__enter__).parameters) == 0)):
+      # Context managers constructed with @contextlib.contextmanager can only
+      # be used once, and in addition cannot be pickled because they invoke
+      # the function on __init__ rather than at __enter__.
+      # In addition, other common context managers such as
+      # tempfile.TemporaryDirectory perform side-effecting actions in __init__
+      # rather than in __enter__.
+      raise TypeError(
+          "A context manager constructor (not a fully constructed context "
+          "manager) must be passed to avoid issues with one-shot managers. "
+          "For example, "
+          "write {class_name}(tempfile.TemporaryDirectory, args=(...)) "
+          "rather than {class_name}(tempfile.TemporaryDirectory(...))")
+    super().__init__(f'{class_name}_{name or id(self)}')
+    self.context_manager_constructor = context_manager_constructor
+    self.args = args
+    self.kwargs = kwargs or {}
+
+  def create_and_enter(self):
+    cm = self.context_manager_constructor(*self.args, **self.kwargs)
+    return cm, cm.__enter__()
+
+
+class _BundleContextParam(_ContextParam):
+  """Allows one to use a context manager to manage bundle-scoped parameters.
+
+  The context will be entered at the start of each bundle and exited at the
+  end, equivalent to the `start_bundle` and `finish_bundle` methods on a DoFn.
+
+  The object returned from `__enter__`, if any, will be substituted for this
+  parameter in invocations.  Multiple context manager parameters may be
+  specified which will all be evaluated (in an unspecified order).
+
+  This can be especially useful for setting up shared context in transforms
+  like `Map`, `FlatMap`, and `Filter` where one does not have start_bundle
+  and finish_bundle methods.
+  """
+
+
+class _SetupContextParam(_ContextParam):
+  """Allows one to use a context manager to manage DoFn-scoped parameters.
+
+  The context will be entered before the DoFn is used and exited when it is
+  discarded, equivalent to the `setup` and `teardown` methods of a DoFn.
+  (Note, like `teardown`, exiting is best effort, as workers may be killed
+  before all DoFns are torn down.)
+
+  The object returned from `__enter__`, if any, will be substituted for this
+  parameter in invocations.  Multiple context manager parameters may be
+  specified which will all be evaluated (in an unspecified order).
+
+  This can be useful for setting up shared resources like persistent
+  connections to external services for transforms like `Map`, `FlatMap`, and
+  `Filter` where one does not have setup and teardown methods.
+  """
+
+
 class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
   """A function object used by a transform with custom processing.
 
@@ -536,10 +611,13 @@ class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
   SideInputParam = _DoFnParam('SideInputParam')
   TimestampParam = _DoFnParam('TimestampParam')
   WindowParam = _DoFnParam('WindowParam')
+  WindowedValueParam = _DoFnParam('WindowedValueParam')
   PaneInfoParam = _DoFnParam('PaneInfoParam')
   WatermarkEstimatorParam = _WatermarkEstimatorParam
   BundleFinalizerParam = _BundleFinalizerParam
   KeyParam = _DoFnParam('KeyParam')
+  BundleContextParam = _BundleContextParam
+  SetupContextParam = _SetupContextParam
 
   # Parameters to access state and timers.  Not restricted to use only in the
   # .process() method. Usage: DoFn.StateParam(state_spec),
@@ -554,12 +632,15 @@ class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
       SideInputParam,
       TimestampParam,
       WindowParam,
+      WindowedValueParam,
       WatermarkEstimatorParam,
       PaneInfoParam,
       BundleFinalizerParam,
       KeyParam,
       StateParam,
       TimerParam,
+      BundleContextParam,
+      SetupContextParam,
   ]
 
   RestrictionParam = _RestrictionDoFnParam
@@ -577,6 +658,40 @@ class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
       return process_fn
 
     return wrapper
+
+  @staticmethod
+  def yields_elements(fn):
+    """A decorator to apply to ``process_batch`` indicating it yields elements.
+
+    By default ``process_batch`` is assumed to both consume and produce
+    "batches", which are collections of multiple logical Beam elements. This
+    decorator indicates that ``process_batch`` **produces** individual elements
+    at a time. ``process_batch`` is always expected to consume batches.
+    """
+    if not fn.__name__ in ('process', 'process_batch'):
+      raise TypeError(
+          "@yields_elements must be applied to a process or "
+          f"process_batch method, got {fn!r}.")
+
+    fn._beam_yields_elements = True
+    return fn
+
+  @staticmethod
+  def yields_batches(fn):
+    """A decorator to apply to ``process`` indicating it yields batches.
+
+    By default ``process`` is assumed to both consume and produce
+    individual elements at a time. This decorator indicates that ``process``
+    **produces** "batches", which are collections of multiple logical Beam
+    elements.
+    """
+    if not fn.__name__ in ('process', 'process_batch'):
+      raise TypeError(
+          "@yields_elements must be applied to a process or "
+          f"process_batch method, got {fn!r}.")
+
+    fn._beam_yields_batches = True
+    return fn
 
   def default_label(self):
     return self.__class__.__name__
@@ -611,6 +726,10 @@ class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
       tracker will be derived from the restriction provider in the parameter.
     - ``DoFn.WatermarkEstimatorParam``: a function that can be used to track
       output watermark of Splittable ``DoFn`` implementations.
+    - ``DoFn.BundleContextParam``: allows a shared context manager to be used
+      per bundle
+    - ``DoFn.SetupContextParam``: allows a shared context manager to be used
+      per DoFn
 
     Args:
       element: The element to be processed
@@ -620,6 +739,9 @@ class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
     Returns:
       An Iterable of output elements or None.
     """
+    raise NotImplementedError
+
+  def process_batch(self, batch, *args, **kwargs):
     raise NotImplementedError
 
   def setup(self):
@@ -667,31 +789,187 @@ class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
     return get_function_arguments(self, func)
 
   def default_type_hints(self):
-    fn_type_hints = typehints.decorators.IOTypeHints.from_callable(self.process)
-    if fn_type_hints is not None:
-      try:
-        fn_type_hints = fn_type_hints.strip_iterable()
-      except ValueError as e:
-        raise ValueError('Return value not iterable: %s: %s' % (self, e))
+    process_type_hints = typehints.decorators.IOTypeHints.from_callable(
+        self.process) or typehints.decorators.IOTypeHints.empty()
+
+    if self._process_yields_batches:
+      # process() produces batches, don't use it's output typehint
+      process_type_hints = process_type_hints.with_output_types_from(
+          typehints.decorators.IOTypeHints.empty())
+
+    if self._process_batch_yields_elements:
+      # process_batch() produces elements, *do* use it's output typehint
+
+      # First access the typehint
+      process_batch_type_hints = typehints.decorators.IOTypeHints.from_callable(
+          self.process_batch) or typehints.decorators.IOTypeHints.empty()
+
+      # Then we deconflict with the typehint from process, if it exists
+      if (process_batch_type_hints.output_types
+          != typehints.decorators.IOTypeHints.empty().output_types):
+        if (process_type_hints.output_types
+            != typehints.decorators.IOTypeHints.empty().output_types and
+            process_batch_type_hints.output_types
+            != process_type_hints.output_types):
+          raise TypeError(
+              f"DoFn {self!r} yields element from both process and "
+              "process_batch, but they have mismatched output typehints:\n"
+              f" process: {process_type_hints.output_types}\n"
+              f" process_batch: {process_batch_type_hints.output_types}")
+
+        process_type_hints = process_type_hints.with_output_types_from(
+            process_batch_type_hints)
+
+    try:
+      process_type_hints = process_type_hints.strip_iterable()
+    except ValueError as e:
+      raise ValueError('Return value not iterable: %s: %s' % (self, e))
+    process_type_hints = process_type_hints.extract_tagged_outputs()
+
     # Prefer class decorator type hints for backwards compatibility.
-    return get_type_hints(self.__class__).with_defaults(fn_type_hints)
+    return get_type_hints(self.__class__).with_defaults(process_type_hints)
 
   # TODO(sourabhbajaj): Do we want to remove the responsibility of these from
   # the DoFn or maybe the runner
   def infer_output_type(self, input_type):
-    # TODO(BEAM-8247): Side inputs types.
-    # TODO(robertwb): Assert compatibility with input type hint?
-    return self._strip_output_annotations(
-        trivial_inference.infer_return_type(self.process, [input_type]))
+    # TODO(https://github.com/apache/beam/issues/19824): Side inputs types.
+    return trivial_inference.element_type(
+        _strip_output_annotations(
+            trivial_inference.infer_return_type(self.process, [input_type])))
 
-  def _strip_output_annotations(self, type_hint):
-    annotations = (TimestampedValue, WindowedValue, pvalue.TaggedOutput)
-    # TODO(robertwb): These should be parameterized types that the
-    # type inferencer understands.
-    if (type_hint in annotations or
-        trivial_inference.element_type(type_hint) in annotations):
-      return typehints.Any
-    return type_hint
+  @property
+  def _process_defined(self) -> bool:
+    # Check if this DoFn's process method has been overridden
+    # Note that we retrieve the __func__ attribute, if it exists, to get the
+    # underlying function from the bound method.
+    # If __func__ doesn't exist, self.process was likely overridden with a free
+    # function, as in CallableWrapperDoFn.
+    return getattr(self.process, '__func__', self.process) != DoFn.process
+
+  @property
+  def _process_batch_defined(self) -> bool:
+    # Check if this DoFn's process_batch method has been overridden
+    # Note that we retrieve the __func__ attribute, if it exists, to get the
+    # underlying function from the bound method.
+    # If __func__ doesn't exist, self.process_batch was likely overridden with
+    # a free function.
+    return getattr(
+        self.process_batch, '__func__',
+        self.process_batch) != DoFn.process_batch
+
+  @property
+  def _can_yield_batches(self) -> bool:
+    return ((self._process_defined and self._process_yields_batches) or (
+        self._process_batch_defined and
+        not self._process_batch_yields_elements))
+
+  @property
+  def _process_yields_batches(self) -> bool:
+    return getattr(self.process, '_beam_yields_batches', False)
+
+  @property
+  def _process_batch_yields_elements(self) -> bool:
+    return getattr(self.process_batch, '_beam_yields_elements', False)
+
+  def get_input_batch_type(
+      self, input_element_type
+  ) -> typing.Optional[typing.Union[TypeConstraint, type]]:
+    """Determine the batch type expected as input to process_batch.
+
+    The default implementation of ``get_input_batch_type`` simply observes the
+    input typehint for the first parameter of ``process_batch``. A Batched DoFn
+    may override this method if a dynamic approach is required.
+
+    Args:
+      input_element_type: The **element type** of the input PCollection this
+        DoFn is being applied to.
+
+    Returns:
+      ``None`` if this DoFn cannot accept batches, else a Beam typehint or
+      a native Python typehint.
+    """
+    if not self._process_batch_defined:
+      return None
+    input_type = list(
+        inspect.signature(self.process_batch).parameters.values())[0].annotation
+    if input_type == inspect.Signature.empty:
+      # TODO(https://github.com/apache/beam/issues/21652): Consider supporting
+      # an alternative (dynamic?) approach for declaring input type
+      raise TypeError(
+          f"Either {self.__class__.__name__}.process_batch() must have a type "
+          f"annotation on its first parameter, or {self.__class__.__name__} "
+          "must override get_input_batch_type.")
+    return input_type
+
+  def _get_input_batch_type_normalized(self, input_element_type):
+    return typehints.native_type_compatibility.convert_to_beam_type(
+        self.get_input_batch_type(input_element_type))
+
+  def _get_output_batch_type_normalized(self, input_element_type):
+    return typehints.native_type_compatibility.convert_to_beam_type(
+        self.get_output_batch_type(input_element_type))
+
+  @staticmethod
+  def _get_element_type_from_return_annotation(method, input_type):
+    return_type = inspect.signature(method).return_annotation
+    if return_type == inspect.Signature.empty:
+      # output type not annotated, try to infer it
+      return_type = trivial_inference.infer_return_type(method, [input_type])
+
+    return_type = typehints.native_type_compatibility.convert_to_beam_type(
+        return_type)
+    if isinstance(return_type, typehints.typehints.IterableTypeConstraint):
+      return return_type.inner_type
+    elif isinstance(return_type, typehints.typehints.IteratorTypeConstraint):
+      return return_type.yielded_type
+    else:
+      raise TypeError(
+          "Expected Iterator in return type annotation for "
+          f"{method!r}, did you mean Iterator[{return_type}]? Note Beam DoFn "
+          "process and process_batch methods are expected to produce "
+          "generators - they should 'yield' rather than 'return'.")
+
+  def get_output_batch_type(
+      self, input_element_type
+  ) -> typing.Optional[typing.Union[TypeConstraint, type]]:
+    """Determine the batch type produced by this DoFn's ``process_batch``
+    implementation and/or its ``process`` implementation with
+    ``@yields_batch``.
+
+    The default implementation of this method observes the return type
+    annotations on ``process_batch`` and/or ``process``.  A Batched DoFn may
+    override this method if a dynamic approach is required.
+
+    Args:
+      input_element_type: The **element type** of the input PCollection this
+        DoFn is being applied to.
+
+    Returns:
+      ``None`` if this DoFn will never yield batches, else a Beam typehint or
+      a native Python typehint.
+    """
+    output_batch_type = None
+    if self._process_defined and self._process_yields_batches:
+      output_batch_type = self._get_element_type_from_return_annotation(
+          self.process, input_element_type)
+    if self._process_batch_defined and not self._process_batch_yields_elements:
+      process_batch_type = self._get_element_type_from_return_annotation(
+          self.process_batch,
+          self._get_input_batch_type_normalized(input_element_type))
+
+      # TODO: Consider requiring an inheritance relationship rather than
+      # equality
+      if (output_batch_type is not None and
+          (not process_batch_type == output_batch_type)):
+        raise TypeError(
+            f"DoFn {self!r} yields batches from both process and "
+            "process_batch, but they produce different types:\n"
+            f" process: {output_batch_type}\n"
+            f" process_batch: {process_batch_type!r}")
+
+      output_batch_type = process_batch_type
+
+    return output_batch_type
 
   def _process_argspec_fn(self):
     """Returns the Python callable that will eventually be invoked.
@@ -762,11 +1040,13 @@ class CallableWrapperDoFn(DoFn):
       raise TypeCheckError(
           'Return value not iterable: %s: %s' %
           (self.display_data()['fn'].value, e))
+    type_hints = type_hints.extract_tagged_outputs()
     return type_hints
 
   def infer_output_type(self, input_type):
-    return self._strip_output_annotations(
-        trivial_inference.infer_return_type(self._fn, [input_type]))
+    return trivial_inference.element_type(
+        _strip_output_annotations(
+            trivial_inference.infer_return_type(self._fn, [input_type])))
 
   def _process_argspec_fn(self):
     return getattr(self._fn, '_argspec_fn', self._fn)
@@ -816,7 +1096,7 @@ class CombineFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
     before executing any of the other methods. The resources can then be
     disposed of in ``CombineFn.teardown``.
 
-    If you are using Dataflow, you need to enable Dataflow Runner V2
+    If you are using Dataflow, you need to enable Dataflow Portable Runner
     before using this feature.
 
     Args:
@@ -883,7 +1163,7 @@ class CombineFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
     raise NotImplementedError(str(self))
 
   def compact(self, accumulator, *args, **kwargs):
-    """Optionally returns a more compact represenation of the accumulator.
+    """Optionally returns a more compact representation of the accumulator.
 
     This is called before an accumulator is sent across the wire, and can
     be useful in cases where values are buffered or otherwise lazily
@@ -914,7 +1194,7 @@ class CombineFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
   def teardown(self, *args, **kwargs):
     """Called to clean up an instance before it is discarded.
 
-    If you are using Dataflow, you need to enable Dataflow Runner V2
+    If you are using Dataflow, you need to enable Dataflow Portable Runner
     before using this feature.
 
     Args:
@@ -1050,12 +1330,13 @@ class CallableWrapperCombineFn(CombineFn):
     return self._fn(accumulator, *args, **kwargs)
 
   def default_type_hints(self):
-    fn_hints = get_type_hints(self._fn)
-    if fn_hints.input_types is None:
-      return fn_hints
+    fn_type_hints = typehints.decorators.IOTypeHints.from_callable(self._fn)
+    type_hints = get_type_hints(self._fn).with_defaults(fn_type_hints)
+    if type_hints.input_types is None:
+      return type_hints
     else:
       # fn(Iterable[V]) -> V becomes CombineFn(V) -> V
-      input_args, input_kwargs = fn_hints.input_types
+      input_args, input_kwargs = type_hints.input_types
       if not input_args:
         if len(input_kwargs) == 1:
           input_args, input_kwargs = tuple(input_kwargs.values()), {}
@@ -1070,7 +1351,11 @@ class CallableWrapperCombineFn(CombineFn):
             input_args[0])
       input_args = (element_type(input_args[0]), ) + input_args[1:]
       # TODO(robertwb): Assert output type is consistent with input type?
-      return fn_hints.with_input_types(*input_args, **input_kwargs)
+      return type_hints.with_input_types(*input_args, **input_kwargs)
+
+  def infer_output_type(self, input_type):
+    return _strip_output_annotations(
+        trivial_inference.infer_return_type(self._fn, [input_type]))
 
   def for_input_type(self, input_type):
     # Avoid circular imports.
@@ -1136,7 +1421,7 @@ class PartitionFn(WithTypeHints):
   def default_label(self):
     return self.__class__.__name__
 
-  def partition_for(self, element, num_partitions, *args, **kwargs):
+  def partition_for(self, element, num_partitions, *args, **kwargs):  # type: ignore[empty-body]
     # type: (T, int, *typing.Any, **typing.Any) -> int
 
     """Specify which partition will receive this element.
@@ -1181,6 +1466,80 @@ class CallableWrapperPartitionFn(PartitionFn):
     return self._fn(element, num_partitions, *args, **kwargs)
 
 
+def _get_function_body_without_inners(func):
+  source_lines = inspect.getsourcelines(func)[0]
+  source_lines = dropwhile(lambda x: x.strip().startswith("@"), source_lines)
+  first_def_line = next(source_lines).strip()
+  if first_def_line.startswith("def "):
+    last_def_line_without_comment = first_def_line.split("#")[0] \
+        .split("\"\"\"")[0]
+    while not last_def_line_without_comment.strip().endswith(":"):
+      last_def_line_without_comment = next(source_lines).split("#")[0] \
+        .split("\"\"\"")[0]
+
+    first_line = next(source_lines)
+    indentation = len(first_line) - len(first_line.lstrip())
+    final_lines = [first_line[indentation:]]
+
+    skip_inner_def = False
+    if first_line[indentation:].startswith("def "):
+      skip_inner_def = True
+    for line in source_lines:
+      line_indentation = len(line) - len(line.lstrip())
+
+      if line[indentation:].startswith("def "):
+        skip_inner_def = True
+        continue
+
+      if skip_inner_def and line_indentation == indentation:
+        skip_inner_def = False
+
+      if skip_inner_def and line_indentation > indentation:
+        continue
+      final_lines.append(line[indentation:])
+
+    return "".join(final_lines)
+  else:
+    return first_def_line.rsplit(":")[-1].strip()
+
+
+def _check_fn_use_yield_and_return(fn):
+  if isinstance(fn, types.BuiltinFunctionType):
+    return False
+  try:
+    source_code = _get_function_body_without_inners(fn)
+    has_yield = False
+    has_return = False
+    has_return_none = False
+    for line in source_code.split("\n"):
+      lstripped_line = line.lstrip()
+      if lstripped_line.startswith("yield ") or lstripped_line.startswith(
+          "yield("):
+        has_yield = True
+      elif lstripped_line.rstrip() == "return":
+        # Return is likely used to exit the function - ok to use with 'yield'.
+        pass
+      elif lstripped_line.startswith("return ") or lstripped_line.startswith(
+          "return("):
+        if lstripped_line.rstrip() == "return None" or lstripped_line.rstrip(
+        ) == "return(None)":
+          has_return_none = True
+        has_return = True
+      if has_yield and has_return:
+        return True
+
+    if has_return_none:
+      _LOGGER.warning(
+          "Process method returned None (element won't be emitted): %s."
+          " Check if intended.",
+          fn.__self__.__class__)
+
+    return False
+  except Exception as e:
+    _LOGGER.debug(str(e))
+    return False
+
+
 class ParDo(PTransformWithSideInputs):
   """A :class:`ParDo` transform.
 
@@ -1221,6 +1580,14 @@ class ParDo(PTransformWithSideInputs):
     if not isinstance(self.fn, DoFn):
       raise TypeError('ParDo must be called with a DoFn instance.')
 
+    # DoFn.process cannot allow both return and yield
+    if _check_fn_use_yield_and_return(self.fn.process):
+      _LOGGER.warning(
+          'Using yield and return in the process method '
+          'of %s can lead to unexpected behavior, see:'
+          'https://github.com/apache/beam/issues/22969.',
+          self.fn.__class__)
+
     # Validate the DoFn by creating a DoFnSignature
     from apache_beam.runners.common import DoFnSignature
     self._signature = DoFnSignature(self.fn)
@@ -1234,8 +1601,13 @@ class ParDo(PTransformWithSideInputs):
       partial=False,
       use_subprocess=False,
       threshold=1,
-      threshold_windowing=None):
-    """Automatically provides a dead letter output for skipping bad records.
+      threshold_windowing=None,
+      timeout=None,
+      error_handler=None,
+      on_failure_callback: typing.Optional[typing.Callable[
+          [Exception, typing.Any], None]] = None,
+      allow_unsafe_userstate_in_process=False):
+    """Automatically provides a dead letter output for saving bad inputs.
     This can allow a pipeline to continue successfully rather than fail or
     continuously throw errors on retry when bad elements are encountered.
 
@@ -1246,17 +1618,18 @@ class ParDo(PTransformWithSideInputs):
 
     For example, one would write::
 
-        good, bad = Map(maybe_error_raising_function).with_exception_handling()
+        good, bad = inputs | Map(maybe_erroring_fn).with_exception_handling()
 
     and `good` will be a PCollection of mapped records and `bad` will contain
-    those that raised exceptions.
+    tuples of the form `(input, error_string`) for each input that raised an
+    exception.
 
 
     Args:
       main_tag: tag to be used for the main (good) output of the DoFn,
           useful to avoid possible conflicts if this DoFn already produces
           multiple outputs.  Optional, defaults to 'good'.
-      dead_letter_tag: tag to be used for the bad records, useful to avoid
+      dead_letter_tag: tag to be used for the bad inputs, useful to avoid
           possible conflicts if this DoFn already produces multiple outputs.
           Optional, defaults to 'bad'.
       exc_class: An exception class, or tuple of exception classes, to catch.
@@ -1275,11 +1648,28 @@ class ParDo(PTransformWithSideInputs):
           than a new process per element, so the overhead should be minimal
           (and can be amortized if there's any per-process or per-bundle
           initialization that needs to be done). Optional, defaults to False.
-      threshold: An upper bound on the ratio of records that can be bad before
+      threshold: An upper bound on the ratio of inputs that can be bad before
           aborting the entire pipeline. Optional, defaults to 1.0 (meaning
-          up to 100% of records can be bad and the pipeline will still succeed).
+          up to 100% of inputs can be bad and the pipeline will still succeed).
       threshold_windowing: Event-time windowing to use for threshold. Optional,
           defaults to the windowing of the input.
+      timeout: If the element has not finished processing in timeout seconds,
+          raise a TimeoutError.  Defaults to None, meaning no time limit.
+      error_handler: An ErrorHandler that should be used to consume the bad
+          records, rather than returning the good and bad records as a tuple.
+      on_failure_callback: If an element fails or times out,
+          on_failure_callback will be invoked. It will receive the exception
+          and the element being processed in as args. In case of a timeout,
+          the exception will be of type `TimeoutError`. Be careful with this
+          callback - if you set a timeout, it will not apply to the callback,
+          and if the callback fails it will not be retried.
+      allow_unsafe_userstate_in_process: If False, user state will not be
+          permitted in the DoFn's process method. This is disabled by default
+          because user state is potentially unsafe with exception handling
+          since it can be successfully stored or cleared even if the associated
+          element fails and is routed to a dead letter queue. Semantics around
+          state in this kind of failure scenario are not well defined and are
+          subject to change.
     """
     args, kwargs = self.raw_side_inputs
     return self.label >> _ExceptionHandlingWrapper(
@@ -1292,13 +1682,80 @@ class ParDo(PTransformWithSideInputs):
         partial,
         use_subprocess,
         threshold,
-        threshold_windowing)
+        threshold_windowing,
+        timeout,
+        error_handler,
+        on_failure_callback,
+        allow_unsafe_userstate_in_process,
+        self.get_resource_hints(),
+        self.get_type_hints())
+
+  def with_error_handler(self, error_handler, **exception_handling_kwargs):
+    """An alias for `with_exception_handling(error_handler=error_handler, ...)`
+
+    This is provided to fit the general ErrorHandler conventions.
+    """
+    if error_handler is None:
+      return self
+    else:
+      return self.with_exception_handling(
+          error_handler=error_handler, **exception_handling_kwargs)
 
   def default_type_hints(self):
     return self.fn.get_type_hints()
 
   def infer_output_type(self, input_type):
-    return trivial_inference.element_type(self.fn.infer_output_type(input_type))
+    return self.fn.infer_output_type(input_type)
+
+  def infer_batch_converters(self, input_element_type):
+    # TODO: Test this code (in batch_dofn_test)
+    if self.fn._process_batch_defined:
+      input_batch_type = self.fn._get_input_batch_type_normalized(
+          input_element_type)
+
+      if input_batch_type is None:
+        raise TypeError(
+            "process_batch method on {self.fn!r} does not have "
+            "an input type annoation")
+
+      try:
+        # Generate a batch converter to convert between the input type and the
+        # (batch) input type of process_batch
+        self.fn.input_batch_converter = BatchConverter.from_typehints(
+            element_type=input_element_type, batch_type=input_batch_type)
+      except TypeError as e:
+        raise TypeError(
+            "Failed to find a BatchConverter for the input types of DoFn "
+            f"{self.fn!r} (element_type={input_element_type!r}, "
+            f"batch_type={input_batch_type!r}).") from e
+
+    else:
+      self.fn.input_batch_converter = None
+
+    if self.fn._can_yield_batches:
+      output_batch_type = self.fn._get_output_batch_type_normalized(
+          input_element_type)
+      if output_batch_type is None:
+        # TODO: Mention process method in this error
+        raise TypeError(
+            f"process_batch method on {self.fn!r} does not have "
+            "a return type annoation")
+
+      # Generate a batch converter to convert between the output type and the
+      # (batch) output type of process_batch
+      output_element_type = self.infer_output_type(input_element_type)
+
+      try:
+        self.fn.output_batch_converter = BatchConverter.from_typehints(
+            element_type=output_element_type, batch_type=output_batch_type)
+      except TypeError as e:
+        raise TypeError(
+            "Failed to find a BatchConverter for the *output* types of DoFn "
+            f"{self.fn!r} (element_type={output_element_type!r}, "
+            f"batch_type={output_batch_type!r}). Maybe you need to override "
+            "DoFn.infer_output_type to set the output element type?") from e
+    else:
+      self.fn.output_batch_converter = None
 
   def make_fn(self, fn, has_side_inputs):
     if isinstance(fn, DoFn):
@@ -1337,7 +1794,14 @@ class ParDo(PTransformWithSideInputs):
             key_coder,
             self)
 
-    return pvalue.PCollection.from_(pcoll)
+    if self._signature.is_unbounded_per_element():
+      is_bounded = False
+    else:
+      is_bounded = pcoll.is_bounded
+
+    self.infer_batch_converters(pcoll.element_type)
+
+    return pvalue.PCollection.from_(pcoll, is_bounded=is_bounded)
 
   def with_outputs(self, *tags, main=None, allow_unknown_tags=None):
     """Returns a tagged tuple allowing access to the outputs of a
@@ -1373,6 +1837,17 @@ class ParDo(PTransformWithSideInputs):
       raise ValueError(
           'Main output tag %r must be different from side output tags %r.' %
           (main, tags))
+    type_hints = self.get_type_hints()
+    declared_tags = set(type_hints.tagged_output_types().keys())
+    requested_tags = set(tags)
+
+    unknown = requested_tags - declared_tags
+    if unknown and declared_tags:  # Only warn if type hints exist
+      logging.warning(
+          "Tags %s requested in with_outputs() but not declared "
+          "in type hints. Declared tags: %s",
+          unknown,
+          declared_tags)
     return _MultiParDo(self, tags, main, allow_unknown_tags)
 
   def _do_fn_info(self):
@@ -1381,7 +1856,9 @@ class ParDo(PTransformWithSideInputs):
   def _get_key_and_window_coder(self, named_inputs):
     if named_inputs is None or not self._signature.is_stateful_dofn():
       return None, None
-    main_input = list(set(named_inputs.keys()) - set(self.side_inputs))[0]
+    main_input = [
+        tag for tag in named_inputs if not tag.startswith(SIDE_INPUT_PREFIX)
+    ][0]
     input_pcoll = named_inputs[main_input]
     kv_type_hint = input_pcoll.element_type
     if kv_type_hint and kv_type_hint != typehints.Any:
@@ -1445,10 +1922,10 @@ class ParDo(PTransformWithSideInputs):
             # transformation is currently irreversible given how
             # remove_objects_from_args and insert_values_in_args
             # are currently implemented.
-            side_inputs={(SIDE_INPUT_PREFIX + '%s') % ix:
-                         si.to_runner_api(context)
-                         for ix,
-                         si in enumerate(self.side_inputs)}))
+            side_inputs={
+                (SIDE_INPUT_PREFIX + '%s') % ix: si.to_runner_api(context)
+                for ix, si in enumerate(self.side_inputs)
+            }))
 
   @staticmethod
   @PTransform.register_urn(
@@ -1466,8 +1943,8 @@ class ParDo(PTransformWithSideInputs):
     # to_runner_api_parameter above).
     indexed_side_inputs = [(
         get_sideinput_index(tag),
-        pvalue.AsSideInput.from_runner_api(si, context)) for tag,
-                           si in pardo_payload.side_inputs.items()]
+        pvalue.AsSideInput.from_runner_api(si, context))
+                           for tag, si in pardo_payload.side_inputs.items()]
     result.side_inputs = [si for _, si in sorted(indexed_side_inputs)]
     return result
 
@@ -1504,6 +1981,15 @@ class _MultiParDo(PTransform):
         self._tags,
         self._main_tag,
         self._allow_unknown_tags)
+
+  def with_exception_handling(self, main_tag=None, **kwargs):
+    if main_tag is None:
+      main_tag = self._main_tag or 'good'
+    named = self._do_transform.with_exception_handling(
+        main_tag=main_tag, **kwargs)
+    # named is _NamedPTransform wrapping _ExceptionHandlingWrapper
+    named.transform._extra_tags = self._tags
+    return named
 
 
 class DoFnInfo(object):
@@ -1573,13 +2059,19 @@ class StatelessDoFnInfo(DoFnInfo):
     return beam_runner_api_pb2.FunctionSpec(urn=self._urn)
 
 
-def FlatMap(fn, *args, **kwargs):  # pylint: disable=invalid-name
+def identity(x):
+  return x
+
+
+def FlatMap(fn=identity, *args, **kwargs):  # pylint: disable=invalid-name
   """:func:`FlatMap` is like :class:`ParDo` except it takes a callable to
   specify the transformation.
 
   The callable must return an iterable for each element of the input
   :class:`~apache_beam.pvalue.PCollection`. The elements of these iterables will
-  be flattened into the output :class:`~apache_beam.pvalue.PCollection`.
+  be flattened into the output :class:`~apache_beam.pvalue.PCollection`. If
+  no callable is given, then all elements of the input PCollection must already
+  be iterables themselves and will be flattened into the output PCollection.
 
   Args:
     fn (callable): a callable object.
@@ -1604,6 +2096,7 @@ def FlatMap(fn, *args, **kwargs):  # pylint: disable=invalid-name
 
   pardo = ParDo(CallableWrapperDoFn(fn), *args, **kwargs)
   pardo.label = label
+
   return pardo
 
 
@@ -1652,7 +2145,15 @@ def Map(fn, *args, **kwargs):  # pylint: disable=invalid-name
             wrapper)
   output_hint = type_hints.simple_output_type(label)
   if output_hint:
-    wrapper = with_output_types(typehints.Iterable[output_hint])(wrapper)
+    tagged = {
+        k: typehints.Iterable[v]
+        for k, v in type_hints.tagged_output_types().items()
+    }
+    wrapper = with_output_types(
+        typehints.Iterable[_strip_output_annotations(
+            output_hint, strip_tagged_output=False)],
+        **tagged)(
+            wrapper)
   # pylint: disable=protected-access
   wrapper._argspec_fn = fn
   # pylint: enable=protected-access
@@ -1666,15 +2167,13 @@ def MapTuple(fn, *args, **kwargs):  # pylint: disable=invalid-name
   r""":func:`MapTuple` is like :func:`Map` but expects tuple inputs and
   flattens them into multiple input arguments.
 
-      beam.MapTuple(lambda a, b, ...: ...)
-
   In other words
 
-      beam.MapTuple(fn)
+      "SwapKV" >> beam.Map(lambda kv: (kv[1], kv[0]))
 
   is equivalent to
 
-      beam.Map(lambda element, ...: fn(\*element, ...))
+      "SwapKV" >> beam.MapTuple(lambda k, v: (v, k))
 
   This can be useful when processing a PCollection of tuples
   (e.g. key-value pairs).
@@ -1713,14 +2212,23 @@ def MapTuple(fn, *args, **kwargs):  # pylint: disable=invalid-name
 
   # Proxy the type-hint information from the original function to this new
   # wrapped function.
-  type_hints = get_type_hints(fn)
+  type_hints = get_type_hints(fn).with_defaults(
+      typehints.decorators.IOTypeHints.from_callable(fn))
   if type_hints.input_types is not None:
-    wrapper = with_input_types(
-        *type_hints.input_types[0], **type_hints.input_types[1])(
-            wrapper)
+    # TODO(BEAM-14052): ignore input hints, as we do not have enough
+    # information to infer the input type hint of the wrapper function.
+    pass
   output_hint = type_hints.simple_output_type(label)
   if output_hint:
-    wrapper = with_output_types(typehints.Iterable[output_hint])(wrapper)
+    tagged = {
+        k: typehints.Iterable[v]
+        for k, v in type_hints.tagged_output_types().items()
+    }
+    wrapper = with_output_types(
+        typehints.Iterable[_strip_output_annotations(
+            output_hint, strip_tagged_output=False)],
+        **tagged)(
+            wrapper)
 
   # Replace the first (args) component.
   modified_arg_names = ['tuple_element'] + arg_names[-num_defaults:]
@@ -1737,19 +2245,13 @@ def FlatMapTuple(fn, *args, **kwargs):  # pylint: disable=invalid-name
   r""":func:`FlatMapTuple` is like :func:`FlatMap` but expects tuple inputs and
   flattens them into multiple input arguments.
 
-      beam.FlatMapTuple(lambda a, b, ...: ...)
-
-  is equivalent to Python 2
-
-      beam.FlatMap(lambda (a, b, ...), ...: ...)
-
   In other words
 
-      beam.FlatMapTuple(fn)
+      beam.FlatMap(lambda start_end: range(start_end[0], start_end[1]))
 
   is equivalent to
 
-      beam.FlatMap(lambda element, ...: fn(\*element, ...))
+      beam.FlatMapTuple(lambda start, end: range(start, end))
 
   This can be useful when processing a PCollection of tuples
   (e.g. key-value pairs).
@@ -1784,18 +2286,22 @@ def FlatMapTuple(fn, *args, **kwargs):  # pylint: disable=invalid-name
   if defaults or args or kwargs:
     wrapper = lambda x, *args, **kwargs: fn(*(tuple(x) + args), **kwargs)
   else:
-    wrapper = lambda x: fn(*x)
+    wrapper = lambda x: fn(*tuple(x))
 
   # Proxy the type-hint information from the original function to this new
   # wrapped function.
-  type_hints = get_type_hints(fn)
+  type_hints = get_type_hints(fn).with_defaults(
+      typehints.decorators.IOTypeHints.from_callable(fn))
   if type_hints.input_types is not None:
-    wrapper = with_input_types(
-        *type_hints.input_types[0], **type_hints.input_types[1])(
-            wrapper)
+    # TODO(BEAM-14052): ignore input hints, as we do not have enough
+    # information to infer the input type hint of the wrapper function.
+    pass
   output_hint = type_hints.simple_output_type(label)
   if output_hint:
-    wrapper = with_output_types(output_hint)(wrapper)
+    wrapper = with_output_types(
+        _strip_output_annotations(output_hint, strip_tagged_output=False),
+        **type_hints.tagged_output_types())(
+            wrapper)
 
   # Replace the first (args) component.
   modified_arg_names = ['tuple_element'] + arg_names[-num_defaults:]
@@ -1806,6 +2312,24 @@ def FlatMapTuple(fn, *args, **kwargs):  # pylint: disable=invalid-name
       **kwargs)
   pardo.label = label
   return pardo
+
+
+# Element format emitted on the dead-letter tag by `with_exception_handling()`:
+# (exception_class, repr(exception), formatted_traceback_lines).
+# The first slot is the bare metaclass `type` rather than `Type[BaseException]`
+# because the runtime value is `type(exn)`, a class object whose only
+# universally-correct hint is `type`. Beam has no parametric `Type[...]`
+# constraint that would yield a non-pickle coder anyway, so narrowing here
+# would over-promise without changing the wire format.
+ExceptionInfo = typehints.Tuple[type, str, typehints.List[str]]
+
+
+class DeadLetter:
+  """Type hint for a dead-letter element: (original_element, ExceptionInfo).
+
+  Use as ``DeadLetter[T]`` in ``with_output_types(...)`` etc."""
+  def __class_getitem__(cls, element_type):
+    return typehints.Tuple[element_type, ExceptionInfo]
 
 
 class _ExceptionHandlingWrapper(ptransform.PTransform):
@@ -1821,7 +2345,13 @@ class _ExceptionHandlingWrapper(ptransform.PTransform):
       partial,
       use_subprocess,
       threshold,
-      threshold_windowing):
+      threshold_windowing,
+      timeout,
+      error_handler,
+      on_failure_callback,
+      allow_unsafe_userstate_in_process,
+      resource_hints,
+      pardo_type_hints=None):
     if partial and use_subprocess:
       raise ValueError('partial and use_subprocess are mutually incompatible.')
     self._fn = fn
@@ -1834,18 +2364,53 @@ class _ExceptionHandlingWrapper(ptransform.PTransform):
     self._use_subprocess = use_subprocess
     self._threshold = threshold
     self._threshold_windowing = threshold_windowing
+    self._timeout = timeout
+    self._error_handler = error_handler
+    self._on_failure_callback = on_failure_callback
+    self._allow_unsafe_userstate_in_process = allow_unsafe_userstate_in_process
+    self._resource_hints = resource_hints
+    self._pardo_type_hints = pardo_type_hints
+    self._extra_tags = None
 
-  def expand(self, pcoll):
-    result = pcoll | ParDo(
+  def with_outputs(self, *tags, main=None):
+    self._extra_tags = tags
+    if main is not None:
+      self._main_tag = main
+    return self
+
+  def _build_pardo(self, pcoll):
+    """Build the inner ParDo with the exception-handling wrapper DoFn."""
+    if self._allow_unsafe_userstate_in_process:
+      if self._use_subprocess or self._timeout:
+        # TODO(https://github.com/apache/beam/issues/35976): Implement this
+        raise Exception(
+            'allow_unsafe_userstate_in_process is incompatible with ' +
+            'exception handling done with subprocesses or timeouts. If you ' +
+            'need this feature, comment in ' +
+            'https://github.com/apache/beam/issues/35976')
+    if self._use_subprocess:
+      wrapped_fn = _SubprocessDoFn(self._fn, timeout=self._timeout)
+    elif self._timeout:
+      wrapped_fn = _TimeoutDoFn(self._fn, timeout=self._timeout)
+    else:
+      wrapped_fn = self._fn
+    pardo = ParDo(
         _ExceptionHandlingWrapperDoFn(
-            _SubprocessDoFn(self._fn) if self._use_subprocess else self._fn,
+            wrapped_fn,
             self._dead_letter_tag,
             self._exc_class,
-            self._partial),
+            self._partial,
+            self._on_failure_callback,
+            self._allow_unsafe_userstate_in_process,
+        ),
         *self._args,
-        **self._kwargs).with_outputs(
-            self._dead_letter_tag, main=self._main_tag, allow_unknown_tags=True)
+        **self._kwargs,
+    )
+    pardo.get_resource_hints().update(self._resource_hints)
+    return pardo
 
+  def _post_process_result(self, pcoll, result):
+    """Apply threshold checking and error handler logic to the result."""
     if self._threshold < 1.0:
 
       class MaybeWindow(ptransform.PTransform):
@@ -1856,11 +2421,15 @@ class _ExceptionHandlingWrapper(ptransform.PTransform):
           else:
             return pcoll
 
+      # Map(lambda) produces a label formatted like this, but it cannot be
+      # changed without breaking update compat. Here, we pin to the transform
+      # name used in the 2.68 release to avoid breaking changes when the line
+      # number changes. Context: https://github.com/apache/beam/pull/36381
       input_count_view = pcoll | 'CountTotal' >> (
-          MaybeWindow() | Map(lambda _: 1)
+          MaybeWindow() | "Map(<lambda at core.py:2346>)" >> Map(lambda _: 1)
           | CombineGlobally(sum).as_singleton_view())
       bad_count_pcoll = result[self._dead_letter_tag] | 'CountBad' >> (
-          MaybeWindow() | Map(lambda _: 1)
+          MaybeWindow() | "Map(<lambda at core.py:2349>)" >> Map(lambda _: 1)
           | CombineGlobally(sum).without_defaults())
 
       def check_threshold(bad, total, threshold, window=DoFn.WindowParam):
@@ -1873,15 +2442,88 @@ class _ExceptionHandlingWrapper(ptransform.PTransform):
       _ = bad_count_pcoll | Map(
           check_threshold, input_count_view, self._threshold)
 
-    return result
+    if self._error_handler:
+      self._error_handler.add_error_pcollection(result[self._dead_letter_tag])
+      if self._extra_tags is not None:
+        return result
+      return result[self._main_tag]
+    else:
+      return result
+
+  def expand_2_72_0(self, pcoll):
+    """Pre-2.73.0 behavior: manual element_type override, no with_output_types.
+    """
+    pardo = self._build_pardo(pcoll)
+    result = pcoll | pardo.with_outputs(
+        self._dead_letter_tag, main=self._main_tag, allow_unknown_tags=True)
+    #TODO(BEAM-18957): Fix when type inference supports tagged outputs.
+    result[self._main_tag].element_type = self._fn.infer_output_type(
+        pcoll.element_type)
+
+    return self._post_process_result(pcoll, result)
+
+  def expand(self, pcoll):
+    if pcoll.pipeline.options.is_compat_version_prior_to("2.73.0"):
+      return self.expand_2_72_0(pcoll)
+
+    pardo = self._build_pardo(pcoll)
+
+    if (self._pardo_type_hints and self._pardo_type_hints._has_output_types()):
+      main_output_type = self._pardo_type_hints.simple_output_type(self.label)
+      tagged_type_hints = dict(self._pardo_type_hints.tagged_output_types())
+    else:
+      main_output_type = self._fn.infer_output_type(pcoll.element_type)
+      tagged_type_hints = dict(self._fn.get_type_hints().tagged_output_types())
+
+    tagged_type_hints[self._dead_letter_tag] = DeadLetter[pcoll.element_type]
+    pardo = pardo.with_output_types(main_output_type, **tagged_type_hints)
+
+    all_tags = tuple(set(self._extra_tags or ()) | {self._dead_letter_tag})
+    result = pcoll | pardo.with_outputs(
+        *all_tags, main=self._main_tag, allow_unknown_tags=True)
+
+    return self._post_process_result(pcoll, result)
 
 
 class _ExceptionHandlingWrapperDoFn(DoFn):
-  def __init__(self, fn, dead_letter_tag, exc_class, partial):
+  def __init__(
+      self,
+      fn,
+      dead_letter_tag,
+      exc_class,
+      partial,
+      on_failure_callback,
+      allow_unsafe_userstate_in_process):
     self._fn = fn
     self._dead_letter_tag = dead_letter_tag
     self._exc_class = exc_class
     self._partial = partial
+    self._on_failure_callback = on_failure_callback
+
+    # Wrap process and expose any top level state params so that process can
+    # handle state and timers.
+    if allow_unsafe_userstate_in_process:
+
+      @wraps(self._fn.process)
+      def process_wrapper(self, *args, **kwargs):
+        return self.exception_handling_wrapper_do_fn_custom_process(
+            *args, **kwargs)
+
+      self.process = types.MethodType(process_wrapper, self)
+    else:
+      self.process = self.exception_handling_wrapper_do_fn_custom_process
+      process_sig = inspect.signature(self._fn.process)
+      for name, param in process_sig.parameters.items():
+        if isinstance(param.default, (DoFn.StateParam, DoFn.TimerParam)):
+          logging.warning(
+              'State or timer parameter {} detected in process method of ' +
+              '{}. State and timers are unsupported when using ' +
+              'with_exception_handling and may lead to errors. To enable ' +
+              'state and timers with limited consistency guarantees, pass ' +
+              'in the allow_unsafe_userstate_in_process parameters to the ' +
+              'with_exception_handling method.',
+              name,
+              self.fn)
 
   def __getattribute__(self, name):
     if (name.startswith('__') or name in self.__dict__ or
@@ -1890,7 +2532,7 @@ class _ExceptionHandlingWrapperDoFn(DoFn):
     else:
       return getattr(self._fn, name)
 
-  def process(self, *args, **kwargs):
+  def exception_handling_wrapper_do_fn_custom_process(self, *args, **kwargs):
     try:
       result = self._fn.process(*args, **kwargs)
       if not self._partial:
@@ -1898,6 +2540,12 @@ class _ExceptionHandlingWrapperDoFn(DoFn):
         result = list(result)
       yield from result
     except self._exc_class as exn:
+      if self._on_failure_callback is not None:
+        try:
+          self._on_failure_callback(exn, args[0])
+        except Exception as e:
+          logging.warning(
+              'on_failure_callback failed with error: %s', e, exc_info=True)
       yield pvalue.TaggedOutput(
           self._dead_letter_tag,
           (
@@ -1907,12 +2555,119 @@ class _ExceptionHandlingWrapperDoFn(DoFn):
                   traceback.format_exception(*sys.exc_info()))))
 
 
+# Idea adapted from https://github.com/tosun-si/asgarde.
+# TODO(robertwb): Consider how this could fit into the public API.
+# TODO(robertwb): Generalize to all PValue types.
+class _PValueWithErrors(object):
+  """This wraps a PCollection such that transforms can be chained in a linear
+  manner while still accumulating any errors."""
+  def __init__(self, pcoll, exception_handling_args, upstream_errors=()):
+    self._pcoll = pcoll
+    self._exception_handling_args = exception_handling_args
+    self._upstream_errors = upstream_errors
+
+  @property
+  def pipeline(self):
+    return self._pcoll.pipeline
+
+  @property
+  def element_type(self):
+    return self._pcoll.element_type
+
+  @element_type.setter
+  def element_type(self, value):
+    self._pcoll.element_type = value
+
+  def main_output_tag(self):
+    return self._exception_handling_args.get('main_tag', 'good')
+
+  def error_output_tag(self):
+    return self._exception_handling_args.get('dead_letter_tag', 'bad')
+
+  def __or__(self, transform):
+    return self.apply(transform)
+
+  def apply(self, transform):
+    if hasattr(transform, 'with_exception_handling'):
+      result = self._pcoll | transform.with_exception_handling(
+          **self._exception_handling_args)
+      if result[self.main_output_tag()].element_type == typehints.Any:
+        result[
+            self.main_output_tag()].element_type = transform.infer_output_type(
+                self._pcoll.element_type)
+      # TODO(BEAM-18957): Add support for tagged type hints.
+      result[self.error_output_tag()].element_type = typehints.Any
+      return _PValueWithErrors(
+          result[self.main_output_tag()],
+          self._exception_handling_args,
+          self._upstream_errors + (result[self.error_output_tag()], ))
+    else:
+      return _PValueWithErrors(
+          self._pcoll | transform,
+          self._exception_handling_args,
+          self._upstream_errors)
+
+  def accumulated_errors(self):
+    if len(self._upstream_errors) == 1:
+      return self._upstream_errors[0]
+    else:
+      return self._upstream_errors | Flatten()
+
+  def as_result(self, error_post_processing=None):
+    return {
+        self.main_output_tag(): self._pcoll,
+        self.error_output_tag(): self.accumulated_errors()
+        if error_post_processing is None else self.accumulated_errors()
+        | error_post_processing,
+    }
+
+
+class _MaybePValueWithErrors(object):
+  """This is like _PValueWithErrors, but only wraps values if
+  exception_handling_args is non-trivial.  It is useful for handling
+  error-catching and non-error-catching code in a uniform manner.
+  """
+  def __init__(self, pvalue, exception_handling_args=None):
+    if isinstance(pvalue, _PValueWithErrors):
+      assert exception_handling_args is None
+      self._pvalue = pvalue
+    elif exception_handling_args is None:
+      self._pvalue = pvalue
+    else:
+      self._pvalue = _PValueWithErrors(pvalue, exception_handling_args)
+
+  @property
+  def pipeline(self):
+    return self._pvalue.pipeline
+
+  @property
+  def element_type(self):
+    return self._pvalue.element_type
+
+  @element_type.setter
+  def element_type(self, value):
+    self._pvalue.element_type = value
+
+  def __or__(self, transform):
+    return self.apply(transform)
+
+  def apply(self, transform):
+    return _MaybePValueWithErrors(self._pvalue | transform)
+
+  def as_result(self, error_post_processing=None):
+    if isinstance(self._pvalue, _PValueWithErrors):
+      return self._pvalue.as_result(error_post_processing)
+    else:
+      return self._pvalue
+
+
 class _SubprocessDoFn(DoFn):
   """Process method run in a subprocess, turning hard crashes into exceptions.
   """
-  def __init__(self, fn):
+  def __init__(self, fn, timeout=None):
     self._fn = fn
     self._serialized_fn = pickler.dumps(fn)
+    self._timeout = timeout
 
   def __getattribute__(self, name):
     if (name.startswith('__') or name in self.__dict__ or
@@ -1937,18 +2692,34 @@ class _SubprocessDoFn(DoFn):
 
   def teardown(self):
     self._call_remote(self._remote_teardown)
-    self._pool.shutdown()
-    self._pool = None
+    self._terminate_pool()
 
   def _call_remote(self, method, *args, **kwargs):
     if self._pool is None:
       self._pool = concurrent.futures.ProcessPoolExecutor(1)
       self._pool.submit(self._remote_init, self._serialized_fn).result()
     try:
-      return self._pool.submit(method, *args, **kwargs).result()
-    except concurrent.futures.process.BrokenProcessPool:
-      self._pool = None
+      return self._pool.submit(method, *args, **kwargs).result(
+          self._timeout if method == self._remote_process else None)
+    except (concurrent.futures.process.BrokenProcessPool,
+            TimeoutError,
+            concurrent.futures._base.TimeoutError):
+      self._terminate_pool()
       raise
+
+  def _terminate_pool(self):
+    """Forcibly terminate the pool, not leaving any live subprocesses."""
+    pool = self._pool
+    self._pool = None
+    processes = list(pool._processes.values())
+    pool.shutdown(wait=False)
+    for p in processes:
+      if p.is_alive():
+        p.kill()
+    time.sleep(1)
+    for p in processes:
+      if p.is_alive():
+        p.terminate()
 
   # These are classmethods to avoid picking the state of self.
   # They should only be called in an isolated process, so there's no concern
@@ -1990,9 +2761,62 @@ class _SubprocessDoFn(DoFn):
     cls._fn = None
 
 
+class _TimeoutDoFn(DoFn):
+  """Process method run in a separate thread allowing timeouts.
+  """
+  def __init__(self, fn, timeout=None):
+    self._fn = fn
+    self._timeout = timeout
+    self._pool = None
+
+  def __getattribute__(self, name):
+    if (name.startswith('__') or name in self.__dict__ or
+        name in type(self).__dict__):
+      return object.__getattribute__(self, name)
+    else:
+      return getattr(self._fn, name)
+
+  def process(self, *args, **kwargs):
+    if self._pool is None:
+      self._pool = concurrent.futures.ThreadPoolExecutor(10)
+
+    # Import here to avoid circular dependency
+    from apache_beam.runners.worker.statesampler import get_current_tracker
+    from apache_beam.runners.worker.statesampler import set_current_tracker
+
+    # State sampler/tracker is stored as a thread local variable, and is used
+    # when incrementing counter metrics.
+    dispatching_thread_state_sampler = get_current_tracker()
+
+    def wrapped_process():
+      """Makes the dispatching thread local state sampler available to child
+      thread"""
+      set_current_tracker(dispatching_thread_state_sampler)
+      return list(self._fn.process(*args, **kwargs))
+
+    # Ensure we iterate over the entire output list in the given amount of time.
+    try:
+      return self._pool.submit(wrapped_process).result(self._timeout)
+    except TimeoutError:
+      self._pool.shutdown(wait=False)
+      self._pool = None
+      raise
+
+  def teardown(self):
+    try:
+      self._fn.teardown()
+    finally:
+      if self._pool is not None:
+        self._pool.shutdown(wait=False)
+        self._pool = None
+
+
 def Filter(fn, *args, **kwargs):  # pylint: disable=invalid-name
   """:func:`Filter` is a :func:`FlatMap` with its callable filtering out
   elements.
+
+  Filter accepts a function that keeps elements that return True, and filters
+  out the remaining elements.
 
   Args:
     fn (``Callable[..., bool]``): a callable object. First argument will be an
@@ -2031,16 +2855,27 @@ def Filter(fn, *args, **kwargs):  # pylint: disable=invalid-name
 
   # Proxy the type-hint information from the function being wrapped, setting the
   # output type to be the same as the input type.
-  if type_hints.input_types is not None:
+  def has_simple_input_type(th):
+    return (
+        th.input_types is not None and len(th.input_types[0]) == 1 and
+        not th.input_types[1])
+
+  def simple_input_type(th):
+    return th.input_types[0][0] if has_simple_input_type(th) else None
+
+  if type_hints.input_types is not None and simple_input_type(
+      type_hints) is not typehints.Any:
     wrapper = with_input_types(
         *type_hints.input_types[0], **type_hints.input_types[1])(
             wrapper)
-  output_hint = type_hints.simple_output_type(label)
-  if (output_hint is None and get_type_hints(wrapper).input_types and
-      get_type_hints(wrapper).input_types[0]):
-    output_hint = get_type_hints(wrapper).input_types[0][0]
-  if output_hint:
-    wrapper = with_output_types(typehints.Iterable[output_hint])(wrapper)
+    output_hint = type_hints.simple_output_type(label)
+    if (output_hint is None and get_type_hints(wrapper).input_types and
+        get_type_hints(wrapper).input_types[0]):
+      output_hint = get_type_hints(wrapper).input_types[0][0]
+    if output_hint:
+      wrapper = with_output_types(
+          typehints.Iterable[_strip_output_annotations(output_hint)])(
+              wrapper)
   # pylint: disable=protected-access
   wrapper._argspec_fn = fn
   # pylint: enable=protected-access
@@ -2191,6 +3026,15 @@ class CombineGlobally(PTransform):
             "or CombineGlobally().as_singleton_view() to get the default "
             "output of the CombineFn if the input PCollection is empty.")
 
+      # log the error for this ill-defined streaming case now
+      if not pcoll.is_bounded and not pcoll.windowing.is_default():
+        _LOGGER.error(
+            "When combining elements in unbounded collections with "
+            "the non-default windowing strategy, you must explicitly "
+            "specify how to define the combined result of an empty window. "
+            "Please use CombineGlobally().without_defaults() to output "
+            "an empty PCollection if the input PCollection is empty.")
+
       def typed(transform):
         # TODO(robertwb): We should infer this.
         if combined.element_type:
@@ -2202,6 +3046,11 @@ class CombineGlobally(PTransform):
 
       def inject_default(_, combined):
         if combined:
+          if len(combined) > 1:
+            _LOGGER.error(
+                "Multiple combined values unexpectedly provided"
+                " for a global combine: %s",
+                combined)
           assert len(combined) == 1
           return combined[0]
         else:
@@ -2252,6 +3101,21 @@ class CombinePerKey(PTransformWithSideInputs):
   Returns:
     A PObject holding the result of the combine operation.
   """
+  def __new__(cls, *args, **kwargs):
+    def has_side_inputs():
+      return (
+          any(isinstance(arg, pvalue.AsSideInput) for arg in args) or
+          any(isinstance(arg, pvalue.AsSideInput) for arg in kwargs.values()))
+
+    if has_side_inputs():
+      # If the CombineFn has deferred side inputs, the python SDK
+      # doesn't implement it.
+      # Use a ParDo-based CombinePerKey instead.
+      from apache_beam.transforms.combiners import LiftedCombinePerKey
+      combine_fn, *args = args
+      return LiftedCombinePerKey(combine_fn, args, kwargs)
+    return super(CombinePerKey, cls).__new__(cls)
+
   def with_hot_key_fanout(self, fanout):
     """A per-key combine operation like self but with two levels of aggregation.
 
@@ -2300,30 +3164,38 @@ class CombinePerKey(PTransformWithSideInputs):
     return lambda element, *args, **kwargs: None
 
   def expand(self, pcoll):
+    # When using gbek, don't allow overriding default implementation
+    gbek_option = (pcoll.pipeline._options.view_as(SetupOptions).gbek)
+    self._using_gbek = (gbek_option is not None and len(gbek_option) > 0)
+
     args, kwargs = util.insert_values_in_args(
         self.args, self.kwargs, self.side_inputs)
     return pcoll | GroupByKey() | 'Combine' >> CombineValues(
         self.fn, *args, **kwargs)
 
   def default_type_hints(self):
-    hints = self.fn.get_type_hints()
-    if hints.input_types:
-      K = typehints.TypeVariable('K')
-      args, kwargs = hints.input_types
-      args = (typehints.Tuple[K, args[0]], ) + args[1:]
-      hints = hints.with_input_types(*args, **kwargs)
+    result = self.fn.get_type_hints()
+    k = typehints.TypeVariable('K')
+    if result.input_types:
+      args, kwargs = result.input_types
+      args = (typehints.Tuple[k, args[0]], ) + args[1:]
+      result = result.with_input_types(*args, **kwargs)
     else:
-      K = typehints.Any
-    if hints.output_types:
-      main_output_type = hints.simple_output_type('')
-      hints = hints.with_output_types(typehints.Tuple[K, main_output_type])
-    return hints
+      result = result.with_input_types(typehints.Tuple[k, typehints.Any])
+    if result.output_types:
+      main_output_type = result.simple_output_type('')
+      result = result.with_output_types(typehints.Tuple[k, main_output_type])
+    else:
+      result = result.with_output_types(typehints.Tuple[k, typehints.Any])
+    return result
 
   def to_runner_api_parameter(
       self,
       context,  # type: PipelineContext
   ):
-    # type: (...) -> typing.Tuple[str, beam_runner_api_pb2.CombinePayload]
+    # type: (...) -> tuple[str, typing.Optional[typing.Union[message.Message, bytes, str]]]
+    if getattr(self, '_using_gbek', False):
+      return super().to_runner_api_parameter(context)
     if self.args or self.kwargs:
       from apache_beam.transforms.combiners import curry_combine_fn
       combine_fn = curry_combine_fn(self.fn, self.args, self.kwargs)
@@ -2471,6 +3343,8 @@ class _CombinePerKeyWithHotKeyFanout(PTransform):
     combine_fn = self._combine_fn
     fanout_fn = self._fanout_fn
 
+    use_direct_windowing = isinstance(pcoll.windowing.windowfn, SlidingWindows)
+
     class SplitHotCold(DoFn):
       def start_bundle(self):
         # Spreading a hot key across all possible sub-keys for all bundles
@@ -2490,33 +3364,48 @@ class _CombinePerKeyWithHotKeyFanout(PTransform):
           yield pvalue.TaggedOutput('hot', ((self._nonce % fanout, key), value))
 
     class PreCombineFn(CombineFn):
+      def __init__(self):
+        # Deepcopy of the combine_fn to avoid sharing state between lifted
+        # stages when using cloudpickle.
+        try:
+          self._combine_fn_copy = copy.deepcopy(combine_fn)
+        except Exception:
+          self._combine_fn_copy = pickler.roundtrip(combine_fn)
+
+        self.setup = self._combine_fn_copy.setup
+        self.create_accumulator = self._combine_fn_copy.create_accumulator
+        self.add_input = self._combine_fn_copy.add_input
+        self.merge_accumulators = self._combine_fn_copy.merge_accumulators
+        self.compact = self._combine_fn_copy.compact
+        self.teardown = self._combine_fn_copy.teardown
+
       @staticmethod
       def extract_output(accumulator):
         # Boolean indicates this is an accumulator.
         return (True, accumulator)
 
-      setup = combine_fn.setup
-      create_accumulator = combine_fn.create_accumulator
-      add_input = combine_fn.add_input
-      merge_accumulators = combine_fn.merge_accumulators
-      compact = combine_fn.compact
-      teardown = combine_fn.teardown
-
     class PostCombineFn(CombineFn):
-      @staticmethod
-      def add_input(accumulator, element):
+      def __init__(self):
+        # Deepcopy of the combine_fn to avoid sharing state between lifted
+        # stages when using cloudpickle.
+        try:
+          self._combine_fn_copy = copy.deepcopy(combine_fn)
+        except Exception:
+          self._combine_fn_copy = pickler.roundtrip(combine_fn)
+
+        self.setup = self._combine_fn_copy.setup
+        self.create_accumulator = self._combine_fn_copy.create_accumulator
+        self.merge_accumulators = self._combine_fn_copy.merge_accumulators
+        self.compact = self._combine_fn_copy.compact
+        self.extract_output = self._combine_fn_copy.extract_output
+        self.teardown = self._combine_fn_copy.teardown
+
+      def add_input(self, accumulator, element):
         is_accumulator, value = element
         if is_accumulator:
-          return combine_fn.merge_accumulators([accumulator, value])
+          return self._combine_fn_copy.merge_accumulators([accumulator, value])
         else:
-          return combine_fn.add_input(accumulator, value)
-
-      setup = combine_fn.setup
-      create_accumulator = combine_fn.create_accumulator
-      merge_accumulators = combine_fn.merge_accumulators
-      compact = combine_fn.compact
-      extract_output = combine_fn.extract_output
-      teardown = combine_fn.teardown
+          return self._combine_fn_copy.add_input(accumulator, value)
 
     def StripNonce(nonce_key_value):
       (_, key), value = nonce_key_value
@@ -2524,21 +3413,38 @@ class _CombinePerKeyWithHotKeyFanout(PTransform):
 
     cold, hot = pcoll | ParDo(SplitHotCold()).with_outputs('hot', main='cold')
     cold.element_type = typehints.Any  # No multi-output type hints.
-    precombined_hot = (
-        hot
-        # Avoid double counting that may happen with stacked accumulating mode.
-        | 'WindowIntoDiscarding' >> WindowInto(
-            pcoll.windowing, accumulation_mode=AccumulationMode.DISCARDING)
-        | CombinePerKey(PreCombineFn())
-        | Map(StripNonce)
-        | 'WindowIntoOriginal' >> WindowInto(pcoll.windowing))
+
+    if use_direct_windowing:
+      # For SlidingWindows, swap windowing strategy metadata directly on the
+      # PCollection without re-assigning windows. This mirrors Java's
+      # setWindowingStrategyInternal(). Using WindowInto would call
+      # windowfn.assign() which re-evaluates window assignments from
+      # timestamps — with SlidingWindows, this causes accumulators to leak
+      # into adjacent overlapping windows.
+      if pcoll.windowing.accumulation_mode == AccumulationMode.ACCUMULATING:
+        discarding_windowing = copy.copy(pcoll.windowing)
+        discarding_windowing.accumulation_mode = AccumulationMode.DISCARDING
+        hot._windowing = discarding_windowing
+      precombined_hot = (hot | CombinePerKey(PreCombineFn()) | Map(StripNonce))
+      precombined_hot._windowing = pcoll.windowing
+    else:
+      precombined_hot = (
+          hot
+          # Avoid double counting that may happen with stacked accumulating
+          # mode.
+          | 'WindowIntoDiscarding' >> WindowInto(
+              pcoll.windowing, accumulation_mode=AccumulationMode.DISCARDING)
+          | CombinePerKey(PreCombineFn())
+          | Map(StripNonce)
+          | 'WindowIntoOriginal' >> WindowInto(pcoll.windowing))
+
     return ((cold, precombined_hot)
             | Flatten()
             | CombinePerKey(PostCombineFn()))
 
 
-@typehints.with_input_types(typing.Tuple[K, V])
-@typehints.with_output_types(typing.Tuple[K, typing.Iterable[V]])
+@typehints.with_input_types(tuple[K, V])
+@typehints.with_output_types(tuple[K, typing.Iterable[V]])
 class GroupByKey(PTransform):
   """A group by key transform.
 
@@ -2549,6 +3455,11 @@ class GroupByKey(PTransform):
 
   The implementation here is used only when run on the local direct runner.
   """
+  def __init__(self, label=None):
+    self._replaced_by_gbek = False
+    self._inside_gbek = False
+    super().__init__(label)
+
   class ReifyWindows(DoFn):
     def process(
         self, element, window=DoFn.WindowParam, timestamp=DoFn.TimestampParam):
@@ -2563,10 +3474,33 @@ class GroupByKey(PTransform):
 
     def infer_output_type(self, input_type):
       key_type, value_type = trivial_inference.key_value_types(input_type)
-      return typehints.Iterable[typehints.KV[
-          key_type, typehints.WindowedValue[value_type]]]  # type: ignore[misc]
+      return typehints.KV[
+          key_type, typehints.WindowedValue[value_type]]  # type: ignore[misc]
+
+  def get_windowing(self, inputs):
+    # Switch to the continuation trigger associated with the current trigger.
+    windowing = inputs[0].windowing
+    triggerfn = windowing.triggerfn.get_continuation_trigger()
+    return Windowing(
+        windowfn=windowing.windowfn,
+        triggerfn=triggerfn,
+        accumulation_mode=windowing.accumulation_mode,
+        timestamp_combiner=windowing.timestamp_combiner,
+        allowed_lateness=windowing.allowed_lateness,
+        environment_id=windowing.environment_id)
 
   def expand(self, pcoll):
+    replace_with_gbek_secret = (
+        pcoll.pipeline._options.view_as(SetupOptions).gbek)
+    if replace_with_gbek_secret is not None and not self._inside_gbek:
+      self._replaced_by_gbek = True
+      from apache_beam.transforms.util import GroupByEncryptedKey
+      from apache_beam.transforms.util import Secret
+
+      secret = Secret.parse_secret_option(
+          replace_with_gbek_secret, pcoll.pipeline._options)
+      return (pcoll | "Group by encrypted key" >> GroupByEncryptedKey(secret))
+
     from apache_beam.transforms.trigger import DataLossReason
     from apache_beam.transforms.trigger import DefaultTrigger
     windowing = pcoll.windowing
@@ -2613,7 +3547,11 @@ class GroupByKey(PTransform):
     return typehints.KV[key_type, typehints.Iterable[value_type]]
 
   def to_runner_api_parameter(self, unused_context):
-    # type: (PipelineContext) -> typing.Tuple[str, None]
+    # type: (PipelineContext) -> tuple[str, typing.Optional[typing.Union[message.Message, bytes, str]]]
+    # if we're containing a GroupByEncryptedKey, don't allow runners to
+    # recognize this transform as a GBEK so that it doesn't get replaced.
+    if self._replaced_by_gbek:
+      return super().to_runner_api_parameter(unused_context)
     return common_urns.primitives.GROUP_BY_KEY.urn, None
 
   @staticmethod
@@ -2662,7 +3600,7 @@ class GroupBy(PTransform):
       self,
       *fields,  # type: typing.Union[str, typing.Callable]
       **kwargs  # type: typing.Union[str, typing.Callable]
-    ):
+  ):
     if len(fields) == 1 and not kwargs:
       self._force_tuple_keys = False
       name = fields[0] if isinstance(fields[0], str) else 'key'
@@ -2685,7 +3623,7 @@ class GroupBy(PTransform):
       field,  # type: typing.Union[str, typing.Callable]
       combine_fn,  # type: typing.Union[typing.Callable, CombineFn]
       dest,  # type: str
-    ):
+  ):
     """Returns a grouping operation that also aggregates grouped values.
 
     Args:
@@ -2717,22 +3655,30 @@ class GroupBy(PTransform):
       key_exprs = [expr for _, expr in self._key_fields]
       return lambda element: key_type(*(expr(element) for expr in key_exprs))
 
-  def _key_type_hint(self):
+  def _key_type_hint(self, input_type):
     if not self._force_tuple_keys and len(self._key_fields) == 1:
-      return typing.Any
+      expr = self._key_fields[0][1]
+      return trivial_inference.infer_return_type(expr, [input_type])
     else:
-      return _dynamic_named_tuple(
-          'Key', tuple(name for name, _ in self._key_fields))
+      return row_type.RowTypeConstraint.from_fields([
+          (name, trivial_inference.infer_return_type(expr, [input_type]))
+          for (name, expr) in self._key_fields
+      ])
 
   def default_label(self):
     return 'GroupBy(%s)' % ', '.join(name for name, _ in self._key_fields)
 
   def expand(self, pcoll):
     input_type = pcoll.element_type or typing.Any
+    # Map(lambda) produces a label formatted like this, but it cannot be
+    # changed without breaking update compat. Here, we pin to the transform
+    # name used in the 2.68 release to avoid breaking changes when the line
+    # number changes. Context: https://github.com/apache/beam/pull/36381
     return (
         pcoll
-        | Map(lambda x: (self._key_func()(x), x)).with_output_types(
-            typehints.Tuple[self._key_type_hint(), input_type])
+        | "Map(<lambda at core.py:3503>)" >>
+        Map(lambda x: (self._key_func()(x), x)).with_output_types(
+            typehints.Tuple[self._key_type_hint(input_type), input_type])
         | GroupByKey())
 
 
@@ -2750,7 +3696,7 @@ def _dynamic_named_tuple(type_name, field_names):
         type_name, field_names)
     # typing: can't override a method. also, self type is unknown and can't
     # be cast to tuple
-    result.__reduce__ = lambda self: (  # type: ignore[assignment]
+    result.__reduce__ = lambda self: (  # type: ignore[method-assign]
         _unpickle_dynamic_named_tuple, (type_name, field_names, tuple(self)))  # type: ignore[arg-type]
   return result
 
@@ -2770,7 +3716,7 @@ class _GroupAndAggregate(PTransform):
       field,  # type: typing.Union[str, typing.Callable]
       combine_fn,  # type: typing.Union[typing.Callable, CombineFn]
       dest,  # type: str
-      ):
+  ):
     field = _expr_to_callable(field, 0)
     return _GroupAndAggregate(
         self._grouping, list(self._aggregations) + [(field, combine_fn, dest)])
@@ -2783,18 +3729,23 @@ class _GroupAndAggregate(PTransform):
     result_fields = tuple(name
                           for name, _ in self._grouping._key_fields) + tuple(
                               dest for _, __, dest in self._aggregations)
-    key_type_hint = self._grouping.force_tuple_keys(True)._key_type_hint()
+    key_type_hint = self._grouping.force_tuple_keys(True)._key_type_hint(
+        pcoll.element_type)
 
+    # Map(lambda) produces a label formatted like this, but it cannot be
+    # changed without breaking update compat. Here, we pin to the transform
+    # name used in the 2.68 release to avoid breaking changes when the line
+    # number changes. Context: https://github.com/apache/beam/pull/36381
     return (
         pcoll
-        | Map(lambda x: (key_func(x), value_func(x))).with_output_types(
+        | "Map(<lambda at core.py:3560>)" >>
+        Map(lambda x: (key_func(x), value_func(x))).with_output_types(
             typehints.Tuple[key_type_hint, typing.Any])
         | CombinePerKey(
             TupleCombineFn(
                 *[combine_fn for _, combine_fn, __ in self._aggregations]))
-        | MapTuple(
-            lambda key,
-            value: _dynamic_named_tuple('Result', result_fields)
+        | "MapTuple(<lambda at core.py:3565>)" >> MapTuple(
+            lambda key, value: _dynamic_named_tuple('Result', result_fields)
             (*(key + value))))
 
 
@@ -2809,31 +3760,52 @@ class Select(PTransform):
 
   is the same as
 
-      pcoll | beam.Map(lambda x: beam.Row(a=x.a, b=foo(x)))
+      pcoll | 'label' >> beam.Map(lambda x: beam.Row(a=x.a, b=foo(x)))
   """
-  def __init__(self,
-               *args,  # type: typing.Union[str, typing.Callable]
-               **kwargs  # type: typing.Union[str, typing.Callable]
-               ):
+  def __init__(
+      self,
+      *args,  # type: typing.Union[str, typing.Callable]
+      **kwargs  # type: typing.Union[str, typing.Callable]
+  ):
     self._fields = [(
         expr if isinstance(expr, str) else 'arg%02d' % ix,
         _expr_to_callable(expr, ix)) for (ix, expr) in enumerate(args)
                     ] + [(name, _expr_to_callable(expr, name))
                          for (name, expr) in kwargs.items()]
+    self._exception_handling_args = None
+
+  def with_exception_handling(self, **kwargs):
+    self._exception_handling_args = kwargs
+    return self
 
   def default_label(self):
     return 'ToRows(%s)' % ', '.join(name for name, _ in self._fields)
 
   def expand(self, pcoll):
-    return pcoll | Map(
-        lambda x: pvalue.Row(**{name: expr(x)
-                                for name, expr in self._fields}))
+    # Map(lambda) produces a label formatted like this, but it cannot be
+    # changed without breaking update compat. Here, we pin to the transform
+    # name used in the 2.68 release to avoid breaking changes when the line
+    # number changes. Context: https://github.com/apache/beam/pull/36381
+    return (
+        _MaybePValueWithErrors(pcoll, self._exception_handling_args)
+        | "Map(<lambda at core.py:3605>)" >> Map(
+            lambda x: pvalue.Row(
+                **{
+                    name: expr(x)
+                    for name, expr in self._fields
+                }))).as_result()
 
   def infer_output_type(self, input_type):
-    from apache_beam.typehints import row_type
-    return row_type.RowTypeConstraint([
-        (name, trivial_inference.infer_return_type(expr, [input_type]))
-        for (name, expr) in self._fields
+    def extract_return_type(expr):
+      expr_hints = get_type_hints(expr)
+      if (expr_hints and expr_hints.has_simple_output_type() and
+          expr_hints.simple_output_type(None) != typehints.Any):
+        return expr_hints.simple_output_type(None)
+      else:
+        return trivial_inference.infer_return_type(expr, [input_type])
+
+    return row_type.RowTypeConstraint.from_fields([
+        (name, extract_return_type(expr)) for (name, expr) in self._fields
     ])
 
 
@@ -2857,7 +3829,13 @@ class Partition(PTransformWithSideInputs):
     """A DoFn that applies a PartitionFn."""
     def process(self, element, partitionfn, n, *args, **kwargs):
       partition = partitionfn.partition_for(element, n, *args, **kwargs)
-      if not 0 <= partition < n:
+      import numbers
+      if isinstance(partition,
+                    bool) or not isinstance(partition, numbers.Integral):
+        raise ValueError(
+            f"PartitionFn yielded a '{type(partition).__name__}' "
+            "when it should only yield integers")
+      if not 0 <= int(partition) < n:
         raise ValueError(
             'PartitionFn specified out-of-bounds partition index: '
             '%d not in [0, %d)' % (partition, n))
@@ -2877,14 +3855,15 @@ class Partition(PTransformWithSideInputs):
 
 
 class Windowing(object):
-  def __init__(self,
-               windowfn,  # type: WindowFn
-               triggerfn=None,  # type: typing.Optional[TriggerFn]
-               accumulation_mode=None,  # type: typing.Optional[beam_runner_api_pb2.AccumulationMode.Enum]
-               timestamp_combiner=None,  # type: typing.Optional[beam_runner_api_pb2.OutputTime.Enum]
-               allowed_lateness=0, # type: typing.Union[int, float]
-               environment_id=None, # type: typing.Optional[str]
-               ):
+  def __init__(
+      self,
+      windowfn,  # type: WindowFn
+      triggerfn=None,  # type: typing.Optional[TriggerFn]
+      accumulation_mode=None,  # type: typing.Optional[beam_runner_api_pb2.AccumulationMode.Enum.ValueType]
+      timestamp_combiner=None,  # type: typing.Optional[beam_runner_api_pb2.OutputTime.Enum.ValueType]
+      allowed_lateness=0,  # type: typing.Union[int, float]
+      environment_id=None,  # type: typing.Optional[str]
+  ):
     """Class representing the window strategy.
 
     Args:
@@ -2902,7 +3881,9 @@ class Windowing(object):
     """
     global AccumulationMode, DefaultTrigger  # pylint: disable=global-variable-not-assigned
     # pylint: disable=wrong-import-order, wrong-import-position
-    from apache_beam.transforms.trigger import AccumulationMode, DefaultTrigger
+    from apache_beam.transforms.trigger import AccumulationMode
+    from apache_beam.transforms.trigger import DefaultTrigger
+
     # pylint: enable=wrong-import-order, wrong-import-position
     if triggerfn is None:
       triggerfn = DefaultTrigger()
@@ -2979,7 +3960,7 @@ class Windowing(object):
         output_time=self.timestamp_combiner,
         # TODO(robertwb): Support EMIT_IF_NONEMPTY
         closing_behavior=beam_runner_api_pb2.ClosingBehavior.EMIT_ALWAYS,
-        OnTimeBehavior=beam_runner_api_pb2.OnTimeBehavior.FIRE_ALWAYS,
+        on_time_behavior=beam_runner_api_pb2.OnTimeBehavior.FIRE_ALWAYS,
         allowed_lateness=self.allowed_lateness.micros // 1000,
         environment_id=environment_id)
 
@@ -3018,6 +3999,9 @@ class WindowInto(ParDo):
           timestamp, element=element, window=window)
       new_windows = self.windowing.windowfn.assign(context)
       yield WindowedValue(element, context.timestamp, new_windows)
+
+    def infer_output_type(self, input_type):
+      return input_type
 
   def __init__(
       self,
@@ -3129,11 +4113,28 @@ class Flatten(PTransform):
       raise ValueError(
           'Input to Flatten must be an iterable. '
           'Got a value of type %s instead.' % type(pvalueish))
+
+    # Spot check to see if any of the items are iterables of PCollections
+    # and raise an error if so. This is always a user-error
+    for idx, item in enumerate(pvalueish):
+      if isinstance(item, (list, tuple)) and any(
+          isinstance(sub_item, pvalue.PCollection) for sub_item in item):
+        raise TypeError(
+            'Inputs to Flatten cannot include an iterable of PCollections. '
+            f'(input at index {idx}: "{item}")')
     return pvalueish, pvalueish
 
   def expand(self, pcolls):
+    windowing = self.get_windowing(pcolls)
     for pcoll in pcolls:
       self._check_pcollection(pcoll)
+      if pcoll.windowing != windowing:
+        _LOGGER.warning(
+            'All input pcollections must have the same window. Windowing for '
+            'flatten set to %s, windowing of pcoll %s set to %s',
+            windowing,
+            pcoll,
+            pcoll.windowing)
     is_bounded = all(pcoll.is_bounded for pcoll in pcolls)
     return pvalue.PCollection(self.pipeline, is_bounded=is_bounded)
 
@@ -3152,6 +4153,33 @@ class Flatten(PTransform):
 
 PTransform.register_urn(
     common_urns.primitives.FLATTEN.urn, None, Flatten.from_runner_api_parameter)
+
+
+class FlattenWith(PTransform):
+  """A PTransform that flattens its input with other PCollections.
+
+  This is equivalent to creating a tuple containing both the input and the
+  other PCollection(s), but has the advantage that it can be more easily used
+  inline.
+
+  Root PTransforms can be passed as well as PCollections, in which case their
+  outputs will be flattened.
+  """
+  def __init__(self, *others):
+    self._others = others
+
+  def expand(self, pcoll):
+    pcolls = [pcoll]
+    for other in self._others:
+      if isinstance(other, pvalue.PCollection):
+        pcolls.append(other)
+      elif isinstance(other, PTransform):
+        pcolls.append(pcoll.pipeline | other)
+      else:
+        raise TypeError(
+            'FlattenWith only takes other PCollections and PTransforms, '
+            f'got {other}')
+    return tuple(pcolls) | Flatten()
 
 
 class Create(PTransform):
@@ -3184,15 +4212,48 @@ class Create(PTransform):
   def to_runner_api_parameter(self, context):
     # type: (PipelineContext) -> typing.Tuple[str, bytes]
     # Required as this is identified by type in PTransformOverrides.
-    # TODO(BEAM-3812): Use an actual URN here.
+    # TODO(https://github.com/apache/beam/issues/18713): Use an actual URN
+    # here.
     return self.to_runner_api_pickled(context)
 
   def infer_output_type(self, unused_input_type):
     if not self.values:
       return typehints.Any
-    return typehints.Union[[
-        trivial_inference.instance_to_type(v) for v in self.values
-    ]]
+
+    # No field data - just use default Union.
+    if not hasattr(self.values[0], 'as_dict'):
+      return typehints.Union[[
+          trivial_inference.instance_to_type(v) for v in self.values
+      ]]
+
+    first_fields = self.values[0].as_dict().keys()
+
+    # Save field types for each field
+    field_types_by_field = defaultdict(set)
+    for row in self.values:
+      row_dict = row.as_dict()
+      for field in first_fields:
+        field_types_by_field[field].add(
+            trivial_inference.instance_to_type(row_dict.get(field)))
+
+    # Determine the appropriate type for each field
+    final_fields = []
+    for field in first_fields:
+      field_types = field_types_by_field[field]
+      non_none_types = {t for t in field_types if t is not type(None)}
+
+      if len(non_none_types) > 1:
+        final_type = typehints.Union[tuple(non_none_types)]
+      elif len(non_none_types) == 1 and len(field_types) == 1:
+        final_type = non_none_types.pop()
+      elif len(non_none_types) == 1 and len(field_types) == 2:
+        final_type = typehints.Optional[non_none_types.pop()]
+      else:
+        raise TypeError("No types found for field %s", field)
+
+      final_fields.append((field, final_type))
+
+    return row_type.RowTypeConstraint.from_fields(final_fields)
 
   def get_output_type(self):
     return (
@@ -3216,10 +4277,15 @@ class Create(PTransform):
         else:
           return pcoll
 
+    # Map(lambda) produces a label formatted like this, but it cannot be
+    # changed without breaking update compat. Here, we pin to the transform
+    # name used in the 2.68 release to avoid breaking changes when the line
+    # number changes. Context: https://github.com/apache/beam/pull/36381
     return (
         pbegin
         | Impulse()
-        | FlatMap(lambda _: serialized_values).with_output_types(bytes)
+        | "FlatMap(<lambda at core.py:4094>)" >>
+        FlatMap(lambda _: serialized_values).with_output_types(bytes)
         | MaybeReshuffle().with_output_types(bytes)
         | Map(self._coder.decode).with_output_types(self.get_output_type()))
 
@@ -3269,3 +4335,28 @@ class Impulse(PTransform):
   def from_runner_api_parameter(
       unused_ptransform, unused_parameter, unused_context):
     return Impulse()
+
+
+def _strip_output_annotations(type_hint, strip_tagged_output=True):
+  # TODO(robertwb): These should be parameterized types that the
+  # type inferencer understands.
+  # Then we can replace them with the correct element types instead of
+  # using Any. Refer to typehints.WindowedValue when doing this.
+  annotations = [TimestampedValue, WindowedValue]
+  if strip_tagged_output:
+    annotations.append(pvalue.TaggedOutput)
+  annotations = tuple(annotations)
+
+  contains_annotation = False
+
+  def visitor(t, unused_args):
+    if t in annotations or (hasattr(t, '__name__') and
+                            t.__name__ == TimestampedValue.__name__):
+      raise StopIteration
+
+  try:
+    visit_inner_types(type_hint, visitor, [])
+  except StopIteration:
+    contains_annotation = True
+
+  return typehints.Any if contains_annotation else type_hint

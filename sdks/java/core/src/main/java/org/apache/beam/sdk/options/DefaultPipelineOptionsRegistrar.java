@@ -18,7 +18,8 @@
 package org.apache.beam.sdk.options;
 
 import com.google.auto.service.AutoService;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.sdk.lineage.LineageOptions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 
 /**
  * A {@link PipelineOptionsRegistrar} containing the {@link PipelineOptions} subclasses available by
@@ -35,6 +36,7 @@ public class DefaultPipelineOptionsRegistrar implements PipelineOptionsRegistrar
         .add(ExperimentalOptions.class)
         .add(SdkHarnessOptions.class)
         .add(PortablePipelineOptions.class)
+        .add(LineageOptions.class)
         .build();
   }
 }

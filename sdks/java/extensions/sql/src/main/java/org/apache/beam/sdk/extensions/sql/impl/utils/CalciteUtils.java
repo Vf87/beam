@@ -22,27 +22,33 @@ import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.Date;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.IntStream;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.schemas.Schema.TypeName;
 import org.apache.beam.sdk.schemas.logicaltypes.PassThroughLogicalType;
 import org.apache.beam.sdk.schemas.logicaltypes.SqlTypes;
+import org.apache.beam.sdk.schemas.logicaltypes.Timestamp;
 import org.apache.beam.sdk.util.Preconditions;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.BiMap;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.ImmutableBiMap;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.avatica.util.ByteString;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.type.RelDataType;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.type.RelDataTypeFactory;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.type.RelDataTypeField;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.SqlTypeNameSpec;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.avatica.util.ByteString;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataType;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataTypeField;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlTypeNameSpec;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.BiMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableBiMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.joda.time.Instant;
 import org.joda.time.base.AbstractInstant;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Utility methods for Calcite related operations. */
 public class CalciteUtils {
+  private static final Logger LOG = LoggerFactory.getLogger(CalciteUtils.class);
+
   private static final long UNLIMITED_ARRAY_SIZE = -1L;
 
   // SQL has schema types that do not directly correspond to Beam Schema types. We define
@@ -54,15 +60,6 @@ public class CalciteUtils {
 
     public TimeWithLocalTzType() {
       super(IDENTIFIER, FieldType.STRING, "", FieldType.DATETIME);
-    }
-  }
-
-  /** A LogicalType corresponding to CHAR. */
-  public static class CharType extends PassThroughLogicalType<String> {
-    public static final String IDENTIFIER = "SqlCharType";
-
-    public CharType() {
-      super(IDENTIFIER, FieldType.STRING, "", FieldType.STRING);
     }
   }
 
@@ -79,7 +76,8 @@ public class CalciteUtils {
       return logicalId.equals(SqlTypes.DATE.getIdentifier())
           || logicalId.equals(SqlTypes.TIME.getIdentifier())
           || logicalId.equals(TimeWithLocalTzType.IDENTIFIER)
-          || logicalId.equals(SqlTypes.DATETIME.getIdentifier());
+          || logicalId.equals(SqlTypes.DATETIME.getIdentifier())
+          || logicalId.equals(Timestamp.IDENTIFIER);
     }
     return false;
   }
@@ -90,10 +88,9 @@ public class CalciteUtils {
     }
 
     if (fieldType.getTypeName().isLogicalType()) {
-      Schema.LogicalType logicalType = fieldType.getLogicalType();
-      Preconditions.checkArgumentNotNull(logicalType);
-      String logicalId = logicalType.getIdentifier();
-      return logicalId.equals(CharType.IDENTIFIER);
+      Schema.LogicalType<?, ?> logicalType = fieldType.getLogicalType();
+      return logicalType instanceof PassThroughLogicalType
+          && logicalType.getBaseType().getTypeName() == TypeName.STRING;
     }
     return false;
   }
@@ -107,9 +104,10 @@ public class CalciteUtils {
   public static final FieldType DOUBLE = FieldType.DOUBLE;
   public static final FieldType DECIMAL = FieldType.DECIMAL;
   public static final FieldType BOOLEAN = FieldType.BOOLEAN;
+  // TODO(https://github.com/apache/beam/issues/24019) Support sql types with arguments
   public static final FieldType VARBINARY = FieldType.BYTES;
   public static final FieldType VARCHAR = FieldType.STRING;
-  public static final FieldType CHAR = FieldType.logicalType(new CharType());
+  public static final FieldType CHAR = FieldType.STRING;
   public static final FieldType DATE = FieldType.logicalType(SqlTypes.DATE);
   public static final FieldType NULLABLE_DATE =
       FieldType.logicalType(SqlTypes.DATE).withNullable(true);
@@ -118,6 +116,8 @@ public class CalciteUtils {
       FieldType.logicalType(SqlTypes.TIME).withNullable(true);
   public static final FieldType TIME_WITH_LOCAL_TZ =
       FieldType.logicalType(new TimeWithLocalTzType());
+  // TODO: Default SQL TIMESTAMP to Timestamp.MICROS (or equivalent) instead of FieldType.DATETIME
+  // once Beam SQL / Calcite can preserve microsecond precision end-to-end.
   public static final FieldType TIMESTAMP = FieldType.DATETIME;
   public static final FieldType NULLABLE_TIMESTAMP = FieldType.DATETIME.withNullable(true);
   public static final FieldType TIMESTAMP_WITH_LOCAL_TZ = FieldType.logicalType(SqlTypes.DATETIME);
@@ -136,7 +136,6 @@ public class CalciteUtils {
           .put(BOOLEAN, SqlTypeName.BOOLEAN)
           .put(VARBINARY, SqlTypeName.VARBINARY)
           .put(VARCHAR, SqlTypeName.VARCHAR)
-          .put(CHAR, SqlTypeName.CHAR)
           .put(DATE, SqlTypeName.DATE)
           .put(TIME, SqlTypeName.TIME)
           .put(TIME_WITH_LOCAL_TZ, SqlTypeName.TIME_WITH_LOCAL_TIME_ZONE)
@@ -154,6 +153,9 @@ public class CalciteUtils {
           .put(SqlTypeName.DOUBLE, DOUBLE)
           .put(SqlTypeName.DECIMAL, DECIMAL)
           .put(SqlTypeName.BOOLEAN, BOOLEAN)
+          // TODO(https://github.com/apache/beam/issues/24019) Support sql types with arguments
+          // Handle Calcite VARBINARY/BINARY/VARCHAR/CHAR with
+          // VariableBinary/FixedBinary/VariableString/FixedString logical types.
           .put(SqlTypeName.VARBINARY, VARBINARY)
           .put(SqlTypeName.BINARY, VARBINARY)
           .put(SqlTypeName.VARCHAR, VARCHAR)
@@ -171,6 +173,31 @@ public class CalciteUtils {
       ImmutableMap.of(
           FieldType.DATETIME, SqlTypeName.TIMESTAMP,
           FieldType.STRING, SqlTypeName.VARCHAR);
+
+  private static final Map<Class<?>, SqlTypeName> JAVA_TO_SQL_TYPE_MAPPING =
+      ImmutableMap.<Class<?>, SqlTypeName>builder()
+          .put(String.class, SqlTypeName.VARCHAR)
+          .put(Integer.class, SqlTypeName.INTEGER)
+          .put(int.class, SqlTypeName.INTEGER)
+          .put(Long.class, SqlTypeName.BIGINT)
+          .put(long.class, SqlTypeName.BIGINT)
+          .put(Double.class, SqlTypeName.DOUBLE)
+          .put(double.class, SqlTypeName.DOUBLE)
+          .put(Float.class, SqlTypeName.FLOAT)
+          .put(float.class, SqlTypeName.FLOAT)
+          .put(Short.class, SqlTypeName.SMALLINT)
+          .put(short.class, SqlTypeName.SMALLINT)
+          .put(Byte.class, SqlTypeName.TINYINT)
+          .put(byte.class, SqlTypeName.TINYINT)
+          .put(Boolean.class, SqlTypeName.BOOLEAN)
+          .put(boolean.class, SqlTypeName.BOOLEAN)
+          .build();
+
+  // Associating FieldType to generated RelDataType objects for Beam logical types. Used for
+  // recovering the original type in output schema after full Beam FieldType->Calcite Type->Beam
+  // FieldType trip
+  private static final Map<RelDataType, FieldType> LOGICAL_TYPE_REL_DATA_MAPPING =
+      new ConcurrentHashMap<>();
 
   /** Generate {@link Schema} from {@code RelDataType} which is used to create table. */
   public static Schema toSchema(RelDataType tableInfo) {
@@ -194,6 +221,25 @@ public class CalciteUtils {
           typeName = BEAM_TO_CALCITE_DEFAULT_MAPPING.get(type);
         }
         if (typeName == null) {
+          Schema.LogicalType<?, ?> logicalType = type.getLogicalType();
+          if (logicalType != null) {
+            if (logicalType instanceof PassThroughLogicalType) {
+              // for pass through logical type, just return its base type
+              return toSqlTypeName(logicalType.getBaseType());
+            } else if (Timestamp.IDENTIFIER.equals(logicalType.getIdentifier())) {
+              return SqlTypeName.TIMESTAMP;
+            } else if ("SqlCharType".equals(logicalType.getIdentifier())) {
+              LOG.warn(
+                  "SqlCharType is used in Schema. It was removed in Beam 2.44.0 and should be"
+                      + " replaced by FixedString logical type.");
+              return SqlTypeName.CHAR;
+            } else {
+              throw new IllegalArgumentException(
+                  String.format(
+                      "Cannot find a matching Calcite SqlTypeName for Beam logical type: %s",
+                      logicalType.getIdentifier()));
+            }
+          }
           throw new IllegalArgumentException(
               String.format("Cannot find a matching Calcite SqlTypeName for Beam type: %s", type));
         } else {
@@ -203,7 +249,11 @@ public class CalciteUtils {
   }
 
   public static FieldType toFieldType(SqlTypeNameSpec sqlTypeName) {
-    return toFieldType(SqlTypeName.get(sqlTypeName.getTypeName().getSimple()));
+    return toFieldType(
+        Preconditions.checkArgumentNotNull(
+            SqlTypeName.get(sqlTypeName.getTypeName().getSimple()),
+            "Failed to find Calcite type with name '%s'",
+            sqlTypeName.getTypeName().getSimple()));
   }
 
   public static FieldType toFieldType(SqlTypeName sqlTypeName) {
@@ -236,13 +286,25 @@ public class CalciteUtils {
   }
 
   public static FieldType toFieldType(RelDataType calciteType) {
+    if (LOGICAL_TYPE_REL_DATA_MAPPING.containsKey(calciteType)) {
+      return LOGICAL_TYPE_REL_DATA_MAPPING.get(calciteType);
+    }
     switch (calciteType.getSqlTypeName()) {
       case ARRAY:
       case MULTISET:
-        return FieldType.array(toFieldType(calciteType.getComponentType()));
+        return FieldType.array(
+            toFieldType(
+                Preconditions.checkArgumentNotNull(
+                    calciteType.getComponentType(),
+                    "Encountered MULTISET type with null component type")));
       case MAP:
         return FieldType.map(
-            toFieldType(calciteType.getKeyType()), toFieldType(calciteType.getValueType()));
+            toFieldType(
+                Preconditions.checkArgumentNotNull(
+                    calciteType.getKeyType(), "Encountered MAP type with null key type.")),
+            toFieldType(
+                Preconditions.checkArgumentNotNull(
+                    calciteType.getValueType(), "Encountered MAP type with null value type.")));
       case ROW:
         return FieldType.row(toSchema(calciteType));
 
@@ -288,6 +350,29 @@ public class CalciteUtils {
         Schema schema = fieldType.getRowSchema();
         Preconditions.checkArgumentNotNull(schema);
         return toCalciteRowType(schema, dataTypeFactory);
+      case LOGICAL_TYPE:
+        Schema.LogicalType<?, ?> logicalType = fieldType.getLogicalType();
+        RelDataType relDataType;
+        if (logicalType instanceof PassThroughLogicalType) {
+          relDataType =
+              toRelDataType(
+                  dataTypeFactory, logicalType.getBaseType().withNullable(fieldType.getNullable()));
+        } else {
+          relDataType = dataTypeFactory.createSqlType(toSqlTypeName(fieldType));
+        }
+        // For backward-compatibility, exclude logical types registered in
+        // CALCITE_TO_BEAM_TYPE_MAPPING,
+        // e.g., primitive types, date time types, etc.
+        SqlTypeName typeName = relDataType.getSqlTypeName();
+        if (typeName != null && !CALCITE_TO_BEAM_TYPE_MAPPING.containsKey(typeName)) {
+          // register both nullable and non-nullable variants.
+          boolean flipNullable = !relDataType.isNullable();
+          LOGICAL_TYPE_REL_DATA_MAPPING.put(relDataType, fieldType);
+          LOGICAL_TYPE_REL_DATA_MAPPING.put(
+              dataTypeFactory.createTypeWithNullability(relDataType, flipNullable),
+              fieldType.withNullable(flipNullable));
+        }
+        return relDataType;
       default:
         return dataTypeFactory.createSqlType(toSqlTypeName(fieldType));
     }
@@ -305,7 +390,9 @@ public class CalciteUtils {
    * SQL-Java type mapping, with specified Beam rules: <br>
    * 1. redirect {@link AbstractInstant} to {@link Date} so Calcite can recognize it. <br>
    * 2. For a list, the component type is needed to create a Sql array type. <br>
-   * 3. For a Map, the component type is needed to create a Sql map type.
+   * 3. For a Map, the component type is needed to create a Sql map type. <br>
+   * 4. For standard Java classes (String, Integer, etc.), map them to corresponding Calcite SQL
+   * type with appropriate nullability.
    *
    * @param type
    * @return Calcite RelDataType
@@ -335,6 +422,14 @@ public class CalciteUtils {
               + type
               + ". This is currently unsupported, use List instead "
               + "of Array.");
+    }
+    if (type instanceof Class) {
+      Class<?> clazz = (Class<?>) type;
+      SqlTypeName sqlTypeName = JAVA_TO_SQL_TYPE_MAPPING.get(clazz);
+      if (sqlTypeName != null) {
+        return typeFactory.createTypeWithNullability(
+            typeFactory.createSqlType(sqlTypeName), !clazz.isPrimitive());
+      }
     }
     return typeFactory.createJavaType((Class) type);
   }

@@ -17,15 +17,16 @@
  */
 package org.apache.beam.sdk.schemas.transforms;
 
+import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.Objects;
-import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.schemas.JavaFieldSchema;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.schemas.annotations.DefaultSchema;
-import org.apache.beam.sdk.schemas.utils.AvroUtils;
+import org.apache.beam.sdk.schemas.logicaltypes.SqlTypes;
+import org.apache.beam.sdk.testing.BeamParallelJunit4Runner;
 import org.apache.beam.sdk.testing.NeedsRunner;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
@@ -35,17 +36,16 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
 
 /** Tests for the {@link Convert} class. */
-@RunWith(JUnit4.class)
+@RunWith(BeamParallelJunit4Runner.class)
 @Category(UsesSchema.class)
 public class ConvertTest {
   @Rule public final transient TestPipeline pipeline = TestPipeline.create();
@@ -67,7 +67,7 @@ public class ConvertTest {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof POJO1)) {
         return false;
       }
       POJO1 pojo1 = (POJO1) o;
@@ -97,7 +97,7 @@ public class ConvertTest {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof POJO1Nested)) {
         return false;
       }
       POJO1Nested that = (POJO1Nested) o;
@@ -134,9 +134,6 @@ public class ConvertTest {
           .addValue(ImmutableMap.of("first", EXPECTED_ROW1_NESTED, "second", EXPECTED_ROW1_NESTED))
           .build();
 
-  private static final GenericRecord EXPECTED_GENERICRECORD1 =
-      AvroUtils.toGenericRecord(EXPECTED_ROW1, AvroUtils.toAvroSchema(EXPECTED_SCHEMA1));
-
   /** Test outer POJO. Different but equivalent schema. * */
   @DefaultSchema(JavaFieldSchema.class)
   public static class POJO2 {
@@ -154,7 +151,7 @@ public class ConvertTest {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof POJO2)) {
         return false;
       }
       POJO2 pojo2 = (POJO2) o;
@@ -184,7 +181,7 @@ public class ConvertTest {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof POJO2Nested)) {
         return false;
       }
       POJO2Nested that = (POJO2Nested) o;
@@ -213,6 +210,103 @@ public class ConvertTest {
             .apply(Create.of(EXPECTED_ROW1).withRowSchema(EXPECTED_SCHEMA1))
             .apply(Convert.fromRows(POJO1.class));
     PAssert.that(pojos).containsInAnyOrder(new POJO1());
+    pipeline.run();
+  }
+
+  /** Reproducer for #37524: a Row with a logical-type DateTime field should convert to a POJO. */
+  @DefaultSchema(JavaFieldSchema.class)
+  public static class TimePOJO {
+    public LocalDateTime time;
+
+    public TimePOJO() {}
+
+    public TimePOJO(LocalDateTime time) {
+      this.time = time;
+    }
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof TimePOJO)) {
+        return false;
+      }
+      TimePOJO that = (TimePOJO) o;
+      return Objects.equals(time, that.time);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(time);
+    }
+  }
+
+  @Test
+  @Category(NeedsRunner.class)
+  public void testFromRowsWithLogicalTypeDateTime() {
+    Schema icebergStyleSchema =
+        Schema.builder().addLogicalTypeField("time", SqlTypes.DATETIME).build();
+    LocalDateTime expected = LocalDateTime.of(2024, 1, 15, 10, 30, 0);
+    Row inputRow = Row.withSchema(icebergStyleSchema).addValue(expected).build();
+
+    PCollection<TimePOJO> pojos =
+        pipeline
+            .apply(Create.of(inputRow).withRowSchema(icebergStyleSchema))
+            .apply(Convert.fromRows(TimePOJO.class));
+
+    PAssert.that(pojos).containsInAnyOrder(new TimePOJO(expected));
+    pipeline.run();
+  }
+
+  /** POJO mixing a logical-type field with a primitive field. */
+  @DefaultSchema(JavaFieldSchema.class)
+  public static class MixedTimePOJO {
+    public LocalDateTime time;
+    public String name;
+
+    public MixedTimePOJO() {}
+
+    public MixedTimePOJO(LocalDateTime time, String name) {
+      this.time = time;
+      this.name = name;
+    }
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof MixedTimePOJO)) {
+        return false;
+      }
+      MixedTimePOJO that = (MixedTimePOJO) o;
+      return Objects.equals(time, that.time) && Objects.equals(name, that.name);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(time, name);
+    }
+  }
+
+  @Test
+  @Category(NeedsRunner.class)
+  public void testFromRowsWithMixedLogicalAndPrimitiveTypes() {
+    Schema mixedSchema =
+        Schema.builder()
+            .addLogicalTypeField("time", SqlTypes.DATETIME)
+            .addStringField("name")
+            .build();
+    LocalDateTime expectedTime = LocalDateTime.of(2024, 1, 15, 10, 30, 0);
+    Row inputRow = Row.withSchema(mixedSchema).addValues(expectedTime, "hello").build();
+
+    PCollection<MixedTimePOJO> pojos =
+        pipeline
+            .apply(Create.of(inputRow).withRowSchema(mixedSchema))
+            .apply(Convert.fromRows(MixedTimePOJO.class));
+
+    PAssert.that(pojos).containsInAnyOrder(new MixedTimePOJO(expectedTime, "hello"));
     pipeline.run();
   }
 
@@ -246,15 +340,6 @@ public class ConvertTest {
             .apply(Select.fieldNames("field2"))
             .apply(Convert.to(TypeDescriptors.longs()));
     PAssert.that(longs).containsInAnyOrder((Long) EXPECTED_ROW1.getValue("field2"));
-    pipeline.run();
-  }
-
-  @Test
-  @Category(NeedsRunner.class)
-  public void testToGenericRecords() {
-    PCollection<GenericRecord> records =
-        pipeline.apply(Create.of(new POJO1())).apply(Convert.to(GenericRecord.class));
-    PAssert.that(records).containsInAnyOrder(EXPECTED_GENERICRECORD1);
     pipeline.run();
   }
 }

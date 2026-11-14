@@ -17,65 +17,121 @@
  */
 package org.apache.beam.sdk.io.gcp.pubsub;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
-
 import com.google.auto.value.AutoValue;
 import java.util.Map;
 import org.checkerframework.checker.nullness.qual.Nullable;
+import org.checkerframework.dataflow.qual.Pure;
 
 /**
  * Class representing a Pub/Sub message. Each message contains a single message payload, a map of
- * attached attributes, and a message id.
+ * attached attributes, a message id and an ordering key.
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class PubsubMessage {
   @AutoValue
   abstract static class Impl {
+    @Pure
+    abstract @Nullable String getTopic();
+
+    @Pure
     @SuppressWarnings("mutable")
     abstract byte[] getPayload();
 
+    @Pure
     abstract @Nullable Map<String, String> getAttributeMap();
 
+    @Pure
     abstract @Nullable String getMessageId();
 
+    @Pure
+    abstract @Nullable String getOrderingKey();
+
     static Impl create(
-        byte[] payload, @Nullable Map<String, String> attributes, @Nullable String messageId) {
-      return new AutoValue_PubsubMessage_Impl(payload, attributes, messageId);
+        @Nullable String topic,
+        byte[] payload,
+        @Nullable Map<String, String> attributes,
+        @Nullable String messageId,
+        @Nullable String orderingKey) {
+      return new AutoValue_PubsubMessage_Impl(topic, payload, attributes, messageId, orderingKey);
     }
   }
 
   private Impl impl;
 
   public PubsubMessage(byte[] payload, @Nullable Map<String, String> attributes) {
-    this(payload, attributes, null);
+    this(payload, attributes, null, null);
   }
 
   public PubsubMessage(
       byte[] payload, @Nullable Map<String, String> attributes, @Nullable String messageId) {
-    impl = Impl.create(payload, attributes, messageId);
+    impl = Impl.create(null, payload, attributes, messageId, null);
+  }
+
+  public PubsubMessage(
+      byte[] payload,
+      @Nullable Map<String, String> attributes,
+      @Nullable String messageId,
+      @Nullable String orderingKey) {
+    impl = Impl.create(null, payload, attributes, messageId, orderingKey);
+  }
+
+  private PubsubMessage(Impl impl) {
+    this.impl = impl;
+  }
+
+  public PubsubMessage withTopic(String topic) {
+    return new PubsubMessage(
+        Impl.create(
+            topic,
+            impl.getPayload(),
+            impl.getAttributeMap(),
+            impl.getMessageId(),
+            impl.getOrderingKey()));
+  }
+
+  @Pure
+  public @Nullable String getTopic() {
+    return impl.getTopic();
   }
 
   /** Returns the main PubSub message. */
+  @Pure
   public byte[] getPayload() {
     return impl.getPayload();
   }
 
   /** Returns the given attribute value. If not such attribute exists, returns null. */
+  @Pure
   public @Nullable String getAttribute(String attribute) {
-    checkNotNull(attribute, "attribute");
-    return impl.getAttributeMap().get(attribute);
+    Map<String, String> attributeMap = impl.getAttributeMap();
+    return attributeMap == null ? null : attributeMap.get(attribute);
   }
 
   /** Returns the full map of attributes. This is an unmodifiable map. */
+  @Pure
   public @Nullable Map<String, String> getAttributeMap() {
     return impl.getAttributeMap();
   }
 
   /** Returns the messageId of the message populated by Cloud Pub/Sub. */
+  @Pure
   public @Nullable String getMessageId() {
     return impl.getMessageId();
+  }
+
+  public PubsubMessage withOrderingKey(@Nullable String orderingKey) {
+    return new PubsubMessage(
+        Impl.create(
+            impl.getTopic(),
+            impl.getPayload(),
+            impl.getAttributeMap(),
+            impl.getMessageId(),
+            orderingKey));
+  }
+
+  /** Returns the ordering key of the message. */
+  @Pure
+  public @Nullable String getOrderingKey() {
+    return impl.getOrderingKey();
   }
 
   @Override
@@ -84,7 +140,7 @@ public class PubsubMessage {
   }
 
   @Override
-  public boolean equals(Object other) {
+  public boolean equals(@Nullable Object other) {
     if (!(other instanceof PubsubMessage)) {
       return false;
     }

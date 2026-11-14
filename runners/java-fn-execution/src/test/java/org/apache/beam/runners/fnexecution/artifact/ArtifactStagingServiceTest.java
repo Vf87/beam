@@ -18,9 +18,11 @@
 package org.apache.beam.runners.fnexecution.artifact;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
-import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -29,20 +31,21 @@ import org.apache.beam.model.jobmanagement.v1.ArtifactApi;
 import org.apache.beam.model.jobmanagement.v1.ArtifactRetrievalServiceGrpc;
 import org.apache.beam.model.jobmanagement.v1.ArtifactStagingServiceGrpc;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.ByteString;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.ManagedChannel;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.inprocess.InProcessChannelBuilder;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.inprocess.InProcessServerBuilder;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.StreamObserver;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.testing.GrpcCleanupRule;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.ManagedChannel;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.inprocess.InProcessChannelBuilder;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.inprocess.InProcessServerBuilder;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.testing.GrpcCleanupRule;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.junit.rules.Timeout;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
@@ -56,6 +59,7 @@ public class ArtifactStagingServiceTest {
   private Path stagingDir;
   @Rule public TemporaryFolder tempFolder = new TemporaryFolder();
   @Rule public final GrpcCleanupRule grpcCleanup = new GrpcCleanupRule();
+  @Rule public transient Timeout globalTimeout = Timeout.seconds(600);
 
   @Before
   public void setUp() throws Exception {
@@ -134,6 +138,22 @@ public class ArtifactStagingServiceTest {
     }
   }
 
+  /** Streams each artifact one byte per chunk, to exercise the service's chunk buffering. */
+  private static class OneBytePerChunkArtifactRetrievalService
+      extends FakeArtifactRetrievalService {
+    @Override
+    public void getArtifact(
+        ArtifactApi.GetArtifactRequest request,
+        StreamObserver<ArtifactApi.GetArtifactResponse> responseObserver) {
+      ByteString data = request.getArtifact().getTypePayload();
+      for (int i = 0; i < data.size(); i++) {
+        responseObserver.onNext(
+            ArtifactApi.GetArtifactResponse.newBuilder().setData(data.substring(i, i + 1)).build());
+      }
+      responseObserver.onCompleted();
+    }
+  }
+
   private String getArtifact(RunnerApi.ArtifactInformation artifact) {
     ByteString all = ByteString.EMPTY;
     Iterator<ArtifactApi.GetArtifactResponse> response =
@@ -145,6 +165,7 @@ public class ArtifactStagingServiceTest {
     return all.toStringUtf8();
   }
 
+  @SuppressWarnings("InlineMeInliner") // inline `Strings.repeat()` - Java 11+ API only
   @Test
   public void testStageArtifacts() throws InterruptedException, ExecutionException {
     List<String> contentsList =
@@ -164,8 +185,98 @@ public class ArtifactStagingServiceTest {
     checkArtifacts(contentsList, staged.get("env2"));
   }
 
+  @Test
+  public void testStageArtifactsWithInvalidFilenameCharacters()
+      throws InterruptedException, ExecutionException {
+    String environment = "0:ref_Environment_default";
+    List<String> contentsList = ImmutableList.of("artifact-content");
+
+    stagingService.registerJob(
+        "stagingToken",
+        ImmutableMap.of(
+            environment,
+            Lists.transform(contentsList, FakeArtifactRetrievalService::resolvedArtifact)));
+
+    ArtifactStagingService.offer(new FakeArtifactRetrievalService(), stagingStub, "stagingToken");
+
+    Map<String, List<RunnerApi.ArtifactInformation>> staged =
+        stagingService.getStagedArtifacts("stagingToken");
+
+    assertEquals(1, staged.size());
+    checkArtifacts(contentsList, staged.get(environment));
+  }
+
+  @Test
+  public void testStageFileArtifactWithAbsolutePath() throws Exception {
+    java.io.File source = tempFolder.newFile("real-artifact.bin");
+    java.nio.file.Files.write(
+        source.toPath(), "payload".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    RunnerApi.ArtifactInformation fileArtifact =
+        RunnerApi.ArtifactInformation.newBuilder()
+            .setTypeUrn(ArtifactRetrievalService.FILE_ARTIFACT_URN)
+            .setTypePayload(
+                RunnerApi.ArtifactFilePayload.newBuilder()
+                    .setPath(source.getAbsolutePath())
+                    .build()
+                    .toByteString())
+            .setRoleUrn("beam:artifact:role:pip_requirements_file:v1")
+            .build();
+    stagingService.registerJob("fileToken", ImmutableMap.of("env", ImmutableList.of(fileArtifact)));
+    ArtifactStagingService.offer(retrievalService, stagingStub, "fileToken");
+    assertEquals(1, stagingService.getStagedArtifacts("fileToken").size());
+  }
+
+  @SuppressWarnings("InlineMeInliner") // inline `Strings.repeat()` - Java 11+ API only
+  @Test(timeout = 60_000)
+  public void testDestinationFailureFailsOfferInsteadOfHanging() throws Exception {
+    // Resolving the destination of a staged artifact can throw an unchecked exception, e.g.
+    // InvalidPathException on Windows where the generated filename may contain characters that
+    // are illegal in paths (https://github.com/apache/beam/issues/39364). This must fail the
+    // offering client instead of stalling the transfer forever.
+    ArtifactStagingService failingStagingService =
+        new ArtifactStagingService(
+            new ArtifactStagingService.ArtifactDestinationProvider() {
+              @Override
+              public ArtifactStagingService.ArtifactDestination getDestination(
+                  String stagingToken, String name) {
+                throw new InvalidPathException(name, "Illegal char simulated");
+              }
+
+              @Override
+              public void removeStagedArtifacts(String stagingToken) {}
+            });
+    grpcCleanup.register(
+        InProcessServerBuilder.forName("failing-server")
+            .directExecutor()
+            .addService(failingStagingService)
+            .build()
+            .start());
+    ManagedChannel failingChannel =
+        grpcCleanup.register(InProcessChannelBuilder.forName("failing-server").build());
+    ArtifactStagingServiceGrpc.ArtifactStagingServiceStub failingStub =
+        ArtifactStagingServiceGrpc.newStub(failingChannel);
+
+    // More chunks than the service buffers per artifact, so staging cannot run to completion
+    // before the destination failure is observed.
+    String contents = Strings.repeat("x", 300);
+    failingStagingService.registerJob(
+        "failingToken",
+        ImmutableMap.of(
+            "env1", ImmutableList.of(FakeArtifactRetrievalService.resolvedArtifact(contents))));
+
+    ExecutionException exn =
+        assertThrows(
+            ExecutionException.class,
+            () ->
+                ArtifactStagingService.offer(
+                    new OneBytePerChunkArtifactRetrievalService(), failingStub, "failingToken"));
+    assertTrue(
+        "Expected the destination failure, got: " + exn.getCause(),
+        exn.getCause().getMessage().contains("Illegal char simulated"));
+  }
+
   private void checkArtifacts(
-      Collection<String> expectedContents, List<RunnerApi.ArtifactInformation> staged) {
+      List<String> expectedContents, List<RunnerApi.ArtifactInformation> staged) {
     assertEquals(
         expectedContents, Lists.transform(staged, RunnerApi.ArtifactInformation::getRoleUrn));
     assertEquals(expectedContents, Lists.transform(staged, this::getArtifact));

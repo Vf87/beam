@@ -17,7 +17,7 @@
  */
 package org.apache.beam.runners.dataflow;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.api.services.dataflow.Dataflow;
 import com.google.api.services.dataflow.Dataflow.Projects.Locations.Jobs;
@@ -36,7 +36,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Wrapper around the generated {@link Dataflow} client to provide common functionality. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class DataflowClient {
 
@@ -94,6 +94,14 @@ public class DataflowClient {
 
   /** Gets the Dataflow {@link Job} with the given {@code jobId}. */
   public Job getJob(@Nonnull String jobId) throws IOException {
+    return getJob(jobId, null);
+  }
+
+  /**
+   * Gets the Dataflow {@link Job} with the given {@code jobId} using the given {@code view} (one of
+   * the {@code JOB_VIEW_*} values), or the service default view if {@code null}.
+   */
+  public Job getJob(@Nonnull String jobId, @Nullable String view) throws IOException {
     checkNotNull(jobId, "jobId");
     Jobs.Get jobsGet =
         dataflow
@@ -101,6 +109,9 @@ public class DataflowClient {
             .locations()
             .jobs()
             .get(options.getProject(), options.getRegion(), jobId);
+    if (view != null) {
+      jobsGet.setView(view);
+    }
     return jobsGet.execute();
   }
 

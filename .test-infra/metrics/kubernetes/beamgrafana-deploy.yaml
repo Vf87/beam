@@ -46,6 +46,30 @@ spec:
           value: "true"
         - name: GF_AUTH_ANONYMOUS_ORG_NAME
           value: Beam
+        - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+          value: Viewer
+        - name: GF_AUTH_ANONYMOUS_HIDE_VERSION
+          value: "true"
+        - name: GF_EXPLORE_ENABLED
+          value: "false"
+        - name: GF_USERS_VIEWERS_CAN_EDIT
+          value: "false"
+        - name: GF_SNAPSHOTS_EXTERNAL_ENABLED
+          value: "false"
+        - name: GF_DATAPROXY_TIMEOUT
+          value: "30"
+        - name: GF_DATAPROXY_ROW_LIMIT
+          value: "10000"
+        - name: GF_SECURITY_COOKIE_SECURE
+          value: "true"
+        - name: GF_SECURITY_COOKIE_SAMESITE
+          value: strict
+        - name: GF_SECURITY_STRICT_TRANSPORT_SECURITY
+          value: "true"
+        - name: GF_ALERTING_ENABLED
+          value: "false"
+        - name: GF_UNIFIED_ALERTING_ENABLED
+          value: "true"
         - name: GF_INSTALL_PLUGINS
           value: marcusolsson-json-datasource
         - name: GF_SECURITY_ADMIN_PASSWORD
@@ -62,12 +86,12 @@ spec:
         - name: PSQL_DB_DBUSERNAME
           valueFrom:
             secretKeyRef:
-              name: beammetrics-psql-db-credentials
+              name: beammetrics-psql-db-credentials-ro
               key: username
         - name: PSQL_DB_DBPWD
           valueFrom:
             secretKeyRef:
-              name: beammetrics-psql-db-credentials
+              name: beammetrics-psql-db-credentials-ro
               key: password
         - name: INFLUX_DB_HOST
           value: influxdb
@@ -109,26 +133,6 @@ spec:
             readOnly: true
       - name: beammetricssyncjenkins
         image: gcr.io/apache-beam-testing/beammetricssyncjenkins
-        imagePullPolicy: Always
-        env:
-          - name: DB_HOST
-            value: 127.0.0.1
-          - name: DB_PORT
-            value: "5432"
-          - name: DB_DBNAME
-            value: beammetrics
-          - name: DB_DBUSERNAME
-            valueFrom:
-              secretKeyRef:
-                name: beammetrics-psql-db-credentials
-                key: username
-          - name: DB_DBPWD
-            valueFrom:
-              secretKeyRef:
-                name: beammetrics-psql-db-credentials
-                key: password
-      - name: beammetricssyncjira
-        image: gcr.io/apache-beam-testing/beammetricssyncjira
         imagePullPolicy: Always
         env:
           - name: DB_HOST

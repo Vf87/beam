@@ -19,7 +19,7 @@ package org.apache.beam.sdk.io.kudu;
 
 import static org.apache.beam.sdk.io.kudu.KuduTestUtils.COL_ID;
 import static org.apache.beam.sdk.io.kudu.KuduTestUtils.GenerateUpsert;
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
@@ -66,7 +66,6 @@ import org.slf4j.LoggerFactory;
  */
 @RunWith(JUnit4.class)
 public class KuduIOTest {
-  private static final Logger LOG = LoggerFactory.getLogger(KuduIOTest.class);
 
   @Rule public final TestPipeline writePipeline = TestPipeline.create();
   @Rule public final TestPipeline readPipeline = TestPipeline.create();
@@ -184,17 +183,20 @@ public class KuduIOTest {
     private transient int id = 0; // set on deserialization
 
     @Override
+    @SuppressWarnings("Slf4jFormatShouldBeConst")
     public void openSession() {
       LOG.debug(String.format(LOG_OPEN_SESSION, id));
     }
 
     @Override
+    @SuppressWarnings("Slf4jFormatShouldBeConst")
     public void write(Long entity) {
       LOG.debug(String.format(LOG_WRITE, entity));
       LOG.debug(String.format(LOG_WRITE_VALUE, entity));
     }
 
     @Override
+    @SuppressWarnings("Slf4jFormatShouldBeConst")
     public void closeSession() {
       LOG.debug(String.format(LOG_CLOSE_SESSION, id));
     }
@@ -235,6 +237,7 @@ public class KuduIOTest {
     }
 
     @Override
+    @SuppressWarnings("Slf4jFormatShouldBeConst")
     public boolean start() {
       //  simulate the deserialization of a tablet scanner
       if (source.serializedToken != null) {

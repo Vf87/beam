@@ -20,7 +20,7 @@ package org.apache.beam.runners.flink.translation.functions;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.Is.is;
 import static org.hamcrest.core.IsInstanceOf.instanceOf;
-import static org.mockito.Matchers.argThat;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -28,7 +28,7 @@ import static org.mockito.Mockito.when;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValue;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.OperatorStateStore;
@@ -39,14 +39,14 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
 import org.mockito.ArgumentMatcher;
-import org.mockito.Matchers;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** Tests for {@link ImpulseSourceFunction}. */
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class ImpulseSourceFunctionTest {
 
@@ -187,7 +187,7 @@ public class ImpulseSourceFunctionTest {
   private static <T> OperatorStateStore getMockOperatorState(ListState<T> listState)
       throws Exception {
     OperatorStateStore mock = Mockito.mock(OperatorStateStore.class);
-    when(mock.getListState(Matchers.any(ListStateDescriptor.class))).thenReturn(listState);
+    when(mock.getListState(ArgumentMatchers.any(ListStateDescriptor.class))).thenReturn(listState);
     return mock;
   }
 
@@ -201,8 +201,7 @@ public class ImpulseSourceFunctionTest {
 
     @Override
     public boolean matches(WindowedValue<byte[]> o) {
-      return o instanceof WindowedValue
-          && Arrays.equals((byte[]) ((WindowedValue) o).getValue(), new byte[] {});
+      return o != null && Arrays.equals(o.getValue(), new byte[] {});
     }
   }
 }

@@ -31,20 +31,33 @@ from apache_beam.runners.portability import spark_uber_jar_job_server
 # https://spark.apache.org/docs/latest/submitting-applications.html#master-urls
 LOCAL_MASTER_PATTERN = r'^local(\[.+\])?$'
 
+SPARK_JAR_JOB_SERVER_JVM_ARGS = [
+    '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED',
+    '--add-opens=java.base/java.nio=ALL-UNNAMED',
+    '--add-opens=java.base/java.util=ALL-UNNAMED',
+    '--add-opens=java.base/java.lang.invoke=ALL-UNNAMED',
+]
+
 # Since Java job servers are heavyweight external processes, cache them.
 # This applies only to SparkJarJobServer, not SparkUberJarJobServer.
 JOB_SERVER_CACHE = {}
 
 
 class SparkRunner(portable_runner.PortableRunner):
-  def run_pipeline(self, pipeline, options):
+  """A runner for launching jobs on Spark, automatically starting a local
+  spark master if one is not given.
+  """
+
+  # Inherits run_portable_pipeline from PortableRunner.
+
+  def default_environment(self, options):
     spark_options = options.view_as(pipeline_options.SparkRunnerOptions)
     portable_options = options.view_as(pipeline_options.PortableOptions)
     if (re.match(LOCAL_MASTER_PATTERN, spark_options.spark_master_url) and
         not portable_options.environment_type and
         not portable_options.output_executable_path):
       portable_options.environment_type = 'LOOPBACK'
-    return super().run_pipeline(pipeline, options)
+    return super().default_environment(options)
 
   def default_job_server(self, options):
     spark_options = options.view_as(pipeline_options.SparkRunnerOptions)
@@ -78,6 +91,10 @@ class SparkJarJobServer(job_server.JavaJarJobServer):
     self._jar = options.spark_job_server_jar
     self._master_url = options.spark_master_url
     self._spark_version = options.spark_version
+    self._jvm_properties = list(self._jvm_properties)
+    for arg in SPARK_JAR_JOB_SERVER_JVM_ARGS:
+      if arg not in self._jvm_properties:
+        self._jvm_properties.append(arg)
 
   def path_to_jar(self):
     if self._jar:
@@ -88,15 +105,13 @@ class SparkJarJobServer(job_server.JavaJarJobServer):
               'Unable to parse jar URL "%s". If using a full URL, make sure '
               'the scheme is specified. If using a local file path, make sure '
               'the file exists; you may have to first build the job server '
-              'using `./gradlew runners:spark:2:job-server:shadowJar`.' %
+              'using `./gradlew runners:spark:3:job-server:shadowJar`.' %
               self._jar)
       return self._jar
     else:
-      if self._spark_version == '3':
-        return self.path_to_beam_jar(':runners:spark:3:job-server:shadowJar')
-      return self.path_to_beam_jar(
-          ':runners:spark:2:job-server:shadowJar',
-          artifact_id='beam-runners-spark-job-server')
+      if self._spark_version == '2':
+        raise ValueError('Support for Spark 2 was dropped.')
+      return self.path_to_beam_jar(':runners:spark:3:job-server:shadowJar')
 
   def java_arguments(
       self, job_port, artifact_port, expansion_port, artifacts_dir):

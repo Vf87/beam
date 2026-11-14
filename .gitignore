@@ -2,6 +2,13 @@
 # is an input to 'maven-assembly-plugin' that generates source distribution.
 # This is typically in files named 'src.xml' throughout this repository.
 
+# Ignore IDE files
+.codex/
+.trae/
+.cursor/
+.windsurf/
+.claude/
+
 # Ignore any offline repositories the user may have created.
 **/offline-repository/**/*
 
@@ -16,6 +23,8 @@ sdks/**/vendor/**/*
 runners/**/vendor/**/*
 **/.gradletasknamecache
 **/generated/*
+/go.mod
+/go.sum
 
 # Ignore sources generated into the main tree
 **/src/main/generated/**
@@ -45,14 +54,16 @@ sdks/java/maven-archetypes/examples/src/main/resources/archetype-resources/sampl
 **/env/**/*
 **/.mypy_cache
 **/.dmypy.json
+**/.hypothesis
 sdks/python/**/*.c
 sdks/python/**/*.so
 sdks/python/**/*.egg
 sdks/python/LICENSE
 sdks/python/NOTICE
 sdks/python/README.md
-sdks/python/apache_beam/portability/api/*pb2*.*
-sdks/python/apache_beam/portability/api/*.yaml
+sdks/python/apache_beam/transforms/xlang/*
+sdks/python/apache_beam/portability/api/*
+sdks/python/apache_beam/yaml/docs/*
 sdks/python/nosetests*.xml
 sdks/python/pytest*.xml
 sdks/python/postcommit_requirements.txt
@@ -93,6 +104,12 @@ sdks/python/coverage.xml
 # Ignore Jupyter notebook checkpoints.
 **/.ipynb_checkpoints/**/*
 
+# Ignore python venv
+**/venv
+
+# pyenv
+.python-version
+
 # NOTE: if you modify this file, you probably need to modify the file set that
 # is an input to 'maven-assembly-plugin' that generates source distribution.
 # This is typically in files named 'src.xml' throughout this repository.
@@ -113,3 +130,35 @@ website/www/site/code_samples
 website/www/site/_config_branch_repo.toml
 website/www/yarn-error.log
 !website/www/site/content
+
+# Node
+**/node_modules
+
+# Dart/Flutter
+**/.dart_tool
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/.packages
+**/generated_plugin_registrant.dart
+playground/frontend/playground_components/pubspec.lock
+playground/frontend/playground_components/test/tools/extract_symbols_java/dependencies
+playground/frontend/playground_components_dev/pubspec.lock
+
+# Ignore Beam Playground Terraform
+playground/cloudfunction.zip
+
+# Ignore Terraform related
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+
+# Ignore Katas auto-generated files
+**/*-remote-info.yaml
+
+# Ignore .test-infra/mock-apis related files
+.test-infra/mock-apis/**/charts/
+
+# Ignore .test-infra/metrics/github_runs_prefetcher/code.zip
+# as its generated with terraform
+.test-infra/metrics/sync/github/github_runs_prefetcher/code.zip
+.venv/

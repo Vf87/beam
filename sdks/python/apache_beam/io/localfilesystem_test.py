@@ -17,9 +17,7 @@
 #
 
 """Unit tests for LocalFileSystem."""
-
-# pytype: skip-file
-
+import contextlib
 import filecmp
 import logging
 import os
@@ -34,6 +32,8 @@ from parameterized import parameterized
 from apache_beam.io import localfilesystem
 from apache_beam.io.filesystem import BeamIOError
 from apache_beam.options.pipeline_options import PipelineOptions
+
+# pytype: skip-file
 
 
 def _gen_fake_join(separator):
@@ -65,9 +65,26 @@ class LocalFileSystemTest(unittest.TestCase):
   def tearDown(self):
     shutil.rmtree(self.tmpdir)
 
+  @contextlib.contextmanager
+  def tmpdir_as_cwd(self):
+    """Context manager that sets the current working directory to a temp dir."""
+    old_cwd = os.getcwd()
+    os.chdir(self.tmpdir)
+    try:
+      yield
+    finally:
+      os.chdir(old_cwd)
+
   def test_scheme(self):
     self.assertIsNone(self.fs.scheme())
     self.assertIsNone(localfilesystem.LocalFileSystem.scheme())
+
+  def test_create_cwd_file(self):
+    with self.tmpdir_as_cwd():
+      with self.fs.create("blah.txt") as f:
+        f.write(b"blah")
+      with open("blah.txt", "rb") as f:
+        assert f.read() == b"blah"
 
   @mock.patch('apache_beam.io.localfilesystem.os')
   def test_unix_path_join(self, *unused_mocks):
@@ -293,8 +310,14 @@ class LocalFileSystemTest(unittest.TestCase):
       f.write('Hello')
     with open(path2, 'a') as f:
       f.write('foo')
-    self.assertEqual(self.fs.checksum(path1), str(5))
-    self.assertEqual(self.fs.checksum(path2), str(3))
+    # tests that localfilesystem checksum returns file size
+    checksum1 = self.fs.checksum(path1)
+    checksum2 = self.fs.checksum(path2)
+    self.assertEqual(checksum1, str(5))
+    self.assertEqual(checksum2, str(3))
+    # tests that fs.checksum and str(fs.size) are consistent
+    self.assertEqual(checksum1, str(self.fs.size(path1)))
+    self.assertEqual(checksum2, str(self.fs.size(path2)))
 
   def make_tree(self, path, value, expected_leaf_count=None):
     """Create a file+directory structure from a simple dict-based DSL
@@ -351,8 +374,8 @@ class LocalFileSystemTest(unittest.TestCase):
     elif isinstance(value, dict):
       # recurse to check subdirectory tree
       actual_leaf_count = sum([
-          self.check_tree(os.path.join(path, basename), v) for basename,
-          v in value.items()
+          self.check_tree(os.path.join(path, basename), v)
+          for basename, v in value.items()
       ])
     else:
       raise Exception('Unexpected value in tempdir tree: %s' % value)

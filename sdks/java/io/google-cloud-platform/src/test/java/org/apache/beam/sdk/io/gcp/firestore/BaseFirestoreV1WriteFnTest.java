@@ -18,7 +18,7 @@
 package org.apache.beam.sdk.io.gcp.firestore;
 
 import static org.apache.beam.sdk.io.gcp.firestore.FirestoreProtoHelpers.newWrite;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists.newArrayList;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists.newArrayList;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -34,11 +34,11 @@ import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
-import static org.powermock.api.mockito.PowerMockito.spy;
 
 import com.google.api.gax.grpc.GrpcStatusCode;
 import com.google.api.gax.rpc.ApiException;
@@ -72,7 +72,7 @@ import org.apache.beam.sdk.metrics.MetricName;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.util.Sleeper;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Before;
@@ -111,7 +111,7 @@ public abstract class BaseFirestoreV1WriteFnTest<
     when(rpcQos.newWriteAttempt(any())).thenReturn(attempt, attempt2);
 
     when(ff.getRpcQos(any())).thenReturn(rpcQos);
-    when(ff.getFirestoreStub(pipelineOptions)).thenReturn(stub);
+    when(ff.getFirestoreStub(any(), any(), any())).thenReturn(stub);
     when(stub.batchWriteCallable()).thenReturn(callable);
     metricsFixture = new MetricsFixture();
   }
@@ -129,7 +129,7 @@ public abstract class BaseFirestoreV1WriteFnTest<
     Write write = newWrite();
     Element<Write> element1 = new WriteElement(0, write, window);
 
-    when(ff.getFirestoreStub(any())).thenReturn(stub);
+    when(ff.getFirestoreStub(any(), any(), any())).thenReturn(stub);
     when(ff.getRpcQos(any())).thenReturn(rpcQos);
     when(rpcQos.newWriteAttempt(FirestoreV1RpcAttemptContexts.V1FnRpcAttemptContext.BatchWrite))
         .thenReturn(attempt);
@@ -137,7 +137,7 @@ public abstract class BaseFirestoreV1WriteFnTest<
 
     FlushBuffer<Element<Write>> flushBuffer = spy(newFlushBuffer(rpcQosOptions));
     when(attempt.awaitSafeToProceed(any())).thenReturn(true);
-    when(attempt.<Write, Element<Write>>newFlushBuffer(attemptStart)).thenReturn(flushBuffer);
+    when(attempt.<Element<Write>>newFlushBuffer(attemptStart)).thenReturn(flushBuffer);
     when(flushBuffer.offer(element1)).thenReturn(true);
     when(flushBuffer.iterator()).thenReturn(newArrayList(element1).iterator());
     when(flushBuffer.getBufferedElementsCount()).thenReturn(1);
@@ -175,7 +175,7 @@ public abstract class BaseFirestoreV1WriteFnTest<
   @Override
   @Test
   public final void noRequestIsSentIfNotSafeToProceed() throws Exception {
-    when(ff.getFirestoreStub(any())).thenReturn(stub);
+    when(ff.getFirestoreStub(any(), any(), any())).thenReturn(stub);
     when(ff.getRpcQos(any())).thenReturn(rpcQos);
     when(rpcQos.newWriteAttempt(FirestoreV1RpcAttemptContexts.V1FnRpcAttemptContext.BatchWrite))
         .thenReturn(attempt);
@@ -224,7 +224,7 @@ public abstract class BaseFirestoreV1WriteFnTest<
     FlushBuffer<Element<Write>> flushBuffer = spy(newFlushBuffer(options));
     when(processContext.element()).thenReturn(write);
     when(attempt.awaitSafeToProceed(any())).thenReturn(true);
-    when(attempt.<Write, Element<Write>>newFlushBuffer(attemptStart)).thenReturn(flushBuffer);
+    when(attempt.<Element<Write>>newFlushBuffer(attemptStart)).thenReturn(flushBuffer);
     ArgumentCaptor<BatchWriteRequest> requestCaptor =
         ArgumentCaptor.forClass(BatchWriteRequest.class);
     when(callable.call(requestCaptor.capture())).thenReturn(response);
@@ -267,7 +267,7 @@ public abstract class BaseFirestoreV1WriteFnTest<
     FlushBuffer<Element<Write>> flushBuffer = spy(newFlushBuffer(rpcQosOptions));
     when(processContext.element()).thenReturn(write);
     when(attempt.awaitSafeToProceed(any())).thenReturn(true);
-    when(attempt.<Write, Element<Write>>newFlushBuffer(attemptStart)).thenReturn(flushBuffer);
+    when(attempt.<Element<Write>>newFlushBuffer(attemptStart)).thenReturn(flushBuffer);
     when(flushBuffer.isFull()).thenReturn(true);
     when(flushBuffer.offer(element1)).thenReturn(true);
     when(flushBuffer.iterator()).thenReturn(newArrayList(element1).iterator());
@@ -324,14 +324,14 @@ public abstract class BaseFirestoreV1WriteFnTest<
     when(attempt2.awaitSafeToProceed(any()))
         .thenReturn(true)
         .thenThrow(new IllegalStateException("too many attempt2#awaitSafeToProceed"));
-    when(attempt2.<Write, Element<Write>>newFlushBuffer(any()))
+    when(attempt2.<Element<Write>>newFlushBuffer(any()))
         .thenAnswer(invocation -> newFlushBuffer(options));
     // finish bundle attempt
     RpcQos.RpcWriteAttempt finishBundleAttempt = mock(RpcWriteAttempt.class);
     when(finishBundleAttempt.awaitSafeToProceed(any()))
         .thenReturn(true, true)
         .thenThrow(new IllegalStateException("too many finishBundleAttempt#awaitSafeToProceed"));
-    when(finishBundleAttempt.<Write, Element<Write>>newFlushBuffer(any()))
+    when(finishBundleAttempt.<Element<Write>>newFlushBuffer(any()))
         .thenAnswer(invocation -> newFlushBuffer(options));
     when(rpcQos.newWriteAttempt(any())).thenReturn(attempt, attempt2, finishBundleAttempt);
     when(callable.call(requestCaptor.capture())).thenReturn(response);
@@ -359,8 +359,7 @@ public abstract class BaseFirestoreV1WriteFnTest<
     final long docCount = totalDocCount / numWorkers;
     LOG.info("docCount = {}", docCount);
     RpcQosOptions options =
-        rpcQosOptions
-            .toBuilder()
+        rpcQosOptions.toBuilder()
             .withHintMaxNumWorkers(numWorkers)
             .withSamplePeriod(Duration.standardMinutes(10))
             // .withBatchInitialCount(5)
@@ -369,7 +368,7 @@ public abstract class BaseFirestoreV1WriteFnTest<
     LOG.debug("options = {}", options);
 
     FirestoreStatefulComponentFactory ff = mock(FirestoreStatefulComponentFactory.class);
-    when(ff.getFirestoreStub(any())).thenReturn(stub);
+    when(ff.getFirestoreStub(any(), any(), any())).thenReturn(stub);
     Random random = new Random(12345);
     TestClock clock = new TestClock(Instant.EPOCH, Duration.standardSeconds(1));
     Sleeper sleeper = millis -> clock.setNext(advanceClockBy(Duration.millis(millis)));
@@ -410,7 +409,7 @@ public abstract class BaseFirestoreV1WriteFnTest<
                 LOG.debug("request = {}", request);
                 long requestDurationMs = 0;
                 BatchWriteResponse.Builder builder = BatchWriteResponse.newBuilder();
-                for (Write w : request.getWritesList()) {
+                for (Write ignored : request.getWritesList()) {
                   builder.addWriteResults(WriteResult.newBuilder().build());
                   if (clock.prev.isBefore(threshold)) {
                     requestDurationMs += defaultDocumentWriteLatency;
@@ -483,9 +482,7 @@ public abstract class BaseFirestoreV1WriteFnTest<
         BatchWriteRequest.newBuilder().setDatabase("projects/testing-project/databases/(default)");
 
     BatchWriteRequest expectedGroup1Request =
-        builder
-            .build()
-            .toBuilder()
+        builder.build().toBuilder()
             .addWrites(write0)
             .addWrites(write1)
             .addWrites(write2)
@@ -519,20 +516,15 @@ public abstract class BaseFirestoreV1WriteFnTest<
     when(attempt.awaitSafeToProceed(any())).thenReturn(true);
     when(attempt2.awaitSafeToProceed(any())).thenReturn(true);
 
-    when(attempt.<Write, Element<Write>>newFlushBuffer(enqueue0))
-        .thenReturn(newFlushBuffer(options));
-    when(attempt.<Write, Element<Write>>newFlushBuffer(enqueue1))
-        .thenReturn(newFlushBuffer(options));
-    when(attempt.<Write, Element<Write>>newFlushBuffer(enqueue2))
-        .thenReturn(newFlushBuffer(options));
-    when(attempt.<Write, Element<Write>>newFlushBuffer(enqueue3))
-        .thenReturn(newFlushBuffer(options));
-    when(attempt.<Write, Element<Write>>newFlushBuffer(enqueue4)).thenReturn(flushBuffer);
+    when(attempt.<Element<Write>>newFlushBuffer(enqueue0)).thenReturn(newFlushBuffer(options));
+    when(attempt.<Element<Write>>newFlushBuffer(enqueue1)).thenReturn(newFlushBuffer(options));
+    when(attempt.<Element<Write>>newFlushBuffer(enqueue2)).thenReturn(newFlushBuffer(options));
+    when(attempt.<Element<Write>>newFlushBuffer(enqueue3)).thenReturn(newFlushBuffer(options));
+    when(attempt.<Element<Write>>newFlushBuffer(enqueue4)).thenReturn(flushBuffer);
     when(callable.call(expectedGroup1Request)).thenReturn(group1Response);
 
-    when(attempt2.<Write, Element<Write>>newFlushBuffer(enqueue5))
-        .thenReturn(newFlushBuffer(options));
-    when(attempt2.<Write, Element<Write>>newFlushBuffer(finalFlush)).thenReturn(flushBuffer2);
+    when(attempt2.<Element<Write>>newFlushBuffer(enqueue5)).thenReturn(newFlushBuffer(options));
+    when(attempt2.<Element<Write>>newFlushBuffer(finalFlush)).thenReturn(flushBuffer2);
     when(callable.call(expectedGroup2Request)).thenReturn(group2Response);
 
     runFunction(
@@ -603,7 +595,7 @@ public abstract class BaseFirestoreV1WriteFnTest<
 
     when(rpcQos.newWriteAttempt(any())).thenReturn(attempt);
     when(attempt.awaitSafeToProceed(any())).thenReturn(true);
-    when(attempt.<Write, Element<Write>>newFlushBuffer(any()))
+    when(attempt.<Element<Write>>newFlushBuffer(any()))
         .thenAnswer(invocation -> newFlushBuffer(options));
     when(attempt.isCodeRetryable(Code.INVALID_ARGUMENT)).thenReturn(true);
     when(attempt.isCodeRetryable(Code.FAILED_PRECONDITION)).thenReturn(true);
@@ -673,9 +665,9 @@ public abstract class BaseFirestoreV1WriteFnTest<
         .thenThrow(new IllegalStateException("too many attempt calls"));
     when(attempt.awaitSafeToProceed(any())).thenReturn(true);
     when(attempt2.awaitSafeToProceed(any())).thenReturn(true);
-    when(attempt.<Write, Element<Write>>newFlushBuffer(any()))
+    when(attempt.<Element<Write>>newFlushBuffer(any()))
         .thenAnswer(invocation -> newFlushBuffer(options));
-    when(attempt2.<Write, Element<Write>>newFlushBuffer(any()))
+    when(attempt2.<Element<Write>>newFlushBuffer(any()))
         .thenAnswer(invocation -> newFlushBuffer(options));
 
     FnT fn = getFn(clock, ff, options, CounterFactory.DEFAULT, DistributionFactory.DEFAULT);
@@ -723,7 +715,7 @@ public abstract class BaseFirestoreV1WriteFnTest<
 
     when(rpcQos.newWriteAttempt(any())).thenReturn(attempt);
     when(attempt.awaitSafeToProceed(any())).thenReturn(true);
-    when(attempt.<Write, Element<Write>>newFlushBuffer(any()))
+    when(attempt.<Element<Write>>newFlushBuffer(any()))
         .thenAnswer(invocation -> newFlushBuffer(options));
 
     FnT fn = getFn(clock, ff, options, CounterFactory.DEFAULT, DistributionFactory.DEFAULT);
@@ -779,7 +771,7 @@ public abstract class BaseFirestoreV1WriteFnTest<
     }
   }
 
-  protected FlushBufferImpl<Write, Element<Write>> newFlushBuffer(RpcQosOptions options) {
+  protected FlushBufferImpl<Element<Write>> newFlushBuffer(RpcQosOptions options) {
     return new FlushBufferImpl<>(options.getBatchMaxCount(), options.getBatchMaxBytes());
   }
 
@@ -853,19 +845,16 @@ public abstract class BaseFirestoreV1WriteFnTest<
   private static class MyCounter implements Counter {
     private final MetricName named;
 
-    private long incInvocationCount;
     private final List<Long> incInvocations;
 
     public MyCounter(String namespace, String name) {
       named = MetricName.named(namespace, name);
-      incInvocationCount = 0;
       incInvocations = new ArrayList<>();
     }
 
     @Override
     public void inc() {
       LOG.trace("{} {}:inc()", METRIC_MARKER, named);
-      incInvocationCount++;
     }
 
     @Override

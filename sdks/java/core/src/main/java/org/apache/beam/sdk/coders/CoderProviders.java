@@ -17,20 +17,19 @@
  */
 package org.apache.beam.sdk.coders;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Arrays;
 import java.util.List;
+import org.apache.beam.sdk.util.Preconditions;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
 
 /** Static utility methods for creating and working with {@link CoderProvider}s. */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public final class CoderProviders {
   private CoderProviders() {} // Static utility class
 
@@ -56,8 +55,9 @@ public final class CoderProviders {
    * See {@link #fromStaticMethods} for a detailed description of the characteristics of this {@link
    * CoderProvider}.
    */
-  private static class CoderProviderFromStaticMethods extends CoderProvider {
+  private static final class CoderProviderFromStaticMethods extends CoderProvider {
 
+    @SuppressFBWarnings("DCN_NULLPOINTER_EXCEPTION") // TODO(#35312)
     @Override
     public <T> Coder<T> coderFor(TypeDescriptor<T> type, List<? extends Coder<?>> componentCoders)
         throws CannotProvideCoderException {
@@ -68,7 +68,9 @@ public final class CoderProviders {
                 type, this.rawType));
       }
       try {
-        return (Coder) factoryMethod.invoke(null /* static */, componentCoders.toArray());
+        return (Coder<T>)
+            Preconditions.checkStateNotNull(
+                factoryMethod.invoke(this.rawType /* ignored */, componentCoders.toArray()));
       } catch (IllegalAccessException
           | IllegalArgumentException
           | InvocationTargetException
@@ -99,7 +101,7 @@ public final class CoderProviders {
      * Returns the static {@code of} constructor method on {@code coderClazz} if it exists. It is
      * assumed to have one {@link Coder} parameter for each type parameter of {@code coderClazz}.
      */
-    private Method getFactoryMethod(Class<?> coderClazz) {
+    private static Method getFactoryMethod(Class<?> coderClazz) {
       Method factoryMethodCandidate;
 
       // Find the static factory method of coderClazz named 'of' with
@@ -178,7 +180,12 @@ public final class CoderProviders {
     @Override
     public <T> Coder<T> coderFor(TypeDescriptor<T> type, List<? extends Coder<?>> componentCoders)
         throws CannotProvideCoderException {
-      if (!this.type.equals(type)) {
+      boolean isTypeEqual = this.type.equals(type);
+      boolean isAutoValueConcrete =
+          type.getRawType().getName().contains("AutoValue_")
+              && this.type.getRawType().isAssignableFrom(type.getRawType());
+
+      if (!isTypeEqual && !isAutoValueConcrete) {
         throw new CannotProvideCoderException(
             String.format(
                 "Unable to provide coder for %s, this factory can only provide coders for %s",

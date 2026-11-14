@@ -22,9 +22,8 @@ https://github.com/googlecodelabs/cloud-dataflow-nyc-taxi-tycoon, aggregates
 the data in 15s windows using SqlTransform, and writes the output to
 a user-defined PubSub topic.
 
-Java 8 must be available to run this pipeline, and the
---experiments=use_runner_v2 flag must be passed when running on Dataflow.
-Docker must also be available to run this pipeline locally.
+A Java version supported by Beam must be installed locally to run this pipeline.
+Additionally, Docker must also be available to run this pipeline locally.
 """
 
 # pytype: skip-file
@@ -51,8 +50,8 @@ def run(output_topic, pipeline_args):
         # Use beam.Row to create a schema-aware PCollection
         | "Create beam Row" >> beam.Map(
             lambda x: beam.Row(
-                ride_status=str(x['ride_status']),
-                passenger_count=int(x['passenger_count'])))
+                ride_status=str(x['ride_status']), passenger_count=int(
+                    x['passenger_count'])))
         # SqlTransform will computes result within an existing window
         | "15s fixed windows" >> beam.WindowInto(beam.window.FixedWindows(15))
         # Aggregate drop offs and pick ups that occur within each 15s window
@@ -69,13 +68,10 @@ def run(output_topic, pipeline_args):
         # the outputs of the query.
         # Collect those attributes, as well as window information, into a dict
         | "Assemble Dictionary" >> beam.Map(
-            lambda row,
-            window=beam.DoFn.WindowParam: {
-                "ride_status": row.ride_status,
-                "num_rides": row.num_rides,
-                "total_passengers": row.total_passengers,
-                "window_start": window.start.to_rfc3339(),
-                "window_end": window.end.to_rfc3339()
+            lambda row, window=beam.DoFn.WindowParam: {
+                "ride_status": row.ride_status, "num_rides": row.num_rides,
+                "total_passengers": row.total_passengers, "window_start": window
+                .start.to_rfc3339(), "window_end": window.end.to_rfc3339()
             })
         | "Convert to JSON" >> beam.Map(json.dumps)
         | "UTF-8 encode" >> beam.Map(lambda s: s.encode("utf-8"))

@@ -35,15 +35,11 @@
  * window, and this replicates conventional batch mode. However, windowing can still be a convenient
  * way to express time-sliced algorithms over bounded {@code PCollection}s.
  *
- * <p>As elements are assigned to a window, they are are placed into a pane. When the trigger fires
- * all of the elements in the current pane are output.
+ * <p>As elements are assigned to a window, they are placed into a pane. When the trigger fires all
+ * of the elements in the current pane are output.
  *
  * <p>The {@link org.apache.beam.sdk.transforms.windowing.DefaultTrigger} will output a window when
  * the system watermark passes the end of the window. See {@link
  * org.apache.beam.sdk.transforms.windowing.AfterWatermark} for details on the watermark.
  */
-@DefaultAnnotation(NonNull.class)
 package org.apache.beam.sdk.transforms.windowing;
-
-import edu.umd.cs.findbugs.annotations.DefaultAnnotation;
-import org.checkerframework.checker.nullness.qual.NonNull;

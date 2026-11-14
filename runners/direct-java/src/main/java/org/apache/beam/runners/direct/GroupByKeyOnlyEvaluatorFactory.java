@@ -17,7 +17,7 @@
  */
 package org.apache.beam.runners.direct;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -33,18 +33,18 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.runners.AppliedPTransform;
 import org.apache.beam.sdk.transforms.PTransform;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 
 /**
  * The {@link DirectRunner} {@link TransformEvaluatorFactory} for the {@link GroupByKeyOnly} {@link
  * PTransform}.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 class GroupByKeyOnlyEvaluatorFactory implements TransformEvaluatorFactory {
   private final EvaluationContext evaluationContext;
@@ -100,13 +100,13 @@ class GroupByKeyOnlyEvaluatorFactory implements TransformEvaluatorFactory {
       this.groupingMap = new HashMap<>();
     }
 
-    private Coder<K> getKeyCoder(Coder<KV<K, V>> coder) {
+    private static <K, V> Coder<K> getKeyCoder(Coder<KV<K, V>> coder) {
       checkState(
           coder instanceof KvCoder,
           "%s requires a coder of class %s."
               + " This is an internal error; this is checked during pipeline construction"
               + " but became corrupted.",
-          getClass().getSimpleName(),
+          GroupByKeyOnlyEvaluator.class.getSimpleName(),
           KvCoder.class.getSimpleName());
       @SuppressWarnings("unchecked")
       Coder<K> keyCoder = ((KvCoder<K, V>) coder).getKeyCoder();
@@ -136,7 +136,7 @@ class GroupByKeyOnlyEvaluatorFactory implements TransformEvaluatorFactory {
                 StructuralKey.of(key, keyCoder),
                 (PCollection<KeyedWorkItem<K, V>>)
                     Iterables.getOnlyElement(application.getOutputs().values()));
-        bundle.add(WindowedValue.valueInGlobalWindow(groupedKv));
+        bundle.add(WindowedValues.valueInGlobalWindow(groupedKv));
         resultBuilder.addOutput(bundle);
       }
       return resultBuilder.build();

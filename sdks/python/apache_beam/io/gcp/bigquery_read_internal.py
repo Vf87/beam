@@ -24,14 +24,12 @@ import collections
 import decimal
 import json
 import logging
-import random
+import secrets
 import time
 import uuid
 from typing import TYPE_CHECKING
 from typing import Any
-from typing import Dict
 from typing import Iterable
-from typing import List
 from typing import Optional
 from typing import Union
 
@@ -44,6 +42,7 @@ from apache_beam.io.gcp import bigquery_tools
 from apache_beam.io.gcp.bigquery_io_metadata import create_bigquery_io_metadata
 from apache_beam.io.iobase import BoundedSource
 from apache_beam.io.textio import _TextSource
+from apache_beam.metrics.metric import Lineage
 from apache_beam.options.pipeline_options import GoogleCloudOptions
 from apache_beam.options.pipeline_options import PipelineOptions
 from apache_beam.options.value_provider import ValueProvider
@@ -63,7 +62,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def bigquery_export_destination_uri(
-    gcs_location_vp: Optional[ValueProvider],
+    gcs_location_vp: Union[str, Optional[ValueProvider]],
     temp_location: Optional[str],
     unique_id: str,
     directory_only: bool = False,
@@ -75,7 +74,10 @@ def bigquery_export_destination_uri(
 
   gcs_location = None
   if gcs_location_vp is not None:
-    gcs_location = gcs_location_vp.get()
+    if isinstance(gcs_location_vp, ValueProvider):
+      gcs_location = gcs_location_vp.get()
+    else:
+      gcs_location = gcs_location_vp
 
   if gcs_location is not None:
     gcs_base = gcs_location
@@ -140,17 +142,23 @@ class _PassThroughThenCleanupTempDatasets(PTransform):
 
     Utilizes readiness of PCollection to trigger DoFn.
   """
-  def __init__(self, side_input=None):
+  def __init__(self, side_input=None, quota_project_id=None):
     self.side_input = side_input
+    self.quota_project_id = quota_project_id
 
   def expand(self, input):
+    pipeline_options = input.pipeline.options
+    quota_project_id = self.quota_project_id
+
     class PassThrough(beam.DoFn):
       def process(self, element):
         yield element
 
     class CleanUpProjects(beam.DoFn):
       def process(self, unused_element, unused_signal, pipeline_details):
-        bq = bigquery_tools.BigQueryWrapper()
+        bq = bigquery_tools.BigQueryWrapper(
+            pipeline_options=pipeline_options,
+            quota_project_id=quota_project_id)
         pipeline_details = pipeline_details[0]
         if 'temp_table_ref' in pipeline_details.keys():
           temp_table_ref = pipeline_details['temp_table_ref']
@@ -188,8 +196,9 @@ class _BigQueryReadSplit(beam.transforms.DoFn):
       self,
       options: PipelineOptions,
       gcs_location: Union[str, ValueProvider] = None,
+      validate: bool = False,
       use_json_exports: bool = False,
-      bigquery_job_labels: Dict[str, str] = None,
+      bigquery_job_labels: dict[str, str] = None,
       step_name: str = None,
       job_name: str = None,
       unique_id: str = None,
@@ -198,6 +207,7 @@ class _BigQueryReadSplit(beam.transforms.DoFn):
       temp_dataset: Union[str, DatasetReference] = None,
       query_priority: Optional[str] = None):
     self.options = options
+    self.validate = validate
     self.use_json_exports = use_json_exports
     self.gcs_location = gcs_location
     self.bigquery_job_labels = bigquery_job_labels or {}
@@ -206,7 +216,7 @@ class _BigQueryReadSplit(beam.transforms.DoFn):
     self._source_uuid = unique_id
     self.kms_key = kms_key
     self.project = project
-    self.temp_dataset = temp_dataset or 'bq_read_all_%s' % uuid.uuid4().hex
+    self.temp_dataset = temp_dataset
     self.query_priority = query_priority
     self.bq_io_metadata = None
 
@@ -220,21 +230,38 @@ class _BigQueryReadSplit(beam.transforms.DoFn):
         'temp_dataset': str(self.temp_dataset)
     }
 
-  def _get_temp_dataset(self):
-    if isinstance(self.temp_dataset, str):
-      return DatasetReference(
-          datasetId=self.temp_dataset, projectId=self._get_project())
-    else:
+  def _get_temp_dataset_id(self):
+    if self.temp_dataset is None:
+      return None
+    elif isinstance(self.temp_dataset, DatasetReference):
+      return self.temp_dataset.datasetId
+    elif isinstance(self.temp_dataset, str):
       return self.temp_dataset
+    else:
+      raise ValueError("temp_dataset has to be either str or DatasetReference")
+
+  def _get_temp_dataset_project(self):
+    """Returns the project ID for temporary dataset operations.
+    
+    If temp_dataset is a DatasetReference, returns its projectId.
+    Otherwise, returns the pipeline project for billing.
+    """
+    if isinstance(self.temp_dataset, DatasetReference):
+      return self.temp_dataset.projectId
+    else:
+      return self._get_project()
+
+  def start_bundle(self):
+    self.bq = bigquery_tools.BigQueryWrapper(
+        temp_dataset_id=self._get_temp_dataset_id(),
+        pipeline_options=self.options)
 
   def process(self,
               element: 'ReadFromBigQueryRequest') -> Iterable[BoundedSource]:
-    bq = bigquery_tools.BigQueryWrapper(
-        temp_dataset_id=self._get_temp_dataset().datasetId)
-
     if element.query is not None:
-      self._setup_temporary_dataset(bq, element)
-      table_reference = self._execute_query(bq, element)
+      if not self.bq.created_temp_dataset:
+        self._setup_temporary_dataset(self.bq, element)
+      table_reference = self._execute_query(self.bq, element)
     else:
       assert element.table
       table_reference = bigquery_tools.parse_table_reference(
@@ -243,19 +270,29 @@ class _BigQueryReadSplit(beam.transforms.DoFn):
     if not table_reference.projectId:
       table_reference.projectId = self._get_project()
 
-    schema, metadata_list = self._export_files(bq, element, table_reference)
+    schema, metadata_list = self._export_files(
+        self.bq, element, table_reference)
 
     for metadata in metadata_list:
       yield self._create_source(metadata.path, schema)
 
+    Lineage.sources().add(
+        'bigquery',
+        table_reference.projectId,
+        table_reference.datasetId,
+        table_reference.tableId)
+
     if element.query is not None:
-      bq._delete_table(
+      self.bq._delete_table(
           table_reference.projectId,
           table_reference.datasetId,
           table_reference.tableId)
 
-    if bq.created_temp_dataset:
-      self._clean_temporary_dataset(bq, element)
+  def finish_bundle(self):
+    if self.bq.created_temp_dataset:
+      # Use the same project that was used to create the temp dataset
+      temp_dataset_project = self._get_temp_dataset_project()
+      self.bq.clean_up_temporary_dataset(temp_dataset_project)
 
   def _get_bq_metadata(self):
     if not self.bq_io_metadata:
@@ -264,14 +301,15 @@ class _BigQueryReadSplit(beam.transforms.DoFn):
 
   def _create_source(self, path, schema):
     if not self.use_json_exports:
-      return _create_avro_source(path, use_fastavro=True)
+      return _create_avro_source(path, validate=self.validate)
     else:
       return _TextSource(
           path,
           min_bundle_size=0,
           compression_type=CompressionTypes.UNCOMPRESSED,
           strip_trailing_newlines=True,
-          coder=_JsonToDictCoder(schema))
+          coder=_JsonToDictCoder(schema),
+          validate=self.validate)
 
   def _setup_temporary_dataset(
       self,
@@ -279,13 +317,11 @@ class _BigQueryReadSplit(beam.transforms.DoFn):
       element: 'ReadFromBigQueryRequest'):
     location = bq.get_query_location(
         self._get_project(), element.query, not element.use_standard_sql)
-    bq.create_temporary_dataset(self._get_project(), location)
-
-  def _clean_temporary_dataset(
-      self,
-      bq: bigquery_tools.BigQueryWrapper,
-      element: 'ReadFromBigQueryRequest'):
-    bq.clean_up_temporary_dataset(self._get_project())
+    # Use the project from temp_dataset if it's a DatasetReference,
+    # otherwise use the pipeline project
+    temp_dataset_project = self._get_temp_dataset_project()
+    bq.create_temporary_dataset(
+        temp_dataset_project, location, kms_key=self.kms_key)
 
   def _execute_query(
       self,
@@ -295,7 +331,7 @@ class _BigQueryReadSplit(beam.transforms.DoFn):
         self._job_name,
         self._source_uuid,
         bigquery_tools.BigQueryJobTypes.QUERY,
-        '%s_%s' % (int(time.time()), random.randint(0, 1000)))
+        '%s_%s' % (int(time.time()), secrets.token_hex(3)))
     job = bq._start_query_job(
         self._get_project(),
         element.query,
@@ -332,24 +368,35 @@ class _BigQueryReadSplit(beam.transforms.DoFn):
         self.gcs_location,
         temp_location,
         '%s%s' % (self._source_uuid, element.obj_id))
-    if self.use_json_exports:
-      job_ref = bq.perform_extract_job([gcs_location],
-                                       export_job_name,
-                                       table_reference,
-                                       bigquery_tools.FileFormat.JSON,
-                                       project=self._get_project(),
-                                       job_labels=job_labels,
-                                       include_header=False)
-    else:
-      job_ref = bq.perform_extract_job([gcs_location],
-                                       export_job_name,
-                                       table_reference,
-                                       bigquery_tools.FileFormat.AVRO,
-                                       project=self._get_project(),
-                                       include_header=False,
-                                       job_labels=job_labels,
-                                       use_avro_logical_types=True)
-    bq.wait_for_bq_job(job_ref)
+    try:
+      if self.use_json_exports:
+        job_ref = bq.perform_extract_job([gcs_location],
+                                         export_job_name,
+                                         table_reference,
+                                         bigquery_tools.FileFormat.JSON,
+                                         project=self._get_project(),
+                                         job_labels=job_labels,
+                                         include_header=False)
+      else:
+        job_ref = bq.perform_extract_job([gcs_location],
+                                         export_job_name,
+                                         table_reference,
+                                         bigquery_tools.FileFormat.AVRO,
+                                         project=self._get_project(),
+                                         include_header=False,
+                                         job_labels=job_labels,
+                                         use_avro_logical_types=True)
+      bq.wait_for_bq_job(job_ref)
+    except Exception as exn:  # pylint: disable=broad-except
+      # The error messages thrown in this case are generic and misleading,
+      # so leave this breadcrumb in case it's the root cause.
+      logging.warning(
+          "Error exporting table: %s. "
+          "Note that external tables cannot be exported: "
+          "https://cloud.google.com/bigquery/docs/external-tables"
+          "#external_table_limitations",
+          exn)
+      raise
     metadata_list = FileSystems.match([gcs_location])[0].metadata_list
 
     if isinstance(table_reference, ValueProvider):
@@ -416,7 +463,7 @@ class _JsonToDictCoder(coders.Coder):
     value = json.loads(value.decode('utf-8'))
     return self._decode_row(value, self.fields)
 
-  def _decode_row(self, row: Dict[str, Any], schema_fields: List[FieldSchema]):
+  def _decode_row(self, row: dict[str, Any], schema_fields: list[FieldSchema]):
     for field in schema_fields:
       if field.name not in row:
         # The field exists in the schema, but it doesn't exist in this row.

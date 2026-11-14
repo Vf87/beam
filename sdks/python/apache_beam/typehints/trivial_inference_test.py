@@ -19,13 +19,17 @@
 
 # pytype: skip-file
 
+import dataclasses
 import types
 import unittest
 
 import apache_beam as beam
+from apache_beam.options.pipeline_options import PipelineOptions
+from apache_beam.options.pipeline_options_context import scoped_pipeline_options
 from apache_beam.typehints import row_type
 from apache_beam.typehints import trivial_inference
 from apache_beam.typehints import typehints
+from apache_beam.utils import python_callable
 
 global_int = 1
 
@@ -36,20 +40,45 @@ class TrivialInferenceTest(unittest.TestCase):
         expected,
         trivial_inference.infer_return_type(f, inputs, debug=True, depth=depth))
 
+  # The meaning of Jump Offsets in Python 3.10 was changed.
+  # https://github.com/python/cpython/issues/71316
+  # Reported as a bug in Beam https://github.com/apache/beam/issues/21671
+  def testJumpOffsets(self):
+    fn = lambda x: False
+    wrapper = lambda x, *args, **kwargs: [x] if fn(x, *args, **kwargs) else []
+    self.assertReturnType(typehints.List[int], wrapper, [int])
+
   def testBuildListUnpack(self):
     # Lambda uses BUILD_LIST_UNPACK opcode in Python 3.
     self.assertReturnType(
-        typehints.List[int],
-        lambda _list: [*_list, *_list, *_list], [typehints.List[int]])
+        typehints.List[int], lambda _list: [*_list, *_list, *_list],
+        [typehints.List[int]])
 
   def testBuildTupleUnpack(self):
     # Lambda uses BUILD_TUPLE_UNPACK opcode in Python 3.
     # yapf: disable
     self.assertReturnType(
-        typehints.Tuple[int, str, str],
+        typehints.Tuple[typehints.Union[int, str], ...],
         lambda _list1, _list2: (*_list1, *_list2, *_list2),
         [typehints.List[int], typehints.List[str]])
     # yapf: enable
+
+  def testBuildSetUnpackOrUpdate(self):
+    self.assertReturnType(
+        typehints.Set[typehints.Union[int, str]],
+        lambda _list1, _list2: {*_list1, *_list2, *_list2},
+        [typehints.List[int], typehints.List[str]])
+
+  def testBuildMapUnpackOrUpdate(self):
+    self.assertReturnType(
+        typehints.Dict[str, typehints.Union[int, str, float]], lambda a, b, c: {
+            **a, **b, **c
+        },
+        [
+            typehints.Dict[str, int],
+            typehints.Dict[str, str],
+            typehints.List[typehints.Tuple[str, float]]
+        ])
 
   def testIdentity(self):
     self.assertReturnType(int, lambda x: x, [int])
@@ -83,6 +112,23 @@ class TrivialInferenceTest(unittest.TestCase):
         typehints.List[int], lambda v: v[::-1], [typehints.List[int]])
     self.assertReturnType(
         typehints.Tuple[int], lambda v: v[::-1], [typehints.Tuple[int]])
+    self.assertReturnType(
+        typehints.Tuple[str, int], lambda v: v[1:],
+        [typehints.Tuple[int, str, int]])
+    self.assertReturnType(
+        typehints.Tuple[int, str], lambda v: v[:-1],
+        [typehints.Tuple[int, str, float]])
+    self.assertReturnType(
+        typehints.Tuple[float, str, int], lambda v: v[::-1],
+        [typehints.Tuple[int, str, float]])
+    self.assertReturnType(
+        typehints.Tuple[int, float], lambda v: v[0:3:2],
+        [typehints.Tuple[int, str, float]])
+    self.assertReturnType(
+        typehints.Tuple[()], lambda v: v[5:], [typehints.Tuple[int, str]])
+    self.assertReturnType(
+        typehints.Tuple[typehints.Union[int, str], ...], lambda v, i: v[i:],
+        [typehints.Tuple[int, str, int], int])
     self.assertReturnType(str, lambda v: v[::-1], [str])
     self.assertReturnType(typehints.Any, lambda v: v[::-1], [typehints.Any])
     self.assertReturnType(typehints.Any, lambda v: v[::-1], [object])
@@ -116,37 +162,29 @@ class TrivialInferenceTest(unittest.TestCase):
 
   def testBuildMap(self):
     self.assertReturnType(
-        typehints.Dict[typehints.Any, typehints.Any],
-        lambda k,
-        v: {}, [int, float])
+        typehints.Dict[typehints.Any, typehints.Any], lambda k, v: {},
+        [int, float])
     self.assertReturnType(
         typehints.Dict[int, float], lambda k, v: {k: v}, [int, float])
     self.assertReturnType(
-        typehints.Tuple[str, typehints.Dict[int, float]],
-        lambda k,
-        v: ('s', {
+        typehints.Tuple[str, typehints.Dict[int, float]], lambda k, v:
+        ('s', {
             k: v
         }), [int, float])
     self.assertReturnType(
         typehints.Dict[int, typehints.Union[float, str]],
-        lambda k1,
-        v1,
-        k2,
-        v2: {
+        lambda k1, v1, k2, v2: {
             k1: v1, k2: v2
         }, [int, float, int, str])
 
     # Constant map.
     self.assertReturnType(
-        typehints.Dict[str, typehints.Union[int, float]],
-        lambda a,
-        b: {
+        typehints.Dict[str, typehints.Union[int, float]], lambda a, b: {
             'a': a, 'b': b
         }, [int, float])
     self.assertReturnType(
         typehints.Tuple[int, typehints.Dict[str, typehints.Union[int, float]]],
-        lambda a,
-        b: (4, {
+        lambda a, b: (4, {
             'a': a, 'b': b
         }), [int, float])
 
@@ -169,20 +207,20 @@ class TrivialInferenceTest(unittest.TestCase):
 
   def testListComprehension(self):
     self.assertReturnType(
-        typehints.List[int],
-        lambda xs: [x for x in xs], [typehints.Tuple[int, ...]])
+        typehints.List[int], lambda xs: [x for x in xs],
+        [typehints.Tuple[int, ...]])
 
   def testTupleListComprehension(self):
     self.assertReturnType(
-        typehints.List[int],
-        lambda xs: [x for x in xs], [typehints.Tuple[int, int, int]])
+        typehints.List[int], lambda xs: [x for x in xs],
+        [typehints.Tuple[int, int, int]])
+
     self.assertReturnType(
-        typehints.List[typehints.Union[int, float]],
-        lambda xs: [x for x in xs], [typehints.Tuple[int, float]])
+        typehints.List[typehints.Union[int, float]], lambda xs: [x for x in xs],
+        [typehints.Tuple[int, float]])
     expected = typehints.List[typehints.Tuple[str, int]]
     self.assertReturnType(
-        expected,
-        lambda kvs: [(kvs[0], v) for v in kvs[1]],
+        expected, lambda kvs: [(kvs[0], v) for v in kvs[1]],
         [typehints.Tuple[str, typehints.Iterable[int]]])
     self.assertReturnType(
         typehints.List[typehints.Tuple[str, typehints.Union[str, int], int]],
@@ -200,8 +238,8 @@ class TrivialInferenceTest(unittest.TestCase):
 
   def testGeneratorComprehension(self):
     self.assertReturnType(
-        typehints.Iterable[int],
-        lambda xs: (x for x in xs), [typehints.Tuple[int, ...]])
+        typehints.Iterable[int], lambda xs: (x for x in xs),
+        [typehints.Tuple[int, ...]])
 
   def testBinOp(self):
     self.assertReturnType(int, lambda a, b: a + b, [int, int])
@@ -209,9 +247,24 @@ class TrivialInferenceTest(unittest.TestCase):
     self.assertReturnType(
         typehints.Any, lambda a, b: a + b, [int, typehints.Any])
     self.assertReturnType(
-        typehints.List[typehints.Union[int, str]],
-        lambda a,
-        b: a + b, [typehints.List[int], typehints.List[str]])
+        typehints.List[typehints.Union[int, str]], lambda a, b: a + b,
+        [typehints.List[int], typehints.List[str]])
+
+  def testBinOpPromotion(self):
+    self.assertReturnType(int, lambda a, b: a + b, [int, bool])
+    self.assertReturnType(float, lambda a, b: a + b, [int, float])
+    self.assertReturnType(complex, lambda a, b: a + b, [int, complex])
+
+  def testBinOpSequenceMul(self):
+    self.assertReturnType(str, lambda a, b: a * b, [int, str])
+    self.assertReturnType(bytes, lambda a, b: a * b, [bytes, int])
+    self.assertReturnType(
+        typehints.List[float], lambda a, b: a * b, [int, typehints.List[float]])
+
+  def testDiv(self):
+    # We only support Python 3 now.
+    self.assertReturnType(float, lambda a, b: a / b, [int, int])
+    self.assertReturnType(int, lambda a, b: a // b, [int, int])
 
   def testCall(self):
     f = lambda x, *args: x
@@ -221,10 +274,29 @@ class TrivialInferenceTest(unittest.TestCase):
     self.assertReturnType(
         typehints.Tuple[int, typehints.Any], lambda: (1, f(x=1.0)))
 
+  def testCallNullaryMethod(self):
+    class Foo:
+      pass
+
+    self.assertReturnType(
+        typehints.Tuple[Foo, typehints.Any], lambda x: (x, x.unknown()), [Foo])
+
+  def testCallNestedLambda(self):
+    class Foo:
+      pass
+
+    self.assertReturnType(
+        typehints.Tuple[Foo, int], lambda x: (x, (lambda: 3)()), [Foo])
+
   def testClosure(self):
     x = 1
     y = 1.0
     self.assertReturnType(typehints.Tuple[int, float], lambda: (x, y))
+
+  @unittest.skip("https://github.com/apache/beam/issues/28420")
+  def testLocalClosure(self):
+    self.assertReturnType(
+        typehints.Tuple[int, int], lambda x: (x, (lambda: x)()), [int])
 
   def testGlobals(self):
     self.assertReturnType(int, lambda: global_int)
@@ -234,8 +306,34 @@ class TrivialInferenceTest(unittest.TestCase):
 
   def testGetAttr(self):
     self.assertReturnType(
-        typehints.Tuple[str, typehints.Any],
-        lambda: (typehints.__doc__, typehints.fake))
+        typehints.Tuple[str, typehints.Any], lambda:
+        (typehints.__doc__, typehints.fake))
+
+  def testSetAttr(self):
+    def fn(obj, flag):
+      if flag == 1:
+        obj.attr = 1
+        res = 1
+      elif flag == 2:
+        obj.attr = 2
+        res = 1.5
+      return res
+
+    self.assertReturnType(typehints.Union[int, float], fn, [int])
+
+  def testSetDeleteGlobal(self):
+    def fn(flag):
+      # pylint: disable=global-variable-undefined
+      global global_var
+      if flag == 1:
+        global_var = 3
+        res = 1
+      elif flag == 4:
+        del global_var
+        res = "str"
+      return res
+
+    self.assertReturnType(typehints.Union[int, str], fn, [int])
 
   def testMethod(self):
     class A(object):
@@ -272,17 +370,23 @@ class TrivialInferenceTest(unittest.TestCase):
     self.assertReturnType(
         typehints.Dict[typehints.Any, typehints.Any], lambda: {})
 
+  # yapf: disable
   def testDictComprehension(self):
     fields = []
     expected_type = typehints.Dict[typehints.Any, typehints.Any]
     self.assertReturnType(
-        expected_type, lambda row: {f: row[f]
-                                    for f in fields}, [typehints.Any])
+        expected_type, lambda row: {f: row[f] for f in fields}, [typehints.Any])
 
   def testDictComprehensionSimple(self):
     self.assertReturnType(
-        typehints.Dict[str, int], lambda _list: {'a': 1
-                                                 for _ in _list}, [])
+        typehints.Dict[str, int], lambda _list: {'a': 1 for _ in _list}, [])
+
+  def testSet(self):
+    self.assertReturnType(
+        typehints.Set[typehints.Union[()]], lambda: {x for x in ()})
+    self.assertReturnType(
+        typehints.Set[int], lambda xs: {x for x in xs}, [typehints.List[int]])
+  # yapf: enable
 
   def testDepthFunction(self):
     def f(i):
@@ -308,16 +412,15 @@ class TrivialInferenceTest(unittest.TestCase):
       return x1, x2
 
     self.assertReturnType(
-        typehints.Tuple[str, float],
-        lambda x1,
-        x2,
-        _list: fn(x1, x2, *_list), [str, float, typehints.List[int]])
+        typehints.Tuple[typehints.Union[str, float, int],
+                        typehints.Union[str, float, int]],
+        lambda x1, x2, _list: fn(x1, x2, *_list),
+        [str, float, typehints.List[int]])
     # No *args
     self.assertReturnType(
-        typehints.Tuple[str, typehints.List[int]],
-        lambda x1,
-        x2,
-        _list: fn(x1, x2, *_list), [str, typehints.List[int]])
+        typehints.Tuple[typehints.Union[str, typehints.List[int]],
+                        typehints.Union[str, typehints.List[int]]],
+        lambda x1, x2, _list: fn(x1, x2, *_list), [str, typehints.List[int]])
 
   def testCallFunctionEx(self):
     # Test when fn arguments are built using BUiLD_LIST.
@@ -326,8 +429,7 @@ class TrivialInferenceTest(unittest.TestCase):
 
     self.assertReturnType(
         typehints.List[typehints.Union[str, float]],
-        lambda x1,
-        x2: fn(*[x1, x2]), [str, float])
+        lambda x1, x2: fn(*[x1, x2]), [str, float])
 
   def testCallFunctionExKwargs(self):
     def fn(x1, x2, **unused_kwargs):
@@ -335,10 +437,8 @@ class TrivialInferenceTest(unittest.TestCase):
 
     # Keyword args are currently unsupported for CALL_FUNCTION_EX.
     self.assertReturnType(
-        typehints.Any,
-        lambda x1,
-        x2,
-        _dict: fn(x1, x2, **_dict), [str, float, typehints.List[int]])
+        typehints.Any, lambda x1, x2, _dict: fn(x1, x2, **_dict),
+        [str, float, typehints.List[int]])
 
   def testInstanceToType(self):
     class MyClass(object):
@@ -372,7 +472,7 @@ class TrivialInferenceTest(unittest.TestCase):
         (MyClass, MyClass()),
         (type(MyClass.method), MyClass.method),
         (types.MethodType, MyClass().method),
-        (row_type.RowTypeConstraint([('x', int)]), beam.Row(x=37)),
+        (row_type.RowTypeConstraint.from_fields([('x', int)]), beam.Row(x=37)),
     ]
     for expected_type, instance in test_cases:
       self.assertEqual(
@@ -382,18 +482,54 @@ class TrivialInferenceTest(unittest.TestCase):
 
   def testRow(self):
     self.assertReturnType(
-        row_type.RowTypeConstraint([('x', int), ('y', str)]),
-        lambda x,
-        y: beam.Row(x=x + 1, y=y), [int, str])
+        row_type.RowTypeConstraint.from_fields([('x', int), ('y', str)]),
+        lambda x, y: beam.Row(x=x + 1, y=y), [int, str])
     self.assertReturnType(
-        row_type.RowTypeConstraint([('x', int), ('y', str)]),
+        row_type.RowTypeConstraint.from_fields([('x', int), ('y', str)]),
         lambda x: beam.Row(x=x, y=str(x)), [int])
 
   def testRowAttr(self):
     self.assertReturnType(
+        typehints.Tuple[int, str], lambda row: (row.x, getattr(row, 'y')),
+        [row_type.RowTypeConstraint.from_fields([('x', int), ('y', str)])])
+
+  def testRowMissingAttr(self):
+    self.assertReturnType(
+        typehints.Any, lambda row: getattr(row, '_asdict'),
+        [row_type.RowTypeConstraint.from_fields([('x', int), ('y', str)])])
+
+  def testFString(self):
+    self.assertReturnType(str, lambda x, y: f'{x}: {y:0.2}', [str, float])
+
+  def testPyCallable(self):
+    self.assertReturnType(
         typehints.Tuple[int, str],
-        lambda row: (row.x, getattr(row, 'y')),
-        [row_type.RowTypeConstraint([('x', int), ('y', str)])])
+        python_callable.PythonCallableWithSource("lambda x: (x, str(x))"),
+        [int])
+
+  def testDataClassFields(self):
+    @dataclasses.dataclass
+    class BaseClass:
+      pass
+
+    @dataclasses.dataclass
+    class MyDataClass:
+      id: int
+      name: str
+      tags: list[str]
+      custom: BaseClass
+
+    self.assertReturnType(
+        typehints.Tuple[int, str, typehints.List[str], BaseClass],
+        python_callable.PythonCallableWithSource(
+            "lambda x: (x.id, x.name, x.tags, x.custom)"), [MyDataClass])
+
+    options = PipelineOptions(['--exclude_infer_dataclass_field_type'])
+    with scoped_pipeline_options(options):
+      self.assertReturnType(
+          typehints.Tuple[int, str, typehints.Any, typehints.Any],
+          python_callable.PythonCallableWithSource(
+              "lambda x: (x.id, x.name, x.tags, x.custom)"), [MyDataClass])
 
 
 if __name__ == '__main__':

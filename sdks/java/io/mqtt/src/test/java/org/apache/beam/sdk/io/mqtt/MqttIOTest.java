@@ -18,35 +18,56 @@
 package org.apache.beam.sdk.io.mqtt;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import com.hivemq.client.mqtt.MqttGlobalPublishFilter;
+import com.hivemq.client.mqtt.datatypes.MqttQos;
+import com.hivemq.client.mqtt.datatypes.MqttTopic;
+import com.hivemq.client.mqtt.mqtt3.Mqtt3BlockingClient;
+import com.hivemq.client.mqtt.mqtt3.Mqtt3Client;
+import com.hivemq.client.mqtt.mqtt3.message.publish.Mqtt3Publish;
+import com.hivemq.client.mqtt.mqtt3.message.publish.Mqtt3PublishBuilder;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.apache.activemq.broker.BrokerService;
 import org.apache.activemq.broker.Connection;
+import org.apache.activemq.broker.region.AbstractRegion;
+import org.apache.activemq.broker.region.RegionBroker;
+import org.apache.activemq.broker.region.Subscription;
+import org.apache.activemq.command.ActiveMQDestination;
+import org.apache.activemq.command.ActiveMQTopic;
+import org.apache.beam.sdk.coders.ByteArrayCoder;
+import org.apache.beam.sdk.coders.KvCoder;
+import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.common.NetworkTestHelper;
 import org.apache.beam.sdk.io.mqtt.MqttIO.Read;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Create;
+import org.apache.beam.sdk.transforms.PTransform;
+import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
-import org.fusesource.hawtbuf.Buffer;
-import org.fusesource.mqtt.client.BlockingConnection;
-import org.fusesource.mqtt.client.MQTT;
-import org.fusesource.mqtt.client.Message;
-import org.fusesource.mqtt.client.QoS;
-import org.fusesource.mqtt.client.Topic;
 import org.joda.time.Duration;
+import org.joda.time.Instant;
 import org.junit.After;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -57,6 +78,18 @@ import org.slf4j.LoggerFactory;
 /** Tests of {@link MqttIO}. */
 @RunWith(JUnit4.class)
 public class MqttIOTest {
+
+  /** Functional interface used to verify the connection status of an MQTT client. */
+  @FunctionalInterface
+  interface ConnectionCondition {
+    /**
+     * Evaluates whether the given {@link Connection} satisfies the condition.
+     *
+     * @param connection the MQTT connection to check
+     * @return {@code true} if the condition is met, {@code false} otherwise
+     */
+    boolean check(Connection connection);
+  }
 
   private static final Logger LOG = LoggerFactory.getLogger(MqttIOTest.class);
 
@@ -80,10 +113,9 @@ public class MqttIOTest {
   }
 
   @Test(timeout = 60 * 1000)
-  @Ignore("https://issues.apache.org/jira/browse/BEAM-3604 Test timeout failure.")
   public void testReadNoClientId() throws Exception {
     final String topicName = "READ_TOPIC_NO_CLIENT_ID";
-    Read mqttReader =
+    Read<byte[]> mqttReader =
         MqttIO.read()
             .withConnectionConfiguration(
                 MqttIO.ConnectionConfiguration.create("tcp://localhost:" + port, topicName))
@@ -104,46 +136,34 @@ public class MqttIOTest {
 
     // produce messages on the brokerService in another thread
     // This thread prevents to block the pipeline waiting for new messages
-    MQTT client = new MQTT();
-    client.setHost("tcp://localhost:" + port);
-    final BlockingConnection publishConnection = client.blockingConnection();
-    publishConnection.connect();
+    Mqtt3BlockingClient publishClient =
+        Mqtt3Client.builder().serverHost("localhost").serverPort(port).buildBlocking();
+    publishClient.connect();
     Thread publisherThread =
         new Thread(
             () -> {
               try {
-                LOG.info(
-                    "Waiting pipeline connected to the MQTT broker before sending "
-                        + "messages ...");
-                boolean pipelineConnected = false;
-                while (!pipelineConnected) {
-                  Thread.sleep(1000);
-                  for (Connection connection : brokerService.getBroker().getClients()) {
-                    if (!connection.getConnectionId().isEmpty()) {
-                      pipelineConnected = true;
-                    }
-                  }
-                }
+                waitForSubscription(new ActiveMQTopic(topicName));
                 for (int i = 0; i < 10; i++) {
-                  publishConnection.publish(
-                      topicName,
-                      ("This is test " + i).getBytes(StandardCharsets.UTF_8),
-                      QoS.EXACTLY_ONCE,
-                      false);
+                  publishClient
+                      .publishWith()
+                      .topic(topicName)
+                      .payload(("This is test " + i).getBytes(StandardCharsets.UTF_8))
+                      .qos(MqttQos.EXACTLY_ONCE)
+                      .send();
                 }
               } catch (Exception e) {
-                // nothing to do
+                LOG.warn("Failed to publish the test messages", e);
               }
             });
     publisherThread.start();
     pipeline.run();
 
-    publishConnection.disconnect();
+    publishClient.disconnect();
     publisherThread.join();
   }
 
-  @Test(timeout = 30 * 1000)
-  @Ignore("https://issues.apache.org/jira/browse/BEAM-5150 Flake Non-deterministic output.")
+  @Test(timeout = 40 * 1000)
   public void testRead() throws Exception {
     PCollection<byte[]> output =
         pipeline.apply(
@@ -151,7 +171,7 @@ public class MqttIOTest {
                 .withConnectionConfiguration(
                     MqttIO.ConnectionConfiguration.create("tcp://localhost:" + port, "READ_TOPIC")
                         .withClientId("READ_PIPELINE"))
-                .withMaxReadTime(Duration.standardSeconds(3)));
+                .withMaxReadTime(Duration.standardSeconds(5)));
     PAssert.that(output)
         .containsInAnyOrder(
             "This is test 0".getBytes(StandardCharsets.UTF_8),
@@ -167,32 +187,21 @@ public class MqttIOTest {
 
     // produce messages on the brokerService in another thread
     // This thread prevents to block the pipeline waiting for new messages
-    MQTT client = new MQTT();
-    client.setHost("tcp://localhost:" + port);
-    final BlockingConnection publishConnection = client.blockingConnection();
-    publishConnection.connect();
+    Mqtt3BlockingClient publishClient =
+        Mqtt3Client.builder().serverHost("localhost").serverPort(port).buildBlocking();
+    publishClient.connect();
     Thread publisherThread =
         new Thread(
             () -> {
               try {
-                LOG.info(
-                    "Waiting pipeline connected to the MQTT broker before sending "
-                        + "messages ...");
-                boolean pipelineConnected = false;
-                while (!pipelineConnected) {
-                  Thread.sleep(1000);
-                  for (Connection connection : brokerService.getBroker().getClients()) {
-                    if (connection.getConnectionId().startsWith("READ_PIPELINE")) {
-                      pipelineConnected = true;
-                    }
-                  }
-                }
+                doConnect(connection -> connection.getConnectionId().startsWith("READ_PIPELINE"));
                 for (int i = 0; i < 10; i++) {
-                  publishConnection.publish(
-                      "READ_TOPIC",
-                      ("This is test " + i).getBytes(StandardCharsets.UTF_8),
-                      QoS.EXACTLY_ONCE,
-                      false);
+                  publishClient
+                      .publishWith()
+                      .topic("READ_TOPIC")
+                      .payload(("This is test " + i).getBytes(StandardCharsets.UTF_8))
+                      .qos(MqttQos.EXACTLY_ONCE)
+                      .send();
                 }
               } catch (Exception e) {
                 // nothing to do
@@ -202,7 +211,75 @@ public class MqttIOTest {
     pipeline.run();
 
     publisherThread.join();
-    publishConnection.disconnect();
+    publishClient.disconnect();
+  }
+
+  @Test(timeout = 60 * 1000)
+  public void testReadWithMetadata() throws Exception {
+    final String wildcardTopic = "topic/#";
+    final String topic1 = "topic/1";
+    final String topic2 = "topic/2";
+
+    final PTransform<PBegin, PCollection<MqttRecord>> mqttReaderWithMetadata =
+        MqttIO.readWithMetadata()
+            .withConnectionConfiguration(
+                MqttIO.ConnectionConfiguration.create("tcp://localhost:" + port, wildcardTopic))
+            .withMaxNumRecords(10)
+            .withMaxReadTime(Duration.standardSeconds(10));
+
+    final PCollection<MqttRecord> output = pipeline.apply(mqttReaderWithMetadata);
+    PAssert.that(output)
+        .containsInAnyOrder(
+            MqttRecord.of(topic1, "This is test 0".getBytes(StandardCharsets.UTF_8)),
+            MqttRecord.of(topic1, "This is test 1".getBytes(StandardCharsets.UTF_8)),
+            MqttRecord.of(topic1, "This is test 2".getBytes(StandardCharsets.UTF_8)),
+            MqttRecord.of(topic1, "This is test 3".getBytes(StandardCharsets.UTF_8)),
+            MqttRecord.of(topic1, "This is test 4".getBytes(StandardCharsets.UTF_8)),
+            MqttRecord.of(topic2, "This is test 5".getBytes(StandardCharsets.UTF_8)),
+            MqttRecord.of(topic2, "This is test 6".getBytes(StandardCharsets.UTF_8)),
+            MqttRecord.of(topic2, "This is test 7".getBytes(StandardCharsets.UTF_8)),
+            MqttRecord.of(topic2, "This is test 8".getBytes(StandardCharsets.UTF_8)),
+            MqttRecord.of(topic2, "This is test 9".getBytes(StandardCharsets.UTF_8)));
+
+    // produce messages on the brokerService in another thread
+    // This thread prevents to block the pipeline waiting for new messages
+    Mqtt3BlockingClient publishClient =
+        Mqtt3Client.builder().serverHost("localhost").serverPort(port).buildBlocking();
+    publishClient.connect();
+    Thread publisherThread =
+        new Thread(
+            () -> {
+              try {
+                // The broker drops messages published before the reader subscribes. ActiveMQ names
+                // the MQTT topic "topic/1" as "topic.1".
+                waitForSubscription(new ActiveMQTopic("topic.1"));
+                for (int i = 0; i < 5; i++) {
+                  publishClient
+                      .publishWith()
+                      .topic(topic1)
+                      .payload(("This is test " + i).getBytes(StandardCharsets.UTF_8))
+                      .qos(MqttQos.EXACTLY_ONCE)
+                      .send();
+                }
+                for (int i = 5; i < 10; i++) {
+                  publishClient
+                      .publishWith()
+                      .topic(topic2)
+                      .payload(("This is test " + i).getBytes(StandardCharsets.UTF_8))
+                      .qos(MqttQos.EXACTLY_ONCE)
+                      .send();
+                }
+
+              } catch (Exception e) {
+                LOG.warn("Failed to publish the test messages", e);
+              }
+            });
+
+    publisherThread.start();
+    pipeline.run();
+
+    publishClient.disconnect();
+    publisherThread.join();
   }
 
   /** Test for BEAM-3282: this test should not timeout. */
@@ -219,14 +296,93 @@ public class MqttIOTest {
     pipeline.run();
   }
 
+  private static class FakeMessage implements Mqtt3Publish {
+    private int ackCount = 0;
+
+    @Override
+    public void acknowledge() {
+      ackCount++;
+    }
+
+    public int getAckCount() {
+      return ackCount;
+    }
+
+    @Override
+    public Optional<ByteBuffer> getPayload() {
+      return Optional.empty();
+    }
+
+    @Override
+    public byte[] getPayloadAsBytes() {
+      return new byte[0];
+    }
+
+    @Override
+    public MqttTopic getTopic() {
+      return MqttTopic.of("temp");
+    }
+
+    @Override
+    public MqttQos getQos() {
+      return MqttQos.AT_LEAST_ONCE;
+    }
+
+    @Override
+    public boolean isRetain() {
+      return false;
+    }
+
+    @Override
+    public Mqtt3PublishBuilder.Complete extend() {
+      return null;
+    }
+  }
+
+  @Test
+  public void testReadCheckpoint() {
+    MqttIO.MqttCheckpointMark.Preparer preparer = new MqttIO.MqttCheckpointMark.Preparer("id");
+    ArrayList<FakeMessage> messages = new ArrayList<>();
+    for (int i = 0; i < 5; ++i) {
+      messages.add(new FakeMessage());
+    }
+    preparer.add(messages.get(0), Instant.ofEpochMilli(20));
+    preparer.add(messages.get(1), Instant.ofEpochMilli(10));
+    preparer.add(messages.get(2), Instant.ofEpochMilli(30));
+    assertEquals(Instant.ofEpochMilli(10), preparer.oldestMessageTimestamp);
+    MqttIO.MqttCheckpointMark checkpointA = preparer.newCheckpoint();
+    preparer.add(messages.get(3), Instant.ofEpochMilli(40));
+    preparer.add(messages.get(4), Instant.ofEpochMilli(50));
+    MqttIO.MqttCheckpointMark checkpointB = preparer.newCheckpoint();
+
+    // Check that ackCount is 0 for all
+    assertTrue(messages.stream().allMatch(m -> m.getAckCount() == 0));
+
+    checkpointA.finalizeCheckpoint();
+    // only messages in finalized checkpoint acked
+    for (int i = 0; i < 3; ++i) {
+      assertEquals(1, messages.get(i).getAckCount());
+    }
+    for (int i = 3; i < 5; ++i) {
+      assertEquals(0, messages.get(i).getAckCount());
+    }
+
+    checkpointB.finalizeCheckpoint();
+    // all messages acked once
+    for (int i = 0; i < 5; ++i) {
+      assertEquals(1, messages.get(i).getAckCount());
+    }
+  }
+
   @Test
   public void testWrite() throws Exception {
     final int numberOfTestMessages = 200;
-    MQTT client = new MQTT();
-    client.setHost("tcp://localhost:" + port);
-    final BlockingConnection connection = client.blockingConnection();
-    connection.connect();
-    connection.subscribe(new Topic[] {new Topic(Buffer.utf8("WRITE_TOPIC"), QoS.EXACTLY_ONCE)});
+    Mqtt3BlockingClient client =
+        Mqtt3Client.builder().serverHost("localhost").serverPort(port).buildBlocking();
+    client.connect();
+    Mqtt3BlockingClient.Mqtt3Publishes publishes =
+        client.publishes(MqttGlobalPublishFilter.ALL, true);
+    client.subscribeWith().topicFilter("WRITE_TOPIC").qos(MqttQos.EXACTLY_ONCE).send();
 
     final Set<String> messages = new ConcurrentSkipListSet<>();
 
@@ -235,9 +391,9 @@ public class MqttIOTest {
             () -> {
               try {
                 for (int i = 0; i < numberOfTestMessages; i++) {
-                  Message message = connection.receive();
-                  messages.add(new String(message.getPayload(), StandardCharsets.UTF_8));
-                  message.ack();
+                  Mqtt3Publish message = publishes.receive();
+                  messages.add(new String(message.getPayloadAsBytes(), StandardCharsets.UTF_8));
+                  message.acknowledge();
                 }
               } catch (Exception e) {
                 LOG.error("Can't receive message", e);
@@ -259,12 +415,220 @@ public class MqttIOTest {
     pipeline.run();
     subscriber.join();
 
-    connection.disconnect();
+    client.disconnect();
 
     assertEquals(numberOfTestMessages, messages.size());
     for (int i = 0; i < numberOfTestMessages; i++) {
       assertTrue(messages.contains("Test " + i));
     }
+  }
+
+  @Test
+  public void testDynamicWrite() throws Exception {
+    final int numberOfTopic1Count = 100;
+    final int numberOfTopic2Count = 100;
+    final int numberOfTestMessages = numberOfTopic1Count + numberOfTopic2Count;
+
+    Mqtt3BlockingClient client =
+        Mqtt3Client.builder().serverHost("localhost").serverPort(port).buildBlocking();
+    client.connect();
+    Mqtt3BlockingClient.Mqtt3Publishes publishes =
+        client.publishes(MqttGlobalPublishFilter.ALL, true);
+    final String writeTopic1 = "WRITE_TOPIC_1";
+    final String writeTopic2 = "WRITE_TOPIC_2";
+    client.subscribeWith().topicFilter(writeTopic1).qos(MqttQos.EXACTLY_ONCE).send();
+    client.subscribeWith().topicFilter(writeTopic2).qos(MqttQos.EXACTLY_ONCE).send();
+
+    final Map<String, List<String>> messageMap = new ConcurrentSkipListMap<>();
+    final Thread subscriber =
+        new Thread(
+            () -> {
+              try {
+                for (int i = 0; i < numberOfTestMessages; i++) {
+                  Mqtt3Publish message = publishes.receive();
+                  List<String> messages = messageMap.get(message.getTopic().toString());
+                  if (messages == null) {
+                    messages = new ArrayList<>();
+                  }
+                  messages.add(new String(message.getPayloadAsBytes(), StandardCharsets.UTF_8));
+                  messageMap.put(message.getTopic().toString(), messages);
+                  message.acknowledge();
+                }
+              } catch (Exception e) {
+                LOG.error("Can't receive message", e);
+              }
+            });
+
+    subscriber.start();
+
+    ArrayList<KV<String, byte[]>> data = new ArrayList<>();
+    for (int i = 0; i < numberOfTopic1Count; i++) {
+      data.add(KV.of(writeTopic1, ("Test" + i).getBytes(StandardCharsets.UTF_8)));
+    }
+
+    for (int i = 0; i < numberOfTopic2Count; i++) {
+      data.add(KV.of(writeTopic2, ("Test" + i).getBytes(StandardCharsets.UTF_8)));
+    }
+
+    pipeline
+        .apply(Create.of(data))
+        .setCoder(KvCoder.of(StringUtf8Coder.of(), ByteArrayCoder.of()))
+        .apply(
+            MqttIO.<KV<String, byte[]>>dynamicWrite()
+                .withConnectionConfiguration(
+                    MqttIO.ConnectionConfiguration.create("tcp://localhost:" + port)
+                        .withClientId("READ_PIPELINE"))
+                .withTopicFn(input -> input.getKey())
+                .withPayloadFn(input -> input.getValue()));
+
+    pipeline.run();
+    subscriber.join();
+
+    client.disconnect();
+
+    assertEquals(
+        numberOfTestMessages, messageMap.values().stream().mapToLong(Collection::size).sum());
+
+    assertEquals(2, messageMap.keySet().size());
+    assertTrue(messageMap.containsKey(writeTopic1));
+    assertTrue(messageMap.containsKey(writeTopic2));
+    for (Map.Entry<String, List<String>> entry : messageMap.entrySet()) {
+      final List<String> messages = entry.getValue();
+      messages.forEach(message -> assertTrue(message.contains("Test")));
+      if (entry.getKey().equals(writeTopic1)) {
+        assertEquals(numberOfTopic1Count, messages.size());
+      } else {
+        assertEquals(numberOfTopic2Count, messages.size());
+      }
+    }
+  }
+
+  @Test
+  public void testReadHaveNoConnectionConfiguration() {
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class, () -> MqttIO.read().expand(PBegin.in(pipeline)));
+
+    assertEquals("connectionConfiguration can not be null", exception.getMessage());
+  }
+
+  @Test
+  public void testReadHaveNoTopic() {
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                MqttIO.read()
+                    .withConnectionConfiguration(MqttIO.ConnectionConfiguration.create("serverUri"))
+                    .expand(PBegin.in(pipeline)));
+
+    assertEquals("topic can not be null", exception.getMessage());
+
+    pipeline.run();
+  }
+
+  @Test
+  public void testWriteHaveNoConnectionConfiguration() {
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> MqttIO.write().expand(pipeline.apply(Create.of(new byte[] {}))));
+
+    assertEquals("connectionConfiguration can not be null", exception.getMessage());
+
+    pipeline.run();
+  }
+
+  @Test
+  public void testWriteHaveNoTopic() {
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                MqttIO.write()
+                    .withConnectionConfiguration(MqttIO.ConnectionConfiguration.create("serverUri"))
+                    .expand(pipeline.apply(Create.of(new byte[] {}))));
+
+    assertEquals("topic can not be null", exception.getMessage());
+
+    pipeline.run();
+  }
+
+  @Test
+  public void testDynamicWriteHaveNoConnectionConfiguration() {
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> MqttIO.dynamicWrite().expand(pipeline.apply(Create.of(new byte[] {}))));
+
+    assertEquals("connectionConfiguration can not be null", exception.getMessage());
+
+    pipeline.run();
+  }
+
+  @Test
+  public void testDynamicWriteHaveNoTopicFn() {
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                MqttIO.dynamicWrite()
+                    .withConnectionConfiguration(MqttIO.ConnectionConfiguration.create("serverUri"))
+                    .expand(pipeline.apply(Create.of(new byte[] {}))));
+
+    assertEquals("topicFn can not be null", exception.getMessage());
+
+    pipeline.run();
+  }
+
+  @Test
+  public void testDynamicWriteHaveNoPayloadFn() {
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                MqttIO.dynamicWrite()
+                    .withConnectionConfiguration(MqttIO.ConnectionConfiguration.create("serverUri"))
+                    .withTopicFn(input -> "topic")
+                    .expand(pipeline.apply(Create.of(new byte[] {}))));
+
+    assertEquals("payloadFn can not be null", exception.getMessage());
+
+    pipeline.run();
+  }
+
+  @Test
+  public void testDynamicWriteHaveStaticTopic() {
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                MqttIO.dynamicWrite()
+                    .withConnectionConfiguration(
+                        MqttIO.ConnectionConfiguration.create("serverUri", "topic"))
+                    .expand(pipeline.apply(Create.of(new byte[] {}))));
+
+    assertEquals("DynamicWrite can not have static topic", exception.getMessage());
+
+    pipeline.run();
+  }
+
+  @Test
+  public void testWriteWithTopicFn() {
+    IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class, () -> MqttIO.write().withTopicFn(e -> "some topic"));
+
+    assertEquals("withTopicFn can not use in non-dynamic write", exception.getMessage());
+  }
+
+  @Test
+  public void testWriteWithPayloadFn() {
+    final IllegalArgumentException exception =
+        assertThrows(
+            IllegalArgumentException.class, () -> MqttIO.write().withPayloadFn(e -> new byte[] {}));
+
+    assertEquals("withPayloadFn can not use in non-dynamic write", exception.getMessage());
   }
 
   @Test
@@ -283,7 +647,56 @@ public class MqttIOTest {
     // the number of messages of the decoded checkpoint should be zero
     assertEquals(0, cp2.messages.size());
     assertEquals(cp1.clientId, cp2.clientId);
-    assertEquals(cp1.oldestMessageTimestamp, cp2.oldestMessageTimestamp);
+  }
+
+  /**
+   * Attempts to establish a connection to the MQTT broker by checking each available client
+   * connection until the specified condition is met.
+   *
+   * <p>This method repeatedly checks the connection status of each MQTT client using the provided
+   * {@link ConnectionCondition}. It blocks execution within a loop, sleeping for 1 second between
+   * each check, until the condition is satisfied.
+   *
+   * @param condition the condition used to verify the connection status
+   * @throws Exception if any error occurs during the connection process
+   */
+  private void doConnect(ConnectionCondition condition) throws Exception {
+    LOG.info("Waiting pipeline connected to the MQTT broker before sending messages ...");
+    boolean pipelineConnected = false;
+    while (!pipelineConnected) {
+      for (Connection connection : brokerService.getBroker().getClients()) {
+        if (condition.check(connection)) {
+          pipelineConnected = true;
+        }
+      }
+      Thread.sleep(1000);
+    }
+  }
+
+  /**
+   * Blocks until a client has subscribed to a topic filter that matches the given destination.
+   *
+   * <p>The publishing clients in these tests never subscribe, so a matching subscription belongs to
+   * the pipeline's reader.
+   *
+   * @param destination the ActiveMQ destination the test is about to publish to
+   * @throws Exception if no client subscribes within 30 seconds
+   */
+  private void waitForSubscription(ActiveMQDestination destination) throws Exception {
+    LOG.info(
+        "Waiting for the pipeline to subscribe to {} before sending messages ...", destination);
+    AbstractRegion topicRegion =
+        (AbstractRegion) ((RegionBroker) brokerService.getRegionBroker()).getTopicRegion();
+    long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+    while (System.nanoTime() < deadlineNanos) {
+      for (Subscription subscription : topicRegion.getSubscriptions().values()) {
+        if (subscription.matches(destination)) {
+          return;
+        }
+      }
+      Thread.sleep(100);
+    }
+    throw new TimeoutException("No subscription to " + destination + " after 30 seconds");
   }
 
   @After

@@ -17,6 +17,9 @@
  */
 package org.apache.beam.sdk.transforms;
 
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.equalTo;
+
 import java.io.Serializable;
 import java.util.Collection;
 import java.util.stream.Collectors;
@@ -33,7 +36,7 @@ import org.apache.beam.sdk.transforms.JsonToRow.ParseResult;
 import org.apache.beam.sdk.util.RowJson.RowJsonDeserializer.NullBehavior;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -276,6 +279,24 @@ public class JsonToRowTest implements Serializable {
 
   @Test
   @Category(NeedsRunner.class)
+  public void testDownstreamExceptionIsNotReportedAsParseError() {
+    PCollection<String> jsonPersons = pipeline.apply("jsonPersons", Create.of(JSON_PERSON.get(0)));
+
+    ParseResult results = jsonPersons.apply(JsonToRow.withExceptionReporting(PERSON_SCHEMA));
+
+    results
+        .getResults()
+        .apply("throwingDownstream", ParDo.of(new ThrowingDownstreamDoFn()))
+        .setRowSchema(PERSON_SCHEMA);
+
+    thrown.expect(RuntimeException.class);
+    thrown.expectMessage("downstream failure");
+
+    pipeline.run();
+  }
+
+  @Test
+  @Category(NeedsRunner.class)
   public void testParsesErrorWithErrorMsgRowsDeadLetterWithCustomFieldNames() throws Exception {
     PCollection<String> jsonPersons =
         pipeline.apply("jsonPersons", Create.of(JSON_PERSON_WITH_ERR));
@@ -298,6 +319,8 @@ public class JsonToRowTest implements Serializable {
 
     PCollection<Row> personRows = results.getResults();
     PCollection<Row> errorsWithMsg = results.getFailedToParseLines();
+
+    assertThat(errorsWithMsg.getSchema(), equalTo(customSchema));
 
     PAssert.that(personRows).containsInAnyOrder(PERSON_ROWS);
 
@@ -329,5 +352,13 @@ public class JsonToRowTest implements Serializable {
 
   private static Row row(Schema schema, Object... values) {
     return Row.withSchema(schema).addValues(values).build();
+  }
+
+  private static class ThrowingDownstreamDoFn extends DoFn<Row, Row> {
+    @ProcessElement
+    @SuppressWarnings("UnusedVariable")
+    public void processElement(ProcessContext context) {
+      throw new RuntimeException("downstream failure");
+    }
   }
 }

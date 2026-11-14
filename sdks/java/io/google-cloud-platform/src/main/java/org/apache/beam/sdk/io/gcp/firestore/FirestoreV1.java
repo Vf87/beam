@@ -18,6 +18,7 @@
 package org.apache.beam.sdk.io.gcp.firestore;
 
 import static java.util.Objects.requireNonNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.firestore.v1.BatchGetDocumentsRequest;
 import com.google.firestore.v1.BatchGetDocumentsResponse;
@@ -37,6 +38,7 @@ import com.google.firestore.v1.StructuredQuery.FieldReference;
 import com.google.firestore.v1.StructuredQuery.Projection;
 import com.google.firestore.v1.Value;
 import com.google.firestore.v1.WriteResult;
+import com.google.protobuf.util.Timestamps;
 import com.google.rpc.Status;
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -46,8 +48,6 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Function;
 import javax.annotation.concurrent.Immutable;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.io.gcp.firestore.FirestoreV1ReadFn.BatchGetDocumentsFn;
 import org.apache.beam.sdk.io.gcp.firestore.FirestoreV1ReadFn.ListCollectionIdsFn;
 import org.apache.beam.sdk.io.gcp.firestore.FirestoreV1ReadFn.ListDocumentsFn;
@@ -68,7 +68,9 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.PInput;
 import org.apache.beam.sdk.values.POutput;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.checkerframework.checker.nullness.qual.Nullable;
+import org.joda.time.Instant;
 
 /**
  * {@link FirestoreV1} provides an API which provides lifecycle managed {@link PTransform}s for <a
@@ -278,7 +280,6 @@ public final class FirestoreV1 {
    * @see FirestoreIO#v1()
    * @see #read()
    */
-  @Experimental(Kind.SOURCE_SINK)
   @Immutable
   public static final class Read {
     private static final Read INSTANCE = new Read();
@@ -501,9 +502,11 @@ public final class FirestoreV1 {
    * @see FirestoreIO#v1()
    * @see #write()
    */
-  @Experimental(Kind.SOURCE_SINK)
   @Immutable
   public static final class Write {
+    private @Nullable String projectId;
+    private @Nullable String databaseId;
+
     private static final Write INSTANCE = new Write();
 
     private Write() {}
@@ -539,8 +542,20 @@ public final class FirestoreV1 {
      * @see <a target="_blank" rel="noopener noreferrer"
      *     href="https://cloud.google.com/firestore/docs/reference/rpc/google.firestore.v1#google.firestore.v1.BatchWriteResponse">google.firestore.v1.BatchWriteResponse</a>
      */
+    public Write withProjectId(String projectId) {
+      checkArgument(projectId != null, "projectId can not be null");
+      this.projectId = projectId;
+      return this;
+    }
+
+    public Write withDatabaseId(String databaseId) {
+      checkArgument(databaseId != null, "databaseId can not be null");
+      this.databaseId = databaseId;
+      return this;
+    }
+
     public BatchWriteWithSummary.Builder batchWrite() {
-      return new BatchWriteWithSummary.Builder();
+      return new BatchWriteWithSummary.Builder().setProjectId(projectId).setDatabaseId(databaseId);
     }
   }
 
@@ -570,7 +585,7 @@ public final class FirestoreV1 {
    *     href="https://cloud.google.com/firestore/docs/reference/rpc/google.firestore.v1#google.firestore.v1.ListCollectionIdsResponse">google.firestore.v1.ListCollectionIdsResponse</a>
    */
   public static final class ListCollectionIds
-      extends Transform<
+      extends ReadTransform<
           PCollection<ListCollectionIdsRequest>,
           PCollection<String>,
           ListCollectionIds,
@@ -579,8 +594,12 @@ public final class FirestoreV1 {
     private ListCollectionIds(
         JodaClock clock,
         FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-        RpcQosOptions rpcQosOptions) {
-      super(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+        RpcQosOptions rpcQosOptions,
+        @Nullable Instant readTime,
+        @Nullable String projectId,
+        @Nullable String databaseId) {
+      super(
+          clock, firestoreStatefulComponentFactory, rpcQosOptions, readTime, projectId, databaseId);
     }
 
     @Override
@@ -589,14 +608,16 @@ public final class FirestoreV1 {
           .apply(
               "listCollectionIds",
               ParDo.of(
-                  new ListCollectionIdsFn(clock, firestoreStatefulComponentFactory, rpcQosOptions)))
+                  new ListCollectionIdsFn(
+                      clock, firestoreStatefulComponentFactory, rpcQosOptions, readTime)))
           .apply(ParDo.of(new FlattenListCollectionIdsResponse()))
           .apply(Reshuffle.viaRandomKey());
     }
 
     @Override
     public Builder toBuilder() {
-      return new Builder(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+      return new Builder(
+          clock, firestoreStatefulComponentFactory, rpcQosOptions, readTime, projectId, databaseId);
     }
 
     /**
@@ -622,7 +643,7 @@ public final class FirestoreV1 {
      *     href="https://cloud.google.com/firestore/docs/reference/rpc/google.firestore.v1#google.firestore.v1.ListCollectionIdsResponse">google.firestore.v1.ListCollectionIdsResponse</a>
      */
     public static final class Builder
-        extends Transform.Builder<
+        extends ReadTransform.Builder<
             PCollection<ListCollectionIdsRequest>,
             PCollection<String>,
             ListCollectionIds,
@@ -635,8 +656,17 @@ public final class FirestoreV1 {
       private Builder(
           JodaClock clock,
           FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-          RpcQosOptions rpcQosOptions) {
-        super(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+          RpcQosOptions rpcQosOptions,
+          @Nullable Instant readTime,
+          @Nullable String projectId,
+          @Nullable String databaseId) {
+        super(
+            clock,
+            firestoreStatefulComponentFactory,
+            rpcQosOptions,
+            readTime,
+            projectId,
+            databaseId);
       }
 
       @Override
@@ -648,8 +678,17 @@ public final class FirestoreV1 {
       ListCollectionIds buildSafe(
           JodaClock clock,
           FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-          RpcQosOptions rpcQosOptions) {
-        return new ListCollectionIds(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+          RpcQosOptions rpcQosOptions,
+          @Nullable Instant readTime,
+          @Nullable String projectId,
+          @Nullable String databaseId) {
+        return new ListCollectionIds(
+            clock,
+            firestoreStatefulComponentFactory,
+            rpcQosOptions,
+            readTime,
+            projectId,
+            databaseId);
       }
     }
   }
@@ -680,7 +719,7 @@ public final class FirestoreV1 {
    *     href="https://cloud.google.com/firestore/docs/reference/rpc/google.firestore.v1#google.firestore.v1.ListDocumentsResponse">google.firestore.v1.ListDocumentsResponse</a>
    */
   public static final class ListDocuments
-      extends Transform<
+      extends ReadTransform<
           PCollection<ListDocumentsRequest>,
           PCollection<Document>,
           ListDocuments,
@@ -689,8 +728,12 @@ public final class FirestoreV1 {
     private ListDocuments(
         JodaClock clock,
         FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-        RpcQosOptions rpcQosOptions) {
-      super(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+        RpcQosOptions rpcQosOptions,
+        @Nullable Instant readTime,
+        @Nullable String projectId,
+        @Nullable String databaseId) {
+      super(
+          clock, firestoreStatefulComponentFactory, rpcQosOptions, readTime, projectId, databaseId);
     }
 
     @Override
@@ -699,14 +742,21 @@ public final class FirestoreV1 {
           .apply(
               "listDocuments",
               ParDo.of(
-                  new ListDocumentsFn(clock, firestoreStatefulComponentFactory, rpcQosOptions)))
+                  new ListDocumentsFn(
+                      clock,
+                      firestoreStatefulComponentFactory,
+                      rpcQosOptions,
+                      readTime,
+                      projectId,
+                      databaseId)))
           .apply(ParDo.of(new ListDocumentsResponseToDocument()))
           .apply(Reshuffle.viaRandomKey());
     }
 
     @Override
     public Builder toBuilder() {
-      return new Builder(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+      return new Builder(
+          clock, firestoreStatefulComponentFactory, rpcQosOptions, readTime, projectId, databaseId);
     }
 
     /**
@@ -732,7 +782,7 @@ public final class FirestoreV1 {
      *     href="https://cloud.google.com/firestore/docs/reference/rpc/google.firestore.v1#google.firestore.v1.ListDocumentsResponse">google.firestore.v1.ListDocumentsResponse</a>
      */
     public static final class Builder
-        extends Transform.Builder<
+        extends ReadTransform.Builder<
             PCollection<ListDocumentsRequest>,
             PCollection<Document>,
             ListDocuments,
@@ -745,8 +795,17 @@ public final class FirestoreV1 {
       private Builder(
           JodaClock clock,
           FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-          RpcQosOptions rpcQosOptions) {
-        super(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+          RpcQosOptions rpcQosOptions,
+          @Nullable Instant readTime,
+          @Nullable String projectId,
+          @Nullable String databaseId) {
+        super(
+            clock,
+            firestoreStatefulComponentFactory,
+            rpcQosOptions,
+            readTime,
+            projectId,
+            databaseId);
       }
 
       @Override
@@ -758,8 +817,17 @@ public final class FirestoreV1 {
       ListDocuments buildSafe(
           JodaClock clock,
           FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-          RpcQosOptions rpcQosOptions) {
-        return new ListDocuments(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+          RpcQosOptions rpcQosOptions,
+          @Nullable Instant readTime,
+          @Nullable String projectId,
+          @Nullable String databaseId) {
+        return new ListDocuments(
+            clock,
+            firestoreStatefulComponentFactory,
+            rpcQosOptions,
+            readTime,
+            projectId,
+            databaseId);
       }
     }
   }
@@ -789,17 +857,22 @@ public final class FirestoreV1 {
    * @see <a target="_blank" rel="noopener noreferrer"
    *     href="https://cloud.google.com/firestore/docs/reference/rpc/google.firestore.v1#google.firestore.v1.RunQueryResponse">google.firestore.v1.RunQueryResponse</a>
    */
-  // TODO(BEAM-12605): Add dynamic work rebalancing to support a Splittable DoFn
-  // TODO(BEAM-12606): Add support for progress reporting
+  // TODO(https://github.com/apache/beam/issues/21056): Add dynamic work rebalancing to support a
+  // Splittable DoFn
+  // TODO(https://github.com/apache/beam/issues/21050): Add support for progress reporting
   public static final class RunQuery
-      extends Transform<
+      extends ReadTransform<
           PCollection<RunQueryRequest>, PCollection<RunQueryResponse>, RunQuery, RunQuery.Builder> {
 
     private RunQuery(
         JodaClock clock,
         FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-        RpcQosOptions rpcQosOptions) {
-      super(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+        RpcQosOptions rpcQosOptions,
+        @Nullable Instant readTime,
+        @Nullable String projectId,
+        @Nullable String databaseId) {
+      super(
+          clock, firestoreStatefulComponentFactory, rpcQosOptions, readTime, projectId, databaseId);
     }
 
     @Override
@@ -807,13 +880,16 @@ public final class FirestoreV1 {
       return input
           .apply(
               "runQuery",
-              ParDo.of(new RunQueryFn(clock, firestoreStatefulComponentFactory, rpcQosOptions)))
+              ParDo.of(
+                  new RunQueryFn(
+                      clock, firestoreStatefulComponentFactory, rpcQosOptions, readTime)))
           .apply(Reshuffle.viaRandomKey());
     }
 
     @Override
     public Builder toBuilder() {
-      return new Builder(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+      return new Builder(
+          clock, firestoreStatefulComponentFactory, rpcQosOptions, readTime, projectId, databaseId);
     }
 
     /**
@@ -839,7 +915,7 @@ public final class FirestoreV1 {
      *     href="https://cloud.google.com/firestore/docs/reference/rpc/google.firestore.v1#google.firestore.v1.RunQueryResponse">google.firestore.v1.RunQueryResponse</a>
      */
     public static final class Builder
-        extends Transform.Builder<
+        extends ReadTransform.Builder<
             PCollection<RunQueryRequest>,
             PCollection<RunQueryResponse>,
             RunQuery,
@@ -852,8 +928,17 @@ public final class FirestoreV1 {
       private Builder(
           JodaClock clock,
           FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-          RpcQosOptions rpcQosOptions) {
-        super(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+          RpcQosOptions rpcQosOptions,
+          @Nullable Instant readTime,
+          @Nullable String projectId,
+          @Nullable String databaseId) {
+        super(
+            clock,
+            firestoreStatefulComponentFactory,
+            rpcQosOptions,
+            readTime,
+            projectId,
+            databaseId);
       }
 
       @Override
@@ -865,8 +950,17 @@ public final class FirestoreV1 {
       RunQuery buildSafe(
           JodaClock clock,
           FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-          RpcQosOptions rpcQosOptions) {
-        return new RunQuery(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+          RpcQosOptions rpcQosOptions,
+          @Nullable Instant readTime,
+          @Nullable String projectId,
+          @Nullable String databaseId) {
+        return new RunQuery(
+            clock,
+            firestoreStatefulComponentFactory,
+            rpcQosOptions,
+            readTime,
+            projectId,
+            databaseId);
       }
     }
   }
@@ -897,7 +991,7 @@ public final class FirestoreV1 {
    *     href="https://cloud.google.com/firestore/docs/reference/rpc/google.firestore.v1#google.firestore.v1.BatchGetDocumentsResponse">google.firestore.v1.BatchGetDocumentsResponse</a>
    */
   public static final class BatchGetDocuments
-      extends Transform<
+      extends ReadTransform<
           PCollection<BatchGetDocumentsRequest>,
           PCollection<BatchGetDocumentsResponse>,
           BatchGetDocuments,
@@ -906,8 +1000,12 @@ public final class FirestoreV1 {
     private BatchGetDocuments(
         JodaClock clock,
         FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-        RpcQosOptions rpcQosOptions) {
-      super(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+        RpcQosOptions rpcQosOptions,
+        @Nullable Instant readTime,
+        @Nullable String projectId,
+        @Nullable String databaseId) {
+      super(
+          clock, firestoreStatefulComponentFactory, rpcQosOptions, readTime, projectId, databaseId);
     }
 
     @Override
@@ -917,13 +1015,15 @@ public final class FirestoreV1 {
           .apply(
               "batchGetDocuments",
               ParDo.of(
-                  new BatchGetDocumentsFn(clock, firestoreStatefulComponentFactory, rpcQosOptions)))
+                  new BatchGetDocumentsFn(
+                      clock, firestoreStatefulComponentFactory, rpcQosOptions, readTime)))
           .apply(Reshuffle.viaRandomKey());
     }
 
     @Override
     public Builder toBuilder() {
-      return new Builder(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+      return new Builder(
+          clock, firestoreStatefulComponentFactory, rpcQosOptions, readTime, projectId, databaseId);
     }
 
     /**
@@ -949,7 +1049,7 @@ public final class FirestoreV1 {
      *     href="https://cloud.google.com/firestore/docs/reference/rpc/google.firestore.v1#google.firestore.v1.BatchGetDocumentsResponse">google.firestore.v1.BatchGetDocumentsResponse</a>
      */
     public static final class Builder
-        extends Transform.Builder<
+        extends ReadTransform.Builder<
             PCollection<BatchGetDocumentsRequest>,
             PCollection<BatchGetDocumentsResponse>,
             BatchGetDocuments,
@@ -962,8 +1062,17 @@ public final class FirestoreV1 {
       public Builder(
           JodaClock clock,
           FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-          RpcQosOptions rpcQosOptions) {
-        super(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+          RpcQosOptions rpcQosOptions,
+          @Nullable Instant readTime,
+          @Nullable String projectId,
+          @Nullable String databaseId) {
+        super(
+            clock,
+            firestoreStatefulComponentFactory,
+            rpcQosOptions,
+            readTime,
+            projectId,
+            databaseId);
       }
 
       @Override
@@ -975,8 +1084,17 @@ public final class FirestoreV1 {
       BatchGetDocuments buildSafe(
           JodaClock clock,
           FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-          RpcQosOptions rpcQosOptions) {
-        return new BatchGetDocuments(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+          RpcQosOptions rpcQosOptions,
+          @Nullable Instant readTime,
+          @Nullable String projectId,
+          @Nullable String databaseId) {
+        return new BatchGetDocuments(
+            clock,
+            firestoreStatefulComponentFactory,
+            rpcQosOptions,
+            readTime,
+            projectId,
+            databaseId);
       }
     }
   }
@@ -1013,7 +1131,7 @@ public final class FirestoreV1 {
    *     href="https://cloud.google.com/firestore/docs/reference/rpc/google.firestore.v1#google.firestore.v1.PartitionQueryResponse">google.firestore.v1.PartitionQueryResponse</a>
    */
   public static final class PartitionQuery
-      extends Transform<
+      extends ReadTransform<
           PCollection<PartitionQueryRequest>,
           PCollection<RunQueryRequest>,
           PartitionQuery,
@@ -1025,8 +1143,12 @@ public final class FirestoreV1 {
         JodaClock clock,
         FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
         RpcQosOptions rpcQosOptions,
-        boolean nameOnlyQuery) {
-      super(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+        boolean nameOnlyQuery,
+        @Nullable Instant readTime,
+        @Nullable String projectId,
+        @Nullable String databaseId) {
+      super(
+          clock, firestoreStatefulComponentFactory, rpcQosOptions, readTime, projectId, databaseId);
       this.nameOnlyQuery = nameOnlyQuery;
     }
 
@@ -1038,8 +1160,10 @@ public final class FirestoreV1 {
                   "PartitionQuery",
                   ParDo.of(
                       new PartitionQueryFn(
-                          clock, firestoreStatefulComponentFactory, rpcQosOptions)))
-              .apply("expand queries", ParDo.of(new PartitionQueryResponseToRunQueryRequest()));
+                          clock, firestoreStatefulComponentFactory, rpcQosOptions, readTime)))
+              .apply(
+                  "expand queries",
+                  ParDo.of(new PartitionQueryResponseToRunQueryRequest(readTime)));
       if (nameOnlyQuery) {
         queries =
             queries.apply(
@@ -1067,7 +1191,14 @@ public final class FirestoreV1 {
 
     @Override
     public Builder toBuilder() {
-      return new Builder(clock, firestoreStatefulComponentFactory, rpcQosOptions, nameOnlyQuery);
+      return new Builder(
+          clock,
+          firestoreStatefulComponentFactory,
+          rpcQosOptions,
+          nameOnlyQuery,
+          readTime,
+          projectId,
+          databaseId);
     }
 
     /**
@@ -1093,7 +1224,7 @@ public final class FirestoreV1 {
      *     href="https://cloud.google.com/firestore/docs/reference/rpc/google.firestore.v1#google.firestore.v1.PartitionQueryResponse">google.firestore.v1.PartitionQueryResponse</a>
      */
     public static final class Builder
-        extends Transform.Builder<
+        extends ReadTransform.Builder<
             PCollection<PartitionQueryRequest>,
             PCollection<RunQueryRequest>,
             PartitionQuery,
@@ -1109,8 +1240,17 @@ public final class FirestoreV1 {
           JodaClock clock,
           FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
           RpcQosOptions rpcQosOptions,
-          boolean nameOnlyQuery) {
-        super(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+          boolean nameOnlyQuery,
+          @Nullable Instant readTime,
+          @Nullable String projectId,
+          @Nullable String databaseId) {
+        super(
+            clock,
+            firestoreStatefulComponentFactory,
+            rpcQosOptions,
+            readTime,
+            projectId,
+            databaseId);
         this.nameOnlyQuery = nameOnlyQuery;
       }
 
@@ -1134,9 +1274,18 @@ public final class FirestoreV1 {
       PartitionQuery buildSafe(
           JodaClock clock,
           FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-          RpcQosOptions rpcQosOptions) {
+          RpcQosOptions rpcQosOptions,
+          @Nullable Instant readTime,
+          @Nullable String projectId,
+          @Nullable String databaseId) {
         return new PartitionQuery(
-            clock, firestoreStatefulComponentFactory, rpcQosOptions, nameOnlyQuery);
+            clock,
+            firestoreStatefulComponentFactory,
+            rpcQosOptions,
+            nameOnlyQuery,
+            readTime,
+            projectId,
+            databaseId);
       }
     }
 
@@ -1146,6 +1295,15 @@ public final class FirestoreV1 {
      */
     static final class PartitionQueryResponseToRunQueryRequest
         extends DoFn<PartitionQueryPair, RunQueryRequest> {
+      private final @Nullable Instant readTime;
+
+      PartitionQueryResponseToRunQueryRequest() {
+        this(null);
+      }
+
+      PartitionQueryResponseToRunQueryRequest(@Nullable Instant readTime) {
+        this.readTime = readTime;
+      }
 
       /**
        * When fetching cursors that span multiple pages it is expected (per <a
@@ -1164,7 +1322,7 @@ public final class FirestoreV1 {
                     .filter(
                         v -> {
                           String referenceValue = v.getReferenceValue();
-                          return referenceValue != null && !referenceValue.isEmpty();
+                          return !referenceValue.isEmpty();
                         })
                     .findFirst();
         Function<String, String[]> stringToPath = (String s) -> s.split("/");
@@ -1245,12 +1403,13 @@ public final class FirestoreV1 {
       }
 
       private void emit(ProcessContext c, String dbRoot, StructuredQuery.Builder builder) {
-        RunQueryRequest runQueryRequest =
-            RunQueryRequest.newBuilder()
-                .setParent(dbRoot)
-                .setStructuredQuery(builder.build())
-                .build();
-        c.output(runQueryRequest);
+        RunQueryRequest.Builder runQueryRequest =
+            RunQueryRequest.newBuilder().setParent(dbRoot).setStructuredQuery(builder.build());
+
+        if (readTime != null) {
+          runQueryRequest.setReadTime(Timestamps.fromMillis(readTime.getMillis()));
+        }
+        c.output(runQueryRequest.build());
       }
     }
   }
@@ -1314,11 +1473,13 @@ public final class FirestoreV1 {
           BatchWriteWithSummary,
           BatchWriteWithSummary.Builder> {
 
-    private BatchWriteWithSummary(
+    public BatchWriteWithSummary(
         JodaClock clock,
         FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-        RpcQosOptions rpcQosOptions) {
-      super(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+        RpcQosOptions rpcQosOptions,
+        @Nullable String projectId,
+        @Nullable String databaseId) {
+      super(clock, firestoreStatefulComponentFactory, rpcQosOptions, projectId, databaseId);
     }
 
     @Override
@@ -1331,12 +1492,15 @@ public final class FirestoreV1 {
                   clock,
                   firestoreStatefulComponentFactory,
                   rpcQosOptions,
-                  CounterFactory.DEFAULT)));
+                  CounterFactory.DEFAULT,
+                  projectId,
+                  databaseId)));
     }
 
     @Override
     public Builder toBuilder() {
-      return new Builder(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+      return new Builder(
+          clock, firestoreStatefulComponentFactory, rpcQosOptions, projectId, databaseId);
     }
 
     /**
@@ -1376,13 +1540,15 @@ public final class FirestoreV1 {
       private Builder(
           JodaClock clock,
           FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-          RpcQosOptions rpcQosOptions) {
-        super(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+          RpcQosOptions rpcQosOptions,
+          @Nullable String projectId,
+          @Nullable String databaseId) {
+        super(clock, firestoreStatefulComponentFactory, rpcQosOptions, projectId, databaseId);
       }
 
       public BatchWriteWithDeadLetterQueue.Builder withDeadLetterQueue() {
         return new BatchWriteWithDeadLetterQueue.Builder(
-            clock, firestoreStatefulComponentFactory, rpcQosOptions);
+            clock, firestoreStatefulComponentFactory, rpcQosOptions, projectId, databaseId);
       }
 
       @Override
@@ -1395,7 +1561,8 @@ public final class FirestoreV1 {
           JodaClock clock,
           FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
           RpcQosOptions rpcQosOptions) {
-        return new BatchWriteWithSummary(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+        return new BatchWriteWithSummary(
+            clock, firestoreStatefulComponentFactory, rpcQosOptions, projectId, databaseId);
       }
     }
   }
@@ -1443,8 +1610,10 @@ public final class FirestoreV1 {
     private BatchWriteWithDeadLetterQueue(
         JodaClock clock,
         FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-        RpcQosOptions rpcQosOptions) {
-      super(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+        RpcQosOptions rpcQosOptions,
+        @Nullable String projectId,
+        @Nullable String databaseId) {
+      super(clock, firestoreStatefulComponentFactory, rpcQosOptions, projectId, databaseId);
     }
 
     @Override
@@ -1456,12 +1625,15 @@ public final class FirestoreV1 {
                   clock,
                   firestoreStatefulComponentFactory,
                   rpcQosOptions,
-                  CounterFactory.DEFAULT)));
+                  CounterFactory.DEFAULT,
+                  projectId,
+                  databaseId)));
     }
 
     @Override
     public Builder toBuilder() {
-      return new Builder(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+      return new Builder(
+          clock, firestoreStatefulComponentFactory, rpcQosOptions, projectId, databaseId);
     }
 
     /**
@@ -1501,8 +1673,10 @@ public final class FirestoreV1 {
       private Builder(
           JodaClock clock,
           FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-          RpcQosOptions rpcQosOptions) {
-        super(clock, firestoreStatefulComponentFactory, rpcQosOptions);
+          RpcQosOptions rpcQosOptions,
+          @Nullable String projectId,
+          @Nullable String databaseId) {
+        super(clock, firestoreStatefulComponentFactory, rpcQosOptions, projectId, databaseId);
       }
 
       @Override
@@ -1516,7 +1690,7 @@ public final class FirestoreV1 {
           FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
           RpcQosOptions rpcQosOptions) {
         return new BatchWriteWithDeadLetterQueue(
-            clock, firestoreStatefulComponentFactory, rpcQosOptions);
+            clock, firestoreStatefulComponentFactory, rpcQosOptions, projectId, databaseId);
       }
     }
   }
@@ -1666,14 +1840,20 @@ public final class FirestoreV1 {
     final JodaClock clock;
     final FirestoreStatefulComponentFactory firestoreStatefulComponentFactory;
     final RpcQosOptions rpcQosOptions;
+    final @Nullable String projectId;
+    final @Nullable String databaseId;
 
     Transform(
         JodaClock clock,
         FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-        RpcQosOptions rpcQosOptions) {
+        RpcQosOptions rpcQosOptions,
+        @Nullable String projectId,
+        @Nullable String databaseId) {
       this.clock = clock;
       this.firestoreStatefulComponentFactory = firestoreStatefulComponentFactory;
       this.rpcQosOptions = rpcQosOptions;
+      this.projectId = projectId;
+      this.databaseId = databaseId;
     }
 
     @Override
@@ -1714,20 +1894,28 @@ public final class FirestoreV1 {
       JodaClock clock;
       FirestoreStatefulComponentFactory firestoreStatefulComponentFactory;
       RpcQosOptions rpcQosOptions;
+      @Nullable String projectId;
+      @Nullable String databaseId;
 
       Builder() {
         clock = JodaClock.DEFAULT;
         firestoreStatefulComponentFactory = FirestoreStatefulComponentFactory.INSTANCE;
         rpcQosOptions = RpcQosOptions.defaultOptions();
+        projectId = null;
+        databaseId = null;
       }
 
       private Builder(
           JodaClock clock,
           FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
-          RpcQosOptions rpcQosOptions) {
+          RpcQosOptions rpcQosOptions,
+          @Nullable String projectId,
+          @Nullable String databaseId) {
         this.clock = clock;
         this.firestoreStatefulComponentFactory = firestoreStatefulComponentFactory;
         this.rpcQosOptions = rpcQosOptions;
+        this.projectId = projectId;
+        this.databaseId = databaseId;
       }
 
       /**
@@ -1780,7 +1968,7 @@ public final class FirestoreV1 {
        * While this type information is important for our implementation, it is less important for
        * the users using our implementation.
        */
-      final TrfmT genericBuild() {
+      TrfmT genericBuild() {
         return buildSafe(
             requireNonNull(clock, "clock must be non null"),
             requireNonNull(firestoreStatefulComponentFactory, "firestoreFactory must be non null"),
@@ -1808,6 +1996,117 @@ public final class FirestoreV1 {
       public final BldrT withRpcQosOptions(RpcQosOptions rpcQosOptions) {
         requireNonNull(rpcQosOptions, "rpcQosOptions must be non null");
         this.rpcQosOptions = rpcQosOptions;
+        return self();
+      }
+
+      public final BldrT setProjectId(@Nullable String projectId) {
+        this.projectId = projectId;
+        return self();
+      }
+
+      public final BldrT setDatabaseId(@Nullable String databaseId) {
+        this.databaseId = databaseId;
+        return self();
+      }
+
+      @VisibleForTesting
+      @Nullable String getProjectId() {
+        return this.projectId;
+      }
+
+      @VisibleForTesting
+      @Nullable String getDatabaseId() {
+        return this.databaseId;
+      }
+    }
+  }
+
+  private abstract static class ReadTransform<
+          InT extends PInput,
+          OutT extends POutput,
+          TrfmT extends ReadTransform<InT, OutT, TrfmT, BldrT>,
+          BldrT extends ReadTransform.Builder<InT, OutT, TrfmT, BldrT>>
+      extends Transform<InT, OutT, TrfmT, BldrT> {
+
+    final @Nullable Instant readTime;
+
+    ReadTransform(
+        JodaClock clock,
+        FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
+        RpcQosOptions rpcQosOptions,
+        @Nullable Instant readTime,
+        @Nullable String projectId,
+        @Nullable String databaseId) {
+      super(clock, firestoreStatefulComponentFactory, rpcQosOptions, projectId, databaseId);
+      this.readTime = readTime;
+    }
+
+    @Override
+    public abstract BldrT toBuilder();
+
+    abstract static class Builder<
+            InT extends PInput,
+            OutT extends POutput,
+            TrfmT extends ReadTransform<InT, OutT, TrfmT, BldrT>,
+            BldrT extends ReadTransform.Builder<InT, OutT, TrfmT, BldrT>>
+        extends Transform.Builder<InT, OutT, TrfmT, BldrT> {
+      @Nullable Instant readTime;
+
+      Builder() {
+        super();
+        this.readTime = null;
+      }
+
+      private Builder(
+          JodaClock clock,
+          FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
+          RpcQosOptions rpcQosOptions,
+          @Nullable Instant readTime,
+          @Nullable String projectId,
+          @Nullable String databaseId) {
+        super(clock, firestoreStatefulComponentFactory, rpcQosOptions, projectId, databaseId);
+        this.readTime = readTime;
+      }
+
+      @Override
+      final TrfmT genericBuild() {
+        return buildSafe(
+            requireNonNull(clock, "clock must be non null"),
+            requireNonNull(firestoreStatefulComponentFactory, "firestoreFactory must be non null"),
+            requireNonNull(rpcQosOptions, "rpcQosOptions must be non null"),
+            readTime,
+            projectId,
+            databaseId);
+      }
+
+      @Override
+      TrfmT buildSafe(
+          JodaClock clock,
+          FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
+          RpcQosOptions rpcQosOptions) {
+        throw new UnsupportedOperationException();
+      }
+
+      abstract TrfmT buildSafe(
+          JodaClock clock,
+          FirestoreStatefulComponentFactory firestoreStatefulComponentFactory,
+          RpcQosOptions rpcQosOptions,
+          @Nullable Instant readTime,
+          @Nullable String projectId,
+          @Nullable String databaseId);
+
+      public final BldrT withReadTime(@Nullable Instant readTime) {
+        this.readTime = readTime;
+        return self();
+      }
+
+      public final BldrT withProjectId(@Nullable String projectId) {
+        this.projectId = projectId;
+        return self();
+      }
+
+      public final BldrT withDatabaseId(@Nullable String databaseId) {
+        this.databaseId = databaseId;
         return self();
       }
     }

@@ -18,7 +18,6 @@
 package org.apache.beam.sdk.io.azure.blobstore;
 
 import static java.util.UUID.randomUUID;
-import static org.apache.beam.sdk.io.fs.CreateOptions.StandardCreateOptions.builder;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.junit.Assert.assertArrayEquals;
@@ -26,6 +25,7 @@ import static org.junit.Assert.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -46,14 +46,17 @@ import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import org.apache.beam.sdk.io.azure.options.BlobstoreOptions;
+import org.apache.beam.sdk.io.fs.CreateOptions;
 import org.apache.beam.sdk.io.fs.MatchResult;
+import org.apache.beam.sdk.metrics.Lineage;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.FluentIterable;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.FluentIterable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Test;
@@ -109,7 +112,7 @@ public class AzureBlobStoreFileSystemTest {
     when(mockedBlobClient.getBlockBlobClient()).thenReturn(mockedBlockBlob);
     when(mockedBlobClient.getProperties()).thenReturn(mockedProperties);
     when(mockedProperties.getBlobSize()).thenReturn(Long.valueOf(1));
-    when(mockedProperties.getLastModified()).thenReturn(OffsetDateTime.now());
+    when(mockedProperties.getLastModified()).thenReturn(OffsetDateTime.now(ZoneOffset.UTC));
     when(mockedContainerClient.listBlobs(any(ListBlobsOptions.class), any(Duration.class)))
         .thenReturn(mockedPagedIterable);
     when(mockedContainerClient.listBlobsByHierarchy(any(String.class)))
@@ -154,7 +157,9 @@ public class AzureBlobStoreFileSystemTest {
     // First create an object and write data to it
     AzfsResourceId path = AzfsResourceId.fromUri("azfs://account/testcontainer/foo/bar.txt");
     WritableByteChannel writableByteChannel =
-        azureBlobStoreFileSystem.create(path, builder().setMimeType("application/text").build());
+        azureBlobStoreFileSystem.create(
+            path,
+            CreateOptions.StandardCreateOptions.builder().setMimeType("application/text").build());
     writableByteChannel.write(bb);
     writableByteChannel.close();
 
@@ -248,7 +253,7 @@ public class AzureBlobStoreFileSystemTest {
 
   private List<String> toFilenames(MatchResult matchResult) throws IOException {
     return FluentIterable.from(matchResult.metadata())
-        .transform(metadata -> (metadata.resourceId()).toString())
+        .transform(metadata -> metadata.resourceId().toString())
         .toList();
   }
 
@@ -335,5 +340,21 @@ public class AzureBlobStoreFileSystemTest {
         contains(toFilenames(matchResults.get(2)).toArray()));
 
     blobContainerClient.delete();
+  }
+
+  @Test
+  public void testReportLineageOnBucket() {
+    verifyLineage("azfs://account/container", ImmutableList.of("account", "container"));
+    verifyLineage("azfs://account/container/", ImmutableList.of("account", "container"));
+    verifyLineage(
+        "azfs://account/container/foo/bar.txt",
+        ImmutableList.of("account", "container", "foo/bar.txt"));
+  }
+
+  private void verifyLineage(String uri, List<String> expected) {
+    AzfsResourceId path = AzfsResourceId.fromUri(uri);
+    Lineage mockLineage = mock(Lineage.class);
+    azureBlobStoreFileSystem.reportLineage(path, mockLineage);
+    verify(mockLineage, times(1)).add("abs", expected, "/");
   }
 }

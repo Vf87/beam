@@ -36,11 +36,11 @@ import org.gradle.api.publish.maven.MavenPublication
  *   <li>Increment the vendored artifact version only if we need to release a new version.
  * </ul>
  *
- * <p>Example for com.google.guava:guava:26.0-jre:
+ * <p>Example for com.google.guava:guava:32.1.2-jre:
  * <ul>
  *   <li>groupId: org.apache.beam
- *   <li>artifactId: guava-26_0-jre
- *   <li>namespace: org.apache.beam.vendor.guava.v26_0_jre
+ *   <li>artifactId: guava-32_1_2-jre
+ *   <li>namespace: org.apache.beam.vendor.guava.v32_1_2_jre
  *   <li>version: 0.1
  * </ul>
  *
@@ -54,6 +54,7 @@ class VendorJavaPlugin implements Plugin<Project> {
     List<String> runtimeDependencies
     List<String> testDependencies
     Map<String, String> relocations
+    Map<String, List<String>> relocationExclusions
     List<String> exclusions
     String groupId
     String artifactId
@@ -79,9 +80,13 @@ class VendorJavaPlugin implements Plugin<Project> {
         config.version += '-SNAPSHOT'
       }
 
-      project.apply plugin: 'com.github.johnrengelman.shadow'
+      project.apply plugin: 'com.gradleup.shadow'
 
       project.apply plugin: 'java'
+
+      // plugin to support repository authentication via ~/.m2/settings.xml
+      // https://github.com/mark-vieira/gradle-maven-settings-plugin/
+      project.apply plugin: 'net.linguica.maven-settings'
 
       // Projects should only depend on the shadowJar output
       project.jar.enabled = false
@@ -97,7 +102,7 @@ class VendorJavaPlugin implements Plugin<Project> {
       project.apply plugin: "project-report"
 
       project.dependencies {
-        config.dependencies.each { compile it }
+        config.dependencies.each { implementation it }
         config.runtimeDependencies.each { runtimeOnly it }
         config.testDependencies.each { compileOnly it}
       }
@@ -118,11 +123,17 @@ artifactId=${project.name}
 
       project.shadowJar {
         config.relocations.each { srcNamespace, destNamespace ->
-          relocate(srcNamespace, destNamespace)
+          relocate(srcNamespace, destNamespace) {
+            if (config.relocationExclusions?.containsKey(srcNamespace)) {
+              config.relocationExclusions.get(srcNamespace).each { toExclude ->
+                exclude toExclude
+              }
+            }
+          }
         }
         config.exclusions.each { exclude it }
 
-        classifier = null
+        archiveClassifier = null
         mergeServiceFiles()
         zip64 true
         exclude "META-INF/INDEX.LIST"
@@ -239,8 +250,8 @@ artifactId=${project.name}
                   url = "https://gitbox.apache.org/repos/asf?p=beam.git;a=summary"
                 }
                 issueManagement {
-                  system = "jira"
-                  url = "https://issues.apache.org/jira/browse/BEAM"
+                  system = "github"
+                  url = "https://github.com/apache/beam/issues"
                 }
                 mailingLists {
                   mailingList {

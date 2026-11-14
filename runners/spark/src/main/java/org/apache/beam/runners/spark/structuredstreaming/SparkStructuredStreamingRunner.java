@@ -17,22 +17,21 @@
  */
 package org.apache.beam.runners.spark.structuredstreaming;
 
-import static org.apache.beam.runners.spark.SparkCommonPipelineOptions.prepareFilesToStage;
-
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import org.apache.beam.runners.core.construction.SplittableParDo;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.beam.runners.core.metrics.MetricsPusher;
-import org.apache.beam.runners.spark.structuredstreaming.aggregators.AggregatorsAccumulator;
-import org.apache.beam.runners.spark.structuredstreaming.metrics.AggregatorMetricSource;
-import org.apache.beam.runners.spark.structuredstreaming.metrics.CompositeSource;
+import org.apache.beam.runners.core.metrics.NoOpMetricsSink;
 import org.apache.beam.runners.spark.structuredstreaming.metrics.MetricsAccumulator;
 import org.apache.beam.runners.spark.structuredstreaming.metrics.SparkBeamMetricSource;
-import org.apache.beam.runners.spark.structuredstreaming.translation.AbstractTranslationContext;
+import org.apache.beam.runners.spark.structuredstreaming.translation.EvaluationContext;
 import org.apache.beam.runners.spark.structuredstreaming.translation.PipelineTranslator;
-import org.apache.beam.runners.spark.structuredstreaming.translation.batch.PipelineTranslatorBatch;
-import org.apache.beam.runners.spark.structuredstreaming.translation.streaming.PipelineTranslatorStreaming;
+import org.apache.beam.runners.spark.structuredstreaming.translation.PipelineTranslatorFactory;
+import org.apache.beam.runners.spark.structuredstreaming.translation.SparkSessionFactory;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineRunner;
 import org.apache.beam.sdk.metrics.MetricsEnvironment;
@@ -41,34 +40,48 @@ import org.apache.beam.sdk.options.ExperimentalOptions;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.PipelineOptionsValidator;
+import org.apache.beam.sdk.util.construction.SplittableParDo;
+import org.apache.beam.sdk.util.construction.graph.ProjectionPushdownOptimizer;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.spark.SparkContext;
 import org.apache.spark.SparkEnv$;
-import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.metrics.MetricsSystem;
+import org.apache.spark.sql.SparkSession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * SparkStructuredStreamingRunner is based on spark structured streaming framework and is no more
- * based on RDD/DStream API. See
- * https://spark.apache.org/docs/latest/structured-streaming-programming-guide.html It is still
- * experimental, its coverage of the Beam model is partial. The SparkStructuredStreamingRunner
- * translate operations defined on a pipeline to a representation executable by Spark, and then
- * submitting the job to Spark to be executed. If we wanted to run a Beam pipeline with the default
- * options of a single threaded spark instance in local mode, we would do the following:
+ * A Spark runner build on top of Spark's SQL Engine (<a
+ * href="https://spark.apache.org/docs/latest/structured-streaming-programming-guide.html">Structured
+ * Streaming framework</a>).
  *
- * <p>{@code Pipeline p = [logic for pipeline creation] SparkStructuredStreamingPipelineResult
- * result = (SparkStructuredStreamingPipelineResult) p.run(); }
+ * <p><b>This runner is experimental, its coverage of the Beam model is still partial. Streaming
+ * mode requires the Spark 4 module (beam-runners-spark-4); the shared Spark 3 module supports batch
+ * pipelines only. </b>
+ *
+ * <p>The runner translates transforms defined on a Beam pipeline to Spark `Dataset` transformations
+ * (leveraging the high level Dataset API) and then submits these to Spark to be executed.
+ *
+ * <p>To run a Beam pipeline with the default options using Spark's local mode, we would do the
+ * following:
+ *
+ * <pre>{@code
+ * Pipeline p = [logic for pipeline creation]
+ * PipelineResult result = p.run();
+ * }</pre>
  *
  * <p>To create a pipeline runner to run against a different spark cluster, with a custom master url
  * we would do the following:
  *
- * <p>{@code Pipeline p = [logic for pipeline creation] SparkStructuredStreamingPipelineOptions
- * options = SparkPipelineOptionsFactory.create(); options.setSparkMaster("spark://host:port");
- * SparkStructuredStreamingPipelineResult result = (SparkStructuredStreamingPipelineResult) p.run();
- * }
+ * <pre>{@code
+ * Pipeline p = [logic for pipeline creation]
+ * SparkCommonPipelineOptions options = p.getOptions.as(SparkCommonPipelineOptions.class);
+ * options.setSparkMaster("spark://host:port");
+ * PipelineResult result = p.run();
+ * }</pre>
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public final class SparkStructuredStreamingRunner
     extends PipelineRunner<SparkStructuredStreamingPipelineResult> {
@@ -124,6 +137,7 @@ public final class SparkStructuredStreamingRunner
   @Override
   public SparkStructuredStreamingPipelineResult run(final Pipeline pipeline) {
     MetricsEnvironment.setMetricsSupported(true);
+    MetricsAccumulator.clear();
 
     LOG.info(
         "*** SparkStructuredStreamingRunner is based on spark structured streaming framework and is no more \n"
@@ -131,89 +145,109 @@ public final class SparkStructuredStreamingRunner
             + " https://spark.apache.org/docs/latest/structured-streaming-programming-guide.html\n"
             + " It is still experimental, its coverage of the Beam model is partial. ***");
 
-    // clear state of Aggregators, Metrics and Watermarks if exists.
-    AggregatorsAccumulator.clear();
-    MetricsAccumulator.clear();
+    PipelineTranslator.detectStreamingMode(pipeline, options);
 
-    final AbstractTranslationContext translationContext = translatePipeline(pipeline);
+    final boolean releaseSession = !options.getUseActiveSparkSession();
+    final SparkSession sparkSession = SparkSessionFactory.acquire(options);
+    final SparkContext sc = sparkSession.sparkContext();
+    final MetricsAccumulator metrics = MetricsAccumulator.getInstance(sparkSession);
 
-    final ExecutorService executorService = Executors.newSingleThreadExecutor();
+    // Null until translation completes.
+    final AtomicReference<EvaluationContext> ctxRef = new AtomicReference<>();
+    final AtomicBoolean cancelRequested = new AtomicBoolean(false);
+
+    final String jobName = options.getJobName();
+    final String jobGroupId = "beam-" + jobName + "-" + UUID.randomUUID();
+    final Runnable cancelSparkJobs =
+        () -> {
+          try {
+            sc.cancelJobGroup(jobGroupId);
+          } catch (IllegalStateException e) {
+            // Context stopped concurrently.
+          }
+        };
+
     final Future<?> submissionFuture =
-        executorService.submit(
+        runAsync(
             () -> {
-              // TODO initialise other services: checkpointing, metrics system, listeners, ...
-              translationContext.startPipeline();
+              try {
+                // Interrupts running tasks on cancel, as Spark's StreamExecution does.
+                sc.setJobGroup(jobGroupId, "Beam " + jobName, true);
+                EvaluationContext ctx = translatePipeline(sparkSession, pipeline);
+                ctxRef.set(ctx);
+                if (!cancelRequested.get()) {
+                  ctx.evaluate();
+                }
+              } finally {
+                if (releaseSession) {
+                  SparkSessionFactory.release(sparkSession);
+                }
+              }
             });
-    executorService.shutdown();
 
-    // TODO: Streaming.
-    SparkStructuredStreamingPipelineResult result =
+    final SparkStructuredStreamingPipelineResult result =
         new SparkStructuredStreamingPipelineResult(
-            submissionFuture, translationContext.getSparkSession());
+            submissionFuture, ctxRef::get, metrics, cancelRequested, cancelSparkJobs);
 
     if (options.getEnableSparkMetricSinks()) {
-      registerMetricsSource(options.getAppName());
+      registerMetricsSource(options.getAppName(), metrics);
     }
-
-    MetricsPusher metricsPusher =
-        new MetricsPusher(
-            MetricsAccumulator.getInstance().value(), options.as(MetricsOptions.class), result);
-    metricsPusher.start();
+    startMetricsPusher(result, metrics);
 
     if (options.getTestMode()) {
       result.waitUntilFinish();
-      result.stop();
     }
 
     return result;
   }
 
-  private AbstractTranslationContext translatePipeline(Pipeline pipeline) {
-    PipelineTranslator.detectTranslationMode(pipeline, options);
-
+  private EvaluationContext translatePipeline(SparkSession sparkSession, Pipeline pipeline) {
     // Default to using the primitive versions of Read.Bounded and Read.Unbounded for non-portable
     // execution.
-    // TODO(BEAM-10670): Use SDF read as default when we address performance issue.
+    // TODO(https://github.com/apache/beam/issues/20530): Use SDF read as default when we address
+    // performance issue.
     if (!ExperimentalOptions.hasExperiment(pipeline.getOptions(), "beam_fn_api")) {
       SplittableParDo.convertReadBasedSplittableDoFnsToPrimitiveReadsIfNecessary(pipeline);
     }
 
+    if (!ExperimentalOptions.hasExperiment(options, "disable_projection_pushdown")) {
+      ProjectionPushdownOptimizer.optimize(pipeline);
+    }
+
     PipelineTranslator.replaceTransforms(pipeline, options);
-    prepareFilesToStage(options);
-    PipelineTranslator pipelineTranslator =
-        options.isStreaming()
-            ? new PipelineTranslatorStreaming(options)
-            : new PipelineTranslatorBatch(options);
 
-    final JavaSparkContext jsc =
-        JavaSparkContext.fromSparkContext(
-            pipelineTranslator.getTranslationContext().getSparkSession().sparkContext());
-    initAccumulators(options, jsc);
-
-    pipelineTranslator.translate(pipeline);
-    return pipelineTranslator.getTranslationContext();
+    PipelineTranslator pipelineTranslator = PipelineTranslatorFactory.create(options.isStreaming());
+    return pipelineTranslator.translate(pipeline, sparkSession, options);
   }
 
-  private void registerMetricsSource(String appName) {
+  private void registerMetricsSource(String appName, MetricsAccumulator metrics) {
     final MetricsSystem metricsSystem = SparkEnv$.MODULE$.get().metricsSystem();
-    final AggregatorMetricSource aggregatorMetricSource =
-        new AggregatorMetricSource(null, AggregatorsAccumulator.getInstance().value());
-    final SparkBeamMetricSource metricsSource = new SparkBeamMetricSource(null);
-    final CompositeSource compositeSource =
-        new CompositeSource(
-            appName + ".Beam",
-            metricsSource.metricRegistry(),
-            aggregatorMetricSource.metricRegistry());
+    final SparkBeamMetricSource metricsSource =
+        new SparkBeamMetricSource(appName + ".Beam", metrics);
     // re-register the metrics in case of context re-use
-    metricsSystem.removeSource(compositeSource);
-    metricsSystem.registerSource(compositeSource);
+    metricsSystem.removeSource(metricsSource);
+    metricsSystem.registerSource(metricsSource);
   }
 
-  /** Init Metrics/Aggregators accumulators. This method is idempotent. */
-  public static void initAccumulators(
-      SparkStructuredStreamingPipelineOptions opts, JavaSparkContext jsc) {
-    // Init metrics accumulators
-    MetricsAccumulator.init(jsc);
-    AggregatorsAccumulator.init(jsc);
+  /** Start {@link MetricsPusher} if sink is set. */
+  private void startMetricsPusher(
+      SparkStructuredStreamingPipelineResult result, MetricsAccumulator metrics) {
+    MetricsOptions metricsOpts = options.as(MetricsOptions.class);
+    Class<?> metricsSink = metricsOpts.getMetricsSink();
+    if (metricsSink != null && !metricsSink.equals(NoOpMetricsSink.class)) {
+      new MetricsPusher(metrics.value(), metricsOpts, result).start();
+    }
+  }
+
+  private static Future<?> runAsync(Runnable task) {
+    ThreadFactory factory =
+        new ThreadFactoryBuilder()
+            .setDaemon(true)
+            .setNameFormat("SparkStructuredStreamingRunner-thread")
+            .build();
+    ExecutorService execService = Executors.newSingleThreadExecutor(factory);
+    Future<?> future = execService.submit(task);
+    execService.shutdown();
+    return future;
   }
 }

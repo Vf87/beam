@@ -38,7 +38,7 @@ var t reflect.Type
 // Increment is the function that will be executed by its address.
 // It increments a global var so we can check that it was indeed called.
 func Increment(str string) {
-	log.Printf(str)
+	log.Print(str)
 	counter++
 }
 
@@ -77,7 +77,7 @@ func main() {
 		log.Fatalf("error creating function out of address")
 		return
 	}
-	ret.Fn.Call([]interface{}{arg})
+	ret.Fn.Call([]any{arg})
 
 	// Checks that function was executed.
 	if counter != 1 {

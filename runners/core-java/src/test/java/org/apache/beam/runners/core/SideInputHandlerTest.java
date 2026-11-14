@@ -32,10 +32,11 @@ import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.transforms.windowing.Window;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionView;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Test;
@@ -83,7 +84,7 @@ public class SideInputHandlerTest {
     long view1WindowSize = 100;
     PCollection<String> pc = Pipeline.create().apply(Create.of("1"));
     PCollectionView<Iterable<String>> view1 =
-        pc.apply(Window.into(FixedWindows.of(new Duration(view1WindowSize))))
+        pc.apply(Window.into(FixedWindows.of(Duration.millis(view1WindowSize))))
             .apply(View.asIterable());
 
     // Unused, just to have a non-trivial handler set up
@@ -121,7 +122,7 @@ public class SideInputHandlerTest {
     long view1WindowSize = 100;
     PCollection<String> pc = Pipeline.create().apply(Create.of("1"));
     PCollectionView<Iterable<String>> view =
-        pc.apply(Window.into(FixedWindows.of(new Duration(view1WindowSize))))
+        pc.apply(Window.into(FixedWindows.of(Duration.millis(view1WindowSize))))
             .apply(View.asIterable());
 
     // new input should completely replace old input
@@ -162,7 +163,7 @@ public class SideInputHandlerTest {
     PCollectionView<Iterable<String>> view1 =
         Pipeline.create()
             .apply(Create.of("1"))
-            .apply(Window.into(FixedWindows.of(new Duration(view1WindowSize))))
+            .apply(Window.into(FixedWindows.of(Duration.millis(view1WindowSize))))
             .apply(View.asIterable());
 
     SideInputHandler sideInputHandler =
@@ -205,9 +206,11 @@ public class SideInputHandlerTest {
     PCollectionView<Iterable<String>> view2;
     PCollection<String> pc = Pipeline.create().apply(Create.of("1"));
     view1 =
-        pc.apply(Window.into(FixedWindows.of(new Duration(windowSize)))).apply(View.asIterable());
+        pc.apply(Window.into(FixedWindows.of(Duration.millis(windowSize))))
+            .apply(View.asIterable());
     view2 =
-        pc.apply(Window.into(FixedWindows.of(new Duration(windowSize)))).apply(View.asIterable());
+        pc.apply(Window.into(FixedWindows.of(Duration.millis(windowSize))))
+            .apply(View.asIterable());
 
     SideInputHandler sideInputHandler =
         new SideInputHandler(
@@ -247,6 +250,6 @@ public class SideInputHandlerTest {
   @SuppressWarnings({"unchecked", "rawtypes"})
   private WindowedValue<Iterable<?>> valuesInWindow(
       List<Object> values, Instant timestamp, BoundedWindow window) {
-    return (WindowedValue) WindowedValue.of(values, timestamp, window, PaneInfo.NO_FIRING);
+    return (WindowedValue) WindowedValues.of(values, timestamp, window, PaneInfo.NO_FIRING);
   }
 }

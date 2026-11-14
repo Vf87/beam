@@ -42,10 +42,11 @@ import org.apache.beam.sdk.io.fs.MoveOptions;
 import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.util.MimeTypes;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.FluentIterable;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Sets;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.Files;
+import org.apache.beam.sdk.values.KV;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.FluentIterable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Files;
 import org.apache.commons.lang3.SystemUtils;
 import org.junit.Rule;
 import org.junit.Test;
@@ -63,8 +64,39 @@ public class FileSystemsTest {
   private LocalFileSystem localFileSystem = new LocalFileSystem();
 
   @Test
+  public void testMatchSingleFileSpecExceptionChaining() throws Exception {
+    java.io.IOException rootCause = new java.io.IOException("403 Forbidden: Fake GCS Error");
+    MatchResult failedResult = MatchResult.create(MatchResult.Status.ERROR, rootCause);
+
+    // Use our fake filesystem instead of Mockito
+    FileSystem<ResourceId> fakeFileSystem = new FakeFileSystem("dummy", failedResult);
+
+    // Use reflection to temporarily override the registered filesystems
+    java.lang.reflect.Field field = FileSystems.class.getDeclaredField("SCHEME_TO_FILESYSTEM");
+    field.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    java.util.concurrent.atomic.AtomicReference<java.util.Map<String, FileSystem>> ref =
+        (java.util.concurrent.atomic.AtomicReference<java.util.Map<String, FileSystem>>)
+            field.get(null);
+
+    java.util.Map<String, FileSystem> original = ref.get();
+    try {
+      ref.set(com.google.common.collect.ImmutableMap.of("dummy", fakeFileSystem));
+
+      thrown.expect(java.io.IOException.class);
+      thrown.expectMessage("Error matching file spec dummy://fake/path: status ERROR");
+      thrown.expectCause(org.hamcrest.Matchers.is(rootCause));
+
+      FileSystems.matchSingleFileSpec("dummy://fake/path");
+    } finally {
+      // Restore the original registry so we don't break other tests
+      ref.set(original);
+    }
+  }
+
+  @Test
   public void testGetLocalFileSystem() throws Exception {
-    // TODO: Java core test failing on windows, https://issues.apache.org/jira/browse/BEAM-10740
+    // TODO: Java core test failing on windows, https://github.com/apache/beam/issues/20484
     assumeFalse(SystemUtils.IS_OS_WINDOWS);
     assertTrue(
         FileSystems.getFileSystemInternal(toLocalResourceId("~/home/").getScheme())
@@ -163,6 +195,34 @@ public class FileSystemsTest {
     FileSystems.rename(
         toResourceIds(ImmutableList.of(existingPath, nonExistentPath), false /* isDirectory */),
         toResourceIds(ImmutableList.of(destPath1, destPath2), false /* isDirectory */));
+  }
+
+  @Test
+  public void testCopySkipIfItExists() throws Exception {
+    Path srcPath1 = temporaryFolder.newFile().toPath();
+    Path srcPath2 = temporaryFolder.newFile().toPath();
+
+    Path destPath1 = srcPath1.resolveSibling("dest1");
+    Path destPath2 = srcPath2.resolveSibling("dest2");
+
+    createFileWithContent(srcPath1, "content1");
+    createFileWithContent(srcPath2, "content3");
+    createFileWithContent(destPath2, "content");
+
+    FileSystems.copy(
+        toResourceIds(ImmutableList.of(srcPath1, srcPath2), false /* isDirectory */),
+        toResourceIds(ImmutableList.of(destPath1, destPath2), false /* isDirectory */),
+        MoveOptions.StandardMoveOptions.SKIP_IF_DESTINATION_EXISTS);
+
+    assertTrue(srcPath1.toFile().exists());
+    assertTrue(srcPath2.toFile().exists());
+    assertThat(
+        Files.readLines(destPath1.toFile(), StandardCharsets.UTF_8),
+        containsInAnyOrder("content1"));
+    // The file is overwritten because the content does not match.
+    assertThat(
+        Files.readLines(destPath2.toFile(), StandardCharsets.UTF_8),
+        containsInAnyOrder("content3"));
   }
 
   @Test
@@ -282,10 +342,85 @@ public class FileSystemsTest {
     assertEquals("file", FileSystems.matchNewResource("c:\\tmp\\f1", false).getScheme());
   }
 
+  @SuppressWarnings("JUnitIncompatibleType")
   @Test(expected = IllegalArgumentException.class)
   public void testInvalidSchemaMatchNewResource() {
     assertEquals("file", FileSystems.matchNewResource("invalidschema://tmp/f1", false));
     assertEquals("file", FileSystems.matchNewResource("c:/tmp/f1", false));
+  }
+
+  @Test
+  public void testMatchNewDirectory() {
+    List<KV<String, KV<String, String[]>>> testCases =
+        ImmutableList.<KV<String, KV<String, String[]>>>builder()
+            .add(KV.of("/abc/d/", KV.of("/abc", new String[] {"d"})))
+            .add(KV.of("/abc/d/", KV.of("/abc/", new String[] {"d"})))
+            .add(KV.of("/abc/d/", KV.of("/abc", new String[] {"d/"})))
+            .add(KV.of("/abc/d/e/f/", KV.of("/abc", new String[] {"d", "e", "f"})))
+            .add(KV.of("/abc/", KV.of("/abc", new String[] {})))
+            .build();
+    for (KV<String, KV<String, String[]>> testCase : testCases) {
+      ResourceId expected = FileSystems.matchNewResource(testCase.getKey(), true);
+      ResourceId actual =
+          FileSystems.matchNewDirectory(
+              testCase.getValue().getKey(), testCase.getValue().getValue());
+      assertEquals(expected, actual);
+    }
+  }
+
+  private static class FakeFileSystem extends FileSystem<ResourceId> {
+    private final String scheme;
+    private final MatchResult matchResult;
+
+    FakeFileSystem(String scheme, MatchResult matchResult) {
+      this.scheme = scheme;
+      this.matchResult = matchResult;
+    }
+
+    @Override
+    protected List<MatchResult> match(List<String> specs) {
+      // Return the predefined MatchResult for every spec requested
+      return specs.stream().map(spec -> matchResult).collect(java.util.stream.Collectors.toList());
+    }
+
+    @Override
+    protected java.nio.channels.WritableByteChannel create(
+        ResourceId resourceId, org.apache.beam.sdk.io.fs.CreateOptions createOptions) {
+      throw new UnsupportedOperationException("FakeFileSystem only supports match() for testing.");
+    }
+
+    @Override
+    protected java.nio.channels.ReadableByteChannel open(ResourceId resourceId) {
+      throw new UnsupportedOperationException("FakeFileSystem only supports match() for testing.");
+    }
+
+    @Override
+    protected void copy(List<ResourceId> srcResourceIds, List<ResourceId> destResourceIds) {
+      throw new UnsupportedOperationException("FakeFileSystem only supports match() for testing.");
+    }
+
+    @Override
+    protected void rename(
+        List<ResourceId> srcResourceIds,
+        List<ResourceId> destResourceIds,
+        org.apache.beam.sdk.io.fs.MoveOptions... moveOptions) {
+      throw new UnsupportedOperationException("FakeFileSystem only supports match() for testing.");
+    }
+
+    @Override
+    protected void delete(java.util.Collection<ResourceId> resourceIds) {
+      throw new UnsupportedOperationException("FakeFileSystem only supports match() for testing.");
+    }
+
+    @Override
+    protected ResourceId matchNewResource(String singleResourceSpec, boolean isDirectory) {
+      throw new UnsupportedOperationException("FakeFileSystem only supports match() for testing.");
+    }
+
+    @Override
+    protected String getScheme() {
+      return scheme;
+    }
   }
 
   private static List<ResourceId> toResourceIds(List<Path> paths, final boolean isDirectory) {

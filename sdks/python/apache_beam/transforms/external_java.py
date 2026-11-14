@@ -21,6 +21,7 @@ import argparse
 import logging
 import subprocess
 import sys
+from typing import Optional
 
 import grpc
 from mock import patch
@@ -31,6 +32,7 @@ from apache_beam.testing.test_pipeline import TestPipeline
 from apache_beam.testing.util import assert_that
 from apache_beam.testing.util import equal_to
 from apache_beam.transforms.external import ImplicitSchemaPayloadBuilder
+from apache_beam.utils import subprocess_server
 
 # Protect against environments where apitools library is not available.
 # pylint: disable=wrong-import-order, wrong-import-position
@@ -46,8 +48,8 @@ else:
 class JavaExternalTransformTest(object):
 
   # This will be overwritten if set via a flag.
-  expansion_service_jar = None  # type: str
-  expansion_service_port = None  # type: int
+  expansion_service_jar: Optional[str] = None
+  expansion_service_port: Optional[int] = None
 
   class _RunWithExpansion(object):
     def __init__(self):
@@ -66,7 +68,8 @@ class JavaExternalTransformTest(object):
 
       # Start the java server and wait for it to be ready.
       if jar:
-        self._server = subprocess.Popen(['java', '-jar', jar, str(port)])
+        java = subprocess_server.JavaHelper.get_java()
+        self._server = subprocess.Popen([java, '-jar', jar, str(port)])
 
       address = 'localhost:%s' % str(port)
 
@@ -122,7 +125,7 @@ class JavaExternalTransformTest(object):
   @staticmethod
   def run_pipeline(pipeline_options, expansion_service, wait_until_finish=True):
     # The actual definitions of these transforms is in
-    # org.apache.beam.runners.core.construction.TestExpansionService.
+    # org.apache.beam.sdk.util.construction.TestExpansionService.
     TEST_COUNT_URN = "beam:transforms:xlang:count"
     TEST_FILTER_URN = "beam:transforms:xlang:filter_less_than_eq"
 
@@ -139,10 +142,15 @@ class JavaExternalTransformTest(object):
         | beam.Map(str)
         | beam.ExternalTransform(
             TEST_FILTER_URN,
-            ImplicitSchemaPayloadBuilder({'data': u'middle'}),
+            ImplicitSchemaPayloadBuilder({'data': 'middle'}),
             expansion_service)
         | beam.ExternalTransform(TEST_COUNT_URN, None, expansion_service)
-        | beam.Map(lambda kv: '%s: %s' % kv))
+        # Map(lambda) produces a label formatted like this, but it cannot be
+        # changed without breaking update compat. Here, we pin to the transform
+        # name used in the 2.68 release to avoid breaking changes when the line
+        # number changes. Context: https://github.com/apache/beam/pull/36381
+        | "Map(<lambda at external_java.py:148>)" >>
+        beam.Map(lambda kv: '%s: %s' % kv))
 
     assert_that(res, equal_to(['a: 3', 'b: 1', 'c: 2']))
 

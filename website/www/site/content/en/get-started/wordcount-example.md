@@ -65,7 +65,7 @@ python -m apache_beam.examples.wordcount_minimal --input YOUR_INPUT_FILE --outpu
 {{< /highlight >}}
 
 {{< highlight go >}}
-$ go install github.com/apache/beam/sdks/go/examples/minimal_wordcount
+$ go install github.com/apache/beam/sdks/v2/go/examples/minimal_wordcount
 $ minimal_wordcount
 {{< /highlight >}}
 
@@ -123,7 +123,7 @@ sections, we will specify the pipeline's runner.
 {{< /highlight >}}
 
 {{< highlight py >}}
-{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" examples_wordcount_minimal_options >}}
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets_examples_wordcount_minimal.py" examples_wordcount_minimal_options >}}
 {{< /highlight >}}
 
 {{< paragraph class="language-java language-py" >}}
@@ -143,7 +143,7 @@ Pipeline p = Pipeline.create(options);
 {{< /highlight >}}
 
 {{< highlight py >}}
-{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" examples_wordcount_minimal_create >}}
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets_examples_wordcount_minimal.py" examples_wordcount_minimal_create >}}
 {{< /highlight >}}
 
 {{< highlight go >}}
@@ -179,7 +179,7 @@ p.apply(TextIO.read().from("gs://apache-beam-samples/shakespeare/*"))
 {{< /highlight >}}
 
 {{< highlight py >}}
-{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" examples_wordcount_minimal_read >}}
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets_examples_wordcount_minimal.py" examples_wordcount_minimal_read >}}
 {{< /highlight >}}
 
 {{< highlight go >}}
@@ -204,7 +204,7 @@ lines := textio.Read(s, "gs://apache-beam-samples/shakespeare/*")
 
 {{< highlight py >}}
 # The Flatmap transform is a simplified version of ParDo.
-{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" examples_wordcount_minimal_pardo >}}
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets_examples_wordcount_minimal.py" examples_wordcount_minimal_pardo >}}
 {{< /highlight >}}
 
 {{< highlight go >}}
@@ -231,7 +231,7 @@ words := beam.ParDo(s, func(line string, emit func(string)) {
 {{< /highlight >}}
 
 {{< highlight py >}}
-{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" examples_wordcount_minimal_count >}}
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets_examples_wordcount_minimal.py" examples_wordcount_minimal_count >}}
 {{< /highlight >}}
 
 {{< highlight go >}}
@@ -253,7 +253,7 @@ counted := stats.Count(s, words)
 {{< /highlight >}}
 
 {{< highlight py >}}
-{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" examples_wordcount_minimal_map >}}
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets_examples_wordcount_minimal.py" examples_wordcount_minimal_map >}}
 {{< /highlight >}}
 
 {{< highlight go >}}
@@ -272,7 +272,7 @@ formatted := beam.ParDo(s, func(w string, c int) string {
 {{< /highlight >}}
 
 {{< highlight py >}}
-{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" examples_wordcount_minimal_write >}}
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets_examples_wordcount_minimal.py" examples_wordcount_minimal_write >}}
 {{< /highlight >}}
 
 {{< highlight go >}}
@@ -320,6 +320,14 @@ Note that the `run` method is asynchronous. For a blocking execution, call the
 returned by the call to `run`.
 {{< /paragraph >}}
 
+### Try the full example in Playground
+
+{{< playground height="700px" >}}
+{{< playground_snippet language="java" path="SDK_JAVA_MinimalWordCount" >}}
+{{< playground_snippet language="py" path="SDK_PYTHON_WordCountMinimal" >}}
+{{< playground_snippet language="go" path="SDK_GO_MinimalWordCount" >}}
+{{< /playground >}}
+
 ## WordCount example
 
 This WordCount example introduces a few recommended programming practices that
@@ -332,6 +340,10 @@ building a pipeline. If you feel that you aren't at that point yet, read the
 above section, [MinimalWordCount](#minimalwordcount-example).
 
 **To run this example in Java:**
+
+Set up your development environment and generate the Maven archetype as
+described in the [Java WordCount quickstart](/get-started/quickstart-java/).
+Then run the pipeline with one of the runners:
 
 {{< runner direct >}}
 $ mvn compile exec:java -Dexec.mainClass=org.apache.beam.examples.WordCount \
@@ -364,11 +376,6 @@ $ mvn compile exec:java -Dexec.mainClass=org.apache.beam.examples.WordCount \
      -Pdataflow-runner
 {{< /runner >}}
 
-{{< runner samza >}}
-$ mvn compile exec:java -Dexec.mainClass=org.apache.beam.examples.WordCount \
-     -Dexec.args="--inputFile=pom.xml --output=counts --runner=SamzaRunner" -Psamza-runner
-{{< /runner >}}
-
 {{< runner nemo >}}
 $ mvn package -Pnemo-runner && java -cp target/word-count-beam-bundled-0.1.jar org.apache.beam.examples.WordCount \
      --runner=NemoRunner --inputFile=`pwd`/pom.xml --output=counts
@@ -396,7 +403,7 @@ python -m apache_beam.examples.wordcount --input /path/to/inputfile \
 
 {{< runner flinkCluster >}}
 # Running Beam Python on a distributed Flink cluster requires additional configuration.
-# See https://beam.apache.org/documentation/runners/flink/ for more information.
+# See /documentation/runners/flink/ for more information.
 {{< /runner >}}
 
 {{< runner spark >}}
@@ -416,10 +423,6 @@ python -m apache_beam.examples.wordcount --input gs://dataflow-samples/shakespea
                                          --temp_location gs://YOUR_GCS_BUCKET/tmp/
 {{< /runner >}}
 
-{{< runner samza >}}
-This runner is not yet available for the Python SDK.
-{{< /runner >}}
-
 {{< runner nemo >}}
 This runner is not yet available for the Python SDK.
 {{< /runner >}}
@@ -434,7 +437,7 @@ To view the full code in Python, see
 **To run this example in Go:**
 
 {{< runner direct >}}
-$ go install github.com/apache/beam/sdks/go/examples/wordcount
+$ go install github.com/apache/beam/sdks/v2/go/examples/wordcount
 $ wordcount --input <PATH_TO_INPUT_FILE> --output counts
 {{< /runner >}}
 
@@ -451,7 +454,7 @@ This runner is not yet available for the Go SDK.
 {{< /runner >}}
 
 {{< runner dataflow >}}
-$ go install github.com/apache/beam/sdks/go/examples/wordcount
+$ go install github.com/apache/beam/sdks/v2/go/examples/wordcount
 # As part of the initial setup, for non linux users - install package unix before run
 $ go get -u golang.org/x/sys/unix
 $ wordcount --input gs://dataflow-samples/shakespeare/kinglear.txt \
@@ -462,10 +465,6 @@ $ wordcount --input gs://dataflow-samples/shakespeare/kinglear.txt \
             --temp_location gs://<your-gcs-bucket>/tmp/ \
             --staging_location gs://<your-gcs-bucket>/binaries/ \
             --worker_harness_container_image=apache/beam_go_sdk:latest
-{{< /runner >}}
-
-{{< runner samza >}}
-This runner is not yet available for the Go SDK.
 {{< /runner >}}
 
 {{< runner nemo >}}
@@ -504,7 +503,7 @@ test and can make the `ParDo` code more readable.
 When using `ParDo` transforms, you need to specify the processing operation that
 gets applied to each element in the input `PCollection`. This processing
 operation is either a named function or a struct with specially-named methods. You
-can use anomynous functions (but not closures). However, it's often a good
+can use anonymous functions (but not closures). However, it's often a good
 idea to define the `DoFn` at the global level, which makes it easier to unit
 test and can make the `ParDo` code more readable.
 {{< /paragraph >}}
@@ -525,7 +524,7 @@ static class ExtractWordsFn extends DoFn<String, String> {
 {{< highlight py >}}
 # In this example, the DoFns are defined as classes:
 
-{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" examples_wordcount_wordcount_dofn >}}
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets_examples_wordcount_wordcount.py" examples_wordcount_wordcount_dofn >}}
 {{< /highlight >}}
 
 {{< highlight go >}}
@@ -594,7 +593,7 @@ public static void main(String[] args) throws IOException {
 {{< /highlight >}}
 
 {{< highlight py >}}
-{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" examples_wordcount_wordcount_composite >}}
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets_examples_wordcount_wordcount.py" examples_wordcount_wordcount_composite >}}
 {{< /highlight >}}
 
 {{< highlight go >}}
@@ -643,7 +642,7 @@ public static void main(String[] args) {
 {{< /highlight >}}
 
 {{< highlight py >}}
-{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" examples_wordcount_wordcount_options >}}
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets_examples_wordcount_wordcount.py" examples_wordcount_wordcount_options >}}
 {{< /highlight >}}
 
 {{< highlight go >}}
@@ -657,6 +656,14 @@ func main() {
     lines := textio.Read(s, *input)
     ...
 {{< /highlight >}}
+
+### Try the full example in Playground
+
+{{< playground height="700px" >}}
+{{< playground_snippet language="java" path="SDK_JAVA_WordCount" >}}
+{{< playground_snippet language="py" path="SDK_PYTHON_WordCount" >}}
+{{< playground_snippet language="go" path="SDK_GO_WordCount" >}}
+{{< /playground >}}
 
 ## DebuggingWordCount example
 
@@ -694,11 +701,6 @@ $ mvn compile exec:java -Dexec.mainClass=org.apache.beam.examples.DebuggingWordC
                 --project=YOUR_PROJECT --region=GCE_REGION \
                 --inputFile=gs://apache-beam-samples/shakespeare/* --output=gs://<your-gcs-bucket>/counts" \
      -Pdataflow-runner
-{{< /runner >}}
-
-{{< runner samza >}}
-$ mvn compile exec:java -Dexec.mainClass=org.apache.beam.examples.DebuggingWordCount \
-     -Dexec.args="--runner=SamzaRunner --output=counts" -Psamza-runner
 {{< /runner >}}
 
 {{< runner nemo >}}
@@ -742,10 +744,6 @@ python -m apache_beam.examples.wordcount_debugging --input gs://dataflow-samples
                                          --temp_location gs://YOUR_GCS_BUCKET/tmp/
 {{< /runner >}}
 
-{{< runner samza >}}
-This runner is not yet available for the Python SDK.
-{{< /runner >}}
-
 {{< runner nemo >}}
 This runner is not yet available for the Python SDK.
 {{< /runner >}}
@@ -760,7 +758,7 @@ To view the full code in Python, see
 **To run this example in Go:**
 
 {{< runner direct >}}
-$ go install github.com/apache/beam/sdks/go/examples/debugging_wordcount
+$ go install github.com/apache/beam/sdks/v2/go/examples/debugging_wordcount
 $ debugging_wordcount --input <PATH_TO_INPUT_FILE> --output counts
 {{< /runner >}}
 
@@ -777,7 +775,7 @@ This runner is not yet available for the Go SDK.
 {{< /runner >}}
 
 {{< runner dataflow >}}
-$ go install github.com/apache/beam/sdks/go/examples/debugging_wordcount
+$ go install github.com/apache/beam/sdks/v2/go/examples/debugging_wordcount
 # As part of the initial setup, for non linux users - install package unix before run
 $ go get -u golang.org/x/sys/unix
 $ debugging_wordcount --input gs://dataflow-samples/shakespeare/kinglear.txt \
@@ -788,10 +786,6 @@ $ debugging_wordcount --input gs://dataflow-samples/shakespeare/kinglear.txt \
                       --temp_location gs://<your-gcs-bucket>/tmp/ \
                       --staging_location gs://<your-gcs-bucket>/binaries/ \
                       --worker_harness_container_image=apache-docker-beam-snapshots-docker.bintray.io/beam/go:20180515
-{{< /runner >}}
-
-{{< runner samza >}}
-This runner is not yet available for the Go SDK.
 {{< /runner >}}
 
 {{< runner nemo >}}
@@ -840,7 +834,7 @@ public class DebuggingWordCount {
 {{< /highlight >}}
 
 {{< highlight py >}}
-{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" example_wordcount_debugging_logging >}}
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets_examples_wordcount_debugging.py" example_wordcount_debugging_logging >}}
 {{< /highlight >}}
 
 {{< highlight go >}}
@@ -899,12 +893,12 @@ or DEBUG significantly increases the amount of logs output.
 #### Apache Spark Runner
 
 > **Note:** This section is yet to be added. There is an open issue for this
-> ([BEAM-792](https://issues.apache.org/jira/browse/BEAM-792)).
+> ([Issue 18076](https://github.com/apache/beam/issues/18076)).
 
 #### Apache Flink Runner
 
 > **Note:** This section is yet to be added. There is an open issue for this
-> ([BEAM-791](https://issues.apache.org/jira/browse/BEAM-791)).
+> ([Issue 18075](https://github.com/apache/beam/issues/18075)).
 
 #### Apache Nemo Runner
 
@@ -972,6 +966,14 @@ See [DebuggingWordCountTest](https://github.com/apache/beam/blob/master/examples
 for an example unit test.
 {{< /paragraph >}}
 
+### Try the full example in Playground
+
+{{< playground height="700px" >}}
+{{< playground_snippet language="java" path="SDK_JAVA_DebuggingWordCount" >}}
+{{< playground_snippet language="py" path="SDK_PYTHON_WordCountDebugging" >}}
+{{< playground_snippet language="go" path="SDK_GO_DebuggingWordCount" >}}
+{{< /playground >}}
+
 ## WindowedWordCount example
 
 The WindowedWordCount example counts words in text just as the previous
@@ -1020,11 +1022,6 @@ $ mvn compile exec:java -Dexec.mainClass=org.apache.beam.examples.WindowedWordCo
      -Pdataflow-runner
 {{< /runner >}}
 
-{{< runner samza >}}
-$ mvn compile exec:java -Dexec.mainClass=org.apache.beam.examples.WindowedWordCount \
-     -Dexec.args="--runner=SamzaRunner --inputFile=pom.xml --output=counts" -Psamza-runner
-{{< /runner >}}
-
 {{< runner nemo >}}
 $ mvn package -Pnemo-runner && java -cp target/word-count-beam-bundled-0.1.jar org.apache.beam.examples.WindowedWordCount \
      --runner=NemoRunner --inputFile=`pwd`/pom.xml --output=counts
@@ -1070,10 +1067,6 @@ python -m apache_beam.examples.windowed_wordcount --input YOUR_INPUT_FILE \
                                          --temp_location gs://YOUR_GCS_BUCKET/tmp/
 {{< /runner >}}
 
-{{< runner samza >}}
-This runner is not yet available for the Python SDK.
-{{< /runner >}}
-
 {{< runner nemo >}}
 This runner is not yet available for the Python SDK.
 {{< /runner >}}
@@ -1088,7 +1081,7 @@ To view the full code in Python, see
 **To run this example in Go:**
 
 {{< runner direct >}}
-$ go install github.com/apache/beam/sdks/go/examples/windowed_wordcount
+$ go install github.com/apache/beam/sdks/v2/go/examples/windowed_wordcount
 $ windowed_wordcount --input <PATH_TO_INPUT_FILE> --output counts
 {{< /runner >}}
 
@@ -1105,7 +1098,7 @@ This runner is not yet available for the Go SDK.
 {{< /runner >}}
 
 {{< runner dataflow >}}
-$ go install github.com/apache/beam/sdks/go/examples/windowed_wordcount
+$ go install github.com/apache/beam/sdks/v2/go/examples/windowed_wordcount
 # As part of the initial setup, for non linux users - install package unix before run
 $ go get -u golang.org/x/sys/unix
 $ windowed_wordcount --input gs://dataflow-samples/shakespeare/kinglear.txt \
@@ -1115,10 +1108,6 @@ $ windowed_wordcount --input gs://dataflow-samples/shakespeare/kinglear.txt \
             --temp_location gs://<your-gcs-bucket>/tmp/ \
             --staging_location gs://<your-gcs-bucket>/binaries/ \
             --worker_harness_container_image=apache-docker-beam-snapshots-docker.bintray.io/beam/go:20180515
-{{< /runner >}}
-
-{{< runner samza >}}
-This runner is not yet available for the Go SDK.
 {{< /runner >}}
 
 {{< runner nemo >}}
@@ -1321,6 +1310,15 @@ word_counts = windowed_words | CountWords()
 counted := wordcount.CountWords(s, windowedLines)
 {{< /highlight >}}
 
+{{< paragraph class="language-java language-go" >}}
+### Try the full example in Playground
+{{< /paragraph >}}
+
+{{< playground height="700px" >}}
+{{< playground_snippet language="java" path="SDK_JAVA_WindowedWordCount" >}}
+{{< playground_snippet language="go" path="SDK_GO_WindowedWordCount" >}}
+{{< /playground >}}
+
 ## StreamingWordCount example
 
 The StreamingWordCount example is a streaming pipeline that reads Pub/Sub
@@ -1373,10 +1371,6 @@ python -m apache_beam.examples.streaming_wordcount \
   --streaming
 {{< /runner >}}
 
-{{< runner samza >}}
-This runner is not yet available for the Python SDK.
-{{< /runner >}}
-
 {{< runner nemo >}}
 This runner is not yet available for the Python SDK.
 {{< /runner >}}
@@ -1391,7 +1385,7 @@ To view the full code in Python, see
 **To run this example in Go:**
 
 > **Note:** StreamingWordCount is not yet available for the Go SDK. There is an open issue for this
-([BEAM-4292](https://issues.apache.org/jira/browse/BEAM-4292)).
+([Issue 18879](https://github.com/apache/beam/issues/18879)).
 
 
 ### Reading an unbounded dataset
@@ -1448,7 +1442,7 @@ using [`beam.io.WriteToPubSub`](https://beam.apache.org/releases/pydoc/{{< param
 
 * Walk through the Mobile Gaming examples in the [Mobile Gaming Example Walkthrough](/get-started/mobile-gaming-example).
 * Take a self-paced tour through our [Learning Resources](/documentation/resources/learning-resources).
-* Dive in to some of our favorite [Videos and Podcasts](/documentation/resources/videos-and-podcasts).
+* Dive in to some of our favorite [Videos and Podcasts](/get-started/resources/videos-and-podcasts).
 * Join the Beam [users@](/community/contact-us) mailing list.
 
 Please don't hesitate to [reach out](/community/contact-us) if you encounter any issues!

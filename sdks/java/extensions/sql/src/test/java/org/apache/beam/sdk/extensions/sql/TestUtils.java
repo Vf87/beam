@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.extensions.sql;
 
-import static org.apache.beam.vendor.calcite.v1_26_0.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -93,7 +93,7 @@ public class TestUtils {
      * )
      * }</pre>
      *
-     * @args pairs of column type and column names.
+     * @param args pairs of column type and column names.
      */
     public static RowsBuilder of(final Object... args) {
       Schema beamSQLSchema = TestTableUtils.buildBeamSqlSchema(args);

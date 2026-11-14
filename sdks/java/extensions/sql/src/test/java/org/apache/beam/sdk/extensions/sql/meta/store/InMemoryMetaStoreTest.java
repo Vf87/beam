@@ -22,10 +22,10 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 
-import com.alibaba.fastjson.JSONObject;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.stream.Stream;
+import org.apache.beam.sdk.extensions.sql.TableUtils;
 import org.apache.beam.sdk.extensions.sql.meta.BeamSqlTable;
 import org.apache.beam.sdk.extensions.sql.meta.Table;
 import org.apache.beam.sdk.extensions.sql.meta.provider.TableProvider;
@@ -94,10 +94,10 @@ public class InMemoryMetaStoreTest {
   @Test
   public void testRegisterProvider() throws Exception {
     store.registerProvider(new MockTableProvider("mock", "hello", "world"));
-    assertNotNull(store.getProviders());
-    assertEquals(2, store.getProviders().size());
-    assertEquals("text", store.getProviders().get("text").getTableType());
-    assertEquals("mock", store.getProviders().get("mock").getTableType());
+    assertNotNull(store.tableProviders());
+    assertEquals(2, store.tableProviders().size());
+    assertEquals("text", store.tableProviders().get("text").getTableType());
+    assertEquals("mock", store.tableProviders().get("mock").getTableType());
 
     assertEquals(2, store.getTables().size());
   }
@@ -119,13 +119,14 @@ public class InMemoryMetaStoreTest {
         .name(name)
         .comment(name + " table")
         .location("/home/admin/" + name)
+        //        .path("default.default." + name)
         .schema(
             Stream.of(
                     Schema.Field.nullable("id", Schema.FieldType.INT32),
                     Schema.Field.nullable("name", Schema.FieldType.STRING))
                 .collect(toSchema()))
         .type(type)
-        .properties(new JSONObject())
+        .properties(TableUtils.emptyProperties())
         .build();
   }
 

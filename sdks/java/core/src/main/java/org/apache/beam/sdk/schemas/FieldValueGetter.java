@@ -19,6 +19,7 @@ package org.apache.beam.sdk.schemas;
 
 import java.io.Serializable;
 import org.apache.beam.sdk.annotations.Internal;
+import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -29,9 +30,13 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * <p>Implementations of this interface are generated at runtime to map object fields to Row fields.
  */
 @Internal
-public interface FieldValueGetter<ObjectT, ValueT> extends Serializable {
-  @Nullable
-  ValueT get(ObjectT object);
+public interface FieldValueGetter<ObjectT extends @NonNull Object, ValueT> extends Serializable {
+  @Nullable ValueT get(ObjectT object);
+
+  /** Returns the raw value of the getter before any further transformations. */
+  default @Nullable Object getRaw(ObjectT object) {
+    return get(object);
+  }
 
   String name();
 }

@@ -19,7 +19,7 @@ package org.apache.beam.sdk.transforms.reflect;
 
 import static org.apache.beam.sdk.transforms.reflect.DoFnSignaturesTestUtils.analyzeProcessElementMethod;
 import static org.apache.beam.sdk.transforms.reflect.DoFnSignaturesTestUtils.errors;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -55,8 +55,8 @@ import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Predicates;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Predicates;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.joda.time.Instant;
 import org.junit.Rule;
 import org.junit.Test;
@@ -70,7 +70,7 @@ import org.junit.runners.JUnit4;
  */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class DoFnSignaturesSplittableDoFnTest {
   @Rule public ExpectedException thrown = ExpectedException.none();
@@ -84,6 +84,7 @@ public class DoFnSignaturesSplittableDoFnTest {
   private abstract static class SomeRestrictionCoder extends StructuredCoder<SomeRestriction> {}
 
   @Test
+  @SuppressWarnings("unused") // used via reflection
   public void testReturnsProcessContinuation() throws Exception {
     DoFnSignature.ProcessElementMethod signature =
         analyzeProcessElementMethod(
@@ -98,6 +99,7 @@ public class DoFnSignaturesSplittableDoFnTest {
   }
 
   @Test
+  @SuppressWarnings("unused") // used via reflection
   public void testHasRestrictionTracker() throws Exception {
     DoFnSignature.ProcessElementMethod signature =
         analyzeProcessElementMethod(
@@ -116,6 +118,7 @@ public class DoFnSignaturesSplittableDoFnTest {
   }
 
   @Test
+  @SuppressWarnings("unused") // used via reflection
   public void testSplittableProcessElementMustNotHaveUnsupportedParams() throws Exception {
     thrown.expect(IllegalArgumentException.class);
     thrown.expectMessage("Illegal parameter");
@@ -190,10 +193,12 @@ public class DoFnSignaturesSplittableDoFnTest {
   private static class BaseFnWithoutContinuation extends DoFn<Integer, String> {
     @ProcessElement
     public void processElement(
-        ProcessContext context, RestrictionTracker<SomeRestriction, Void> tracker) {}
+        @SuppressWarnings("unused") ProcessContext context,
+        @SuppressWarnings("unused") RestrictionTracker<SomeRestriction, Void> tracker) {}
 
     @GetInitialRestriction
-    public SomeRestriction getInitialRestriction(@Element Integer element) {
+    public SomeRestriction getInitialRestriction(
+        @SuppressWarnings("unused") @Element Integer element) {
       return null;
     }
   }
@@ -201,12 +206,14 @@ public class DoFnSignaturesSplittableDoFnTest {
   private static class BaseFnWithContinuation extends DoFn<Integer, String> {
     @ProcessElement
     public ProcessContinuation processElement(
-        ProcessContext context, RestrictionTracker<SomeRestriction, Void> tracker) {
+        @SuppressWarnings("unused") ProcessContext context,
+        @SuppressWarnings("unused") RestrictionTracker<SomeRestriction, Void> tracker) {
       return null;
     }
 
     @GetInitialRestriction
-    public SomeRestriction getInitialRestriction(@Element Integer element) {
+    public SomeRestriction getInitialRestriction(
+        @SuppressWarnings("unused") @Element Integer element) {
       return null;
     }
   }
@@ -292,7 +299,8 @@ public class DoFnSignaturesSplittableDoFnTest {
           PipelineOptions pipelineOptions,
           BoundedWindow boundedWindow,
           PaneInfo paneInfo,
-          @Timestamp Instant timestamp) {
+          @Timestamp Instant timestamp,
+          @SideInput("sideInput") String sideInput) {
         return null;
       }
 
@@ -305,7 +313,8 @@ public class DoFnSignaturesSplittableDoFnTest {
           PipelineOptions pipelineOptions,
           BoundedWindow boundedWindow,
           PaneInfo paneInfo,
-          @Timestamp Instant timestamp) {}
+          @Timestamp Instant timestamp,
+          @SideInput("sideInput") String sideInput) {}
 
       @TruncateRestriction
       public TruncateResult<SomeRestriction> truncateRestriction(
@@ -315,7 +324,8 @@ public class DoFnSignaturesSplittableDoFnTest {
           PipelineOptions pipelineOptions,
           BoundedWindow boundedWindow,
           PaneInfo paneInfo,
-          @Timestamp Instant timestamp) {
+          @Timestamp Instant timestamp,
+          @SideInput("sideInput") String sideInput) {
         return TruncateResult.of(null);
       }
 
@@ -326,7 +336,8 @@ public class DoFnSignaturesSplittableDoFnTest {
           PipelineOptions pipelineOptions,
           BoundedWindow boundedWindow,
           PaneInfo paneInfo,
-          @Timestamp Instant timestamp) {
+          @Timestamp Instant timestamp,
+          @SideInput("sideInput") String sideInput) {
         return null;
       }
 
@@ -337,7 +348,8 @@ public class DoFnSignaturesSplittableDoFnTest {
           PipelineOptions pipelineOptions,
           BoundedWindow boundedWindow,
           PaneInfo paneInfo,
-          @Timestamp Instant timestamp) {
+          @Timestamp Instant timestamp,
+          @SideInput("sideInput") String sideInput) {
         return 1.0;
       }
 
@@ -353,7 +365,8 @@ public class DoFnSignaturesSplittableDoFnTest {
           PipelineOptions pipelineOptions,
           BoundedWindow boundedWindow,
           PaneInfo paneInfo,
-          @Timestamp Instant timestamp) {
+          @Timestamp Instant timestamp,
+          @SideInput("sideInput") String sideInput) {
         return null;
       }
 
@@ -370,7 +383,8 @@ public class DoFnSignaturesSplittableDoFnTest {
           PipelineOptions pipelineOptions,
           BoundedWindow boundedWindow,
           PaneInfo paneInfo,
-          @Timestamp Instant timestamp) {
+          @Timestamp Instant timestamp,
+          @SideInput("sideInput") String sideInput) {
         return null;
       }
     }
@@ -751,7 +765,7 @@ public class DoFnSignaturesSplittableDoFnTest {
 
     thrown.expectMessage(
         "Has watermark estimator type SomeDefaultWatermarkEstimator, but the DoFn's watermark estimator type must be one of [WatermarkEstimator, ManualWatermarkEstimator] types.");
-    DoFnSignature signature = DoFnSignatures.getSignature(Fn.class);
+    DoFnSignatures.getSignature(Fn.class);
   }
 
   @Test
@@ -939,6 +953,7 @@ public class DoFnSignaturesSplittableDoFnTest {
   }
 
   @Test
+  @SuppressWarnings("unused") // used via reflection
   public void testSplitRestrictionWrongArgumentType() throws Exception {
     thrown.expectMessage("Object is not a valid context parameter.");
     DoFnSignatures.analyzeSplitRestrictionMethod(
@@ -1041,6 +1056,7 @@ public class DoFnSignaturesSplittableDoFnTest {
   }
 
   @Test
+  @SuppressWarnings("unused") // used via reflection
   public void testTruncateRestrictionWrongArgumentType() throws Exception {
     thrown.expectMessage("Object is not a valid context parameter.");
     DoFnSignatures.analyzeTruncateRestrictionMethod(
@@ -1160,6 +1176,7 @@ public class DoFnSignaturesSplittableDoFnTest {
   }
 
   @Test
+  @SuppressWarnings("unused") // used via reflection
   public void testNewTrackerWrongArgumentType() throws Exception {
     thrown.expectMessage("Object is not a valid context parameter.");
     DoFnSignatures.analyzeNewTrackerMethod(
@@ -1178,6 +1195,7 @@ public class DoFnSignaturesSplittableDoFnTest {
   }
 
   @Test
+  @SuppressWarnings("unused") // used via reflection
   public void testNewTrackerInconsistent() throws Exception {
     thrown.expectMessage(
         "Returns SomeRestrictionTracker, "

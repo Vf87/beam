@@ -21,10 +21,10 @@ import java.io.IOException;
 import java.io.Serializable;
 import java.util.Objects;
 import org.apache.beam.sdk.coders.Coder;
-import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.state.BagState;
 import org.apache.beam.sdk.state.CombiningState;
 import org.apache.beam.sdk.state.MapState;
+import org.apache.beam.sdk.state.MultimapState;
 import org.apache.beam.sdk.state.OrderedListState;
 import org.apache.beam.sdk.state.SetState;
 import org.apache.beam.sdk.state.State;
@@ -35,19 +35,16 @@ import org.apache.beam.sdk.state.ValueState;
 import org.apache.beam.sdk.state.WatermarkHoldState;
 import org.apache.beam.sdk.transforms.Combine.CombineFn;
 import org.apache.beam.sdk.transforms.CombineWithContext.CombineFnWithContext;
-import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.TimestampCombiner;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Equivalence;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Equivalence;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Static utility methods for creating {@link StateTag} instances. */
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class StateTags {
-
-  private static final CoderRegistry STANDARD_REGISTRY = CoderRegistry.createDefault();
 
   public static final Equivalence<StateTag> ID_EQUIVALENCE =
       new Equivalence<StateTag>() {
@@ -62,7 +59,9 @@ public class StateTags {
         }
       };
 
-  /** @deprecated for migration purposes only */
+  /**
+   * @deprecated for migration purposes only
+   */
   @Deprecated
   private static StateBinder adaptTagBinder(final StateTag.StateBinder binder) {
     return new StateBinder() {
@@ -88,6 +87,15 @@ public class StateTags {
           Coder<KeyT> mapKeyCoder,
           Coder<ValueT> mapValueCoder) {
         return binder.bindMap(tagForSpec(id, spec), mapKeyCoder, mapValueCoder);
+      }
+
+      @Override
+      public <KeyT, ValueT> MultimapState<KeyT, ValueT> bindMultimap(
+          String id,
+          StateSpec<MultimapState<KeyT, ValueT>> spec,
+          Coder<KeyT> keyCoder,
+          Coder<ValueT> valueCoder) {
+        return binder.bindMultimap(tagForSpec(id, spec), keyCoder, valueCoder);
       }
 
       @Override
@@ -138,6 +146,8 @@ public class StateTags {
 
   private interface SystemStateTag<StateT extends State> {
     StateTag<StateT> asKind(StateKind kind);
+
+    StateKind getKind();
   }
 
   /** Create a state tag for the given id and spec. */
@@ -206,12 +216,17 @@ public class StateTags {
     return new SimpleStateTag<>(new StructuredId(id), StateSpecs.map(keyCoder, valueCoder));
   }
 
+  public static <K, V> StateTag<MultimapState<K, V>> multimap(
+      String id, Coder<K> keyCoder, Coder<V> valueCoder) {
+    return new SimpleStateTag<>(new StructuredId(id), StateSpecs.multimap(keyCoder, valueCoder));
+  }
+
   public static <T> StateTag<OrderedListState<T>> orderedList(String id, Coder<T> elemCoder) {
     return new SimpleStateTag<>(new StructuredId(id), StateSpecs.orderedList(elemCoder));
   }
 
   /** Create a state tag for holding the watermark. */
-  public static <W extends BoundedWindow> StateTag<WatermarkHoldState> watermarkStateInternal(
+  public static StateTag<WatermarkHoldState> watermarkStateInternal(
       String id, TimestampCombiner timestampCombiner) {
     return new SimpleStateTag<>(
         new StructuredId(id), StateSpecs.watermarkStateInternal(timestampCombiner));
@@ -232,6 +247,16 @@ public class StateTags {
     return typedTag.asKind(StateKind.SYSTEM);
   }
 
+  /*
+   * Returns true if the tag is a system internal tag.
+   */
+  public static <StateT extends State> boolean isSystemTagInternal(StateTag<StateT> tag) {
+    if (!(tag instanceof SystemStateTag)) {
+      return false;
+    }
+    return StateKind.SYSTEM.equals(((SystemStateTag<?>) tag).getKind());
+  }
+
   public static <InputT, AccumT, OutputT> StateTag<BagState<AccumT>> convertToBagTagInternal(
       StateTag<CombiningState<InputT, AccumT, OutputT>> combiningTag) {
     return new SimpleStateTag<>(
@@ -243,6 +268,14 @@ public class StateTags {
       StateTag<SetState<KeyT>> setTag) {
     return new SimpleStateTag<>(
         new StructuredId(setTag.getId()), StateSpecs.convertToMapSpecInternal(setTag.getSpec()));
+  }
+
+  public static <KeyT, ValueT> StateTag<MultimapState<KeyT, ValueT>> convertToMultiMapTagInternal(
+      StateTag<MapState<KeyT, ValueT>> mapTag) {
+    StateSpec<MapState<KeyT, ValueT>> spec = mapTag.getSpec();
+    StateSpec<MultimapState<KeyT, ValueT>> multimapSpec =
+        StateSpecs.convertToMultimapSpecInternal(spec);
+    return new SimpleStateTag<>(new StructuredId(mapTag.getId()), multimapSpec);
   }
 
   private static class StructuredId implements Serializable {
@@ -307,7 +340,9 @@ public class StateTags {
       this.spec = spec;
     }
 
-    /** @deprecated use {@link StateSpec#bind} method via {@link #getSpec} for now. */
+    /**
+     * @deprecated use {@link StateSpec#bind} method via {@link #getSpec} for now.
+     */
     @Override
     @Deprecated
     public StateT bind(StateTag.StateBinder binder) {
@@ -337,6 +372,11 @@ public class StateTags {
     @Override
     public StateTag<StateT> asKind(StateKind kind) {
       return new SimpleStateTag<>(id.asKind(kind), spec);
+    }
+
+    @Override
+    public StateKind getKind() {
+      return id.kind;
     }
 
     @Override

@@ -28,13 +28,15 @@ import org.apache.beam.sdk.coders.InstantCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.CausedByDrain;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
 /** Elements which can be buffered as part of a checkpoint for @RequiresStableInput. */
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 class BufferedElements {
 
@@ -65,6 +67,11 @@ class BufferedElements {
     @Override
     public int hashCode() {
       return Objects.hash(element);
+    }
+
+    @Override
+    public String toString() {
+      return MoreObjects.toStringHelper(this).add("element", element).toString();
     }
   }
 
@@ -98,7 +105,14 @@ class BufferedElements {
     @Override
     public void processWith(DoFnRunner doFnRunner) {
       doFnRunner.onTimer(
-          timerId, timerFamilyId, key, window, timestamp, outputTimestamp, timeDomain);
+          timerId,
+          timerFamilyId,
+          key,
+          window,
+          timestamp,
+          outputTimestamp,
+          timeDomain,
+          CausedByDrain.NORMAL);
     }
 
     @Override

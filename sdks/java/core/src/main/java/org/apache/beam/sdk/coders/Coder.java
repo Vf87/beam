@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.coders;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -27,15 +27,13 @@ import java.io.Serializable;
 import java.util.Arrays;
 import java.util.List;
 import org.apache.beam.sdk.PipelineRunner;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.util.common.ElementByteSizeObserver;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Objects;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.ByteStreams;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.CountingOutputStream;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Joiner;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Objects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.ByteStreams;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.CountingOutputStream;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -54,6 +52,11 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * <p>All methods of a {@link Coder} are required to be thread safe.
  *
  * @param <T> the type of values being encoded and decoded
+ *     <p>The behavior of encoding and decoding depends on the {@link Context}.
+ *     <p>In {@link Context#OUTER}, the value consumes the remainder of the stream.
+ *     <p>In {@link Context#NESTED}, the value is part of a larger structure and must be
+ *     self-delimiting so that subsequent values can be correctly decoded.
+ *     <p>See {@link CoderProperties} for utilities to test coder correctness and consistency.
  */
 public abstract class Coder<T> implements Serializable {
   /**
@@ -64,7 +67,6 @@ public abstract class Coder<T> implements Serializable {
    *     implementations for methods accepting a {@link Context}.
    */
   @Deprecated
-  @Experimental(Kind.CODER_CONTEXT)
   public static class Context {
     /**
      * The outer context: the value being encoded or decoded takes up the remainder of the
@@ -115,7 +117,10 @@ public abstract class Coder<T> implements Serializable {
   }
 
   /**
-   * Encodes the given value of type {@code T} onto the given output stream.
+   * Encodes the given value of type {@code T} onto the given output stream. Multiple elements can
+   * be encoded next to each other on the output stream, each coder should encode information to
+   * know how many bytes to read when decoding. A common approach is to prefix the encoding with the
+   * element's encoded length.
    *
    * @throws IOException if writing to the {@code OutputStream} fails for some reason
    * @throws CoderException if the value could not be encoded for some reason
@@ -130,7 +135,6 @@ public abstract class Coder<T> implements Serializable {
    * @deprecated only implement and call {@link #encode(Object value, OutputStream)}
    */
   @Deprecated
-  @Experimental(Kind.CODER_CONTEXT)
   public void encode(T value, OutputStream outStream, Context context)
       throws CoderException, IOException {
     encode(value, outStream);
@@ -138,7 +142,9 @@ public abstract class Coder<T> implements Serializable {
 
   /**
    * Decodes a value of type {@code T} from the given input stream in the given context. Returns the
-   * decoded value.
+   * decoded value. Multiple elements can be encoded next to each other on the input stream, each
+   * coder should encode information to know how many bytes to read when decoding. A common approach
+   * is to prefix the encoding with the element's encoded length.
    *
    * @throws IOException if reading from the {@code InputStream} fails for some reason
    * @throws CoderException if the value could not be decoded for some reason
@@ -154,7 +160,6 @@ public abstract class Coder<T> implements Serializable {
    * @deprecated only implement and call {@link #decode(InputStream)}
    */
   @Deprecated
-  @Experimental(Kind.CODER_CONTEXT)
   public T decode(InputStream inStream, Context context) throws CoderException, IOException {
     return decode(inStream);
   }
@@ -196,6 +201,11 @@ public abstract class Coder<T> implements Serializable {
         throw new NonDeterministicException(target, message, e);
       }
     }
+  }
+
+  public static <T> long getEncodedElementByteSizeUsingCoder(Coder<T> target, T value)
+      throws Exception {
+    return target.getEncodedElementByteSize(value);
   }
 
   /**
@@ -303,7 +313,6 @@ public abstract class Coder<T> implements Serializable {
   }
 
   /** Returns the {@link TypeDescriptor} for the type encoded. */
-  @Experimental(Kind.CODER_TYPE_ENCODING)
   public TypeDescriptor<T> getEncodedTypeDescriptor() {
     return (TypeDescriptor<T>)
         TypeDescriptor.of(getClass()).resolveType(new TypeDescriptor<T>() {}.getType());

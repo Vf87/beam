@@ -16,11 +16,12 @@
 package pipelinex
 
 import (
+	"fmt"
 	"testing"
 
 	pipepb "github.com/apache/beam/sdks/v2/go/pkg/beam/model/pipeline_v1"
-	"github.com/golang/protobuf/proto"
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
 )
 
@@ -310,6 +311,29 @@ func TestComputeInputOutput(t *testing.T) {
 	}
 }
 
+func BenchmarkComputeInputOutput(b *testing.B) {
+	in := make(map[string]*pipepb.PTransform)
+	// Build a long chain of composite transforms.
+	for i := 0; i < 3000; i++ {
+		compositeID := fmt.Sprintf("x%d", i)
+		primitiveID := fmt.Sprintf("y%d", i)
+		in[compositeID] = &pipepb.PTransform{
+			UniqueName:    compositeID,
+			Subtransforms: []string{primitiveID},
+		}
+		in[primitiveID] = &pipepb.PTransform{
+			UniqueName: primitiveID,
+			Inputs:     map[string]string{"i0": fmt.Sprintf("p%d", i)},
+			Outputs:    map[string]string{"i0": fmt.Sprintf("p%d", i+1)},
+		}
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		computeCompositeInputOutput(in)
+	}
+}
+
 func TestApplySdkImageOverrides(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -400,4 +424,21 @@ func buildEnvironment(t *testing.T, containerImg string) *pipepb.Environment {
 	}
 	env.Payload = plb
 	return env
+}
+
+func TestComputeRootsDeterminism(t *testing.T) {
+	xforms := map[string]*pipepb.PTransform{
+		"e10": {UniqueName: "root10"},
+		"e2":  {UniqueName: "root2", Inputs: map[string]string{"i0": "p1"}},
+		"e1":  {UniqueName: "root1", Outputs: map[string]string{"i0": "p1"}},
+		"s1":  {UniqueName: "comp1", Subtransforms: []string{"e3"}},
+		"e3":  {UniqueName: "child3"},
+	}
+	want := []string{"s1", "e10", "e1", "e2"}
+	for i := 0; i < 20; i++ {
+		got := computeRoots(xforms)
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Fatalf("iteration %d: computeRoots(%v) = %v, want %v (-want +got):\n%s", i, xforms, got, want, diff)
+		}
+	}
 }

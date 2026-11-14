@@ -17,15 +17,13 @@
  */
 package org.apache.beam.sdk.transforms.windowing;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
 import java.util.List;
 import java.util.Objects;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.transforms.windowing.Trigger.OnceTrigger;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
@@ -56,9 +54,8 @@ import org.joda.time.Instant;
  * AfterWatermark.pastEndOfWindow.withEarlyFirings(OnceTrigger)} or {@code
  * AfterWatermark.pastEndOfWindow.withLateFirings(OnceTrigger)}.
  */
-@Experimental(Kind.TRIGGER)
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class AfterWatermark {
 
@@ -72,7 +69,7 @@ public class AfterWatermark {
     return new FromEndOfWindow();
   }
 
-  /** @see AfterWatermark */
+  /** See {@link AfterWatermark}. */
   public static class AfterWatermarkEarlyAndLate extends Trigger {
 
     private final OnceTrigger earlyTrigger;
@@ -105,6 +102,11 @@ public class AfterWatermark {
     }
 
     @Override
+    public <OutputT> OutputT accept(TriggerVisitor<OutputT> visitor) {
+      return visitor.visit(this);
+    }
+
+    @Override
     public Trigger getContinuationTrigger() {
       return new AfterWatermarkEarlyAndLate(
           earlyTrigger.getContinuationTrigger(),
@@ -123,7 +125,7 @@ public class AfterWatermark {
       return window.maxTimestamp();
     }
 
-    /** @return true if there is no late firing set up, otherwise false */
+    /** Returns true if there is no late firing set up, otherwise false. */
     @Override
     public boolean mayFinish() {
       return lateTrigger == null;
@@ -178,6 +180,11 @@ public class AfterWatermark {
     @Override
     protected FromEndOfWindow getContinuationTrigger(List<Trigger> continuationTriggers) {
       return this;
+    }
+
+    @Override
+    public <OutputT> OutputT accept(TriggerVisitor<OutputT> visitor) {
+      return visitor.visit(this);
     }
 
     @Override

@@ -31,15 +31,24 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.regex.Pattern;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.coders.AtomicCoder;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.SerializableCoder;
+import org.apache.beam.sdk.coders.VarIntCoder;
 import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.io.GenerateSequence;
-import org.apache.beam.sdk.testing.PAssert.PCollectionContentsAssert.MatcherCheckerFn;
+import org.apache.beam.sdk.testing.PAssert.MatcherCheckerFn;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.GroupByKey;
@@ -58,9 +67,9 @@ import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.TimestampedValue;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Throwables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Throwables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -69,12 +78,11 @@ import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
 
 /** Test case for {@link PAssert}. */
-@RunWith(JUnit4.class)
+@RunWith(BeamParallelJunit4Runner.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class PAssertTest implements Serializable {
 
@@ -136,6 +144,37 @@ public class PAssertTest implements Serializable {
     } catch (Exception e) {
       throw new RuntimeException("Wrapped error", e);
     }
+  }
+
+  @Test
+  public void testAssertionNamesAreUniqueAcrossThreads() throws Exception {
+    // ValidatesRunner suites build pipelines from many threads at once; a lost update on the
+    // assertion counter would hand two PAsserts the same name (possibly within one pipeline).
+    final int threads = 16;
+    final int namesPerThread = 2000;
+    final Set<String> names = ConcurrentHashMap.newKeySet();
+    final CyclicBarrier start = new CyclicBarrier(threads);
+    ExecutorService executor = Executors.newFixedThreadPool(threads);
+    try {
+      List<Future<?>> futures = new ArrayList<>();
+      for (int t = 0; t < threads; t++) {
+        futures.add(
+            executor.submit(
+                () -> {
+                  start.await();
+                  for (int i = 0; i < namesPerThread; i++) {
+                    assertTrue("duplicate assertion name", names.add(PAssert.nextAssertionName()));
+                  }
+                  return null;
+                }));
+      }
+      for (Future<?> future : futures) {
+        future.get();
+      }
+    } finally {
+      executor.shutdownNow();
+    }
+    assertEquals(threads * namesPerThread, names.size());
   }
 
   @Test
@@ -250,7 +289,8 @@ public class PAssertTest implements Serializable {
    */
   @SuppressWarnings({
     "deprecation", // test of deprecated function
-    "EqualsIncompatibleType"
+    "EqualsIncompatibleType",
+    "ReturnValueIgnored"
   })
   @Test
   public void testPAssertEqualsSingletonUnsupported() throws Exception {
@@ -267,7 +307,8 @@ public class PAssertTest implements Serializable {
    */
   @SuppressWarnings({
     "deprecation", // test of deprecated function
-    "EqualsIncompatibleType"
+    "EqualsIncompatibleType",
+    "ReturnValueIgnored"
   })
   @Test
   public void testPAssertEqualsIterableUnsupported() throws Exception {
@@ -282,7 +323,10 @@ public class PAssertTest implements Serializable {
    * Test that {@code PAssert.thatSingleton().hashCode()} is unsupported. See {@link
    * #testPAssertEqualsSingletonUnsupported}.
    */
-  @SuppressWarnings("deprecation") // test of deprecated function
+  @SuppressWarnings({
+    "deprecation", // test of deprecated function
+    "ReturnValueIgnored",
+  })
   @Test
   public void testPAssertHashCodeSingletonUnsupported() throws Exception {
     thrown.expect(UnsupportedOperationException.class);
@@ -296,7 +340,10 @@ public class PAssertTest implements Serializable {
    * Test that {@code PAssert.thatIterable().hashCode()} is unsupported. See {@link
    * #testPAssertEqualsIterableUnsupported}.
    */
-  @SuppressWarnings("deprecation") // test of deprecated function
+  @SuppressWarnings({
+    "deprecation", // test of deprecated function
+    "ReturnValueIgnored" // verify exception is thrown
+  })
   @Test
   public void testPAssertHashCodeIterableUnsupported() throws Exception {
     thrown.expect(UnsupportedOperationException.class);
@@ -378,6 +425,36 @@ public class PAssertTest implements Serializable {
     assertThat(message, containsString("but: was <42>"));
   }
 
+  @Test
+  @Category({ValidatesRunner.class, UsesFailureMessage.class})
+  public void testPAssertEqualsSingletonFailsForEmptyPCollection() throws Exception {
+    PCollection<Integer> pcollection = pipeline.apply(Create.empty(VarIntCoder.of()));
+    PAssert.thatSingleton("The value was not equal to 44", pcollection).isEqualTo(44);
+
+    Throwable thrown = runExpectingAssertionFailure(pipeline);
+
+    String message = thrown.getMessage();
+
+    assertThat(message, containsString("The value was not equal to 44"));
+    assertThat(message, containsString("expected singleton PCollection"));
+    assertThat(message, containsString("but was: empty PCollection"));
+  }
+
+  @Test
+  @Category({ValidatesRunner.class, UsesFailureMessage.class})
+  public void testPAssertEqualsSingletonFailsForNonSingletonPCollection() throws Exception {
+    PCollection<Integer> pcollection = pipeline.apply(Create.of(44, 44));
+    PAssert.thatSingleton("The value was not equal to 44", pcollection).isEqualTo(44);
+
+    Throwable thrown = runExpectingAssertionFailure(pipeline);
+
+    String message = thrown.getMessage();
+
+    assertThat(message, containsString("The value was not equal to 44"));
+    assertThat(message, containsString("expected one element"));
+    assertThat(message, containsString("but was: <44, 44>"));
+  }
+
   /** Test that we throw an error for false assertion on singleton. */
   @Test
   @Category({ValidatesRunner.class, UsesFailureMessage.class})
@@ -389,7 +466,7 @@ public class PAssertTest implements Serializable {
 
     String message = thrown.getMessage();
 
-    assertThat(message, containsString("Create.Values/Read(CreateSource)"));
+    assertThat(message, containsString("Create.Values/"));
     assertThat(message, containsString("Expected: <44>"));
     assertThat(message, containsString("but: was <42>"));
   }
@@ -400,6 +477,19 @@ public class PAssertTest implements Serializable {
   public void testContainsInAnyOrder() throws Exception {
     PCollection<Integer> pcollection = pipeline.apply(Create.of(1, 2, 3, 4));
     PAssert.that(pcollection).containsInAnyOrder(2, 1, 4, 3);
+    pipeline.run();
+  }
+
+  @Test
+  @Category(ValidatesRunner.class)
+  public void testContainsInAnyOrderWithMatchers() throws Exception {
+    PCollection<Integer> pcollection = pipeline.apply(Create.of(1, 2, 3, 4));
+    PAssert.that(pcollection)
+        .containsInAnyOrder(
+            SerializableMatchers.equalTo(2),
+            SerializableMatchers.equalTo(1),
+            SerializableMatchers.equalTo(4),
+            SerializableMatchers.equalTo(3));
     pipeline.run();
   }
 

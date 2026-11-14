@@ -24,7 +24,7 @@
  *
  * <pre>{@code
  * PCollection<TableRow> inputData = pipeline.apply(
- *     BigQueryIO.readTableRows().from("clouddataflow-readonly:samples.weather_stations"));
+ *     BigQueryIO.readTableRows().from("apache-beam-testing.samples.weather_stations"));
  * }</pre>
  *
  * and {@code Write} transforms that persist PCollections to external storage:
@@ -34,8 +34,4 @@
  * numbers.apply(TextIO.write().to("gs://my_bucket/path/to/numbers"));
  * }</pre>
  */
-@DefaultAnnotation(NonNull.class)
 package org.apache.beam.sdk.io;
-
-import edu.umd.cs.findbugs.annotations.DefaultAnnotation;
-import org.checkerframework.checker.nullness.qual.NonNull;

@@ -17,11 +17,10 @@
 # pytype: skip-file
 
 import array
-import json
 from collections import OrderedDict
 
 import numpy as np
-from avro.schema import Parse
+from fastavro import parse_schema
 
 from apache_beam.typehints import trivial_inference
 from apache_beam.typehints import typehints
@@ -65,21 +64,18 @@ def infer_typehints_schema(data):
   for row in data:
     for key, value in row.items():
       column_data.setdefault(key, []).append(value)
-  column_types = OrderedDict([
-      (key, infer_element_type(values)) for key, values in column_data.items()
-  ])
+  column_types = OrderedDict([(key, infer_element_type(values))
+                              for key, values in column_data.items()])
   return column_types
 
 
-def infer_avro_schema(data, use_fastavro=False):
+def infer_avro_schema(data):
   """For internal use only; no backwards-compatibility guarantees.
 
   Infer avro schema for tabular data.
 
   Args:
     data (List[dict]): A list of dictionaries representing rows in a table.
-    use_fastavro (bool): A flag indicating whether the schema should be
-        constructed using fastavro.
 
   Returns:
     An avro schema object.
@@ -104,19 +100,14 @@ def infer_avro_schema(data, use_fastavro=False):
   column_types = infer_typehints_schema(data)
   avro_fields = [{
       "name": str(key), "type": typehint_to_avro_type(value)
-  } for key,
-                 value in column_types.items()]
+  } for key, value in column_types.items()]
   schema_dict = {
       "namespace": "example.avro",
       "name": "User",
       "type": "record",
       "fields": avro_fields
   }
-  if use_fastavro:
-    from fastavro import parse_schema
-    return parse_schema(schema_dict)
-  else:
-    return Parse(json.dumps(schema_dict))
+  return parse_schema(schema_dict)
 
 
 def infer_pyarrow_schema(data):
@@ -134,7 +125,6 @@ def infer_pyarrow_schema(data):
   for row in data:
     for key, value in row.items():
       column_data.setdefault(key, []).append(value)
-  column_types = OrderedDict([
-      (key, pa.array(value).type) for key, value in column_data.items()
-  ])
+  column_types = OrderedDict([(key, pa.array(value).type)
+                              for key, value in column_data.items()])
   return pa.schema(list(column_types.items()))

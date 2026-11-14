@@ -20,10 +20,8 @@ package org.apache.beam.sdk.nexmark.queries.sql;
 import org.apache.beam.sdk.extensions.sql.SqlTransform;
 import org.apache.beam.sdk.extensions.sql.impl.CalciteQueryPlanner;
 import org.apache.beam.sdk.extensions.sql.impl.QueryPlanner;
-import org.apache.beam.sdk.extensions.sql.zetasql.ZetaSQLQueryPlanner;
 import org.apache.beam.sdk.nexmark.model.AuctionPrice;
 import org.apache.beam.sdk.nexmark.model.Event;
-import org.apache.beam.sdk.nexmark.model.Event.Type;
 import org.apache.beam.sdk.nexmark.model.sql.SelectEvent;
 import org.apache.beam.sdk.nexmark.queries.NexmarkQueryTransform;
 import org.apache.beam.sdk.nexmark.queries.NexmarkQueryUtil;
@@ -45,14 +43,11 @@ import org.apache.beam.sdk.values.PCollection;
  */
 public class SqlQuery2 extends NexmarkQueryTransform<AuctionPrice> {
 
-  private static final String QUERY_TEMPLATE =
-      "SELECT auction, price FROM PCOLLECTION WHERE MOD(auction, %d) = 0";
-
   private final long skipFactor;
   private final Class<? extends QueryPlanner> plannerClass;
 
   private SqlQuery2(String name, long skipFactor, Class<? extends QueryPlanner> plannerClass) {
-    super("SqlQuery2");
+    super(name);
     this.plannerClass = plannerClass;
     this.skipFactor = skipFactor;
   }
@@ -61,17 +56,16 @@ public class SqlQuery2 extends NexmarkQueryTransform<AuctionPrice> {
     return new SqlQuery2("SqlQuery2", skipFactor, CalciteQueryPlanner.class);
   }
 
-  public static SqlQuery2 zetaSqlQuery2(long skipFactor) {
-    return new SqlQuery2("ZetaSqlQuery2", skipFactor, ZetaSQLQueryPlanner.class);
-  }
-
   @Override
   public PCollection<AuctionPrice> expand(PCollection<Event> allEvents) {
     return allEvents
         .apply(Filter.by(NexmarkQueryUtil.IS_BID))
-        .apply(getName() + ".SelectEvent", new SelectEvent(Type.BID))
+        .apply(getName() + ".SelectEvent", new SelectEvent(Event.Type.BID))
         .apply(
-            SqlTransform.query(String.format(QUERY_TEMPLATE, skipFactor))
+            SqlTransform.query(
+                    String.format(
+                        "SELECT auction, price FROM PCOLLECTION WHERE MOD(auction, %d) = 0",
+                        skipFactor))
                 .withQueryPlannerClass(plannerClass))
         .apply(Convert.fromRows(AuctionPrice.class));
   }

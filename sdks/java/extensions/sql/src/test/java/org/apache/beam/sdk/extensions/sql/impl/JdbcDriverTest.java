@@ -22,9 +22,11 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.sql.Connection;
@@ -36,13 +38,21 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TimeZone;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import org.apache.beam.sdk.extensions.sql.meta.catalog.InMemoryCatalogManager;
 import org.apache.beam.sdk.extensions.sql.meta.provider.ReadOnlyTableProvider;
+import org.apache.beam.sdk.extensions.sql.meta.provider.seqgen.GenerateSequenceTableProvider;
 import org.apache.beam.sdk.extensions.sql.meta.provider.test.TestBoundedTable;
 import org.apache.beam.sdk.extensions.sql.meta.provider.test.TestTableProvider;
 import org.apache.beam.sdk.extensions.sql.meta.provider.test.TestUnboundedTable;
@@ -50,10 +60,10 @@ import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.util.ReleaseInfo;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.jdbc.CalciteConnection;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.jdbc.CalciteSchema;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.SchemaPlus;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.jdbc.CalciteConnection;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.jdbc.CalciteSchema;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.SchemaPlus;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.joda.time.DateTime;
 import org.joda.time.Duration;
 import org.joda.time.ReadableInstant;
@@ -116,9 +126,9 @@ public class JdbcDriverTest {
   public void testDriverManager_defaultUserAgent() throws Exception {
     Connection connection = DriverManager.getConnection(JdbcDriver.CONNECT_STRING_PREFIX);
     SchemaPlus rootSchema = ((CalciteConnection) connection).getRootSchema();
-    BeamCalciteSchema beamSchema =
-        (BeamCalciteSchema) CalciteSchema.from(rootSchema.getSubSchema("beam")).schema;
-    Map<String, String> pipelineOptions = beamSchema.getPipelineOptions();
+    CatalogManagerSchema catalogManagerSchema =
+        (CatalogManagerSchema) CalciteSchema.from(rootSchema.getSubSchema("beam")).schema;
+    Map<String, String> pipelineOptions = catalogManagerSchema.connection().getPipelineOptionsMap();
     assertThat(pipelineOptions.get("userAgent"), containsString("BeamSQL"));
   }
 
@@ -127,9 +137,9 @@ public class JdbcDriverTest {
   public void testDriverManager_hasUserAgent() throws Exception {
     JdbcConnection connection =
         (JdbcConnection) DriverManager.getConnection(JdbcDriver.CONNECT_STRING_PREFIX);
-    BeamCalciteSchema schema = connection.getCurrentBeamSchema();
+    CatalogManagerSchema schema = (CatalogManagerSchema) connection.getCurrentBeamSchema();
     assertThat(
-        schema.getPipelineOptions().get("userAgent"),
+        schema.connection().getPipelineOptionsMap().get("userAgent"),
         equalTo("BeamSQL/" + ReleaseInfo.getReleaseInfo().getVersion()));
   }
 
@@ -140,9 +150,9 @@ public class JdbcDriverTest {
         DriverManager.getConnection(
             JdbcDriver.CONNECT_STRING_PREFIX + "beam.userAgent=Secret Agent");
     SchemaPlus rootSchema = ((CalciteConnection) connection).getRootSchema();
-    BeamCalciteSchema beamSchema =
-        (BeamCalciteSchema) CalciteSchema.from(rootSchema.getSubSchema("beam")).schema;
-    Map<String, String> pipelineOptions = beamSchema.getPipelineOptions();
+    CatalogManagerSchema catalogManagerSchema =
+        (CatalogManagerSchema) CalciteSchema.from(rootSchema.getSubSchema("beam")).schema;
+    Map<String, String> pipelineOptions = catalogManagerSchema.connection().getPipelineOptionsMap();
     assertThat(pipelineOptions.get("userAgent"), equalTo("Secret Agent"));
   }
 
@@ -154,9 +164,9 @@ public class JdbcDriverTest {
             JdbcDriver.CONNECT_STRING_PREFIX
                 + "beam.foo=baz;beam.foobizzle=mahshizzle;other=smother");
     SchemaPlus rootSchema = ((CalciteConnection) connection).getRootSchema();
-    BeamCalciteSchema beamSchema =
-        (BeamCalciteSchema) CalciteSchema.from(rootSchema.getSubSchema("beam")).schema;
-    Map<String, String> pipelineOptions = beamSchema.getPipelineOptions();
+    CatalogManagerSchema catalogManagerSchema =
+        (CatalogManagerSchema) CalciteSchema.from(rootSchema.getSubSchema("beam")).schema;
+    Map<String, String> pipelineOptions = catalogManagerSchema.connection().getPipelineOptionsMap();
     assertThat(pipelineOptions.get("foo"), equalTo("baz"));
     assertThat(pipelineOptions.get("foobizzle"), equalTo("mahshizzle"));
     assertThat(pipelineOptions.get("other"), nullValue());
@@ -449,6 +459,47 @@ public class JdbcDriverTest {
     assertFalse(resultSet2.next());
   }
 
+  /** Statement.cancel() (e.g. Ctrl+C in the SQL shell) must stop a never-ending pipeline. */
+  @Test
+  public void testCancelUnboundedQuery() throws Exception {
+    TestTableProvider testTables = new TestTableProvider();
+    InMemoryCatalogManager catalogManager = new InMemoryCatalogManager();
+    catalogManager.registerTableProvider(testTables);
+    catalogManager.registerTableProvider(new GenerateSequenceTableProvider());
+    Connection connection = JdbcDriver.connect(catalogManager, PipelineOptionsFactory.create());
+    Statement ddl = connection.createStatement();
+    ddl.execute(
+        "CREATE EXTERNAL TABLE seq (sequence BIGINT, event_time TIMESTAMP) TYPE 'sequence'");
+    ddl.execute("CREATE EXTERNAL TABLE sink (sequence BIGINT) TYPE 'test'");
+
+    ExecutorService executor = Executors.newCachedThreadPool();
+    try {
+      Statement insert = connection.createStatement();
+      Future<?> insertRun =
+          executor.submit(() -> insert.execute("INSERT INTO sink SELECT sequence FROM seq"));
+      while (testTables.tableRows("sink").isEmpty() && !insertRun.isDone()) {
+        Thread.sleep(100);
+      }
+      assertCancels(insert, insertRun);
+
+      for (String select :
+          Arrays.asList("SELECT sequence FROM seq", "SELECT sequence FROM seq LIMIT 1000000")) {
+        Statement statement = connection.createStatement();
+        assertCancels(statement, executor.submit(() -> statement.executeQuery(select)));
+      }
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  private static void assertCancels(Statement statement, Future<?> run) throws Exception {
+    statement.cancel();
+    ExecutionException e =
+        assertThrows(ExecutionException.class, () -> run.get(30, TimeUnit.SECONDS));
+    assertThat(e.getCause(), instanceOf(SQLException.class));
+    assertThat(e.getCause().getMessage(), containsString("Statement canceled"));
+  }
+
   private List<List<Object>> readResultSet(ResultSet result) throws Exception {
     List<List<Object>> results = new ArrayList<>();
 
@@ -470,6 +521,18 @@ public class JdbcDriverTest {
 
   private Row row(Schema schema, Object... values) {
     return Row.withSchema(schema).addValues(values).build();
+  }
+
+  @Test
+  public void testCalciteConnectionProperties_BigQuery() throws Exception {
+    BeamSqlPipelineOptions options =
+        PipelineOptionsFactory.create().as(BeamSqlPipelineOptions.class);
+    options.setCalciteConnectionProperties(ImmutableMap.of("fun", "BIGQUERY", "lex", "BIG_QUERY"));
+    CalciteConnection connection = JdbcDriver.connect(BOUNDED_TABLE, options);
+    assertEquals(
+        "BIGQUERY", connection.getProperties().getProperty("fun", "CALCITE").toUpperCase());
+    assertEquals(
+        "BIG_QUERY", connection.getProperties().getProperty("lex", "CALCITE").toUpperCase());
   }
 
   @Test
@@ -508,5 +571,54 @@ public class JdbcDriverTest {
     thrown.expectMessage("No suitable driver found");
 
     DriverManager.getConnection("jdbc:baaaaaad");
+  }
+
+  @Test
+  public void testBigQueryDialect() throws Exception {
+    ReadOnlyTableProvider tableProvider =
+        new ReadOnlyTableProvider(
+            "test",
+            ImmutableMap.of(
+                "test",
+                TestUnboundedTable.of(
+                        Schema.FieldType.INT32, "order_id",
+                        Schema.FieldType.INT32, "site_id",
+                        Schema.FieldType.INT32, "price",
+                        Schema.FieldType.STRING, "label",
+                        Schema.FieldType.STRING, "date",
+                        Schema.FieldType.DATETIME, "order_time")
+                    .timestampColumnIndex(5)
+                    .addRows(
+                        Duration.ZERO,
+                        1,
+                        1,
+                        1,
+                        "test-1",
+                        "2025-06-30",
+                        FIRST_DATE,
+                        1,
+                        2,
+                        6,
+                        "test-2",
+                        "2025-06-30",
+                        FIRST_DATE)));
+    BeamSqlPipelineOptions options =
+        PipelineOptionsFactory.create().as(BeamSqlPipelineOptions.class);
+    options.setCalciteConnectionProperties(ImmutableMap.of("fun", "bigquery"));
+
+    CalciteConnection connection = JdbcDriver.connect(tableProvider, options);
+    assertEquals("bigquery", connection.getProperties().getProperty("fun", "CALCITE"));
+    Statement statement = connection.createStatement();
+
+    ResultSet resultSet1 =
+        statement.executeQuery(
+            "SELECT SUBSTRING(`label`,2), SUBSTR(`label`, 2,4) FROM test LIMIT 1");
+    assertTrue(resultSet1.next());
+    assertFalse(resultSet1.next());
+
+    ResultSet resultSet2 = statement.executeQuery("SELECT * FROM test LIMIT 2");
+    assertTrue(resultSet2.next());
+    assertTrue(resultSet2.next());
+    assertFalse(resultSet2.next());
   }
 }

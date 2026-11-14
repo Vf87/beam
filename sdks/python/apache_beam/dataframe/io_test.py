@@ -18,7 +18,6 @@ import glob
 import importlib
 import math
 import os
-import platform
 import shutil
 import tempfile
 import typing
@@ -27,17 +26,33 @@ from datetime import datetime
 from io import BytesIO
 from io import StringIO
 
+import mock
 import pandas as pd
 import pandas.testing
+import pyarrow
 import pytest
 from pandas.testing import assert_frame_equal
 from parameterized import parameterized
 
 import apache_beam as beam
+import apache_beam.io.gcp.bigquery
 from apache_beam.dataframe import convert
 from apache_beam.dataframe import io
+from apache_beam.io import fileio
 from apache_beam.io import restriction_trackers
+from apache_beam.io.gcp.bigquery_tools import BigQueryWrapper
+from apache_beam.io.gcp.internal.clients import bigquery
 from apache_beam.testing.util import assert_that
+from apache_beam.testing.util import equal_to
+
+try:
+  from apitools.base.py.exceptions import HttpError
+except ImportError:
+  HttpError = None
+
+# Get major, minor version
+PD_VERSION = tuple(map(int, pd.__version__.split('.')[0:2]))
+PYARROW_VERSION = tuple(map(int, pyarrow.__version__.split('.')[0:2]))
 
 
 class SimpleRow(typing.NamedTuple):
@@ -49,7 +64,6 @@ class MyRow(typing.NamedTuple):
   value: int
 
 
-@unittest.skipIf(platform.system() == 'Windows', 'BEAM-10929')
 class IOTest(unittest.TestCase):
   def setUp(self):
     self._temp_roots = []
@@ -76,6 +90,19 @@ class IOTest(unittest.TestCase):
       if delete:
         os.remove(path)
 
+  def test_read_fwf(self):
+    input = self.temp_dir(
+        {'all.fwf': '''
+A     B
+11a   0
+37a   1
+389a  2
+    '''.strip()})
+    with beam.Pipeline() as p:
+      df = p | io.read_fwf(input + 'all.fwf')
+      rows = convert.to_pcollection(df) | beam.Map(tuple)
+      assert_that(rows, equal_to([('11a', 0), ('37a', 1), ('389a', 2)]))
+
   def test_read_write_csv(self):
     input = self.temp_dir({'1.csv': 'a,b\n1,2\n', '2.csv': 'a,b\n3,4\n'})
     output = self.temp_dir()
@@ -86,7 +113,36 @@ class IOTest(unittest.TestCase):
     self.assertCountEqual(['a,b,c', '1,2,3', '3,4,7'],
                           set(self.read_all_lines(output + 'out.csv*')))
 
+  def test_wide_csv_with_dtypes(self):
+    # Verify https://github.com/apache/beam/issues/31152 is resolved.
+    cols = ','.join(f'col{ix}' for ix in range(123))
+    data = ','.join(str(ix) for ix in range(123))
+    input = self.temp_dir({'tmp.csv': f'{cols}\n{data}'})
+    with beam.Pipeline() as p:
+      pcoll = p | beam.io.ReadFromCsv(f'{input}tmp.csv', dtype=str)
+      assert_that(pcoll | beam.Map(max), equal_to(['99']))
+
+  def test_empty_csv_read(self):
+    input = self.temp_dir({'empty.csv': 'col1,col2,col3\n'})
+    with beam.Pipeline() as p:
+      pcoll = p | beam.io.ReadFromCsv(input + 'empty.csv')
+      assert_that(pcoll, equal_to([]))
+
+  def test_sharding_parameters(self):
+    data = pd.DataFrame({'label': ['11a', '37a', '389a'], 'rank': [0, 1, 2]})
+    output = self.temp_dir()
+    with beam.Pipeline() as p:
+      df = convert.to_dataframe(p | beam.Create([data]), proxy=data[:0])
+      df.to_csv(
+          output,
+          num_shards=1,
+          file_naming=fileio.single_file_naming('out.csv'))
+    self.assertEqual(glob.glob(output + '*'), [output + 'out.csv'])
+
   @pytest.mark.uses_pyarrow
+  @unittest.skipIf(
+      PD_VERSION >= (1, 4) and PYARROW_VERSION < (1, 0),
+      "pandas 1.4 requires at least pyarrow 1.0.1")
   def test_read_write_parquet(self):
     self._run_read_write_test(
         'parquet', {}, {}, dict(check_index=False), ['pyarrow'])
@@ -229,6 +285,64 @@ class IOTest(unittest.TestCase):
     self.assertGreater(
         min(len(s) for s in splits), len(numbers) * 0.9**20 * 0.1)
 
+  def _run_truncating_file_handle_iter_test(self, s, delim=' ', chunk_size=10):
+    tracker = restriction_trackers.OffsetRestrictionTracker(
+        restriction_trackers.OffsetRange(0, len(s)))
+    handle = io._TruncatingFileHandle(
+        StringIO(s), tracker, splitter=io._DelimSplitter(delim, chunk_size))
+    self.assertEqual(s, ''.join(list(handle)))
+
+  def test_truncating_filehandle_iter(self):
+    self._run_truncating_file_handle_iter_test('a b c')
+    self._run_truncating_file_handle_iter_test('aaaaaaaaaaaaaaaaaaaa b ccc')
+    self._run_truncating_file_handle_iter_test('aaa b cccccccccccccccccccc')
+    self._run_truncating_file_handle_iter_test('aaa b ccccccccccccccccc ')
+
+  def test_truncating_filehandle_flush_on_closed_stream(self):
+    class ClosedFlushingStream(StringIO):
+      def flush(self):
+        if self.closed:
+          raise ValueError("I/O operation on closed file.")
+        super().flush()
+
+    s = 'a b c'
+    tracker = restriction_trackers.OffsetRestrictionTracker(
+        restriction_trackers.OffsetRange(0, len(s)))
+    underlying = ClosedFlushingStream(s)
+    handle = io._TruncatingFileHandle(
+        underlying, tracker, splitter=io._DelimSplitter(' ', 10))
+
+    # Verify that calling flush() when the underlying stream is closed
+    # succeeds without raising ValueError.
+    underlying.close()
+    handle.flush()
+    handle.close()
+
+  def test_truncating_filehandle_exception_suppression(self):
+    class FaultyStream(StringIO):
+      @property
+      def closed(self):
+        return False
+
+      def flush(self):
+        raise ValueError("Simulated flush error")
+
+      def close(self):
+        raise OSError("Simulated close error")
+
+    s = 'a b c'
+    tracker = restriction_trackers.OffsetRestrictionTracker(
+        restriction_trackers.OffsetRange(0, len(s)))
+    underlying = FaultyStream(s)
+    handle = io._TruncatingFileHandle(
+        underlying, tracker, splitter=io._DelimSplitter(' ', 10))
+
+    # Verify that ValueError raised during flush() is safely suppressed.
+    handle.flush()
+
+    # Verify that OSError raised during close() is safely suppressed.
+    handle.close()
+
   @parameterized.expand([
       ('defaults', {}),
       ('header', dict(header=1)),
@@ -259,7 +373,7 @@ class IOTest(unittest.TestCase):
               BytesIO(contents.encode('ascii')),
               restriction_trackers.OffsetRestrictionTracker(
                   restriction_trackers.OffsetRange(start, stop)),
-              splitter=io._CsvSplitter((), kwargs, read_chunk_size=7)),
+              splitter=io._TextFileSplitter((), kwargs, read_chunk_size=7)),
           index_col=0,
           **kwargs)
 
@@ -319,6 +433,11 @@ X     , c1, c2
 
   def test_windowed_write(self):
     output = self.temp_dir()
+
+    def no_colon_file_naming(*args):
+      file_name = fileio.default_file_naming('out.csv')(*args)
+      return file_name.replace(':', '_')
+
     with beam.Pipeline() as p:
       pc = (
           p | beam.Create([MyRow(timestamp=i, value=i % 3) for i in range(20)])
@@ -328,18 +447,18 @@ X     , c1, c2
               beam.window.FixedWindows(10)).with_output_types(MyRow))
 
       deferred_df = convert.to_dataframe(pc)
-      deferred_df.to_csv(output + 'out.csv', index=False)
+      deferred_df.to_csv(output, file_naming=no_colon_file_naming, index=False)
 
     first_window_files = (
         f'{output}out.csv-'
-        f'{datetime.utcfromtimestamp(0).isoformat()}*')
+        f'{datetime.utcfromtimestamp(0).isoformat().replace(":", "_")}*')
     self.assertCountEqual(
-        ['timestamp,value'] + [f'{i},{i%3}' for i in range(10)],
+        ['timestamp,value'] + [f'{i},{i % 3}' for i in range(10)],
         set(self.read_all_lines(first_window_files, delete=True)))
 
     second_window_files = (
         f'{output}out.csv-'
-        f'{datetime.utcfromtimestamp(10).isoformat()}*')
+        f'{datetime.utcfromtimestamp(10).isoformat().replace(":", "_")}*')
     self.assertCountEqual(
         ['timestamp,value'] + [f'{i},{i%3}' for i in range(10, 20)],
         set(self.read_all_lines(second_window_files, delete=True)))
@@ -371,6 +490,48 @@ X     , c1, c2
                           set(self.read_all_lines(output + 'out1.csv*')))
     self.assertCountEqual(['value', '3', '4'],
                           set(self.read_all_lines(output + 'out2.csv*')))
+
+
+@unittest.skipIf(HttpError is None, 'GCP dependencies are not installed')
+class ReadGbqTransformTests(unittest.TestCase):
+  @mock.patch.object(BigQueryWrapper, 'get_table')
+  def test_bad_schema_public_api_direct_read(self, get_table):
+    fields = [
+        bigquery.TableFieldSchema(name='stn', type='DOUBLE', mode="NULLABLE"),
+        bigquery.TableFieldSchema(name='temp', type='FLOAT64', mode="REPEATED"),
+        bigquery.TableFieldSchema(name='count', type='INTEGER', mode=None)
+    ]
+    schema = bigquery.TableSchema(fields=fields)
+    table = apache_beam.io.gcp.internal.clients.bigquery. \
+        bigquery_v2_messages.Table(
+        schema=schema)
+    get_table.return_value = table
+
+    with self.assertRaisesRegex(ValueError,
+                                "Encountered an unsupported type: 'DOUBLE'"):
+      p = apache_beam.Pipeline()
+      _ = p | apache_beam.dataframe.io.read_gbq(
+          table="dataset.sample_table", use_bqstorage_api=True)
+
+  def test_unsupported_callable(self):
+    def filterTable(table):
+      if table is not None:
+        return table
+
+    res = filterTable
+    with self.assertRaisesRegex(TypeError,
+                                'ReadFromBigQuery: table must be of type string'
+                                '; got a callable instead'):
+      p = beam.Pipeline()
+      _ = p | beam.dataframe.io.read_gbq(table=res)
+
+  def test_ReadGbq_unsupported_param(self):
+    with self.assertRaisesRegex(ValueError,
+                                r"""Encountered unsupported parameter\(s\) """
+                                r"""in read_gbq: dict_keys\(\['reauth']\)"""):
+      p = beam.Pipeline()
+      _ = p | beam.dataframe.io.read_gbq(
+          table="table", use_bqstorage_api=False, reauth="true_config")
 
 
 if __name__ == '__main__':

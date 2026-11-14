@@ -27,6 +27,15 @@ boolean IfExistsOpt() :
     { return false; }
 }
 
+boolean CascadeOpt() :
+{
+}
+{
+    <CASCADE> { return true; }
+|
+    { return false; }
+}
+
 SqlNodeList Options() :
 {
     final Span s;
@@ -65,7 +74,7 @@ List<Schema.Field> FieldListParens() :
 }
 {
     <LPAREN>
-        fields = FieldListBody()
+        fields = FieldListBody(null)
     <RPAREN>
     {
         return fields;
@@ -78,35 +87,40 @@ List<Schema.Field> FieldListAngular() :
 }
 {
     <LT>
-        fields = FieldListBody()
+        fields = FieldListBody(null)
     <GT>
     {
         return fields;
     }
 }
 
-List<Schema.Field> FieldListBody() :
+List<Schema.Field> FieldListBody(SqlNodeList primaryKey) :
 {
     final List<Schema.Field> fields = new ArrayList<Schema.Field>();
     Schema.Field field = null;
 }
 {
-    field = Field() { fields.add(field); }
+    field = Field(primaryKey) { fields.add(field); }
     (
-        <COMMA> field = Field() { fields.add(field); }
+        <COMMA> field = Field(primaryKey) { fields.add(field); }
     )*
     {
         return fields;
     }
 }
 
-Schema.Field Field() :
+/**
+ * A column definition. Columns declared PRIMARY KEY are added to primaryKey, which is null where
+ * keys aren't allowed: only CREATE EXTERNAL TABLE's own columns can be keys.
+ */
+Schema.Field Field(SqlNodeList primaryKey) :
 {
     final String name;
     final Schema.FieldType type;
     final boolean nullable;
     Schema.Field field = null;
     SqlNode comment = null;
+    final Span s;
 }
 {
     name = Identifier()
@@ -122,6 +136,11 @@ Schema.Field Field() :
         { field = field.withNullable(true); }
     )
     [
+        LOOKAHEAD(1, { primaryKey != null })
+        <PRIMARY> { s = span(); } <KEY> NotEnforced(s)
+        { primaryKey.add(new SqlIdentifier(name, s.pos())); }
+    ]
+    [
         <COMMENT> comment = StringLiteral()
         {
             if (comment != null) {
@@ -136,22 +155,439 @@ Schema.Field Field() :
     }
 }
 
+/** The NOT ENFORCED that must follow a PRIMARY KEY. */
+void NotEnforced(Span s) :
+{
+}
+{
+    <NOT> <ENFORCED>
+|
+    { throw SqlDdlNodes.enforcedPrimaryKey(s.end(this)); }
+}
+
+SqlNodeList PropertyList() :
+{
+    SqlNodeList list = new SqlNodeList(getPos());
+    SqlNode property;
+}
+{
+    property = Property() { list.add(property); }
+    (
+        <COMMA> property = Property() { list.add(property); }
+    )*
+    {
+        return list;
+    }
+}
+
+
+SqlNode Property() :
+{
+    SqlNode key;
+    SqlNode value;
+}
+{
+    key = StringLiteral()
+    <EQ>
+    value = StringLiteral()
+    {
+        SqlNodeList pair = new SqlNodeList(getPos());
+        pair.add(key);
+        pair.add(value);
+        return pair;
+    }
+}
+
+SqlNodeList ArgList() :
+{
+    SqlNodeList list = new SqlNodeList(getPos());
+    SqlNode property;
+}
+{
+    property = StringLiteral() { list.add(property); }
+    (
+        <COMMA> property = StringLiteral() { list.add(property); }
+    )*
+    {
+        return list;
+    }
+}
+
+/**
+ * CREATE CATALOG ( IF NOT EXISTS )? catalog_name
+ *   TYPE type_name
+ *   ( PROPERTIES '(' key = value ( ',' key = value )* ')' )?
+ */
+SqlCreate SqlCreateCatalog(Span s, boolean replace) :
+{
+    final boolean ifNotExists;
+    final SqlNode catalogName;
+    final SqlNode type;
+    SqlNodeList properties = null;
+}
+{
+
+    <CATALOG> {
+        s.add(this);
+    }
+
+    ifNotExists = IfNotExistsOpt()
+    (
+        catalogName = StringLiteral()
+        |
+        catalogName = SimpleIdentifier()
+    )
+    <TYPE>
+    (
+        type = StringLiteral()
+        |
+        type = SimpleIdentifier()
+    )
+    [ <PROPERTIES> <LPAREN> properties = PropertyList() <RPAREN> ]
+
+    {
+        return new SqlCreateCatalog(
+            s.end(this),
+            replace,
+            ifNotExists,
+            catalogName,
+            type,
+            properties);
+    }
+}
+
+/**
+ * USE CATALOG catalog_name
+ */
+SqlCall SqlUseCatalog(Span s, String scope) :
+{
+    final SqlNode catalogName;
+}
+{
+    <USE> {
+        s.add(this);
+    }
+    <CATALOG>
+    (
+        catalogName = StringLiteral()
+        |
+        catalogName = SimpleIdentifier()
+    )
+    {
+        return new SqlUseCatalog(
+            s.end(this),
+            scope,
+            catalogName);
+    }
+}
+
+
+/**
+ * ALTER CATALOG catalog_name
+ *   [ SET (key1=val1, key2=val2, ...) ]
+ *   [ (RESET | UNSET) (key1, key2, ...) ]
+ */
+SqlCall SqlAlterCatalog(Span s, String scope) :
+{
+    final SqlNode catalogName;
+    SqlNodeList setProps = null;
+    SqlNodeList resetProps = null;
+}
+{
+    <ALTER> {
+        s.add(this);
+    }
+    <CATALOG>
+    (
+        catalogName = CompoundIdentifier()
+        |
+        catalogName = StringLiteral()
+    )
+    [ <SET> <LPAREN> setProps = PropertyList() <RPAREN> ]
+    [ (<RESET> | <UNSET>) <LPAREN> resetProps = ArgList() <RPAREN> ]
+
+    {
+        return new SqlAlterCatalog(
+            s.end(this),
+            scope,
+            catalogName,
+            setProps,
+            resetProps);
+    }
+}
+
+
+SqlDrop SqlDropCatalog(Span s, boolean replace) :
+{
+    final boolean ifExists;
+    final SqlNode catalogName;
+}
+{
+    <CATALOG> ifExists = IfExistsOpt()
+    (
+        catalogName = StringLiteral()
+        |
+        catalogName = SimpleIdentifier()
+    )
+    {
+        return new SqlDropCatalog(s.end(this), ifExists, catalogName);
+    }
+}
+
+/**
+ * SHOW CATALOGS [ LIKE regex_pattern ]
+ */
+SqlCall SqlShowCatalogs(Span s) :
+{
+    SqlNode regex = null;
+}
+{
+    <SHOW> <CATALOGS> { s.add(this); }
+    [ <LIKE> regex = StringLiteral() ]
+    {
+        List<String> path = new ArrayList<String>();
+        path.add("beamsystem");
+        path.add("catalogs");
+        SqlNodeList selectList = SqlNodeList.of(SqlIdentifier.star(s.end(this)));
+        SqlIdentifier from = new SqlIdentifier(path, s.end(this));
+        SqlNode where = null;
+        if (regex != null) {
+            SqlIdentifier nameIdentifier = new SqlIdentifier("NAME", s.end(this));
+            where = SqlStdOperatorTable.LIKE.createCall(
+                s.end(this),
+                nameIdentifier, regex);
+        }
+
+        return new SqlSelect(
+            s.end(this),
+            null,
+            selectList,
+            from,
+            where,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+    }
+}
+
+
+/**
+ * CREATE DATABASE ( IF NOT EXISTS )? ( catalog_name '.' )? database_name
+ */
+SqlCreate SqlCreateDatabase(Span s, boolean replace) :
+{
+    final boolean ifNotExists;
+    final SqlIdentifier databaseName;
+}
+{
+    <DATABASE> {
+        s.add(this);
+    }
+
+    ifNotExists = IfNotExistsOpt()
+    databaseName = CompoundIdentifier()
+
+    {
+        return new SqlCreateDatabase(
+            s.end(this),
+            replace,
+            ifNotExists,
+            databaseName);
+    }
+}
+
+/**
+ * USE [ DATABASE ] ( catalog_name '.' )? database_name
+ */
+SqlCall SqlUseDatabase(Span s, String scope) :
+{
+    final SqlIdentifier databaseName;
+}
+{
+    <USE> {
+        s.add(this);
+    }
+    [ <DATABASE> ]
+    databaseName = CompoundIdentifier()
+    {
+        return new SqlUseDatabase(
+            s.end(this),
+            scope,
+            databaseName);
+    }
+}
+
+/**
+ * DROP DATABASE [ IF EXISTS ] database_name [ RESTRICT | CASCADE ]
+ */
+SqlDrop SqlDropDatabase(Span s, boolean replace) :
+{
+    final boolean ifExists;
+    final SqlIdentifier databaseName;
+    final boolean cascade;
+}
+{
+    <DATABASE>
+    ifExists = IfExistsOpt()
+    databaseName = CompoundIdentifier()
+
+    cascade = CascadeOpt()
+
+    {
+        return new SqlDropDatabase(s.end(this), ifExists, databaseName, cascade);
+    }
+}
+
+/**
+ * SHOW DATABASES [ ( FROM | IN )? catalog_name ] [LIKE regex_pattern ]
+ */
+SqlCall SqlShowDatabases(Span s) :
+{
+    SqlIdentifier catalogName = null;
+    SqlNode regex = null;
+}
+{
+    <SHOW> <DATABASES> { s.add(this); }
+    [ ( <FROM> | <IN> ) catalogName = SimpleIdentifier() ]
+    [ <LIKE> regex = StringLiteral() ]
+    {
+        List<String> path = new ArrayList<String>();
+        path.add("beamsystem");
+        path.add("databases");
+        SqlNodeList selectList = SqlNodeList.of(SqlIdentifier.star(s.end(this)));
+        SqlNode where = null;
+        if (regex != null) {
+            SqlIdentifier nameIdentifier = new SqlIdentifier("NAME", s.end(this));
+            where = SqlStdOperatorTable.LIKE.createCall(
+                s.end(this),
+                nameIdentifier, regex);
+        }
+        if (catalogName != null) {
+            path.add(catalogName.getSimple());
+        } else {
+            path.add("__current_catalog__");
+        }
+        SqlIdentifier from = new SqlIdentifier(path, s.end(this));
+
+        return new SqlSelect(
+            s.end(this),
+            null,
+            selectList,
+            from,
+            where,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+    }
+}
+
+/**
+ * SHOW CURRENT ( CATALOG | DATABASE )
+ */
+SqlCall SqlShowCurrent(Span s) :
+{
+}
+{
+    <SHOW> <CURRENT> { s.add(this); }
+    {
+        List<String> path = new ArrayList<String>();
+        path.add("beamsystem");
+    }
+    (
+        <CATALOG> {
+            path.add("__current_catalog__");
+        }
+    |
+        <DATABASE> {
+            path.add("__current_database__");
+        }
+    )
+    {
+        if (path.size() != 2) {
+            throw new ParseException(
+                "Expected SHOW CURRENT CATALOG or SHOW CURRENT DATABASE");
+        }
+        SqlNodeList selectList = SqlNodeList.of(SqlIdentifier.star(s.end(this)));
+        SqlIdentifier from = new SqlIdentifier(path, s.end(this));
+
+        return new SqlSelect(
+            s.end(this),
+            null,
+            selectList,
+            from,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+    }
+}
+
+SqlNodeList PartitionFieldsParens() :
+{
+    final SqlNodeList partitions;
+}
+{
+    <LPAREN>
+    partitions = PartitionFieldList()
+    <RPAREN>
+    {
+        return partitions;
+    }
+}
+
+SqlNodeList PartitionFieldList() :
+{
+    final List<SqlNode> list = new ArrayList<SqlNode>();
+    SqlNode field;
+}
+{
+    field = StringLiteral() { list.add(field); }
+    (
+        <COMMA> field = StringLiteral() { list.add(field); }
+    )*
+    {
+        return new SqlNodeList(list, getPos());
+    }
+}
+
 /**
  * Note: This example is probably out of sync with the code.
  *
- * CREATE TABLE ( IF NOT EXISTS )?
- *   ( database_name '.' )? table_name '(' column_def ( ',' column_def )* ')'
+ * CREATE EXTERNAL TABLE ( IF NOT EXISTS )?
+ *   ( catalog_name '.' )? ( database_name '.' )? table_name
+ *   '(' column_def ( ',' column_def )*
+ *     ( ',' PRIMARY KEY '(' column_name ( ',' column_name )* ')' NOT ENFORCED )? ')'
  *   TYPE type_name
+ *   ( PARTITIONED BY '(' partition_field ( ',' partition_field )* ')' )?
  *   ( COMMENT comment_string )?
  *   ( LOCATION location_string )?
  *   ( TBLPROPERTIES tbl_properties )?
+ *
+ * column_def:
+ *   column_name type ( NULL | NOT NULL )? ( PRIMARY KEY NOT ENFORCED )? ( COMMENT comment_string )?
  */
 SqlCreate SqlCreateExternalTable(Span s, boolean replace) :
 {
     final boolean ifNotExists;
     final SqlIdentifier id;
     List<Schema.Field> fieldList = null;
+    final SqlNodeList columnKey = new SqlNodeList(SqlParserPos.ZERO);
+    SqlNodeList primaryKey = null;
+    final Span primaryKeySpan;
     final SqlNode type;
+    SqlNodeList partitionFields = null;
     SqlNode comment = null;
     SqlNode location = null;
     SqlNode tblProperties = null;
@@ -164,13 +600,30 @@ SqlCreate SqlCreateExternalTable(Span s, boolean replace) :
 
     ifNotExists = IfNotExistsOpt()
     id = CompoundIdentifier()
-    fieldList = FieldListParens()
+    <LPAREN>
+    fieldList = FieldListBody(columnKey)
+    [
+        <COMMA> <PRIMARY> { primaryKeySpan = span(); } <KEY>
+        primaryKey = ParenthesizedSimpleIdentifierList()
+        NotEnforced(primaryKeySpan)
+    ]
+    <RPAREN>
+    {
+        if (!columnKey.isEmpty()) {
+            if (columnKey.size() > 1 || primaryKey != null) {
+                throw new ParseException("A table can have only one PRIMARY KEY. Declare a key on "
+                    + "several columns as PRIMARY KEY (column, ...) NOT ENFORCED after the columns.");
+            }
+            primaryKey = columnKey;
+        }
+    }
     <TYPE>
     (
         type = StringLiteral()
     |
         type = SimpleIdentifier()
     )
+    [ <PARTITIONED> <BY> partitionFields = PartitionFieldsParens() ]
     [ <COMMENT> comment = StringLiteral() ]
     [ <LOCATION> location = StringLiteral() ]
     [ <TBLPROPERTIES> tblProperties = StringLiteral() ]
@@ -182,10 +635,81 @@ SqlCreate SqlCreateExternalTable(Span s, boolean replace) :
                 ifNotExists,
                 id,
                 fieldList,
+                primaryKey,
                 type,
+                partitionFields,
                 comment,
                 location,
                 tblProperties);
+    }
+}
+
+/**
+ * Loosely following Flink's grammar: https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/dev/table/sql/alter/#alter-table
+ * ALTER TABLE table_name
+ *   [ ADD COLUMNS <column_def, column_def, ...> ]
+ *   [ DROP COLUMNS <column_name, column_name> ]
+ *   [ ADD PARTITIONS <partition_field, partition_field, ...> ]
+ *   [ DROP PARTITIONS <partition_field, partition_field, ...> ]
+ *   [ ADD PRIMARY KEY (column_name, column_name, ...) NOT ENFORCED ]
+ *   [ DROP PRIMARY KEY ]
+ *   [ SET (key1=val1, key2=val2, ...) ]
+ *   [ (RESET | UNSET) (key1, key2, ...) ]
+ */
+SqlCall SqlAlterTable(Span s, String scope) :
+{
+    final SqlNode tableName;
+    SqlNodeList columnsToDrop = null;
+    List<Schema.Field> columnsToAdd = null;
+    SqlNodeList partitionsToDrop = null;
+    SqlNodeList partitionsToAdd = null;
+    SqlNodeList primaryKeyToAdd = null;
+    boolean dropPrimaryKey = false;
+    final Span primaryKeySpan;
+    SqlNodeList setProps = null;
+    SqlNodeList resetProps = null;
+}
+{
+    <ALTER> {
+        s.add(this);
+    }
+    <TABLE>
+    tableName = CompoundIdentifier()
+
+    [ <DROP> (
+      <COLUMNS> columnsToDrop = ParenthesizedSimpleIdentifierList()
+        |
+      <PARTITIONS> partitionsToDrop = ParenthesizedLiteralOptionCommaList()
+        |
+      <PRIMARY> <KEY> { dropPrimaryKey = true; }
+    ) ]
+
+    [ <ADD> (
+      <COLUMNS> columnsToAdd = FieldListParens()
+        |
+      <PARTITIONS> partitionsToAdd = ParenthesizedLiteralOptionCommaList()
+        |
+      <PRIMARY> { primaryKeySpan = span(); } <KEY>
+      primaryKeyToAdd = ParenthesizedSimpleIdentifierList()
+      NotEnforced(primaryKeySpan)
+    ) ]
+
+    [ (<RESET> | <UNSET>) <LPAREN> resetProps = ArgList() <RPAREN> ]
+    [ <SET> <LPAREN> setProps = PropertyList() <RPAREN> ]
+
+    {
+        return new SqlAlterTable(
+            s.end(this),
+            scope,
+            tableName,
+            columnsToAdd,
+            columnsToDrop,
+            partitionsToAdd,
+            partitionsToDrop,
+            setProps,
+            resetProps,
+            primaryKeyToAdd,
+            dropPrimaryKey);
     }
 }
 
@@ -240,6 +764,64 @@ SqlDrop SqlDropTable(Span s, boolean replace) :
         return SqlDdlNodes.dropTable(s.end(this), ifExists, id);
     }
 }
+
+/**
+ * SHOW TABLES [ ( FROM | IN )? [ catalog_name '.' ] database_name ] [ LIKE regex_pattern ]
+ */
+SqlCall SqlShowTables(Span s) :
+{
+    SqlIdentifier databaseCatalog = null;
+    SqlNode regex = null;
+}
+{
+    <SHOW> <TABLES> { s.add(this); }
+    [ (<FROM> | <IN>) databaseCatalog = CompoundIdentifier() ]
+    [ <LIKE> regex = StringLiteral() ]
+    {
+        List<String> path = new ArrayList<String>();
+        path.add("beamsystem");
+        path.add("tables");
+        SqlNodeList selectList = SqlNodeList.of(SqlIdentifier.star(s.end(this)));
+        SqlNode where = null;
+        if (regex != null) {
+            SqlIdentifier nameIdentifier = new SqlIdentifier("NAME", s.end(this));
+            where = SqlStdOperatorTable.LIKE.createCall(
+                s.end(this),
+                nameIdentifier, regex);
+        }
+        if (databaseCatalog != null) {
+            List<String> components = databaseCatalog.names;
+            if (components.size() == 1) {
+                path.add("__current_catalog__");
+                path.add(components.get(0));
+            } else if (components.size() == 2) {
+                path.addAll(components);
+            } else {
+                throw new ParseException(
+                    "SHOW TABLES FROM/IN accepts at most a catalog name and a database name.");
+            }
+        } else {
+            path.add("__current_catalog__");
+            path.add("__current_database__");
+        }
+        SqlIdentifier from = new SqlIdentifier(path, s.end(this));
+
+        return new SqlSelect(
+            s.end(this),
+            null,
+            selectList,
+            from,
+            where,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+    }
+}
+
 
 Schema.FieldType FieldType() :
 {
@@ -373,6 +955,87 @@ SqlSetOptionBeam SqlSetOptionBeam(Span s, String scope) :
             return new SqlSetOptionBeam(s.end(name), scope, name, null);
         }
     )
+}
+
+/**
+ * Parses the WITH clause of a table in FROM or of an INSERT target and folds it into the table's
+ * name; see TableClause. (see also build.gradle)
+ */
+SqlNode TableClauseOpt(SqlNode tableRef, TableClause.Role role) :
+{
+    final Map<String, Object> withOptions = new LinkedHashMap<String, Object>();
+}
+{
+    [ AddTableOptions(withOptions) ]
+    {
+        return TableClause.fold(tableRef, role, withOptions);
+    }
+}
+
+/**
+ * Parses the WITH clause of a table function call in FROM. Folds a CHANGES(...) call and its WITH
+ * clause into the name of the table it reads; see TableClause. (see also build.gradle)
+ */
+SqlNode ChangesCallOpt(SqlNode tableRef) :
+{
+    final Map<String, Object> withOptions = new LinkedHashMap<String, Object>();
+}
+{
+    [ AddTableOptions(withOptions) ]
+    {
+        return TableClause.foldChanges(tableRef, withOptions);
+    }
+}
+
+/** Parses a name component written by TableClause.encode(). */
+TableClause TableClauseEof() :
+{
+    TableClause.Role role = TableClause.Role.READ;
+    final String name;
+    final SqlIdentifier function;
+    final SqlNode tableRef;
+    final Map<String, Object> withOptions = new LinkedHashMap<String, Object>();
+}
+{
+    (
+        [ <INTO> { role = TableClause.Role.WRITE; } ]
+        name = Identifier() AddTableOptions(withOptions) <EOF> {
+            return TableClause.create(name, role, withOptions);
+        }
+    |
+        function = CompoundTableIdentifier()
+        tableRef = ImplicitTableFunctionCallArgs(function)
+        [ AddTableOptions(withOptions) ] <EOF> {
+            return TableClause.readChanges(tableRef, withOptions);
+        }
+    )
+}
+
+/**
+ * WITH '(' 'key' = value ( ',' 'key' = value )* ')'
+ */
+void AddTableOptions(Map<String, Object> withOptions) :
+{
+}
+{
+    <WITH> <LPAREN>
+    AddTableOption(withOptions)
+    ( <COMMA> AddTableOption(withOptions) )*
+    <RPAREN>
+}
+
+void AddTableOption(Map<String, Object> withOptions) :
+{
+    final String key;
+    final SqlParserPos keyPos;
+    final SqlNode value;
+}
+{
+    key = SimpleStringLiteral() { keyPos = getPos(); }
+    <EQ>
+    value = Expression(ExprContext.ACCEPT_NON_QUERY) {
+        TableClause.addOption(withOptions, key, keyPos, value);
+    }
 }
 
 // End parserImpls.ftl

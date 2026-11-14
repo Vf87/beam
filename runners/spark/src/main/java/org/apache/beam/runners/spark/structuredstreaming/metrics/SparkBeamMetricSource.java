@@ -24,16 +24,14 @@ import org.apache.spark.metrics.source.Source;
  * A Spark {@link Source} that is tailored to expose a {@link SparkBeamMetric}, wrapping an
  * underlying {@link org.apache.beam.sdk.metrics.MetricResults} instance.
  */
-public class SparkBeamMetricSource implements Source {
-  private static final String METRIC_NAME = "Metrics";
-
+public final class SparkBeamMetricSource implements Source {
   private final String name;
 
   private final MetricRegistry metricRegistry = new MetricRegistry();
 
-  public SparkBeamMetricSource(final String name) {
+  public SparkBeamMetricSource(String name, MetricsAccumulator metrics) {
     this.name = name;
-    metricRegistry.register(METRIC_NAME, new SparkBeamMetric());
+    metricRegistry.register(name, new SparkBeamMetric(metrics));
   }
 
   @Override

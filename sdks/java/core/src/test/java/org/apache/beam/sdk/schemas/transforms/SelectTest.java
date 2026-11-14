@@ -36,8 +36,8 @@ import org.apache.beam.sdk.testing.UsesSchema;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -58,14 +58,15 @@ public class SelectTest {
   abstract static class Schema1 {
     abstract String getField1();
 
-    abstract Integer getField2();
+    abstract int getField2();
 
-    abstract Double getField3();
+    abstract double getField3();
 
     static Schema1 create() {
       return new AutoValue_SelectTest_Schema1("field1", 42, 3.14);
     }
-  };
+  }
+  ;
 
   /** A class matching the schema resulting from selection field1, field3. */
   @DefaultSchema(AutoValueSchema.class)
@@ -73,7 +74,7 @@ public class SelectTest {
   abstract static class Schema1Selected {
     abstract String getField1();
 
-    abstract Double getField3();
+    abstract double getField3();
 
     static Schema1Selected create() {
       return new AutoValue_SelectTest_Schema1Selected("field1", 3.14);
@@ -88,7 +89,7 @@ public class SelectTest {
   abstract static class Schema1SelectedRenamed {
     abstract String getFieldOne();
 
-    abstract Double getFieldThree();
+    abstract double getFieldThree();
 
     static Schema1SelectedRenamed create() {
       return new AutoValue_SelectTest_Schema1SelectedRenamed("field1", 3.14);
@@ -367,11 +368,7 @@ public class SelectTest {
   @DefaultSchema(AutoValueSchema.class)
   @AutoValue
   abstract static class PartialRowMultipleArray {
-    private static final List<Schema1Selected> ROW_LIST =
-        ImmutableList.of(
-            Schema1Selected.create(), Schema1Selected.create(), Schema1Selected.create());
-    private static final List<List<Schema1Selected>> ROW_LIST_LIST =
-        ImmutableList.of(ROW_LIST, ROW_LIST, ROW_LIST);
+
     private static final List<String> STRING_LIST = ImmutableList.of("field1", "field1", "field1");
     private static final List<List<String>> STRING_LISTLIST =
         ImmutableList.of(STRING_LIST, STRING_LIST, STRING_LIST);
@@ -675,10 +672,9 @@ public class SelectTest {
         bottomRow.stream()
             .map(r -> Row.withSchema(NESTED_SCHEMA).addValues(r, r).build())
             .collect(Collectors.toList());
-    PCollection<Row> unnested =
-        pipeline
-            .apply(Create.of(rows).withRowSchema(NESTED_SCHEMA))
-            .apply(Select.<Row>flattenedSchema().keepMostNestedFieldName());
+    pipeline
+        .apply(Create.of(rows).withRowSchema(NESTED_SCHEMA))
+        .apply(Select.<Row>flattenedSchema().keepMostNestedFieldName());
     pipeline.run();
   }
 

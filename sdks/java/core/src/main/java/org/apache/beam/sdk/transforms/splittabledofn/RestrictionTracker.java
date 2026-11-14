@@ -33,7 +33,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * known amount of completed and remaining work.
  */
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 public abstract class RestrictionTracker<RestrictionT, PositionT> {
   /**
@@ -176,6 +176,9 @@ public abstract class RestrictionTracker<RestrictionT, PositionT> {
   @AutoValue
   public abstract static class Progress {
 
+    /** Constant Progress instance to be used when no work has been completed yet. */
+    public static final Progress NONE = from(0, 1);
+
     /**
      * A representation for the amount of known completed and remaining work. See {@link
      * HasProgress#getProgress()} for details.
@@ -208,6 +211,6 @@ public abstract class RestrictionTracker<RestrictionT, PositionT> {
       return new AutoValue_RestrictionTracker_TruncateResult(restriction);
     }
 
-    public abstract @Nullable RestrictionT getTruncatedRestriction();
+    public abstract RestrictionT getTruncatedRestriction();
   }
 }

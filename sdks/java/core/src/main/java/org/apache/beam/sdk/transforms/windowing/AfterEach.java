@@ -17,13 +17,11 @@
  */
 package org.apache.beam.sdk.transforms.windowing;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.util.Arrays;
 import java.util.List;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Joiner;
 import org.joda.time.Instant;
 
 /**
@@ -42,7 +40,6 @@ import org.joda.time.Instant;
  *       Repeatedly.forever(a)}, since the repeated trigger never finishes.
  * </ul>
  */
-@Experimental(Kind.TRIGGER)
 public class AfterEach extends Trigger {
 
   private AfterEach(List<Trigger> subTriggers) {
@@ -70,12 +67,17 @@ public class AfterEach extends Trigger {
 
   @Override
   public boolean mayFinish() {
-    return subTriggers.stream().allMatch(trigger -> trigger.mayFinish());
+    return subTriggers.stream().allMatch(Trigger::mayFinish);
   }
 
   @Override
   protected Trigger getContinuationTrigger(List<Trigger> continuationTriggers) {
     return Repeatedly.forever(new AfterFirst(continuationTriggers));
+  }
+
+  @Override
+  public <OutputT> OutputT accept(TriggerVisitor<OutputT> visitor) {
+    return visitor.visit(this);
   }
 
   @Override

@@ -19,14 +19,20 @@
 # pytype: skip-file
 
 import itertools
+import json
+import os
 import random
+import tempfile
+import time
 import unittest
+from pathlib import Path
 
 import hamcrest as hc
 import pytest
 
 import apache_beam as beam
 import apache_beam.transforms.combiners as combine
+from apache_beam import pvalue
 from apache_beam.metrics import Metrics
 from apache_beam.metrics import MetricsFilter
 from apache_beam.options.pipeline_options import PipelineOptions
@@ -44,6 +50,7 @@ from apache_beam.transforms.core import Create
 from apache_beam.transforms.core import Map
 from apache_beam.transforms.display import DisplayData
 from apache_beam.transforms.display_test import DisplayDataItemMatcher
+from apache_beam.transforms.periodicsequence import PeriodicImpulse
 from apache_beam.transforms.ptransform import PTransform
 from apache_beam.transforms.trigger import AfterAll
 from apache_beam.transforms.trigger import AfterCount
@@ -191,6 +198,20 @@ class CombineTest(unittest.TestCase):
                      | combine.Top.Of(3, key=len, reverse=True),
                      [['c', 'aa', 'bbb']])
 
+    self.assertEqual(['xc', 'zb', 'yd', 'wa']
+                     | combine.Top.Largest(3, key=lambda x: x[-1]),
+                     [['yd', 'xc', 'zb']])
+    self.assertEqual(['xc', 'zb', 'yd', 'wa']
+                     | combine.Top.Smallest(3, key=lambda x: x[-1]),
+                     [['wa', 'zb', 'xc']])
+
+    self.assertEqual([('a', x) for x in [1, 2, 3, 4, 1, 1]]
+                     | combine.Top.LargestPerKey(3, key=lambda x: -x),
+                     [('a', [1, 1, 1])])
+    self.assertEqual([('a', x) for x in [1, 2, 3, 4, 1, 1]]
+                     | combine.Top.SmallestPerKey(3, key=lambda x: -x),
+                     [('a', [4, 3, 2])])
+
   def test_sharded_top_combine_fn(self):
     def test_combine_fn(combine_fn, shards, expected):
       accumulators = [
@@ -232,6 +253,7 @@ class CombineTest(unittest.TestCase):
 
     individual_test_per_key_dd(combine.Sample.FixedSizePerKey, 5)
     individual_test_per_key_dd(combine.Sample.FixedSizeGlobally, 5)
+    individual_test_per_key_dd(combine.Sample.Any, 5)
 
   def test_combine_globally_display_data(self):
     transform = beam.CombineGlobally(combine.Smallest(5))
@@ -337,6 +359,59 @@ class CombineTest(unittest.TestCase):
         return match
 
       assert_that(result, matcher())
+
+  def test_sample_any(self):
+    with TestPipeline() as pipeline:
+      pcoll = pipeline | 'start' >> Create([1, 2, 3, 4, 5])
+      result = pcoll | 'sample-any' >> combine.Sample.Any(3)
+
+      def check(actual):
+        assert len(actual) == 3, actual
+        for element in actual:
+          assert element in [1, 2, 3, 4, 5], element
+
+      assert_that(result, check)
+
+  def test_sample_any_at_most_input_size(self):
+    with TestPipeline() as pipeline:
+      pcoll = pipeline | 'start' >> Create([1, 2])
+      result = pcoll | 'sample-any' >> combine.Sample.Any(5)
+      assert_that(result, equal_to([1, 2]))
+
+  def test_sample_any_windowed(self):
+    with TestPipeline() as pipeline:
+      pcoll = (
+          pipeline
+          | 'start' >> Create([1, 2, 3, 4])
+          | 'timestamp' >> Map(lambda x: TimestampedValue(x, x * 10))
+          | 'window' >> WindowInto(FixedWindows(15)))
+      result = pcoll | 'sample-any' >> combine.Sample.Any(1)
+
+      def check(actual):
+        # Timestamps 10, 20, 30, 40 fall into fixed windows [0, 15), [15, 30)
+        # and [30, 45), holding {1}, {2} and {3, 4}. One element is sampled from
+        # each window that has elements.
+        assert len(actual) == 3, actual
+        for element in actual:
+          assert element in [1, 2, 3, 4], element
+
+      assert_that(result, check)
+
+  def test_sample_any_empty(self):
+    with TestPipeline() as pipeline:
+      pcoll = pipeline | 'start' >> Create([])
+      result = pcoll | 'sample-any' >> combine.Sample.Any(3)
+      assert_that(result, equal_to([]))
+
+  def test_sample_any_zero(self):
+    with TestPipeline() as pipeline:
+      pcoll = pipeline | 'start' >> Create([1, 2, 3])
+      result = pcoll | 'sample-any' >> combine.Sample.Any(0)
+      assert_that(result, equal_to([]))
+
+  def test_sample_any_negative_n(self):
+    with self.assertRaises(ValueError):
+      combine.Sample.Any(-1)
 
   def test_tuple_combine_fn(self):
     with TestPipeline() as p:
@@ -561,6 +636,64 @@ class CombineTest(unittest.TestCase):
         # be at least one 15.
         hamcrest_assert(ordered[4:], only_contains(15))
 
+      assert_that(result, has_expected_values)
+
+  def test_combining_with_sliding_windows_and_fanout(self):
+    options = PipelineOptions()
+    options.view_as(StandardOptions).streaming = True
+    with TestPipeline(options=options) as p:
+
+      def has_expected_values(actual):
+        from hamcrest.core import assert_that as hamcrest_assert
+        from hamcrest.library.collection import only_contains
+        ordered = sorted(actual)
+        hamcrest_assert(
+            ordered,
+            only_contains([0, 1, 2, 3], [0, 1, 2, 3, 5, 6, 7, 8], [5, 6, 7, 8]))
+
+      result = (
+          p
+          | beam.Create([
+              window.TimestampedValue(0, Timestamp(seconds=1666707510)),
+              window.TimestampedValue(1, Timestamp(seconds=1666707511)),
+              window.TimestampedValue(2, Timestamp(seconds=1666707512)),
+              window.TimestampedValue(3, Timestamp(seconds=1666707513)),
+              window.TimestampedValue(5, Timestamp(seconds=1666707515)),
+              window.TimestampedValue(6, Timestamp(seconds=1666707516)),
+              window.TimestampedValue(7, Timestamp(seconds=1666707517)),
+              window.TimestampedValue(8, Timestamp(seconds=1666707518))
+          ])
+          | beam.WindowInto(window.SlidingWindows(10, 5))
+          | beam.CombineGlobally(beam.combiners.ToListCombineFn()).
+          without_defaults().with_fanout(7))
+      assert_that(result, has_expected_values)
+
+  def test_combining_with_session_windows_and_fanout(self):
+    options = PipelineOptions()
+    options.view_as(StandardOptions).streaming = True
+    with TestPipeline(options=options) as p:
+
+      def has_expected_values(actual):
+        from hamcrest.core import assert_that as hamcrest_assert
+        from hamcrest.library.collection import only_contains
+        ordered = sorted(actual)
+        hamcrest_assert(ordered, only_contains([0, 1, 2, 3], [5, 6, 7, 8]))
+
+      result = (
+          p
+          | beam.Create([
+              window.TimestampedValue(0, Timestamp(seconds=1666707510)),
+              window.TimestampedValue(1, Timestamp(seconds=1666707511)),
+              window.TimestampedValue(2, Timestamp(seconds=1666707512)),
+              window.TimestampedValue(3, Timestamp(seconds=1666707513)),
+              window.TimestampedValue(5, Timestamp(seconds=1666707515)),
+              window.TimestampedValue(6, Timestamp(seconds=1666707516)),
+              window.TimestampedValue(7, Timestamp(seconds=1666707517)),
+              window.TimestampedValue(8, Timestamp(seconds=1666707518))
+          ])
+          | beam.WindowInto(window.Sessions(2))
+          | beam.CombineGlobally(beam.combiners.ToListCombineFn()).
+          without_defaults().with_fanout(7))
       assert_that(result, has_expected_values)
 
   def test_MeanCombineFn_combine(self):
@@ -852,6 +985,24 @@ class LatestCombineFnTest(unittest.TestCase):
         _ = pc | beam.CombineGlobally(self.fn)
 
 
+@pytest.mark.it_validatesrunner
+class CombineValuesTest(unittest.TestCase):
+  def test_gbk_immediately_followed_by_combine(self):
+    def merge(vals):
+      return "".join(vals)
+
+    with TestPipeline() as p:
+      result = (
+          p \
+          | Create([("key1", "foo"), ("key2", "bar"), ("key1", "foo")],
+                    reshuffle=False) \
+          | beam.GroupByKey() \
+          | beam.CombineValues(merge) \
+          | beam.MapTuple(lambda k, v: '{}: {}'.format(k, v)))
+
+      assert_that(result, equal_to(['key1: foofoo', 'key2: bar']))
+
+
 #
 # Test cases for streaming.
 #
@@ -922,6 +1073,229 @@ class TimestampCombinerTest(unittest.TestCase):
           equal_to_per_window(expected_window_to_elements),
           use_global_window=False,
           label='assert per window')
+
+
+class CombineGloballyTest(unittest.TestCase):
+  def test_combine_globally_for_unbounded_source_with_default(self):
+    # this error is logged since the below combination is ill-defined.
+    with self.assertLogs() as captured_logs:
+      with TestPipeline() as p:
+        _ = (
+            p
+            | PeriodicImpulse(
+                start_timestamp=time.time(),
+                stop_timestamp=time.time() + 4,
+                fire_interval=1,
+                apply_windowing=False,
+            )
+            | beam.Map(lambda x: ('c', 1))
+            | beam.WindowInto(
+                window.GlobalWindows(),
+                trigger=trigger.Repeatedly(trigger.AfterCount(2)),
+                accumulation_mode=trigger.AccumulationMode.DISCARDING,
+            )
+            | beam.combiners.Count.Globally())
+    self.assertIn('unbounded collections', '\n'.join(captured_logs.output))
+
+  def test_combine_globally_for_unbounded_source_without_defaults(self):
+    # this is the supported case
+    with TestPipeline() as p:
+      _ = (
+          p
+          | PeriodicImpulse(
+              start_timestamp=time.time(),
+              stop_timestamp=time.time() + 4,
+              fire_interval=1,
+              apply_windowing=False,
+          )
+          | beam.Map(lambda x: 1)
+          | beam.WindowInto(
+              window.GlobalWindows(),
+              trigger=trigger.Repeatedly(trigger.AfterCount(2)),
+              accumulation_mode=trigger.AccumulationMode.DISCARDING,
+          )
+          | beam.CombineGlobally(sum).without_defaults())
+
+
+def get_common_items(sets, excluded_chars=""):
+  # set.intersection() takes multiple sets as separete arguments.
+  # We unpack the `sets` list into multiple arguments with the * operator.
+  # The combine transform might give us an empty list of `sets`,
+  # so we use a list with an empty set as a default value.
+  common = set.intersection(*(sets or [set()]))
+  return common.difference(excluded_chars)
+
+
+class CombinerWithSideInputs(unittest.TestCase):
+  def test_cpk_with_side_input(self):
+    test_cases = [(get_common_items, True),
+                  (beam.CombineFn.from_callable(get_common_items), True),
+                  (get_common_items, False),
+                  (beam.CombineFn.from_callable(get_common_items), False)]
+    for combiner, with_kwarg in test_cases:
+      self._check_combineperkey_with_side_input(combiner, with_kwarg)
+      self._check_combineglobally_with_side_input(combiner, with_kwarg)
+
+  def _check_combineperkey_with_side_input(self, combiner, with_kwarg):
+    with beam.Pipeline() as pipeline:
+      pc = (pipeline | beam.Create(['🍅']))
+      if with_kwarg:
+        cpk = beam.CombinePerKey(
+            combiner, excluded_chars=beam.pvalue.AsSingleton(pc))
+      else:
+        cpk = beam.CombinePerKey(combiner, beam.pvalue.AsSingleton(pc))
+      common_items = (
+          pipeline
+          | 'Create produce' >> beam.Create([
+              {'🍓', '🥕', '🍌', '🍅', '🌶️'},
+              {'🍇', '🥕', '🥝', '🍅', '🥔'},
+              {'🍉', '🥕', '🍆', '🍅', '🍍'},
+              {'🥑', '🥕', '🌽', '🍅', '🥥'},
+          ])
+          | beam.WithKeys(lambda x: None)
+          | cpk)
+      assert_that(common_items, equal_to([(None, {'🥕'})]))
+
+  def _check_combineglobally_with_side_input(self, combiner, with_kwarg):
+    with beam.Pipeline() as pipeline:
+      pc = (pipeline | beam.Create(['🍅']))
+      if with_kwarg:
+        cpk = beam.CombineGlobally(
+            combiner, excluded_chars=beam.pvalue.AsSingleton(pc))
+      else:
+        cpk = beam.CombineGlobally(combiner, beam.pvalue.AsSingleton(pc))
+      common_items = (
+          pipeline
+          | 'Create produce' >> beam.Create([
+              {'🍓', '🥕', '🍌', '🍅', '🌶️'},
+              {'🍇', '🥕', '🥝', '🍅', '🥔'},
+              {'🍉', '🥕', '🍆', '🍅', '🍍'},
+              {'🥑', '🥕', '🌽', '🍅', '🥥'},
+          ])
+          | cpk)
+      assert_that(common_items, equal_to([{'🥕'}]))
+
+  def test_combinefn_methods_with_side_input(self):
+    # Test that the expected combinefn methods are called with the
+    # expected arguments when using side inputs in CombinePerKey.
+    with tempfile.TemporaryDirectory() as tmp_dirname:
+      fname = str(Path(tmp_dirname) / "combinefn_calls.json")
+      with open(fname, "w") as f:
+        json.dump({}, f)
+
+      def set_in_json(key, values):
+        current_json = {}
+        if os.path.exists(fname):
+          with open(fname, "r") as f:
+            current_json = json.load(f)
+        current_json[key] = values
+        with open(fname, "w") as f:
+          json.dump(current_json, f)
+
+      class MyCombiner(beam.CombineFn):
+        def create_accumulator(self, *args, **kwargs):
+          set_in_json("create_accumulator_args", args)
+          set_in_json("create_accumulator_kwargs", kwargs)
+          return args, kwargs
+
+        def add_input(self, accumulator, input, *args, **kwargs):
+          set_in_json("add_input_args", args)
+          set_in_json("add_input_kwargs", kwargs)
+          return accumulator
+
+        def merge_accumulators(self, accumulators, *args, **kwargs):
+          set_in_json("merge_accumulators_args", args)
+          set_in_json("merge_accumulators_kwargs", kwargs)
+          return args, kwargs
+
+        def compact(self, accumulator, *args, **kwargs):
+          set_in_json("compact_args", args)
+          set_in_json("compact_kwargs", kwargs)
+          return accumulator
+
+        def extract_output(self, accumulator, *args, **kwargs):
+          set_in_json("extract_output_args", args)
+          set_in_json("extract_output_kwargs", kwargs)
+          return accumulator
+
+      with beam.Pipeline() as p:
+        static_pos_arg = 0
+        deferred_pos_arg = beam.pvalue.AsSingleton(
+            p | "CreateDeferredSideInput" >> beam.Create([1]))
+        static_kwarg = 2
+        deferred_kwarg = beam.pvalue.AsSingleton(
+            p | "CreateDeferredSideInputKwarg" >> beam.Create([3]))
+        res = (
+            p
+            | "CreateInputs" >> beam.Create([(None, None)])
+            | beam.CombinePerKey(
+                MyCombiner(),
+                static_pos_arg,
+                deferred_pos_arg,
+                static_kwarg=static_kwarg,
+                deferred_kwarg=deferred_kwarg))
+        assert_that(
+            res,
+            equal_to([
+                (None, ((0, 1), {
+                    'static_kwarg': 2, 'deferred_kwarg': 3
+                }))
+            ]))
+
+      # Check that the combinefn was called with the expected arguments
+      with open(fname, "r") as f:
+        data = json.load(f)
+        expected_args = [0, 1]
+        expected_kwargs = {"static_kwarg": 2, "deferred_kwarg": 3}
+        method_names = [
+            "create_accumulator",
+            "compact",
+            "add_input",
+            "merge_accumulators",
+            "extract_output"
+        ]
+        for key in method_names:
+          print(f"Checking {key}")
+          self.assertEqual(data[key + "_args"], expected_args)
+          self.assertEqual(data[key + "_kwargs"], expected_kwargs)
+
+  def test_cpk_with_windows(self):
+    # With global window side input
+    with TestPipeline() as p:
+
+      def sum_with_floor(vals, min_value=0):
+        vals_sum = sum(vals)
+        if vals_sum < min_value:
+          vals_sum += min_value
+        return vals_sum
+
+      res = (
+          p
+          | "CreateInputs" >> beam.Create([1, 2, 100, 101, 102])
+          | beam.Map(lambda x: window.TimestampedValue(('k', x), x))
+          | beam.WindowInto(FixedWindows(99))
+          | beam.CombinePerKey(
+              sum_with_floor,
+              min_value=pvalue.AsSingleton(p | beam.Create([100]))))
+      assert_that(res, equal_to([('k', 103), ('k', 303)]))
+
+    # with matching window side input
+    with TestPipeline() as p:
+      min_value = (
+          p
+          | "CreateMinValue" >> beam.Create([
+              window.TimestampedValue(50, 5),
+              window.TimestampedValue(1000, 100)
+          ])
+          | "WindowSideInputs" >> beam.WindowInto(FixedWindows(99)))
+      res = (
+          p
+          | "CreateInputs" >> beam.Create([1, 2, 100, 101, 102])
+          | beam.Map(lambda x: window.TimestampedValue(('k', x), x))
+          | beam.WindowInto(FixedWindows(99))
+          | beam.CombinePerKey(
+              sum_with_floor, min_value=pvalue.AsSingleton(min_value)))
+      assert_that(res, equal_to([('k', 53), ('k', 1303)]))
 
 
 if __name__ == '__main__':

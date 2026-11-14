@@ -17,20 +17,17 @@
  */
 package org.apache.beam.runners.core.triggers;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.util.Arrays;
 import java.util.List;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Joiner;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 
 /**
  * A {@link TriggerStateMachine} that fires and finishes once after all of its sub-triggers have
  * fired.
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class AfterAllStateMachine extends TriggerStateMachine {
 
   private AfterAllStateMachine(List<TriggerStateMachine> subTriggers) {
@@ -117,7 +114,7 @@ public class AfterAllStateMachine extends TriggerStateMachine {
   @Override
   public String toString() {
     StringBuilder builder = new StringBuilder("AfterAll.of(");
-    Joiner.on(", ").appendTo(builder, subTriggers);
+    Joiner.on(", ").appendTo(builder, subTriggers());
     builder.append(")");
     return builder.toString();
   }

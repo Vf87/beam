@@ -15,23 +15,21 @@
 # limitations under the License.
 #
 
-# cython: language_level=3
-# cython: profile=True
-
 """Worker operations executor."""
 
 # pytype: skip-file
 # pylint: disable=super-with-arguments
 
+# ruff: noqa: UP006
 import collections
 import logging
 import threading
+import warnings
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import DefaultDict
 from typing import Dict
 from typing import FrozenSet
-from typing import Hashable
 from typing import Iterable
 from typing import Iterator
 from typing import List
@@ -39,7 +37,6 @@ from typing import Mapping
 from typing import NamedTuple
 from typing import Optional
 from typing import Tuple
-from typing import Union
 
 from apache_beam import coders
 from apache_beam.internal import pickler
@@ -53,20 +50,24 @@ from apache_beam.runners.common import Receiver
 from apache_beam.runners.worker import opcounters
 from apache_beam.runners.worker import operation_specs
 from apache_beam.runners.worker import sideinputs
-from apache_beam.transforms import sideinputs as apache_sideinputs
+from apache_beam.runners.worker.data_sampler import DataSampler
 from apache_beam.transforms import combiners
 from apache_beam.transforms import core
+from apache_beam.transforms import sideinputs as apache_sideinputs
 from apache_beam.transforms import userstate
 from apache_beam.transforms import window
 from apache_beam.transforms.combiners import PhasedCombineFnExecutor
 from apache_beam.transforms.combiners import curry_combine_fn
 from apache_beam.transforms.window import GlobalWindows
+from apache_beam.typehints.batch import BatchConverter
+from apache_beam.utils.windowed_value import WindowedBatch
 from apache_beam.utils.windowed_value import WindowedValue
 
 if TYPE_CHECKING:
   from apache_beam.runners.sdf_utils import SplitResultPrimary
   from apache_beam.runners.sdf_utils import SplitResultResidual
   from apache_beam.runners.worker.bundle_processor import ExecutionContext
+  from apache_beam.runners.worker.data_sampler import OutputSampler
   from apache_beam.runners.worker.statesampler import StateSampler
   from apache_beam.transforms.userstate import TimerSpec
 
@@ -76,9 +77,7 @@ try:
 except ImportError:
 
   class FakeCython(object):
-    @staticmethod
-    def cast(type, value):
-      return value
+    compiled = False
 
   globals()['cython'] = FakeCython()
 
@@ -91,6 +90,22 @@ SdfSplitResultsPrimary = Tuple['DoOperation', 'SplitResultPrimary']
 SdfSplitResultsResidual = Tuple['DoOperation', 'SplitResultResidual']
 
 
+# TODO(BEAM-9324) Remove these workarounds once upgraded to Cython 3
+def _cast_to_operation(value):
+  if cython.compiled:
+    return cython.cast(Operation, value)
+  else:
+    return value
+
+
+# TODO(BEAM-9324) Remove these workarounds once upgraded to Cython 3
+def _cast_to_receiver(value):
+  if cython.compiled:
+    return cython.cast(Receiver, value)
+  else:
+    return value
+
+
 class ConsumerSet(Receiver):
   """A ConsumerSet represents a graph edge between two Operation nodes.
 
@@ -100,58 +115,70 @@ class ConsumerSet(Receiver):
   ConsumerSet are attached to the outputting Operation.
   """
   @staticmethod
-  def create(counter_factory,
-             step_name,  # type: str
-             output_index,
-             consumers,  # type: List[Operation]
-             coder,
-             producer_type_hints
-             ):
+  def create(
+      counter_factory,
+      step_name,  # type: str
+      output_index,
+      consumers,  # type: List[Operation]
+      coder,
+      producer_type_hints,
+      producer_batch_converter,  # type: Optional[BatchConverter]
+      output_sampler=None,  # type: Optional[OutputSampler]
+  ):
     # type: (...) -> ConsumerSet
     if len(consumers) == 1:
-      return SingletonConsumerSet(
-          counter_factory,
-          step_name,
-          output_index,
-          consumers,
-          coder,
-          producer_type_hints)
-    else:
-      return ConsumerSet(
-          counter_factory,
-          step_name,
-          output_index,
-          consumers,
-          coder,
-          producer_type_hints)
+      consumer = consumers[0]
 
-  def __init__(self,
-               counter_factory,
-               step_name,  # type: str
-               output_index,
-               consumers,  # type: List[Operation]
-               coder,
-               producer_type_hints
-               ):
-    self.consumers = consumers
+      consumer_batch_preference = consumer.get_batching_preference()
+      consumer_batch_converter = consumer.get_input_batch_converter()
+      if (not consumer_batch_preference.supports_batches and
+          producer_batch_converter is None and
+          consumer_batch_converter is None):
+        return SingletonElementConsumerSet(
+            counter_factory,
+            step_name,
+            output_index,
+            consumer,
+            coder,
+            producer_type_hints,
+            output_sampler)
 
+    return GeneralPurposeConsumerSet(
+        counter_factory,
+        step_name,
+        output_index,
+        coder,
+        producer_type_hints,
+        consumers,
+        producer_batch_converter,
+        output_sampler)
+
+  def __init__(
+      self,
+      counter_factory,
+      step_name,  # type: str
+      output_index,
+      consumers,
+      coder,
+      producer_type_hints,
+      producer_batch_converter,
+      output_sampler):
     self.opcounter = opcounters.OperationCounters(
         counter_factory,
         step_name,
         coder,
         output_index,
-        producer_type_hints=producer_type_hints)
+        producer_type_hints=producer_type_hints,
+        producer_batch_converter=producer_batch_converter)
     # Used in repr.
     self.step_name = step_name
     self.output_index = output_index
     self.coder = coder
-
-  def receive(self, windowed_value):
-    # type: (WindowedValue) -> None
-    self.update_counters_start(windowed_value)
-    for consumer in self.consumers:
-      cython.cast(Operation, consumer).process(windowed_value)
-    self.update_counters_finish()
+    self.consumers = consumers
+    self.output_sampler = output_sampler
+    self.element_sampler = (
+        output_sampler.element_sampler if output_sampler else None)
+    self.execution_context = None  # type: Optional[ExecutionContext]
 
   def try_split(self, fraction_of_remainder):
     # type: (...) -> Optional[Any]
@@ -178,9 +205,27 @@ class ConsumerSet(Receiver):
     # type: (WindowedValue) -> None
     self.opcounter.update_from(windowed_value)
 
+    if self.execution_context is not None:
+      self.execution_context.output_sampler = self.output_sampler
+
+    # The following code is optimized by inlining a function call. Because this
+    # is called for every element, a function call is too expensive (order of
+    # 100s of nanoseconds). Furthermore, a lock was purposefully not used
+    # between here and the DataSampler as an additional operation. The tradeoff
+    # is that some samples might be dropped, but it is better than the
+    # alternative which is double sampling the same element.
+    if self.element_sampler is not None:
+      if not self.element_sampler.has_element:
+        self.element_sampler.el = windowed_value
+        self.element_sampler.has_element = True
+
   def update_counters_finish(self):
     # type: () -> None
     self.opcounter.update_collect()
+
+  def update_counters_batch(self, windowed_batch):
+    # type: (WindowedBatch) -> None
+    self.opcounter.update_from_batch(windowed_batch)
 
   def __repr__(self):
     return '%s[%s.out%s, coder=%s, len(consumers)=%s]' % (
@@ -191,30 +236,41 @@ class ConsumerSet(Receiver):
         len(self.consumers))
 
 
-class SingletonConsumerSet(ConsumerSet):
-  def __init__(self,
-               counter_factory,
-               step_name,
-               output_index,
-               consumers,  # type: List[Operation]
-               coder,
-               producer_type_hints
-               ):
-    assert len(consumers) == 1
-    super(SingletonConsumerSet, self).__init__(
+class SingletonElementConsumerSet(ConsumerSet):
+  """ConsumerSet representing a single consumer that can only process elements
+  (not batches)."""
+  def __init__(
+      self,
+      counter_factory,
+      step_name,
+      output_index,
+      consumer,  # type: Operation
+      coder,
+      producer_type_hints,
+      output_sampler):
+    super().__init__(
         counter_factory,
         step_name,
-        output_index,
-        consumers,
+        output_index, [consumer],
         coder,
-        producer_type_hints)
-    self.consumer = consumers[0]
+        producer_type_hints,
+        None,
+        output_sampler)
+    self.consumer = consumer
 
   def receive(self, windowed_value):
     # type: (WindowedValue) -> None
     self.update_counters_start(windowed_value)
     self.consumer.process(windowed_value)
     self.update_counters_finish()
+
+  def receive_batch(self, windowed_batch):
+    raise AssertionError(
+        "SingletonElementConsumerSet.receive_batch is not implemented")
+
+  def flush(self):
+    # SingletonElementConsumerSet has no buffer to flush
+    pass
 
   def try_split(self, fraction_of_remainder):
     # type: (...) -> Optional[Any]
@@ -224,35 +280,163 @@ class SingletonConsumerSet(ConsumerSet):
     return self.consumer.current_element_progress()
 
 
+class GeneralPurposeConsumerSet(ConsumerSet):
+  """ConsumerSet implementation that handles all combinations of possible edges.
+  """
+  MAX_BATCH_SIZE = 4096
+
+  def __init__(
+      self,
+      counter_factory,
+      step_name,  # type: str
+      output_index,
+      coder,
+      producer_type_hints,
+      consumers,  # type: List[Operation]
+      producer_batch_converter,
+      output_sampler):
+    super().__init__(
+        counter_factory,
+        step_name,
+        output_index,
+        consumers,
+        coder,
+        producer_type_hints,
+        producer_batch_converter,
+        output_sampler)
+
+    self.producer_batch_converter = producer_batch_converter
+
+    # Partition consumers into three groups:
+    # - consumers that will be passed elements
+    # - consumers that will be passed batches (where their input batch type
+    #   matches the output of the producer)
+    # - consumers that will be passed converted batches
+    self.element_consumers: List[Operation] = []
+    self.passthrough_batch_consumers: List[Operation] = []
+    other_batch_consumers: DefaultDict[
+        BatchConverter, List[Operation]] = collections.defaultdict(lambda: [])
+
+    for consumer in consumers:
+      if not consumer.get_batching_preference().supports_batches:
+        self.element_consumers.append(consumer)
+      elif (consumer.get_input_batch_converter() ==
+            self.producer_batch_converter):
+        self.passthrough_batch_consumers.append(consumer)
+      else:
+        # Batch consumer with a mismatched batch type
+        if consumer.get_batching_preference().supports_elements:
+          # Pass it elements if we can
+          self.element_consumers.append(consumer)
+        else:
+          # As a last resort, explode and rebatch
+          consumer_batch_converter = consumer.get_input_batch_converter()
+          # This consumer supports batches, it must have a batch converter
+          assert consumer_batch_converter is not None
+          other_batch_consumers[consumer_batch_converter].append(consumer)
+
+    self.other_batch_consumers: Dict[BatchConverter, List[Operation]] = dict(
+        other_batch_consumers)
+
+    self.has_batch_consumers = (
+        self.passthrough_batch_consumers or self.other_batch_consumers)
+    self._batched_elements: List[Any] = []
+
+  def receive(self, windowed_value):
+    # type: (WindowedValue) -> None
+
+    self.update_counters_start(windowed_value)
+
+    for consumer in self.element_consumers:
+      _cast_to_operation(consumer).process(windowed_value)
+
+    # TODO: Do this branching when contstructing ConsumerSet
+    if self.has_batch_consumers:
+      self._batched_elements.append(windowed_value)
+      if len(self._batched_elements) >= self.MAX_BATCH_SIZE:
+        self.flush()
+
+    # TODO(https://github.com/apache/beam/issues/21655): Properly estimate
+    # sizes in the batch-consumer only case, this undercounts large iterables
+    self.update_counters_finish()
+
+  def receive_batch(self, windowed_batch):
+    if self.element_consumers:
+      for wv in windowed_batch.as_windowed_values(
+          self.producer_batch_converter.explode_batch):
+        for consumer in self.element_consumers:
+          _cast_to_operation(consumer).process(wv)
+
+    for consumer in self.passthrough_batch_consumers:
+      _cast_to_operation(consumer).process_batch(windowed_batch)
+
+    for (consumer_batch_converter,
+         consumers) in self.other_batch_consumers.items():
+      # Explode and rebatch into the new batch type (ouch!)
+      # TODO: Register direct conversions for equivalent batch types
+
+      for consumer in consumers:
+        warnings.warn(
+            f"Input to operation {consumer} must be rebatched from type "
+            f"{self.producer_batch_converter.batch_type!r} to "
+            f"{consumer_batch_converter.batch_type!r}.\n"
+            "This is very inefficient, consider re-structuring your pipeline "
+            "or adding a DoFn to directly convert between these types.",
+            InefficientExecutionWarning)
+        # produce_batch takes a sequence, and some converters read it more
+        # than once (the pyarrow Table converter reads it once per column).
+        _cast_to_operation(consumer).process_batch(
+            windowed_batch.with_values(
+                consumer_batch_converter.produce_batch(
+                    list(
+                        self.producer_batch_converter.explode_batch(
+                            windowed_batch.values)))))
+
+    self.update_counters_batch(windowed_batch)
+
+  def flush(self):
+    if not self.has_batch_consumers or not self._batched_elements:
+      return
+
+    for batch_converter, consumers in self.other_batch_consumers.items():
+      for windowed_batch in WindowedBatch.from_windowed_values(
+          self._batched_elements, produce_fn=batch_converter.produce_batch):
+        for consumer in consumers:
+          _cast_to_operation(consumer).process_batch(windowed_batch)
+
+    for consumer in self.passthrough_batch_consumers:
+      for windowed_batch in WindowedBatch.from_windowed_values(
+          self._batched_elements,
+          produce_fn=self.producer_batch_converter.produce_batch):
+        _cast_to_operation(consumer).process_batch(windowed_batch)
+
+    self._batched_elements = []
+
+
 class Operation(object):
   """An operation representing the live version of a work item specification.
 
   An operation can have one or more outputs and for each output it can have
   one or more receiver operations that will take that as input.
   """
-
-  def __init__(self,
-               name_context,  # type: Union[str, common.NameContext]
-               spec,
-               counter_factory,
-               state_sampler  # type: StateSampler
-              ):
+  def __init__(
+      self,
+      name_context,  # type: common.NameContext
+      spec,
+      counter_factory,
+      state_sampler  # type: StateSampler
+  ):
     """Initializes a worker operation instance.
 
     Args:
-      name_context: A NameContext instance or string(deprecated), with the
-        name information for this operation.
+      name_context: A NameContext instance, with the name information for this
+        operation.
       spec: A operation_specs.Worker* instance.
       counter_factory: The CounterFactory to use for our counters.
       state_sampler: The StateSampler for the current operation.
     """
-    if isinstance(name_context, common.NameContext):
-      # TODO(BEAM-4028): Clean this up once it's completely migrated.
-      # We use the specific operation name that is used for metrics and state
-      # sampling.
-      self.name_context = name_context
-    else:
-      self.name_context = common.NameContext(name_context)
+    assert isinstance(name_context, common.NameContext)
+    self.name_context = name_context
 
     self.spec = spec
     self.counter_factory = counter_factory
@@ -277,20 +461,30 @@ class Operation(object):
     # on the operation.
     self.setup_done = False
     self.step_name = None  # type: Optional[str]
+    self.data_sampler: Optional[DataSampler] = None
 
-  def setup(self):
-    # type: () -> None
+  def setup(self, data_sampler=None):
+    # type: (Optional[DataSampler]) -> None
 
     """Set up operation.
 
     This must be called before any other methods of the operation."""
     with self.scoped_start_state:
+      self.data_sampler = data_sampler
       self.debug_logging_enabled = logging.getLogger().isEnabledFor(
           logging.DEBUG)
+      transform_id = self.name_context.transform_id
+
       # Everything except WorkerSideInputSource, which is not a
       # top-level operation, should have output_coders
       #TODO(pabloem): Define better what step name is used here.
       if getattr(self.spec, 'output_coders', None):
+
+        def get_output_sampler(output_num):
+          if data_sampler is None:
+            return None
+          return data_sampler.sampler_for_output(transform_id, output_num)
+
         self.receivers = [
             ConsumerSet.create(
                 self.counter_factory,
@@ -298,8 +492,10 @@ class Operation(object):
                 i,
                 self.consumers[i],
                 coder,
-                self._get_runtime_performance_hints()) for i,
-            coder in enumerate(self.spec.output_coders)
+                self._get_runtime_performance_hints(),
+                self.get_output_batch_converter(),
+                get_output_sampler(i))
+            for i, coder in enumerate(self.spec.output_coders)
         ]
     self.setup_done = True
 
@@ -309,12 +505,35 @@ class Operation(object):
     """Start operation."""
     if not self.setup_done:
       # For legacy workers.
-      self.setup()
+      self.setup(self.data_sampler)
+
+    # The ExecutionContext is per instruction and so cannot be set at
+    # initialization time.
+    if self.data_sampler is not None:
+      for receiver in self.receivers:
+        receiver.execution_context = self.execution_context
+
+  def get_batching_preference(self):
+    # By default operations don't support batching, require Receiver to unbatch
+    return common.BatchingPreference.BATCH_FORBIDDEN
+
+  def get_input_batch_converter(self) -> Optional[BatchConverter]:
+    """Returns a batch type converter if this operation can accept a batch,
+    otherwise None."""
+    return None
+
+  def get_output_batch_converter(self) -> Optional[BatchConverter]:
+    """Returns a batch type converter if this operation can produce a batch,
+    otherwise None."""
+    return None
 
   def process(self, o):
     # type: (WindowedValue) -> None
 
     """Process element in operation."""
+    pass
+
+  def process_batch(self, batch: WindowedBatch):
     pass
 
   def finalize_bundle(self):
@@ -335,7 +554,8 @@ class Operation(object):
     # type: () -> None
 
     """Finish operation."""
-    pass
+    for receiver in self.receivers:
+      _cast_to_receiver(receiver).flush()
 
   def teardown(self):
     # type: () -> None
@@ -351,7 +571,7 @@ class Operation(object):
 
   def output(self, windowed_value, output_index=0):
     # type: (WindowedValue, int) -> None
-    cython.cast(Receiver, self.receivers[output_index]).receive(windowed_value)
+    _cast_to_receiver(self.receivers[output_index]).receive(windowed_value)
 
   def add_receiver(self, operation, output_index=0):
     # type: (Operation, int) -> None
@@ -501,7 +721,7 @@ class ReadOperation(Operation):
 class ImpulseReadOperation(Operation):
   def __init__(
       self,
-      name_context,  # type: Union[str, common.NameContext]
+      name_context,  # type: common.NameContext
       counter_factory,
       state_sampler,  # type: StateSampler
       consumers,  # type: Mapping[Any, List[Operation]]
@@ -518,7 +738,8 @@ class ImpulseReadOperation(Operation):
             0,
             next(iter(consumers.values())),
             output_coder,
-            self._get_runtime_performance_hints())
+            self._get_runtime_performance_hints(),
+            self.get_output_batch_converter())
     ]
 
   def process(self, unused_impulse):
@@ -550,8 +771,8 @@ class _TaggedReceivers(dict):
     self._step_name = step_name
 
   def __missing__(self, tag):
-    self[tag] = receiver = ConsumerSet(
-        self._counter_factory, self._step_name, tag, [], None, None)
+    self[tag] = receiver = ConsumerSet.create(
+        self._counter_factory, self._step_name, tag, [], None, None, None)
     return receiver
 
   def total_output_bytes(self):
@@ -577,21 +798,28 @@ OpInputInfo = NamedTuple(
 
 class DoOperation(Operation):
   """A Do operation that will execute a custom DoFn for each input element."""
-
-  def __init__(self,
-               name,  # type: common.NameContext
-               spec,  # operation_specs.WorkerDoFn  # need to fix this type
-               counter_factory,
-               sampler,
-               side_input_maps=None,
-               user_state_context=None
-              ):
+  def __init__(
+      self,
+      name,  # type: common.NameContext
+      spec,  # operation_specs.WorkerDoFn  # need to fix this type
+      counter_factory,
+      sampler,
+      side_input_maps=None,
+      user_state_context=None,
+  ):
     super(DoOperation, self).__init__(name, spec, counter_factory, sampler)
     self.side_input_maps = side_input_maps
     self.user_state_context = user_state_context
     self.tagged_receivers = None  # type: Optional[_TaggedReceivers]
     # A mapping of timer tags to the input "PCollections" they come in on.
     self.input_info = None  # type: Optional[OpInputInfo]
+    self.scoped_timer_processing_state = self.state_sampler.scoped_state(
+        self.name_context,
+        'process-timers',
+        metrics_container=self.metrics_container)
+    # See fn_data in dataflow_runner.py
+    # TODO: Store all the items from spec?
+    self.fn, _, _, _, _ = (pickler.loads(self.spec.serialized_fn))
 
   def _read_side_inputs(self, tags_and_types):
     # type: (...) -> Iterator[apache_sideinputs.SideInputMap]
@@ -649,10 +877,10 @@ class DoOperation(Operation):
       yield apache_sideinputs.SideInputMap(
           view_class, view_options, sideinputs.EmulatedIterable(iterator_fn))
 
-  def setup(self):
-    # type: () -> None
+  def setup(self, data_sampler=None):
+    # type: (Optional[DataSampler]) -> None
     with self.scoped_start_state:
-      super(DoOperation, self).setup()
+      super(DoOperation, self).setup(data_sampler)
 
       # See fn_data in dataflow_runner.py
       fn, args, kwargs, tags_and_types, window_fn = (
@@ -699,6 +927,7 @@ class DoOperation(Operation):
           step_name=self.name_context.logging_name(),
           state=state,
           user_state_context=self.user_state_context,
+          transform_id=self.name_context.transform_id,
           operation_name=self.name_context.metrics_name())
       self.dofn_runner.setup()
 
@@ -706,7 +935,23 @@ class DoOperation(Operation):
     # type: () -> None
     with self.scoped_start_state:
       super(DoOperation, self).start()
+      self.dofn_runner.execution_context = self.execution_context
       self.dofn_runner.start()
+
+  def get_batching_preference(self):
+    if self.fn._process_batch_defined:
+      if self.fn._process_defined:
+        return common.BatchingPreference.DO_NOT_CARE
+      else:
+        return common.BatchingPreference.BATCH_REQUIRED
+    else:
+      return common.BatchingPreference.BATCH_FORBIDDEN
+
+  def get_input_batch_converter(self) -> Optional[BatchConverter]:
+    return getattr(self.fn, 'input_batch_converter', None)
+
+  def get_output_batch_converter(self) -> Optional[BatchConverter]:
+    return getattr(self.fn, 'output_batch_converter', None)
 
   def process(self, o):
     # type: (WindowedValue) -> None
@@ -717,6 +962,9 @@ class DoOperation(Operation):
         for delayed_application in delayed_applications:
           self.execution_context.delayed_applications.append(
               (self, delayed_application))
+
+  def process_batch(self, windowed_batch: WindowedBatch) -> None:
+    self.dofn_runner.process_batch(windowed_batch)
 
   def finalize_bundle(self):
     # type: () -> None
@@ -730,17 +978,19 @@ class DoOperation(Operation):
     self.user_state_context.add_timer_info(timer_family_id, timer_info)
 
   def process_timer(self, tag, timer_data):
-    timer_spec = self.timer_specs[tag]
-    self.dofn_runner.process_user_timer(
-        timer_spec,
-        timer_data.user_key,
-        timer_data.windows[0],
-        timer_data.fire_timestamp,
-        timer_data.paneinfo,
-        timer_data.dynamic_timer_tag)
+    with self.scoped_timer_processing_state:
+      timer_spec = self.timer_specs[tag]
+      self.dofn_runner.process_user_timer(
+          timer_spec,
+          timer_data.user_key,
+          timer_data.windows[0],
+          timer_data.fire_timestamp,
+          timer_data.paneinfo,
+          timer_data.dynamic_timer_tag)
 
   def finish(self):
     # type: () -> None
+    super(DoOperation, self).finish()
     with self.scoped_finish_state:
       self.dofn_runner.finish()
       if self.user_state_context:
@@ -864,10 +1114,7 @@ class SdfProcessSizedElements(DoOperation):
   def monitoring_infos(self, transform_id, tag_to_pcollection_id):
     # type: (str, Dict[str, str]) -> Dict[FrozenSet, metrics_pb2.MonitoringInfo]
 
-    def encode_progress(value):
-      # type: (float) -> bytes
-      coder = coders.IterableCoder(coders.FloatCoder())
-      return coder.encode([value])
+    progress_coder = coders.IterableCoder(coders.FloatCoder())
 
     with self.lock:
       infos = super(SdfProcessSizedElements,
@@ -886,12 +1133,12 @@ class SdfProcessSizedElements(DoOperation):
             urn=monitoring_infos.WORK_COMPLETED_URN,
             type=monitoring_infos.PROGRESS_TYPE,
             labels=monitoring_infos.create_labels(ptransform=transform_id),
-            payload=encode_progress(completed))
+            payload=progress_coder.encode([completed]))
         remaining_mi = metrics_pb2.MonitoringInfo(
             urn=monitoring_infos.WORK_REMAINING_URN,
             type=monitoring_infos.PROGRESS_TYPE,
             labels=monitoring_infos.create_labels(ptransform=transform_id),
-            payload=encode_progress(remaining))
+            payload=progress_coder.encode([remaining]))
         infos[monitoring_infos.to_key(completed_mi)] = completed_mi
         infos[monitoring_infos.to_key(remaining_mi)] = remaining_mi
     return infos
@@ -909,11 +1156,11 @@ class CombineOperation(Operation):
     self.phased_combine_fn = (
         PhasedCombineFnExecutor(self.spec.phase, fn, args, kwargs))
 
-  def setup(self):
-    # type: () -> None
+  def setup(self, data_sampler=None):
+    # type: (Optional[DataSampler]) -> None
     with self.scoped_start_state:
       _LOGGER.debug('Setup called for %s', self)
-      super(CombineOperation, self).setup()
+      super(CombineOperation, self).setup(data_sampler)
       self.phased_combine_fn.combine_fn.setup()
 
   def process(self, o):
@@ -927,6 +1174,7 @@ class CombineOperation(Operation):
   def finish(self):
     # type: () -> None
     _LOGGER.debug('Finishing %s', self)
+    super(CombineOperation, self).finish()
 
   def teardown(self):
     # type: () -> None
@@ -972,6 +1220,7 @@ class PGBKOperation(Operation):
   def finish(self):
     # type: () -> None
     self.flush(0)
+    super().finish()
 
   def flush(self, target):
     # type: (int) -> None
@@ -989,6 +1238,11 @@ class PGBKOperation(Operation):
 
 
 class PGBKCVOperation(Operation):
+  """Partial group-by-key operation.
+
+  This operation handles grouped values with
+a combine function applied.
+  """
   def __init__(
       self, name_context, spec, counter_factory, state_sampler, windowing=None):
     super(PGBKCVOperation,
@@ -1026,11 +1280,11 @@ class PGBKCVOperation(Operation):
     self.key_count = 0
     self.table = {}
 
-  def setup(self):
-    # type: () -> None
+  def setup(self, data_sampler=None):
+    # type: (Optional[DataSampler]) -> None
     with self.scoped_start_state:
       _LOGGER.debug('Setup called for %s', self)
-      super(PGBKCVOperation, self).setup()
+      super(PGBKCVOperation, self).setup(data_sampler)
       self.combine_fn.setup()
 
   def process(self, wkv):
@@ -1040,33 +1294,37 @@ class PGBKCVOperation(Operation):
       # pylint: disable=unidiomatic-typecheck
       # Optimization for the global window case.
       if self.is_default_windowing:
-        wkey = key  # type: Hashable
+        self.add_key_value(key, value, None)
       else:
-        wkey = tuple(wkv.windows), key
-      entry = self.table.get(wkey, None)
-      if entry is None:
-        if self.key_count >= self.max_keys:
-          target = self.key_count * 9 // 10
-          old_wkeys = []
-          # TODO(robertwb): Use an LRU cache?
-          for old_wkey, old_wvalue in self.table.items():
-            old_wkeys.append(old_wkey)  # Can't mutate while iterating.
-            self.output_key(old_wkey, old_wvalue[0], old_wvalue[1])
-            self.key_count -= 1
-            if self.key_count <= target:
-              break
-          for old_wkey in reversed(old_wkeys):
-            del self.table[old_wkey]
-        self.key_count += 1
-        # We save the accumulator as a one element list so we can efficiently
-        # mutate when new values are added without searching the cache again.
-        entry = self.table[wkey] = [self.combine_fn.create_accumulator(), None]
-        if not self.is_default_windowing:
-          # Conditional as the timestamp attribute is lazily initialized.
-          entry[1] = wkv.timestamp
-      entry[0] = self.combine_fn_add_input(entry[0], value)
-      if not self.is_default_windowing and self.timestamp_combiner:
-        entry[1] = self.timestamp_combiner.combine(entry[1], wkv.timestamp)
+        for window in wkv.windows:
+          self.add_key_value((window, key),
+                             value,
+                             wkv.timestamp if self.timestamp_combiner else None)
+
+  def add_key_value(self, wkey, value, timestamp):
+    entry = self.table.get(wkey, None)
+    if entry is None:
+      if self.key_count >= self.max_keys:
+        target = self.key_count * 9 // 10
+        old_wkeys = []
+        # TODO(robertwb): Use an LRU cache?
+        for old_wkey, old_wvalue in self.table.items():
+          old_wkeys.append(old_wkey)  # Can't mutate while iterating.
+          self.output_key(old_wkey, old_wvalue[0], old_wvalue[1])
+          self.key_count -= 1
+          if self.key_count <= target:
+            break
+        for old_wkey in reversed(old_wkeys):
+          del self.table[old_wkey]
+      self.key_count += 1
+      # We save the accumulator as a one element list so we can efficiently
+      # mutate when new values are added without searching the cache again.
+      entry = self.table[wkey] = [
+          self.combine_fn.create_accumulator(), timestamp
+      ]
+    entry[0] = self.combine_fn_add_input(entry[0], value)
+    if not self.is_default_windowing and self.timestamp_combiner:
+      entry[1] = self.timestamp_combiner.combine(entry[1], timestamp)
 
   def finish(self):
     # type: () -> None
@@ -1091,10 +1349,10 @@ class PGBKCVOperation(Operation):
     if self.is_default_windowing:
       self.output(_globally_windowed_value.with_value((wkey, value)))
     else:
-      windows, key = wkey
+      window, key = wkey
       if self.timestamp_combiner is None:
-        timestamp = windows[0].max_timestamp()
-      self.output(WindowedValue((key, value), timestamp, windows))
+        timestamp = window.max_timestamp()
+      self.output(WindowedValue((key, value), timestamp, (window, )))
 
 
 class FlattenOperation(Operation):
@@ -1276,3 +1534,11 @@ class SimpleMapTaskExecutor(object):
       op.start()
     for op in self._ops:
       op.finish()
+
+
+class InefficientExecutionWarning(RuntimeWarning):
+  """warning to indicate an inefficiency in a Beam pipeline."""
+
+
+# Don't ignore InefficientExecutionWarning, but only log them once
+warnings.simplefilter('once', InefficientExecutionWarning)

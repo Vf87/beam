@@ -18,9 +18,9 @@
 package org.apache.beam.sdk.io.gcp.datastore;
 
 import static org.junit.Assert.assertThrows;
-import static org.mockito.Mockito.verify;
 
 import java.util.Map;
+import java.util.UUID;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Create;
@@ -30,10 +30,11 @@ import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.util.Sleeper;
 import org.apache.beam.sdk.values.PCollectionView;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.joda.time.DateTimeUtils;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -48,10 +49,10 @@ public class RampupThrottlingFnTest {
   @Mock private Counter mockCounter;
   private final Sleeper mockSleeper =
       millis -> {
-        verify(mockCounter).inc(millis);
+        mockCounter.inc(millis);
         throw new RampupDelayException();
       };
-  private DoFnTester<Void, Void> rampupThrottlingFnTester;
+  private DoFnTester<String, String> rampupThrottlingFnTester;
 
   @Before
   public void setUp() throws Exception {
@@ -61,8 +62,8 @@ public class RampupThrottlingFnTest {
     TestPipeline pipeline = TestPipeline.create();
     PCollectionView<Instant> startTimeView =
         pipeline.apply(Create.of(Instant.now())).apply(View.asSingleton());
-    RampupThrottlingFn<Void> rampupThrottlingFn =
-        new RampupThrottlingFn<Void>(1, startTimeView) {
+    RampupThrottlingFn<String> rampupThrottlingFn =
+        new RampupThrottlingFn<String>(1, startTimeView) {
           @Override
           @Setup
           public void setup() {
@@ -75,6 +76,11 @@ public class RampupThrottlingFnTest {
     rampupThrottlingFnTester.setCloningBehavior(CloningBehavior.DO_NOT_CLONE);
     rampupThrottlingFnTester.startBundle();
     rampupThrottlingFn.throttlingMsecs = mockCounter;
+  }
+
+  @After
+  public void tearDown() {
+    DateTimeUtils.setCurrentMillisSystem();
   }
 
   @Test
@@ -95,7 +101,7 @@ public class RampupThrottlingFnTest {
     for (Map.Entry<Duration, Integer> entry : rampupSchedule.entrySet()) {
       DateTimeUtils.setCurrentMillisFixed(entry.getKey().getMillis());
       for (int i = 0; i < entry.getValue(); i++) {
-        rampupThrottlingFnTester.processElement(null);
+        rampupThrottlingFnTester.processElement(UUID.randomUUID().toString());
       }
       assertThrows(RampupDelayException.class, () -> rampupThrottlingFnTester.processElement(null));
     }

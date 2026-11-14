@@ -20,11 +20,9 @@ package org.apache.beam.sdk.nexmark.queries.sql;
 import org.apache.beam.sdk.extensions.sql.SqlTransform;
 import org.apache.beam.sdk.extensions.sql.impl.CalciteQueryPlanner;
 import org.apache.beam.sdk.extensions.sql.impl.QueryPlanner;
-import org.apache.beam.sdk.extensions.sql.zetasql.ZetaSQLQueryPlanner;
 import org.apache.beam.sdk.nexmark.NexmarkConfiguration;
 import org.apache.beam.sdk.nexmark.model.Auction;
 import org.apache.beam.sdk.nexmark.model.Event;
-import org.apache.beam.sdk.nexmark.model.Event.Type;
 import org.apache.beam.sdk.nexmark.model.NameCityStateId;
 import org.apache.beam.sdk.nexmark.model.Person;
 import org.apache.beam.sdk.nexmark.model.sql.SelectEvent;
@@ -94,10 +92,6 @@ public class SqlQuery3 extends NexmarkQueryTransform<NameCityStateId> {
     return new SqlQuery3("SqlQuery3", configuration, CalciteQueryPlanner.class);
   }
 
-  public static SqlQuery3 zetaSqlQuery3(NexmarkConfiguration configuration) {
-    return new SqlQuery3("ZetaSqlQuery3", configuration, ZetaSQLQueryPlanner.class);
-  }
-
   @Override
   public PCollection<NameCityStateId> expand(PCollection<Event> allEvents) {
     PCollection<Event> windowed =
@@ -108,13 +102,13 @@ public class SqlQuery3 extends NexmarkQueryTransform<NameCityStateId> {
     PCollection<Row> auctions =
         windowed
             .apply(getName() + ".Filter." + auctionName, Filter.by(e1 -> e1.newAuction != null))
-            .apply(getName() + ".ToRecords." + auctionName, new SelectEvent(Type.AUCTION));
+            .apply(getName() + ".ToRecords." + auctionName, new SelectEvent(Event.Type.AUCTION));
 
     String personName = Person.class.getSimpleName();
     PCollection<Row> people =
         windowed
             .apply(getName() + ".Filter." + personName, Filter.by(e -> e.newPerson != null))
-            .apply(getName() + ".ToRecords." + personName, new SelectEvent(Type.PERSON));
+            .apply(getName() + ".ToRecords." + personName, new SelectEvent(Event.Type.PERSON));
 
     PCollectionTuple inputStreams =
         PCollectionTuple.of(new TupleTag<>("Auction"), auctions)

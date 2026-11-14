@@ -23,7 +23,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.ServiceLoader;
-import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.extensions.sql.impl.BeamSqlEnv;
 import org.apache.beam.sdk.extensions.sql.impl.BeamSqlEnv.BeamSqlEnvBuilder;
 import org.apache.beam.sdk.extensions.sql.impl.BeamSqlPipelineOptions;
@@ -32,21 +31,23 @@ import org.apache.beam.sdk.extensions.sql.impl.QueryPlanner.QueryParameters;
 import org.apache.beam.sdk.extensions.sql.impl.rel.BeamSqlRelUtils;
 import org.apache.beam.sdk.extensions.sql.impl.schema.BeamPCollectionTable;
 import org.apache.beam.sdk.extensions.sql.meta.BeamSqlTable;
+import org.apache.beam.sdk.extensions.sql.meta.catalog.CatalogManager;
+import org.apache.beam.sdk.extensions.sql.meta.catalog.InMemoryCatalogManager;
 import org.apache.beam.sdk.extensions.sql.meta.provider.ReadOnlyTableProvider;
 import org.apache.beam.sdk.extensions.sql.meta.provider.TableProvider;
-import org.apache.beam.sdk.extensions.sql.meta.store.InMemoryMetaStore;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.PInput;
+import org.apache.beam.sdk.values.POutput;
 import org.apache.beam.sdk.values.PValue;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -109,17 +110,20 @@ import org.checkerframework.checker.nullness.qual.Nullable;
 @AutoValue
 @AutoValue.CopyAnnotations
 public abstract class SqlTransform extends PTransform<PInput, PCollection<Row>> {
-  static final String PCOLLECTION_NAME = "PCOLLECTION";
+
+  public static final String PCOLLECTION_NAME = "PCOLLECTION";
 
   abstract String queryString();
+
+  abstract @Nullable PTransform<PCollection<Row>, ? extends POutput> errorsTransformer();
 
   abstract List<String> ddlStrings();
 
   abstract QueryParameters queryParameters();
 
-  abstract @Experimental List<UdfDefinition> udfDefinitions();
+  abstract List<UdfDefinition> udfDefinitions();
 
-  abstract @Experimental List<UdafDefinition> udafDefinitions();
+  abstract List<UdafDefinition> udafDefinitions();
 
   abstract boolean autoLoading();
 
@@ -133,9 +137,9 @@ public abstract class SqlTransform extends PTransform<PInput, PCollection<Row>> 
   public PCollection<Row> expand(PInput input) {
     TableProvider inputTableProvider =
         new ReadOnlyTableProvider(PCOLLECTION_NAME, toTableMap(input));
-    InMemoryMetaStore metaTableProvider = new InMemoryMetaStore();
-    metaTableProvider.registerProvider(inputTableProvider);
-    BeamSqlEnvBuilder sqlEnvBuilder = BeamSqlEnv.builder(metaTableProvider);
+    CatalogManager catalogManager = new InMemoryCatalogManager();
+    catalogManager.registerTableProvider(inputTableProvider);
+    BeamSqlEnvBuilder sqlEnvBuilder = BeamSqlEnv.builder(catalogManager);
 
     // TODO: validate duplicate functions.
     registerFunctions(sqlEnvBuilder);
@@ -144,7 +148,7 @@ public abstract class SqlTransform extends PTransform<PInput, PCollection<Row>> 
     // the same names are reused.
     if (autoLoading()) {
       sqlEnvBuilder.autoLoadUserDefinedFunctions();
-      ServiceLoader.load(TableProvider.class).forEach(metaTableProvider::registerProvider);
+      ServiceLoader.load(TableProvider.class).forEach(catalogManager::registerTableProvider);
     }
 
     tableProviderMap().forEach(sqlEnvBuilder::addSchema);
@@ -164,7 +168,9 @@ public abstract class SqlTransform extends PTransform<PInput, PCollection<Row>> 
     BeamSqlEnv sqlEnv = sqlEnvBuilder.build();
     ddlStrings().forEach(sqlEnv::executeDdl);
     return BeamSqlRelUtils.toPCollection(
-        input.getPipeline(), sqlEnv.parseQuery(queryString(), queryParameters()));
+        input.getPipeline(),
+        sqlEnv.parseQuery(queryString(), queryParameters()),
+        errorsTransformer());
   }
 
   @SuppressWarnings("unchecked")
@@ -235,7 +241,6 @@ public abstract class SqlTransform extends PTransform<PInput, PCollection<Row>> 
     return withTableProvider(name, tableProvider).toBuilder().setDefaultTableProvider(name).build();
   }
 
-  @Experimental
   public SqlTransform withQueryPlannerClass(Class<? extends QueryPlanner> clazz) {
     return toBuilder().setQueryPlannerClassName(clazz.getName()).build();
   }
@@ -257,12 +262,12 @@ public abstract class SqlTransform extends PTransform<PInput, PCollection<Row>> 
   public SqlTransform withAutoLoading(boolean autoLoading) {
     return toBuilder().setAutoLoading(autoLoading).build();
   }
+
   /**
    * register a UDF function used in this query.
    *
    * <p>Refer to {@link BeamSqlUdf} for more about how to implement a UDF in BeamSql.
    */
-  @Experimental
   public SqlTransform registerUdf(String functionName, Class<? extends BeamSqlUdf> clazz) {
     return registerUdf(functionName, clazz, BeamSqlUdf.UDF_METHOD);
   }
@@ -271,7 +276,6 @@ public abstract class SqlTransform extends PTransform<PInput, PCollection<Row>> 
    * Register {@link SerializableFunction} as a UDF function used in this query. Note, {@link
    * SerializableFunction} must have a constructor without arguments.
    */
-  @Experimental
   public SqlTransform registerUdf(String functionName, SerializableFunction sfn) {
     return registerUdf(functionName, sfn.getClass(), "apply");
   }
@@ -287,7 +291,6 @@ public abstract class SqlTransform extends PTransform<PInput, PCollection<Row>> 
   }
 
   /** register a {@link Combine.CombineFn} as UDAF function used in this query. */
-  @Experimental
   public SqlTransform registerUdaf(String functionName, Combine.CombineFn combineFn) {
     ImmutableList<UdafDefinition> newUdafs =
         ImmutableList.<UdafDefinition>builder()
@@ -296,6 +299,11 @@ public abstract class SqlTransform extends PTransform<PInput, PCollection<Row>> 
             .build();
 
     return toBuilder().setUdafDefinitions(newUdafs).build();
+  }
+
+  public SqlTransform withErrorsTransformer(
+      PTransform<PCollection<Row>, ? extends POutput> errorsTransformer) {
+    return toBuilder().setErrorsTransformer(errorsTransformer).build();
   }
 
   abstract Builder toBuilder();
@@ -319,9 +327,9 @@ public abstract class SqlTransform extends PTransform<PInput, PCollection<Row>> 
 
     abstract Builder setDdlStrings(List<String> ddlStrings);
 
-    abstract @Experimental Builder setUdfDefinitions(List<UdfDefinition> udfDefinitions);
+    abstract Builder setUdfDefinitions(List<UdfDefinition> udfDefinitions);
 
-    abstract @Experimental Builder setUdafDefinitions(List<UdafDefinition> udafDefinitions);
+    abstract Builder setUdafDefinitions(List<UdafDefinition> udafDefinitions);
 
     abstract Builder setAutoLoading(boolean autoLoading);
 
@@ -331,12 +339,14 @@ public abstract class SqlTransform extends PTransform<PInput, PCollection<Row>> 
 
     abstract Builder setQueryPlannerClassName(@Nullable String queryPlannerClassName);
 
+    abstract Builder setErrorsTransformer(
+        @Nullable PTransform<PCollection<Row>, ? extends POutput> errorsTransformer);
+
     abstract SqlTransform build();
   }
 
   @AutoValue
   @AutoValue.CopyAnnotations
-  @Experimental
   abstract static class UdfDefinition {
     abstract String udfName();
 
@@ -351,7 +361,6 @@ public abstract class SqlTransform extends PTransform<PInput, PCollection<Row>> 
 
   @AutoValue
   @AutoValue.CopyAnnotations
-  @Experimental
   abstract static class UdafDefinition {
     abstract String udafName();
 

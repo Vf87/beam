@@ -20,8 +20,8 @@ package org.apache.beam.runners.direct;
 import org.apache.beam.runners.local.Bundle;
 import org.apache.beam.runners.local.StructuralKey;
 import org.apache.beam.sdk.transforms.PTransform;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.WindowedValue;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
@@ -35,8 +35,7 @@ import org.joda.time.Instant;
 interface CommittedBundle<T> extends Bundle<T, PCollection<T>> {
   /** Returns the PCollection that the elements of this bundle belong to. */
   @Override
-  @Nullable
-  PCollection<T> getPCollection();
+  @Nullable PCollection<T> getPCollection();
 
   /**
    * Returns the key that was output in the most recent {@code GroupByKey} in the execution of this
@@ -71,6 +70,7 @@ interface CommittedBundle<T> extends Bundle<T, PCollection<T>> {
    */
   @Override
   Instant getSynchronizedProcessingOutputWatermark();
+
   /**
    * Return a new {@link CommittedBundle} that is like this one, except calls to {@link
    * #getElements()} will return the provided elements. This bundle is unchanged.

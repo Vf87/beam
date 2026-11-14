@@ -17,8 +17,9 @@
  */
 package org.apache.beam.runners.dataflow;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects.toStringHelper;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects.toStringHelper;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.ArrayDeque;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.runners.AppliedPTransform;
@@ -32,7 +33,7 @@ import org.apache.beam.sdk.transforms.PTransform;
  * not general enough to be shared between runners.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 class DataflowPTransformMatchers {
   private DataflowPTransformMatchers() {}
@@ -69,6 +70,7 @@ class DataflowPTransformMatchers {
           && parentIsCombinePerKey(application);
     }
 
+    @SuppressFBWarnings("DCN_NULLPOINTER_EXCEPTION") // TODO(#35312)
     private boolean parentIsCombinePerKey(AppliedPTransform<?, ?, ?> application) {
       // We want the PipelineVisitor below to change the parent, but the parent must be final to
       // be captured in there. To work around this issue, wrap the parent in a one element array.

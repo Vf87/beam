@@ -17,14 +17,20 @@
  */
 package org.apache.beam.runners.dataflow;
 
-import static org.apache.beam.sdk.util.WindowedValue.valueInGlobalWindow;
+import static org.apache.beam.sdk.values.WindowedValues.valueInGlobalWindow;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.Assert.assertEquals;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.apache.beam.runners.core.DoFnRunner;
+import org.apache.beam.runners.core.DoFnRunners;
+import org.apache.beam.runners.core.NullSideInputReader;
 import org.apache.beam.runners.dataflow.BatchViewOverrides.TransformedMap;
 import org.apache.beam.runners.dataflow.internal.IsmFormat;
 import org.apache.beam.runners.dataflow.internal.IsmFormat.IsmRecord;
@@ -33,17 +39,24 @@ import org.apache.beam.runners.dataflow.internal.IsmFormat.MetadataKeyCoder;
 import org.apache.beam.sdk.coders.BigEndianLongCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.VarLongCoder;
-import org.apache.beam.sdk.transforms.DoFnTester;
+import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.DoFnSchemaInformation;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.util.CoderUtils;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.sdk.util.WindowedValue.FullWindowedValueCoder;
+import org.apache.beam.sdk.util.UserCodeException;
+import org.apache.beam.sdk.util.WindowedValueMultiReceiver;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.sdk.values.WindowedValues.FullWindowedValueCoder;
+import org.apache.beam.sdk.values.WindowingStrategy;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Throwables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.joda.time.Instant;
 import org.junit.Rule;
 import org.junit.Test;
@@ -58,16 +71,16 @@ public class BatchViewOverridesTest {
 
   @Test
   public void testBatchViewAsSingletonToIsmRecord() throws Exception {
-    DoFnTester<
+    DoFn<
             KV<Integer, Iterable<KV<GlobalWindow, WindowedValue<String>>>>,
             IsmRecord<WindowedValue<String>>>
-        doFnTester =
-            DoFnTester.of(
-                new BatchViewOverrides.BatchViewAsSingleton.IsmRecordForSingularValuePerWindowDoFn<
-                    String, GlobalWindow>(GlobalWindow.Coder.INSTANCE));
+        fn =
+            new BatchViewOverrides.BatchViewAsSingleton.IsmRecordForSingularValuePerWindowDoFn<
+                String, GlobalWindow>(GlobalWindow.Coder.INSTANCE);
 
     assertThat(
-        doFnTester.processBundle(
+        processBundle(
+            fn,
             ImmutableList.of(
                 KV.of(
                     0, ImmutableList.of(KV.of(GlobalWindow.INSTANCE, valueInGlobalWindow("a")))))),
@@ -77,17 +90,17 @@ public class BatchViewOverridesTest {
   @Test
   public void testBatchViewAsSingletonToIsmRecordWithMultipleValuesThrowsException()
       throws Exception {
-    DoFnTester<
+    DoFn<
             KV<Integer, Iterable<KV<GlobalWindow, WindowedValue<String>>>>,
             IsmRecord<WindowedValue<String>>>
-        doFnTester =
-            DoFnTester.of(
-                new BatchViewOverrides.BatchViewAsSingleton.IsmRecordForSingularValuePerWindowDoFn<
-                    String, GlobalWindow>(GlobalWindow.Coder.INSTANCE));
+        fn =
+            new BatchViewOverrides.BatchViewAsSingleton.IsmRecordForSingularValuePerWindowDoFn<
+                String, GlobalWindow>(GlobalWindow.Coder.INSTANCE);
 
     thrown.expect(IllegalStateException.class);
     thrown.expectMessage("found for singleton within window");
-    doFnTester.processBundle(
+    processBundle(
+        fn,
         ImmutableList.of(
             KV.of(
                 0,
@@ -98,13 +111,12 @@ public class BatchViewOverridesTest {
 
   @Test
   public void testBatchViewAsListToIsmRecordForGlobalWindow() throws Exception {
-    DoFnTester<String, IsmRecord<WindowedValue<String>>> doFnTester =
-        DoFnTester.of(
-            new BatchViewOverrides.BatchViewAsList.ToIsmRecordForGlobalWindowDoFn<String>());
+    DoFn<String, IsmRecord<WindowedValue<String>>> fn =
+        new BatchViewOverrides.BatchViewAsList.ToIsmRecordForGlobalWindowDoFn<String>();
 
     // The order of the output elements is important relative to processing order
     assertThat(
-        doFnTester.processBundle(ImmutableList.of("a", "b", "c")),
+        processBundle(fn, ImmutableList.of("a", "b", "c")),
         contains(
             IsmRecord.of(ImmutableList.of(GlobalWindow.INSTANCE, 0L), valueInGlobalWindow("a")),
             IsmRecord.of(ImmutableList.of(GlobalWindow.INSTANCE, 1L), valueInGlobalWindow("b")),
@@ -113,13 +125,12 @@ public class BatchViewOverridesTest {
 
   @Test
   public void testBatchViewAsListToIsmRecordForNonGlobalWindow() throws Exception {
-    DoFnTester<
+    DoFn<
             KV<Integer, Iterable<KV<IntervalWindow, WindowedValue<Long>>>>,
             IsmRecord<WindowedValue<Long>>>
-        doFnTester =
-            DoFnTester.of(
-                new BatchViewOverrides.BatchViewAsList.ToIsmRecordForNonGlobalWindowDoFn<
-                    Long, IntervalWindow>(IntervalWindow.getCoder()));
+        fn =
+            new BatchViewOverrides.BatchViewAsList.ToIsmRecordForNonGlobalWindowDoFn<
+                Long, IntervalWindow>(IntervalWindow.getCoder());
 
     IntervalWindow windowA = new IntervalWindow(new Instant(0), new Instant(10));
     IntervalWindow windowB = new IntervalWindow(new Instant(10), new Instant(20));
@@ -133,50 +144,51 @@ public class BatchViewOverridesTest {
                     ImmutableList.of(
                         KV.of(
                             windowA,
-                            WindowedValue.of(110L, new Instant(1), windowA, PaneInfo.NO_FIRING)),
+                            WindowedValues.of(110L, new Instant(1), windowA, PaneInfo.NO_FIRING)),
                         KV.of(
                             windowA,
-                            WindowedValue.of(111L, new Instant(3), windowA, PaneInfo.NO_FIRING)),
+                            WindowedValues.of(111L, new Instant(3), windowA, PaneInfo.NO_FIRING)),
                         KV.of(
                             windowA,
-                            WindowedValue.of(112L, new Instant(4), windowA, PaneInfo.NO_FIRING)),
+                            WindowedValues.of(112L, new Instant(4), windowA, PaneInfo.NO_FIRING)),
                         KV.of(
                             windowB,
-                            WindowedValue.of(120L, new Instant(12), windowB, PaneInfo.NO_FIRING)),
+                            WindowedValues.of(120L, new Instant(12), windowB, PaneInfo.NO_FIRING)),
                         KV.of(
                             windowB,
-                            WindowedValue.of(121L, new Instant(14), windowB, PaneInfo.NO_FIRING)))),
+                            WindowedValues.of(
+                                121L, new Instant(14), windowB, PaneInfo.NO_FIRING)))),
             KV.of(
                 2,
                 (Iterable<KV<IntervalWindow, WindowedValue<Long>>>)
                     ImmutableList.of(
                         KV.of(
                             windowC,
-                            WindowedValue.of(
+                            WindowedValues.of(
                                 210L, new Instant(25), windowC, PaneInfo.NO_FIRING)))));
 
     // The order of the output elements is important relative to processing order
     assertThat(
-        doFnTester.processBundle(inputElements),
+        processBundle(fn, inputElements),
         contains(
             IsmRecord.of(
                 ImmutableList.of(windowA, 0L),
-                WindowedValue.of(110L, new Instant(1), windowA, PaneInfo.NO_FIRING)),
+                WindowedValues.of(110L, new Instant(1), windowA, PaneInfo.NO_FIRING)),
             IsmRecord.of(
                 ImmutableList.of(windowA, 1L),
-                WindowedValue.of(111L, new Instant(3), windowA, PaneInfo.NO_FIRING)),
+                WindowedValues.of(111L, new Instant(3), windowA, PaneInfo.NO_FIRING)),
             IsmRecord.of(
                 ImmutableList.of(windowA, 2L),
-                WindowedValue.of(112L, new Instant(4), windowA, PaneInfo.NO_FIRING)),
+                WindowedValues.of(112L, new Instant(4), windowA, PaneInfo.NO_FIRING)),
             IsmRecord.of(
                 ImmutableList.of(windowB, 0L),
-                WindowedValue.of(120L, new Instant(12), windowB, PaneInfo.NO_FIRING)),
+                WindowedValues.of(120L, new Instant(12), windowB, PaneInfo.NO_FIRING)),
             IsmRecord.of(
                 ImmutableList.of(windowB, 1L),
-                WindowedValue.of(121L, new Instant(14), windowB, PaneInfo.NO_FIRING)),
+                WindowedValues.of(121L, new Instant(14), windowB, PaneInfo.NO_FIRING)),
             IsmRecord.of(
                 ImmutableList.of(windowC, 0L),
-                WindowedValue.of(210L, new Instant(25), windowC, PaneInfo.NO_FIRING))));
+                WindowedValues.of(210L, new Instant(25), windowC, PaneInfo.NO_FIRING))));
   }
 
   @Test
@@ -195,18 +207,17 @@ public class BatchViewOverridesTest {
                 MetadataKeyCoder.of(keyCoder), IntervalWindow.getCoder(), BigEndianLongCoder.of()),
             FullWindowedValueCoder.of(VarLongCoder.of(), windowCoder));
 
-    DoFnTester<
+    DoFn<
             KV<Integer, Iterable<KV<KV<Long, IntervalWindow>, WindowedValue<Long>>>>,
             IsmRecord<WindowedValue<Long>>>
-        doFnTester =
-            DoFnTester.of(
-                new BatchViewOverrides.BatchViewAsMultimap.ToIsmRecordForMapLikeDoFn<>(
-                    outputForSizeTag,
-                    outputForEntrySetTag,
-                    windowCoder,
-                    keyCoder,
-                    ismCoder,
-                    false /* unique keys */));
+        fn =
+            new BatchViewOverrides.BatchViewAsMultimap.ToIsmRecordForMapLikeDoFn<>(
+                outputForSizeTag,
+                outputForEntrySetTag,
+                windowCoder,
+                keyCoder,
+                ismCoder,
+                false /* unique keys */);
 
     IntervalWindow windowA = new IntervalWindow(new Instant(0), new Instant(10));
     IntervalWindow windowB = new IntervalWindow(new Instant(10), new Instant(20));
@@ -221,27 +232,27 @@ public class BatchViewOverridesTest {
                         ImmutableList.of(
                             KV.of(
                                 KV.of(1L, windowA),
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     110L, new Instant(1), windowA, PaneInfo.NO_FIRING)),
                             // same window same key as to previous
                             KV.of(
                                 KV.of(1L, windowA),
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     111L, new Instant(2), windowA, PaneInfo.NO_FIRING)),
                             // same window different key as to previous
                             KV.of(
                                 KV.of(2L, windowA),
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     120L, new Instant(3), windowA, PaneInfo.NO_FIRING)),
                             // different window same key as to previous
                             KV.of(
                                 KV.of(2L, windowB),
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     210L, new Instant(11), windowB, PaneInfo.NO_FIRING)),
                             // different window and different key as to previous
                             KV.of(
                                 KV.of(3L, windowB),
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     220L, new Instant(12), windowB, PaneInfo.NO_FIRING)))),
                 KV.of(
                     2,
@@ -250,35 +261,43 @@ public class BatchViewOverridesTest {
                             // different shard
                             KV.of(
                                 KV.of(4L, windowC),
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     330L, new Instant(21), windowC, PaneInfo.NO_FIRING)))));
+
+    TupleTag<IsmRecord<WindowedValue<Long>>> mainOutputTag = new TupleTag<>();
+    BundleOutputs outputs =
+        processBundle(
+            fn,
+            inputElements,
+            mainOutputTag,
+            ImmutableList.of(outputForSizeTag, outputForEntrySetTag));
 
     // The order of the output elements is important relative to processing order
     assertThat(
-        doFnTester.processBundle(inputElements),
+        outputs.get(mainOutputTag),
         contains(
             IsmRecord.of(
                 ImmutableList.of(1L, windowA, 0L),
-                WindowedValue.of(110L, new Instant(1), windowA, PaneInfo.NO_FIRING)),
+                WindowedValues.of(110L, new Instant(1), windowA, PaneInfo.NO_FIRING)),
             IsmRecord.of(
                 ImmutableList.of(1L, windowA, 1L),
-                WindowedValue.of(111L, new Instant(2), windowA, PaneInfo.NO_FIRING)),
+                WindowedValues.of(111L, new Instant(2), windowA, PaneInfo.NO_FIRING)),
             IsmRecord.of(
                 ImmutableList.of(2L, windowA, 0L),
-                WindowedValue.of(120L, new Instant(3), windowA, PaneInfo.NO_FIRING)),
+                WindowedValues.of(120L, new Instant(3), windowA, PaneInfo.NO_FIRING)),
             IsmRecord.of(
                 ImmutableList.of(2L, windowB, 0L),
-                WindowedValue.of(210L, new Instant(11), windowB, PaneInfo.NO_FIRING)),
+                WindowedValues.of(210L, new Instant(11), windowB, PaneInfo.NO_FIRING)),
             IsmRecord.of(
                 ImmutableList.of(3L, windowB, 0L),
-                WindowedValue.of(220L, new Instant(12), windowB, PaneInfo.NO_FIRING)),
+                WindowedValues.of(220L, new Instant(12), windowB, PaneInfo.NO_FIRING)),
             IsmRecord.of(
                 ImmutableList.of(4L, windowC, 0L),
-                WindowedValue.of(330L, new Instant(21), windowC, PaneInfo.NO_FIRING))));
+                WindowedValues.of(330L, new Instant(21), windowC, PaneInfo.NO_FIRING))));
 
     // Verify the number of unique keys per window.
     assertThat(
-        doFnTester.takeOutputElements(outputForSizeTag),
+        outputs.get(outputForSizeTag),
         contains(
             KV.of(
                 ismCoder.hash(ImmutableList.of(IsmFormat.getMetadataKey(), windowA)),
@@ -292,7 +311,7 @@ public class BatchViewOverridesTest {
 
     // Verify the output for the unique keys.
     assertThat(
-        doFnTester.takeOutputElements(outputForEntrySetTag),
+        outputs.get(outputForEntrySetTag),
         contains(
             KV.of(
                 ismCoder.hash(ImmutableList.of(IsmFormat.getMetadataKey(), windowA)),
@@ -327,18 +346,17 @@ public class BatchViewOverridesTest {
                 MetadataKeyCoder.of(keyCoder), IntervalWindow.getCoder(), BigEndianLongCoder.of()),
             FullWindowedValueCoder.of(VarLongCoder.of(), windowCoder));
 
-    DoFnTester<
+    DoFn<
             KV<Integer, Iterable<KV<KV<Long, IntervalWindow>, WindowedValue<Long>>>>,
             IsmRecord<WindowedValue<Long>>>
-        doFnTester =
-            DoFnTester.of(
-                new BatchViewOverrides.BatchViewAsMultimap.ToIsmRecordForMapLikeDoFn<>(
-                    outputForSizeTag,
-                    outputForEntrySetTag,
-                    windowCoder,
-                    keyCoder,
-                    ismCoder,
-                    true /* unique keys */));
+        fn =
+            new BatchViewOverrides.BatchViewAsMultimap.ToIsmRecordForMapLikeDoFn<>(
+                outputForSizeTag,
+                outputForEntrySetTag,
+                windowCoder,
+                keyCoder,
+                ismCoder,
+                true /* unique keys */);
 
     IntervalWindow windowA = new IntervalWindow(new Instant(0), new Instant(10));
 
@@ -351,17 +369,17 @@ public class BatchViewOverridesTest {
                         ImmutableList.of(
                             KV.of(
                                 KV.of(1L, windowA),
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     110L, new Instant(1), windowA, PaneInfo.NO_FIRING)),
                             // same window same key as to previous
                             KV.of(
                                 KV.of(1L, windowA),
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     111L, new Instant(2), windowA, PaneInfo.NO_FIRING)))));
 
     thrown.expect(IllegalStateException.class);
     thrown.expectMessage("Unique keys are expected but found key");
-    doFnTester.processBundle(inputElements);
+    processBundle(fn, inputElements);
   }
 
   @Test
@@ -378,11 +396,9 @@ public class BatchViewOverridesTest {
                 MetadataKeyCoder.of(keyCoder), IntervalWindow.getCoder(), BigEndianLongCoder.of()),
             FullWindowedValueCoder.of(VarLongCoder.of(), windowCoder));
 
-    DoFnTester<KV<Integer, Iterable<KV<IntervalWindow, Long>>>, IsmRecord<WindowedValue<Long>>>
-        doFnTester =
-            DoFnTester.of(
-                new BatchViewOverrides.BatchViewAsMultimap.ToIsmMetadataRecordForSizeDoFn<
-                    Long, Long, IntervalWindow>(windowCoder));
+    DoFn<KV<Integer, Iterable<KV<IntervalWindow, Long>>>, IsmRecord<WindowedValue<Long>>> fn =
+        new BatchViewOverrides.BatchViewAsMultimap.ToIsmMetadataRecordForSizeDoFn<
+            Long, Long, IntervalWindow>(windowCoder);
 
     IntervalWindow windowA = new IntervalWindow(new Instant(0), new Instant(10));
     IntervalWindow windowB = new IntervalWindow(new Instant(10), new Instant(20));
@@ -400,7 +416,7 @@ public class BatchViewOverridesTest {
 
     // The order of the output elements is important relative to processing order
     assertThat(
-        doFnTester.processBundle(inputElements),
+        processBundle(fn, inputElements),
         contains(
             IsmRecord.<WindowedValue<Long>>meta(
                 ImmutableList.of(IsmFormat.getMetadataKey(), windowA, 0L),
@@ -427,11 +443,9 @@ public class BatchViewOverridesTest {
                 MetadataKeyCoder.of(keyCoder), IntervalWindow.getCoder(), BigEndianLongCoder.of()),
             FullWindowedValueCoder.of(VarLongCoder.of(), windowCoder));
 
-    DoFnTester<KV<Integer, Iterable<KV<IntervalWindow, Long>>>, IsmRecord<WindowedValue<Long>>>
-        doFnTester =
-            DoFnTester.of(
-                new BatchViewOverrides.BatchViewAsMultimap.ToIsmMetadataRecordForKeyDoFn<
-                    Long, Long, IntervalWindow>(keyCoder, windowCoder));
+    DoFn<KV<Integer, Iterable<KV<IntervalWindow, Long>>>, IsmRecord<WindowedValue<Long>>> fn =
+        new BatchViewOverrides.BatchViewAsMultimap.ToIsmMetadataRecordForKeyDoFn<
+            Long, Long, IntervalWindow>(keyCoder, windowCoder);
 
     IntervalWindow windowA = new IntervalWindow(new Instant(0), new Instant(10));
     IntervalWindow windowB = new IntervalWindow(new Instant(10), new Instant(20));
@@ -454,7 +468,7 @@ public class BatchViewOverridesTest {
 
     // The order of the output elements is important relative to processing order
     assertThat(
-        doFnTester.processBundle(inputElements),
+        processBundle(fn, inputElements),
         contains(
             IsmRecord.<WindowedValue<Long>>meta(
                 ImmutableList.of(IsmFormat.getMetadataKey(), windowA, 1L),
@@ -474,13 +488,12 @@ public class BatchViewOverridesTest {
   public void testToMapDoFn() throws Exception {
     Coder<IntervalWindow> windowCoder = IntervalWindow.getCoder();
 
-    DoFnTester<
+    DoFn<
             KV<Integer, Iterable<KV<IntervalWindow, WindowedValue<KV<Long, Long>>>>>,
             IsmRecord<WindowedValue<TransformedMap<Long, WindowedValue<Long>, Long>>>>
-        doFnTester =
-            DoFnTester.of(
-                new BatchViewOverrides.BatchViewAsMap.ToMapDoFn<Long, Long, IntervalWindow>(
-                    windowCoder));
+        fn =
+            new BatchViewOverrides.BatchViewAsMap.ToMapDoFn<Long, Long, IntervalWindow>(
+                windowCoder);
 
     IntervalWindow windowA = new IntervalWindow(new Instant(0), new Instant(10));
     IntervalWindow windowB = new IntervalWindow(new Instant(10), new Instant(20));
@@ -495,19 +508,19 @@ public class BatchViewOverridesTest {
                         ImmutableList.of(
                             KV.of(
                                 windowA,
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     KV.of(1L, 11L), new Instant(3), windowA, PaneInfo.NO_FIRING)),
                             KV.of(
                                 windowA,
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     KV.of(2L, 21L), new Instant(7), windowA, PaneInfo.NO_FIRING)),
                             KV.of(
                                 windowB,
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     KV.of(2L, 21L), new Instant(13), windowB, PaneInfo.NO_FIRING)),
                             KV.of(
                                 windowB,
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     KV.of(3L, 31L),
                                     new Instant(15),
                                     windowB,
@@ -518,7 +531,7 @@ public class BatchViewOverridesTest {
                         ImmutableList.of(
                             KV.of(
                                 windowC,
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     KV.of(4L, 41L),
                                     new Instant(25),
                                     windowC,
@@ -526,7 +539,7 @@ public class BatchViewOverridesTest {
 
     // The order of the output elements is important relative to processing order
     List<IsmRecord<WindowedValue<TransformedMap<Long, WindowedValue<Long>, Long>>>> output =
-        doFnTester.processBundle(inputElements);
+        processBundle(fn, inputElements);
     assertEquals(3, output.size());
     Map<Long, Long> outputMap;
 
@@ -547,14 +560,13 @@ public class BatchViewOverridesTest {
   public void testToMultimapDoFn() throws Exception {
     Coder<IntervalWindow> windowCoder = IntervalWindow.getCoder();
 
-    DoFnTester<
+    DoFn<
             KV<Integer, Iterable<KV<IntervalWindow, WindowedValue<KV<Long, Long>>>>>,
             IsmRecord<
                 WindowedValue<TransformedMap<Long, Iterable<WindowedValue<Long>>, Iterable<Long>>>>>
-        doFnTester =
-            DoFnTester.of(
-                new BatchViewOverrides.BatchViewAsMultimap.ToMultimapDoFn<
-                    Long, Long, IntervalWindow>(windowCoder));
+        fn =
+            new BatchViewOverrides.BatchViewAsMultimap.ToMultimapDoFn<Long, Long, IntervalWindow>(
+                windowCoder);
 
     IntervalWindow windowA = new IntervalWindow(new Instant(0), new Instant(10));
     IntervalWindow windowB = new IntervalWindow(new Instant(10), new Instant(20));
@@ -569,29 +581,29 @@ public class BatchViewOverridesTest {
                         ImmutableList.of(
                             KV.of(
                                 windowA,
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     KV.of(1L, 11L), new Instant(3), windowA, PaneInfo.NO_FIRING)),
                             // [BEAM-5184] Specifically test with a duplicate value to ensure that
                             // duplicate key/values are not lost.
                             KV.of(
                                 windowA,
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     KV.of(1L, 11L), new Instant(3), windowA, PaneInfo.NO_FIRING)),
                             KV.of(
                                 windowA,
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     KV.of(1L, 12L), new Instant(5), windowA, PaneInfo.NO_FIRING)),
                             KV.of(
                                 windowA,
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     KV.of(2L, 21L), new Instant(7), windowA, PaneInfo.NO_FIRING)),
                             KV.of(
                                 windowB,
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     KV.of(2L, 21L), new Instant(13), windowB, PaneInfo.NO_FIRING)),
                             KV.of(
                                 windowB,
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     KV.of(3L, 31L),
                                     new Instant(15),
                                     windowB,
@@ -602,7 +614,7 @@ public class BatchViewOverridesTest {
                         ImmutableList.of(
                             KV.of(
                                 windowC,
-                                WindowedValue.of(
+                                WindowedValues.of(
                                     KV.of(4L, 41L),
                                     new Instant(25),
                                     windowC,
@@ -612,7 +624,7 @@ public class BatchViewOverridesTest {
     List<
             IsmRecord<
                 WindowedValue<TransformedMap<Long, Iterable<WindowedValue<Long>>, Iterable<Long>>>>>
-        output = doFnTester.processBundle(inputElements);
+        output = processBundle(fn, inputElements);
     assertEquals(3, output.size());
     Map<Long, Iterable<Long>> outputMap;
 
@@ -629,5 +641,68 @@ public class BatchViewOverridesTest {
     outputMap = output.get(2).getValue().getValue();
     assertEquals(1, outputMap.size());
     assertThat(outputMap.get(4L), containsInAnyOrder(41L));
+  }
+
+  /** Outputs of one bundle, by tag, in the order the fn emitted them. */
+  private static class BundleOutputs {
+    private final Map<TupleTag<?>, List<Object>> byTag = new HashMap<>();
+
+    @SuppressWarnings("unchecked")
+    <T> List<T> get(TupleTag<T> tag) {
+      return (List<T>) byTag.getOrDefault(tag, Collections.emptyList());
+    }
+  }
+
+  private static <InputT, OutputT> List<OutputT> processBundle(
+      DoFn<InputT, OutputT> fn, Iterable<InputT> inputs) {
+    TupleTag<OutputT> mainOutputTag = new TupleTag<>();
+    return processBundle(fn, inputs, mainOutputTag, Collections.emptyList()).get(mainOutputTag);
+  }
+
+  /**
+   * Runs {@code fn} over {@code inputs} in a single bundle, in-process, in the global window. These
+   * fns number their output by position within the bundle, so the tests need one bundle with a
+   * known input order, which a {@code TestPipeline} does not guarantee.
+   */
+  private static <InputT, OutputT> BundleOutputs processBundle(
+      DoFn<InputT, OutputT> fn,
+      Iterable<InputT> inputs,
+      TupleTag<OutputT> mainOutputTag,
+      List<TupleTag<?>> additionalOutputTags) {
+    BundleOutputs outputs = new BundleOutputs();
+    DoFnRunner<InputT, OutputT> runner =
+        DoFnRunners.simpleRunner(
+            PipelineOptionsFactory.create(),
+            fn,
+            NullSideInputReader.empty(),
+            new WindowedValueMultiReceiver() {
+              @Override
+              public <T> void output(TupleTag<T> tag, WindowedValue<T> output) {
+                outputs
+                    .byTag
+                    .computeIfAbsent(tag, unused -> new ArrayList<>())
+                    .add(output.getValue());
+              }
+            },
+            mainOutputTag,
+            additionalOutputTags,
+            null,
+            null,
+            Collections.emptyMap(),
+            WindowingStrategy.globalDefault(),
+            DoFnSchemaInformation.create(),
+            Collections.emptyMap());
+    try {
+      runner.startBundle();
+      for (InputT input : inputs) {
+        runner.processElement(WindowedValues.valueInGlobalWindow(input));
+      }
+      runner.finishBundle();
+    } catch (UserCodeException e) {
+      // Surface the fn's own exception, as the tests expect it rather than the runner's wrapper.
+      Throwables.throwIfUnchecked(e.getCause());
+      throw e;
+    }
+    return outputs;
   }
 }

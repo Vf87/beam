@@ -18,7 +18,7 @@
 package org.apache.beam.sdk.io.aws2.kinesis;
 
 import java.io.Serializable;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Ordering;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Ordering;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 
@@ -125,8 +125,7 @@ public interface WatermarkPolicyFactory extends Serializable {
     @Override
     public void update(KinesisRecord record) {
       watermarkParameters =
-          watermarkParameters
-              .toBuilder()
+          watermarkParameters.toBuilder()
               .setEventTime(
                   Ordering.natural()
                       .max(

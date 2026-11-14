@@ -16,6 +16,15 @@
 
 set -e
 
+# Get currently used Python version from Gradle or assume a default.
+PYTHON=${1:-python3}
+if ! command -v "${PYTHON}" >/dev/null 2>&1; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON=python3
+  else
+    PYTHON=python
+  fi
+fi
 SCRIPT_DIR="${PWD}/license_scripts"
 ENV_DIR="${PWD}/build/virtualenv"
 
@@ -37,20 +46,33 @@ echo "Copying already-fetched licenses from ${EXISTING_LICENSE_DIR} to ${DOWNLOA
 if [ -d "$DOWNLOAD_DIR" ]; then rm -rf "$DOWNLOAD_DIR" ; fi
 mkdir -p "$DOWNLOAD_DIR"
 cp -r "${EXISTING_LICENSE_DIR}"/*.jar "${DOWNLOAD_DIR}"
-
-# activate virtualenv
-virtualenv --python=python3 ${ENV_DIR} && . ${ENV_DIR}/bin/activate
+${PYTHON} -m venv --clear ${ENV_DIR} --without-pip --system-site-packages
+. ${ENV_DIR}/bin/activate
+if ! python -m pip --version >/dev/null 2>&1; then
+  GET_PIP_URL="https://bootstrap.pypa.io/get-pip.py"
+  if command -v curl >/dev/null 2>&1; then
+    curl -sSL "$GET_PIP_URL" | python
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- "$GET_PIP_URL" | python
+  else
+    echo "Neither curl nor wget found; cannot bootstrap pip"
+    exit 1
+  fi
+fi
+python -m pip install --retries 10 --upgrade pip setuptools wheel
 
 # install packages
-${ENV_DIR}/bin/pip install -r ${SCRIPT_DIR}/requirement.txt
+python -m pip install --retries 10 -r ${SCRIPT_DIR}/requirement.txt
 
 # pull licenses, notices and source code
 FLAGS="--license_index=${INDEX_FILE} \
        --output_dir=${DOWNLOAD_DIR} \
-       --dep_url_yaml=${SCRIPT_DIR}/dep_urls_java.yaml "
+       --dep_url_yaml=${SCRIPT_DIR}/dep_urls_java.yaml \
+       --manual_license_path=${SCRIPT_DIR}/manual_licenses \
+       --use_license_cache"
 
-echo "Executing ${ENV_DIR}/bin/python ${SCRIPT_DIR}/pull_licenses_java.py $FLAGS"
-"${ENV_DIR}/bin/python" "${SCRIPT_DIR}/pull_licenses_java.py" $FLAGS
+echo "Executing python ${SCRIPT_DIR}/pull_licenses_java.py $FLAGS"
+python "${SCRIPT_DIR}/pull_licenses_java.py" $FLAGS
 
 # If this script is running, it is assumed that outputs are out of date and should be cleared and rewritten
 if [ -d "$DEST_DIR" ]; then rm -rf "$DEST_DIR"; fi

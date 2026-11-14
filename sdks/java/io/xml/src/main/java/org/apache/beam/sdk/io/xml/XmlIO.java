@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.io.xml;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.auto.value.AutoValue;
 import java.io.IOException;
@@ -49,12 +49,12 @@ import org.apache.beam.sdk.transforms.display.HasDisplayData;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Transforms for reading and writing XML files using JAXB mappers. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class XmlIO {
   // CHECKSTYLE.OFF: JavadocStyle
@@ -252,25 +252,27 @@ public class XmlIO {
       abstract Read<T> build();
     }
 
-    /** @deprecated Use {@link Compression} instead. */
+    /**
+     * @deprecated Use {@link Compression} instead.
+     */
     @Deprecated
     public enum CompressionType {
-      /** @see Compression#AUTO */
+      /** See {@link Compression#AUTO}. */
       AUTO(Compression.AUTO),
 
-      /** @see Compression#UNCOMPRESSED */
+      /** See {@link Compression#UNCOMPRESSED}. */
       UNCOMPRESSED(Compression.UNCOMPRESSED),
 
-      /** @see Compression#GZIP */
+      /** See {@link Compression#GZIP}. */
       GZIP(Compression.GZIP),
 
-      /** @see Compression#BZIP2 */
+      /** See {@link Compression#BZIP2}. */
       BZIP2(Compression.BZIP2),
 
-      /** @see Compression#ZIP */
+      /** See {@link Compression#ZIP}. */
       ZIP(Compression.ZIP),
 
-      /** @see Compression#DEFLATE */
+      /** See {@link Compression#DEFLATE}. */
       DEFLATE(Compression.DEFLATE);
 
       private final Compression canonical;
@@ -279,7 +281,7 @@ public class XmlIO {
         this.canonical = canonical;
       }
 
-      /** @see Compression#matches */
+      /** See {@link Compression#matches}. */
       public boolean matches(String filename) {
         return canonical.matches(filename);
       }
@@ -340,7 +342,9 @@ public class XmlIO {
       return toBuilder().setMinBundleSize(minBundleSize).build();
     }
 
-    /** @deprecated use {@link #withCompression}. */
+    /**
+     * @deprecated use {@link #withCompression}.
+     */
     @Deprecated
     public Read<T> withCompressionType(CompressionType compressionType) {
       return withCompression(compressionType.canonical);

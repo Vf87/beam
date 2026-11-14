@@ -67,7 +67,7 @@ Perform Beam runner specific setup.
 
 ℹ️ Note that cross-language transforms require
 portable implementations of Spark/Flink/Direct runners. Dataflow requires
-[runner V2](https://cloud.google.com/dataflow/docs/guides/deploying-a-pipeline#dataflow-runner-v2).
+[Dataflow Portable Runner](https://cloud.google.com/dataflow/docs/guides/deploying-a-pipeline#dataflow-runner-v2).
 See [here](https://beam.apache.org/documentation/runners/dataflow/) for
 instructions for setting up Dataflow.
 
@@ -104,8 +104,7 @@ python -m apache_beam.examples.kafkataxi.kafka_taxi \
   --region $REGION \
   --num_workers $NUM_WORKERS \
   --job_name $JOB_NAME \
-  --bootstrap_servers $BOOTSTRAP_SERVER \
-  --experiments=use_runner_v2
+  --bootstrap_servers $BOOTSTRAP_SERVER
 ```
 
 ## *(Optional)*  Running the Example from a Beam Git Clone
@@ -135,8 +134,8 @@ prerequisites and additional information.
 
 ```sh
 export DOCKER_ROOT="Your Docker Repository Root"
-./gradlew :sdks:java:container:java8:docker -Pdocker-repository-root=$DOCKER_ROOT -Pdocker-tag=latest
-docker push $DOCKER_ROOT/beam_java8_sdk:latest
+./gradlew :sdks:java:container:java11:docker -Pdocker-repository-root=$DOCKER_ROOT -Pdocker-tag=latest
+docker push $DOCKER_ROOT/beam_java11_sdk:latest
 ```
 
 For portable Flink/Spark in local mode, instead of above command just build the
@@ -149,17 +148,18 @@ instructions regarding setting up other types of Python virtual environments.
 
 ```sh
 cd ..  # Creating the virtual environment in the top level work directory.
-python -m venv env
-source env/bin/activate
+python3 -m venv env
+source ./env/bin/activate
+pip install --upgrade pip setuptools wheel
 ```
 
 Install Beam and dependencies and build a Beam distribution.
 
 ```sh
 cd beam/sdks/python
-pip install -r build-requirements.txt
 pip install -e '.[gcp]'
-python setup.py sdist
+pip install -q build
+python -m build --sdist
 ```
 
 Run the Beam pipeline. You can either use the default Kafka topic name or specify
@@ -184,6 +184,5 @@ python -m apache_beam.examples.kafkataxi.kafka_taxi \
   --num_workers $NUM_WORKERS \
   --job_name $JOB_NAME \
   --bootstrap_servers $BOOTSTRAP_SERVER \
-  --sdk_harness_container_image_overrides ".*java.*,${DOCKER_ROOT}/beam_java8_sdk:latest" \
-  --experiments=use_runner_v2
+  --sdk_harness_container_image_overrides ".*java.*,${DOCKER_ROOT}/beam_java11_sdk:latest"
 ```

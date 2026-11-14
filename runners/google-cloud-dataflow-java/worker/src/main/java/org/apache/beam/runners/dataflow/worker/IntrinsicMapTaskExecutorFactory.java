@@ -17,8 +17,6 @@
  */
 package org.apache.beam.runners.dataflow.worker;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-
 import com.google.api.services.dataflow.model.InstructionOutput;
 import com.google.api.services.dataflow.model.MapTask;
 import com.google.api.services.dataflow.model.MultiOutputInfo;
@@ -33,10 +31,7 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.function.Function;
-import org.apache.beam.model.pipeline.v1.Endpoints;
 import org.apache.beam.runners.core.ElementByteSizeObservable;
-import org.apache.beam.runners.dataflow.DataflowRunner;
-import org.apache.beam.runners.dataflow.options.DataflowPipelineDebugOptions;
 import org.apache.beam.runners.dataflow.util.CloudObject;
 import org.apache.beam.runners.dataflow.util.CloudObjects;
 import org.apache.beam.runners.dataflow.worker.counters.CounterFactory;
@@ -64,27 +59,24 @@ import org.apache.beam.runners.dataflow.worker.util.common.worker.ReadOperation;
 import org.apache.beam.runners.dataflow.worker.util.common.worker.Receiver;
 import org.apache.beam.runners.dataflow.worker.util.common.worker.Sink;
 import org.apache.beam.runners.dataflow.worker.util.common.worker.WriteOperation;
-import org.apache.beam.runners.fnexecution.control.InstructionRequestHandler;
-import org.apache.beam.runners.fnexecution.data.GrpcDataService;
-import org.apache.beam.runners.fnexecution.state.GrpcStateService;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.fn.IdGenerator;
-import org.apache.beam.sdk.fn.server.GrpcFnServer;
 import org.apache.beam.sdk.options.PipelineOptions;
-import org.apache.beam.sdk.util.WindowedValue.WindowedValueCoder;
+import org.apache.beam.sdk.options.StreamingOptions;
 import org.apache.beam.sdk.util.common.ElementByteSizeObserver;
 import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.graph.MutableNetwork;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.graph.Network;
+import org.apache.beam.sdk.values.WindowedValues.WindowedValueCoder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.graph.MutableNetwork;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.graph.Network;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** Creates a {@link DataflowMapTaskExecutor} from a {@link MapTask} definition. */
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class IntrinsicMapTaskExecutorFactory implements DataflowMapTaskExecutorFactory {
   private static final Logger LOG = LoggerFactory.getLogger(IntrinsicMapTaskExecutorFactory.class);
@@ -101,10 +93,6 @@ public class IntrinsicMapTaskExecutorFactory implements DataflowMapTaskExecutorF
    */
   @Override
   public DataflowMapTaskExecutor create(
-      InstructionRequestHandler instructionRequestHandler,
-      GrpcFnServer<GrpcDataService> grpcDataFnServer,
-      Endpoints.ApiServiceDescriptor dataApiServiceDescriptor,
-      GrpcFnServer<GrpcStateService> grpcStateFnServer,
       MutableNetwork<Node, Edge> network,
       PipelineOptions options,
       String stageName,
@@ -114,21 +102,37 @@ public class IntrinsicMapTaskExecutorFactory implements DataflowMapTaskExecutorF
       CounterSet counterSet,
       IdGenerator idGenerator) {
 
-    // TODO: remove this once we trust the code paths
-    checkArgument(
-        !DataflowRunner.hasExperiment(
-            options.as(DataflowPipelineDebugOptions.class), "beam_fn_api"),
-        "experiment beam_fn_api turned on but non-Fn API MapTaskExecutorFactory invoked");
-
     // Swap out all the InstructionOutput nodes with OutputReceiver nodes
+    boolean isStreaming = options.as(StreamingOptions.class).isStreaming();
     Networks.replaceDirectedNetworkNodes(
-        network, createOutputReceiversTransform(stageName, counterSet));
+        network, createOutputReceiversTransform(stageName, counterSet, isStreaming));
 
-    // Swap out all the ParallelInstruction nodes with Operation nodes
-    Networks.replaceDirectedNetworkNodes(
-        network,
-        createOperationTransformForParallelInstructionNodes(
-            stageName, network, options, readerFactory, sinkFactory, executionContext));
+    // Swap out all the ParallelInstruction nodes with Operation nodes. While updating the network,
+    // we keep track of
+    // the created Operations so that if an exception is encountered we can properly abort started
+    // operations.
+    ArrayList<Operation> createdOperations = new ArrayList<>();
+    try {
+      Networks.replaceDirectedNetworkNodes(
+          network,
+          createOperationTransformForParallelInstructionNodes(
+              stageName,
+              network,
+              options,
+              readerFactory,
+              sinkFactory,
+              executionContext,
+              createdOperations));
+    } catch (RuntimeException exn) {
+      for (Operation o : createdOperations) {
+        try {
+          o.abort();
+        } catch (Exception exn2) {
+          exn.addSuppressed(exn2);
+        }
+      }
+      throw exn;
+    }
 
     // Collect all the operations within the network and attach all the operations as receivers
     // to preceding output receivers.
@@ -163,7 +167,8 @@ public class IntrinsicMapTaskExecutorFactory implements DataflowMapTaskExecutorF
       final PipelineOptions options,
       final ReaderFactory readerFactory,
       final SinkFactory sinkFactory,
-      final DataflowExecutionContext<?> executionContext) {
+      final DataflowExecutionContext<?> executionContext,
+      final List<Operation> createdOperations) {
 
     return new TypeSafeNodeFunction<ParallelInstructionNode>(ParallelInstructionNode.class) {
       @Override
@@ -175,20 +180,22 @@ public class IntrinsicMapTaskExecutorFactory implements DataflowMapTaskExecutorF
                 instruction.getOriginalName(),
                 instruction.getSystemName(),
                 instruction.getName());
+        OperationNode result;
         try {
           DataflowOperationContext context = executionContext.createOperationContext(nameContext);
           if (instruction.getRead() != null) {
-            return createReadOperation(
-                network, node, options, readerFactory, executionContext, context);
+            result =
+                createReadOperation(
+                    network, node, options, readerFactory, executionContext, context);
           } else if (instruction.getWrite() != null) {
-            return createWriteOperation(node, options, sinkFactory, executionContext, context);
+            result = createWriteOperation(node, options, sinkFactory, executionContext, context);
           } else if (instruction.getParDo() != null) {
-            return createParDoOperation(network, node, options, executionContext, context);
+            result = createParDoOperation(network, node, options, executionContext, context);
           } else if (instruction.getPartialGroupByKey() != null) {
-            return createPartialGroupByKeyOperation(
-                network, node, options, executionContext, context);
+            result =
+                createPartialGroupByKeyOperation(network, node, options, executionContext, context);
           } else if (instruction.getFlatten() != null) {
-            return createFlattenOperation(network, node, context);
+            result = createFlattenOperation(network, node, context);
           } else {
             throw new IllegalArgumentException(
                 String.format("Unexpected instruction: %s", instruction));
@@ -196,6 +203,8 @@ public class IntrinsicMapTaskExecutorFactory implements DataflowMapTaskExecutorF
         } catch (Exception e) {
           throw new RuntimeException(e);
         }
+        createdOperations.add(result.getOperation());
+        return result;
       }
     };
   }
@@ -338,7 +347,7 @@ public class IntrinsicMapTaskExecutorFactory implements DataflowMapTaskExecutorF
    * Returns a function which can convert {@link InstructionOutput}s into {@link OutputReceiver}s.
    */
   static Function<Node, Node> createOutputReceiversTransform(
-      final String stageName, final CounterFactory counterFactory) {
+      final String stageName, final CounterFactory counterFactory, final boolean isStreaming) {
     return new TypeSafeNodeFunction<InstructionOutputNode>(InstructionOutputNode.class) {
       @Override
       public Node typedApply(InstructionOutputNode input) {
@@ -347,9 +356,8 @@ public class IntrinsicMapTaskExecutorFactory implements DataflowMapTaskExecutorF
         Coder<?> coder =
             CloudObjects.coderFromCloudObject(CloudObject.fromSpec(cloudOutput.getCodec()));
 
-        @SuppressWarnings("unchecked")
         ElementCounter outputCounter =
-            new DataflowOutputCounter(
+            DataflowOutputCounter.create(
                 cloudOutput.getName(),
                 new ElementByteSizeObservableCoder<>(coder),
                 counterFactory,
@@ -357,7 +365,8 @@ public class IntrinsicMapTaskExecutorFactory implements DataflowMapTaskExecutorF
                     stageName,
                     cloudOutput.getOriginalName(),
                     cloudOutput.getSystemName(),
-                    cloudOutput.getName()));
+                    cloudOutput.getName()),
+                isStreaming);
         outputReceiver.addOutputCounter(outputCounter);
 
         return OutputReceiverNode.create(outputReceiver, coder, input.getPcollectionId());

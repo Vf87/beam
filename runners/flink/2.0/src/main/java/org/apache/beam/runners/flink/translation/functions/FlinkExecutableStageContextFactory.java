@@ -1,0 +1,86 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.beam.runners.flink.translation.functions;
+
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import org.apache.beam.runners.fnexecution.control.DefaultExecutableStageContext;
+import org.apache.beam.runners.fnexecution.control.ExecutableStageContext;
+import org.apache.beam.runners.fnexecution.control.ReferenceCountingExecutableStageContextFactory;
+import org.apache.beam.runners.fnexecution.control.StageBundleFactory;
+import org.apache.beam.runners.fnexecution.provisioning.JobInfo;
+import org.apache.beam.sdk.util.construction.graph.ExecutableStage;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+
+/** Singleton class that contains one {@link ExecutableStageContext.Factory} per job. */
+public class FlinkExecutableStageContextFactory implements ExecutableStageContext.Factory {
+
+  private static final FlinkExecutableStageContextFactory instance =
+      new FlinkExecutableStageContextFactory();
+  private static final ConcurrentMap<String, ExecutableStageContext.Factory> jobFactories =
+      new ConcurrentHashMap<>();
+
+  private FlinkExecutableStageContextFactory() {}
+
+  public static FlinkExecutableStageContextFactory getInstance() {
+    return instance;
+  }
+
+  @Override
+  public ExecutableStageContext get(JobInfo jobInfo) {
+    ExecutableStageContext.Factory jobFactory =
+        jobFactories.computeIfAbsent(
+            jobInfo.jobId(),
+            k ->
+                ReferenceCountingExecutableStageContextFactory.create(
+                    info -> new JobScopedExecutableStageContext(info, k),
+                    // Release immediately when the factory is not on the Flink parent classloader
+                    // (so cleanup still works after that classloader is discarded). Otherwise keep
+                    // the default environment cache delay so DoFn @Teardown can finish first.
+                    caller ->
+                        caller.getClass().getClassLoader()
+                            != StreamExecutionEnvironment.class.getClassLoader()));
+    return jobFactory.get(jobInfo);
+  }
+
+  private static class JobScopedExecutableStageContext implements ExecutableStageContext {
+    private final DefaultExecutableStageContext delegate;
+    private final String jobId;
+
+    private JobScopedExecutableStageContext(JobInfo jobInfo, String jobId) {
+      this.delegate = DefaultExecutableStageContext.create(jobInfo);
+      this.jobId = jobId;
+    }
+
+    @Override
+    public StageBundleFactory getStageBundleFactory(ExecutableStage executableStage) {
+      return delegate.getStageBundleFactory(executableStage);
+    }
+
+    @Override
+    public void close() throws Exception {
+      try {
+        delegate.close();
+      } finally {
+        // Drop the per-job factory entry so a long-lived JVM that runs many jobs does not
+        // accumulate one entry per finished job.
+        jobFactories.remove(jobId);
+      }
+    }
+  }
+}

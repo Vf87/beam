@@ -45,7 +45,7 @@ var (
 func TestValidEncoderForms(t *testing.T) {
 	tests := []struct {
 		t   reflect.Type
-		enc interface{}
+		enc any
 	}{
 		{t: mT, enc: func(MyType) []byte { return nil }},
 		{t: mT, enc: func(MyType) ([]byte, error) { return nil, nil }},
@@ -84,7 +84,7 @@ func TestValidEncoderForms(t *testing.T) {
 func TestValidDecoderForms(t *testing.T) {
 	tests := []struct {
 		t   reflect.Type
-		dec interface{}
+		dec any
 	}{
 		{t: mT, dec: func([]byte) MyType { return MyType{} }},
 		{t: mT, dec: func([]byte) (MyType, error) { return MyType{}, nil }},
@@ -168,6 +168,9 @@ func TestCoder_String(t *testing.T) {
 	}, {
 		want: "KV<bytes,varint>",
 		c:    NewKV([]*Coder{bytes, ints}),
+	}, {
+		want: "N<bytes>",
+		c:    NewN(bytes),
 	}, {
 		want: "CoGBK<bytes,varint,bytes>",
 		c:    NewCoGBK([]*Coder{bytes, ints, bytes}),
@@ -279,6 +282,10 @@ func TestCoder_Equals(t *testing.T) {
 		b:    NewKV([]*Coder{customSame, ints}),
 	}, {
 		want: true,
+		a:    NewN(custom1),
+		b:    NewN(customSame),
+	}, {
+		want: true,
 		a:    NewCoGBK([]*Coder{custom1, ints, customSame}),
 		b:    NewCoGBK([]*Coder{customSame, ints, custom1}),
 	}, {
@@ -307,7 +314,7 @@ func TestCustomCoder_Equals(t *testing.T) {
 	cusStrEnc2 := func(string) []byte { return nil }
 	cusStrDec2 := func([]byte) string { return "" }
 
-	newCC := func(t *testing.T, name string, et reflect.Type, enc, dec interface{}) *CustomCoder {
+	newCC := func(t *testing.T, name string, et reflect.Type, enc, dec any) *CustomCoder {
 		t.Helper()
 		cc, err := NewCustomCoder(name, et, enc, dec)
 		if err != nil {
@@ -512,6 +519,126 @@ func TestNewKV(t *testing.T) {
 			}
 			if test.want != nil && !test.want.Equals(got) {
 				t.Fatalf("NewKV(%v) = %v, want %v", test.cs, got, test.want)
+			}
+		})
+	}
+}
+
+func TestNewNullable(t *testing.T) {
+	bytes := NewBytes()
+
+	tests := []struct {
+		name        string
+		component   *Coder
+		shouldpanic bool
+		want        *Coder
+	}{
+		{
+			name:        "nil",
+			component:   nil,
+			shouldpanic: true,
+		},
+		{
+			name:        "empty",
+			component:   &Coder{},
+			shouldpanic: true,
+		},
+		{
+			name:        "bytes",
+			component:   bytes,
+			shouldpanic: false,
+			want: &Coder{
+				Kind:       Nullable,
+				T:          typex.New(typex.NullableType, bytes.T),
+				Components: []*Coder{bytes},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			if test.shouldpanic {
+				defer func() {
+					if p := recover(); p != nil {
+						t.Log(p)
+						return
+					}
+					t.Fatalf("NewNullable(%v): want panic", test.component)
+				}()
+			}
+			got := NewN(test.component)
+			if !IsNullable(got) {
+				t.Errorf("IsNullable(%v) = false, want true", got)
+			}
+			if test.want != nil && !test.want.Equals(got) {
+				t.Fatalf("NewNullable(%v) = %v, want %v", test.component, got, test.want)
+			}
+		})
+	}
+}
+
+func TestCoder_IsDeterministic(t *testing.T) {
+	ints := NewVarInt()
+	bytes := NewBytes()
+	bools := NewBool()
+	doubles := NewDouble()
+	strs := NewString()
+
+	enc := func(string) []byte { return nil }
+	dec := func([]byte) string { return "" }
+
+	nonDetCustom, err := NewCustomCoder("nonDet", reflectx.String, enc, dec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonDetC := &Coder{Kind: Custom, Custom: nonDetCustom, T: typex.New(reflectx.String)}
+
+	// Register a deterministic custom coder for a dedicated type.
+	type detType struct{}
+	detT := reflect.TypeOf((*detType)(nil)).Elem()
+	detEnc := func(detType) []byte { return nil }
+	detDec := func([]byte) detType { return detType{} }
+	RegisterDeterministicCoder(detT, detEnc, detDec)
+	detCustom, err := NewCustomCoder("det", detT, detEnc, detDec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detC := &Coder{Kind: Custom, Custom: detCustom, T: typex.New(detT)}
+
+	tests := []struct {
+		name string
+		c    *Coder
+		want bool
+	}{
+		{"nil", nil, false},
+		{"bytes", bytes, true},
+		{"bool", bools, true},
+		{"varint", ints, true},
+		{"double", doubles, true},
+		{"string", strs, true},
+		{"nonDetCustom", nonDetC, false},
+		{"detCustom", detC, true},
+		{"KV_bytes_varint", NewKV([]*Coder{bytes, ints}), true},
+		{"KV_bytes_nonDet", NewKV([]*Coder{bytes, nonDetC}), false},
+		{"KV_nonDet_bytes", NewKV([]*Coder{nonDetC, bytes}), false},
+		{"iterable_varint", NewI(ints), true},
+		{"iterable_nonDet", NewI(nonDetC), false},
+		{"nullable_string", NewN(strs), true},
+		{"nullable_nonDet", NewN(nonDetC), false},
+		{"CoGBK_bytes_varint", NewCoGBK([]*Coder{bytes, ints}), true},
+		{"CoGBK_nonDet_varint", NewCoGBK([]*Coder{nonDetC, ints}), false},
+		{"WindowedValue_varint", NewW(ints, NewGlobalWindow()), true},
+		{"WindowedValue_nonDet", NewW(nonDetC, NewGlobalWindow()), false},
+		{"Row", NewR(typex.New(reflect.TypeOf((*namedTypeForTest)(nil)))), false},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			got := test.c.IsDeterministic()
+			if got != test.want {
+				t.Errorf("IsDeterministic(%v) = %v, want %v", test.c, got, test.want)
 			}
 		})
 	}

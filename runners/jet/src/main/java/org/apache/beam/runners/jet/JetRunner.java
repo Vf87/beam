@@ -31,10 +31,6 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 import org.apache.beam.runners.core.SplittableParDoViaKeyedWorkItems;
-import org.apache.beam.runners.core.construction.PTransformMatchers;
-import org.apache.beam.runners.core.construction.SplittableParDo;
-import org.apache.beam.runners.core.construction.SplittableParDoNaiveBounded;
-import org.apache.beam.runners.core.construction.UnconsumedReads;
 import org.apache.beam.runners.core.metrics.MetricUpdates;
 import org.apache.beam.runners.jet.metrics.JetMetricsContainer;
 import org.apache.beam.sdk.Pipeline;
@@ -43,11 +39,15 @@ import org.apache.beam.sdk.PipelineRunner;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.runners.PTransformOverride;
 import org.apache.beam.sdk.transforms.PTransform;
+import org.apache.beam.sdk.util.construction.PTransformMatchers;
+import org.apache.beam.sdk.util.construction.SplittableParDo;
+import org.apache.beam.sdk.util.construction.SplittableParDoNaiveBounded;
+import org.apache.beam.sdk.util.construction.UnconsumedReads;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** Jet specific implementation of Beam's {@link PipelineRunner}. */
-public class JetRunner extends PipelineRunner<PipelineResult> {
+public final class JetRunner extends PipelineRunner<PipelineResult> {
 
   private static final Logger LOG = LoggerFactory.getLogger(JetRunner.class);
 
@@ -143,7 +143,7 @@ public class JetRunner extends PipelineRunner<PipelineResult> {
       for (int i = 0; i < noOfLocalMembers; i++) {
         jetInstances.add(Jet.newJetInstance());
       }
-      LOG.info("Started " + jetInstances.size() + " Jet cluster members");
+      LOG.info("Started {} Jet cluster members", jetInstances.size());
     }
   }
 

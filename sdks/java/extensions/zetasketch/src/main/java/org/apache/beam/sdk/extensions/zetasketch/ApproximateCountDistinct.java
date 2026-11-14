@@ -20,10 +20,10 @@ package org.apache.beam.sdk.extensions.zetasketch;
 import com.google.auto.value.AutoValue;
 import java.util.List;
 import javax.annotation.Nullable;
-import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.extensions.zetasketch.HllCount.Init.Builder;
+import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.Contextful;
 import org.apache.beam.sdk.transforms.Contextful.Fn;
 import org.apache.beam.sdk.transforms.MapElements;
@@ -34,9 +34,7 @@ import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 
 /**
  * {@code PTransform}s for estimating the number of distinct elements in a {@code PCollection}, or
@@ -75,10 +73,7 @@ import org.slf4j.LoggerFactory;
  *       .via(kv -> KV.of(kv.getKey(), (long) kv.getValue().hashCode())));
  * }</pre>
  */
-@Experimental
 public class ApproximateCountDistinct {
-
-  private static final Logger LOG = LoggerFactory.getLogger(ApproximateCountDistinct.class);
 
   private static final List<TypeDescriptor<?>> HLL_IMPLEMENTED_TYPES =
       ImmutableList.of(
@@ -97,6 +92,10 @@ public class ApproximateCountDistinct {
     return new AutoValue_ApproximateCountDistinct_PerKey.Builder<K, V>()
         .setPrecision(HllCount.DEFAULT_PRECISION)
         .build();
+  }
+
+  public static <T> Combine.CombineFn<T, ?, byte[]> getUdaf(TypeDescriptor<T> input) {
+    return ApproximateCountDistinct.<T>builderForType(input).asUdaf();
   }
 
   /////////////////////////////////////////////////////////////////////////////
@@ -131,7 +130,7 @@ public class ApproximateCountDistinct {
       return toBuilder().setMapping(Contextful.<T, Long>fn(fn)).build();
     }
 
-    public <V> Globally<V> withPercision(Integer withPercision) {
+    public <V> Globally<V> withPercision(int withPercision) {
       @SuppressWarnings("unchecked")
       Globally<V> globally = (Globally<V>) toBuilder().setPrecision(withPercision).build();
       return globally;
@@ -149,7 +148,7 @@ public class ApproximateCountDistinct {
         return input.apply(builder.globally()).apply(HllCount.Extract.globally());
       }
 
-      // Boiler plate to avoid  [argument.type.incompatible] NonNull vs Nullable
+      // Boiler plate to avoid  [argument] NonNull vs Nullable
       Contextful<Fn<T, Long>> mapping = getMapping();
 
       if (mapping != null) {
@@ -177,7 +176,7 @@ public class ApproximateCountDistinct {
   public abstract static class PerKey<K, V>
       extends PTransform<PCollection<KV<K, V>>, PCollection<KV<K, Long>>> {
 
-    public abstract Integer getPrecision();
+    public abstract int getPrecision();
 
     @Nullable
     public abstract Contextful<Fn<KV<K, V>, KV<K, Long>>> getMapping();
@@ -187,14 +186,14 @@ public class ApproximateCountDistinct {
     @AutoValue.Builder
     public abstract static class Builder<K, V> {
 
-      public abstract Builder<K, V> setPrecision(Integer precision);
+      public abstract Builder<K, V> setPrecision(int precision);
 
       public abstract Builder<K, V> setMapping(Contextful<Fn<KV<K, V>, KV<K, Long>>> value);
 
       public abstract PerKey<K, V> build();
     }
 
-    public <K2, V2> PerKey<K2, V2> withPercision(Integer withPercision) {
+    public <K2, V2> PerKey<K2, V2> withPercision(int withPercision) {
       // Work around for loss of type inference when using API.
       @SuppressWarnings("unchecked")
       PerKey<K2, V2> perKey = (PerKey<K2, V2>) this.toBuilder().setPrecision(withPercision).build();
@@ -220,7 +219,7 @@ public class ApproximateCountDistinct {
         return input.apply(builder.perKey()).apply(HllCount.Extract.perKey());
       }
 
-      // Boiler plate to avoid  [argument.type.incompatible] NonNull vs Nullable
+      // Boiler plate to avoid  [argument] NonNull vs Nullable
       Contextful<Fn<KV<K, V>, KV<K, Long>>> mapping = getMapping();
 
       if (mapping != null) {
@@ -257,7 +256,7 @@ public class ApproximateCountDistinct {
 
   // HLLCount supports, Long, Integers, String and Byte primitives.
   // We will return an appropriate builder
-  protected static <T> Builder<T> builderForType(TypeDescriptor<T> input) {
+  protected static <T> HllCount.Init.Builder<T> builderForType(TypeDescriptor<T> input) {
 
     @SuppressWarnings("rawtypes")
     HllCount.Init.Builder builder = null;
@@ -281,7 +280,7 @@ public class ApproximateCountDistinct {
 
     // Safe to ignore warning, as we know the type based on the check we do above.
     @SuppressWarnings("unchecked")
-    Builder<T> output = (Builder<T>) builder;
+    HllCount.Init.Builder<T> output = (HllCount.Init.Builder<T>) builder;
 
     return output;
   }

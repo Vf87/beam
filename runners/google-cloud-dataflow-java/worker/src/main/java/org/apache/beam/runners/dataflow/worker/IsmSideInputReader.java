@@ -20,9 +20,9 @@ package org.apache.beam.runners.dataflow.worker;
 import static org.apache.beam.runners.dataflow.util.Structs.addString;
 import static org.apache.beam.runners.dataflow.util.Structs.getString;
 import static org.apache.beam.sdk.util.Preconditions.checkArgumentNotNull;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import com.google.api.services.dataflow.model.SideInputInfo;
 import com.google.api.services.dataflow.model.Source;
@@ -66,10 +66,10 @@ import org.apache.beam.sdk.transforms.ViewFn;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.util.CoderUtils;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.PCollectionViews.HasDefaultValue;
+import org.apache.beam.sdk.values.PCollectionViews.IterableBackedListViewFn;
 import org.apache.beam.sdk.values.PCollectionViews.IterableViewFn;
 import org.apache.beam.sdk.values.PCollectionViews.IterableViewFn2;
 import org.apache.beam.sdk.values.PCollectionViews.ListViewFn;
@@ -81,16 +81,17 @@ import org.apache.beam.sdk.values.PCollectionViews.MultimapViewFn2;
 import org.apache.beam.sdk.values.PCollectionViews.SingletonViewFn;
 import org.apache.beam.sdk.values.PCollectionViews.SingletonViewFn2;
 import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Function;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Objects;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Throwables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.primitives.Ints;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Function;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Objects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Throwables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.primitives.Ints;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -100,10 +101,10 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * list views, and {@link #getMapForWindow} for map and multimap views.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
   "keyfor",
   "nullness"
-}) // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+}) // TODO(https://github.com/apache/beam/issues/20497)
 public class IsmSideInputReader implements SideInputReader {
   private static final String SINGLETON_KIND = "singleton";
   private static final String COLLECTION_KIND = "collection";
@@ -128,8 +129,10 @@ public class IsmSideInputReader implements SideInputReader {
 
   private final ExecutorService executorService;
   private final Set<TupleTag<?>> singletonMaterializedTags;
+
   /** A map from tuple tag to non-empty IsmReaders. */
   @VisibleForTesting final Map<TupleTag<?>, List<IsmReader<?>>> tagToIsmReaderMap;
+
   /**
    * A map from tuple tag to empty IsmReaders. Even though this is unused, we want to maintain a
    * strong reference so that it is retained in memory so the logical reference cache keeps a
@@ -354,7 +357,8 @@ public class IsmSideInputReader implements SideInputReader {
                   if (viewFn instanceof IterableViewFn
                       || viewFn instanceof IterableViewFn2
                       || viewFn instanceof ListViewFn
-                      || viewFn instanceof ListViewFn2) {
+                      || viewFn instanceof ListViewFn2
+                      || viewFn instanceof IterableBackedListViewFn) {
                     @SuppressWarnings("unchecked")
                     ViewT viewT = (ViewT) getListForWindow(tag, window);
                     return viewT;
@@ -396,7 +400,7 @@ public class IsmSideInputReader implements SideInputReader {
   private <T, W extends BoundedWindow> T getSingletonForWindow(
       TupleTag<?> viewTag, HasDefaultValue<T> viewFn, W window) throws IOException {
     @SuppressWarnings({
-      "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+      "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
       "unchecked"
     })
     List<IsmReader<WindowedValue<T>>> readers = (List) tagToIsmReaderMap.get(viewTag);
@@ -422,7 +426,7 @@ public class IsmSideInputReader implements SideInputReader {
   private <T, W extends BoundedWindow> T getMapSingletonForViewAndWindow(
       TupleTag<?> viewTag, W window) throws IOException {
     @SuppressWarnings({
-      "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+      "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
       "unchecked"
     })
     List<IsmReader<WindowedValue<T>>> readers = (List) tagToIsmReaderMap.get(viewTag);
@@ -507,10 +511,9 @@ public class IsmSideInputReader implements SideInputReader {
    * </ul>
    *
    * The {@code [META, Window, 0]} record stores the number of unique keys per window, while {@code
-   * [META, Window, i]} for {@code i} in {@code [1, size of map]} stores a the users key. This
-   * allows for one to access the size of the map by looking at {@code [META, Window, 0]} and
-   * iterate over all the keys by accessing {@code [META, Window, i]} for {@code i} in {@code [1,
-   * size of map]}.
+   * [META, Window, i]} for {@code i} in {@code [1, size of map]} stores the users key. This allows
+   * for one to access the size of the map by looking at {@code [META, Window, 0]} and iterate over
+   * all the keys by accessing {@code [META, Window, i]} for {@code i} in {@code [1, size of map]}.
    */
   private <K, V, W extends BoundedWindow> Map<K, V> getMapForWindow(TupleTag<?> tag, W window)
       throws IOException {
@@ -560,10 +563,9 @@ public class IsmSideInputReader implements SideInputReader {
    * </ul>
    *
    * The {@code [META, Window, 0]} record stores the number of unique keys per window, while {@code
-   * [META, Window, i]} for {@code i} in {@code [1, size of map]} stores a the users key. This
-   * allows for one to access the size of the map by looking at {@code [META, Window, 0]} and
-   * iterate over all the keys by accessing {@code [META, Window, i]} for {@code i} in {@code [1,
-   * size of map]}.
+   * [META, Window, i]} for {@code i} in {@code [1, size of map]} stores the users key. This allows
+   * for one to access the size of the map by looking at {@code [META, Window, 0]} and iterate over
+   * all the keys by accessing {@code [META, Window, i]} for {@code i} in {@code [1, size of map]}.
    */
   private <K, V, W extends BoundedWindow> Map<K, Iterable<V>> getMultimapForWindow(
       TupleTag<?> tag, W window) throws IOException {

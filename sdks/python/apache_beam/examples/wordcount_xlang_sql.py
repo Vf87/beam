@@ -17,15 +17,14 @@
 
 """A word-counting workflow that uses the SQL transform.
 
-Java 8 must be available to run this pipeline, and the
---experiments=use_runner_v2 flag must be passed when running on Dataflow.
-Docker must also be available to run this pipeline locally.
+A Java version supported by Beam must be installed locally to run this pipeline.
+Additionally, Docker must also be available to run this pipeline locally.
 """
 
 import argparse
 import logging
 import re
-import typing
+from typing import NamedTuple
 
 import apache_beam as beam
 from apache_beam import coders
@@ -42,7 +41,7 @@ from apache_beam.transforms.sql import SqlTransform
 #
 # Here we create and register a simple NamedTuple with a single str typed
 # field named 'word' which we will use below.
-MyRow = typing.NamedTuple('MyRow', [('word', str)])
+MyRow = NamedTuple('MyRow', [('word', str)])
 coders.registry.register_coder(MyRow, coders.RowCoder)
 
 

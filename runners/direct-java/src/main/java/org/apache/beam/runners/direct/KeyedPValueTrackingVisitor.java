@@ -17,7 +17,8 @@
  */
 package org.apache.beam.runners.direct;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import java.util.HashSet;
 import java.util.Map;
@@ -33,7 +34,7 @@ import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PValue;
 import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
 
 /**
  * A pipeline visitor that tracks all keyed {@link PValue PValues}. A {@link PValue} is keyed if it
@@ -46,8 +47,7 @@ import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Immutabl
 // TODO: Handle Key-preserving transforms when appropriate and more aggressively make PTransforms
 // unkeyed
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 class KeyedPValueTrackingVisitor extends PipelineVisitor.Defaults {
 
@@ -87,7 +87,7 @@ class KeyedPValueTrackingVisitor extends PipelineVisitor.Defaults {
         node);
     if (node.isRootNode()) {
       finalized = true;
-    } else if (PRODUCES_KEYED_OUTPUTS.contains(node.getTransform().getClass())) {
+    } else if (PRODUCES_KEYED_OUTPUTS.contains(checkStateNotNull(node.getTransform()).getClass())) {
       Map<TupleTag<?>, PCollection<?>> outputs = node.getOutputs();
       for (PValue output : outputs.values()) {
         keyedValues.add(output);
@@ -101,8 +101,9 @@ class KeyedPValueTrackingVisitor extends PipelineVisitor.Defaults {
     for (PValue input : producer.getInputs().values()) {
       inputsAreKeyed = inputsAreKeyed && keyedValues.contains(input);
     }
-    if (PRODUCES_KEYED_OUTPUTS.contains(producer.getTransform().getClass())
-        || (isKeyPreserving(producer.getTransform()) && inputsAreKeyed)) {
+    PTransform<?, ?> transform = checkStateNotNull(producer.getTransform());
+    if (PRODUCES_KEYED_OUTPUTS.contains(transform.getClass())
+        || (isKeyPreserving(transform) && inputsAreKeyed)) {
       keyedValues.add(value);
     }
   }

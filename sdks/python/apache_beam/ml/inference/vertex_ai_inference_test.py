@@ -1,0 +1,185 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# pytype: skip-file
+
+import unittest
+
+try:
+  from google.api_core.exceptions import TooManyRequests
+
+  from apache_beam.ml.inference.vertex_ai_inference import VertexAIModelHandlerJSON
+  from apache_beam.ml.inference.vertex_ai_inference import _retry_on_appropriate_gcp_error
+except ImportError:
+  raise unittest.SkipTest('VertexAI dependencies are not installed')
+
+
+class RetryOnClientErrorTest(unittest.TestCase):
+  def test_retry_on_client_error_positive(self):
+    e = TooManyRequests(message="fake service rate limiting")
+    self.assertTrue(_retry_on_appropriate_gcp_error(e))
+
+  def test_retry_on_client_error_negative(self):
+    e = ValueError()
+    self.assertFalse(_retry_on_appropriate_gcp_error(e))
+
+
+class ModelHandlerArgConditions(unittest.TestCase):
+  def test_max_batch_weight_requires_element_size_fn(self):
+    with self.assertRaisesRegex(ValueError,
+                                "max_batch_weight requires element_size_fn"):
+      VertexAIModelHandlerJSON(
+          endpoint_id="1",
+          project="testproject",
+          location="us-central1",
+          max_batch_weight=100)
+
+  def test_max_batch_weight_cannot_combine_with_length_batching(self):
+    with self.assertRaisesRegex(
+        ValueError, "cannot be combined with length-based batching"):
+      VertexAIModelHandlerJSON(
+          endpoint_id="1",
+          project="testproject",
+          location="us-central1",
+          max_batch_weight=100,
+          element_size_fn=len,
+          batch_length_fn=len)
+
+  def test_batch_bucket_boundaries_require_batch_length_fn(self):
+    with self.assertRaisesRegex(
+        ValueError, "batch_bucket_boundaries requires batch_length_fn"):
+      VertexAIModelHandlerJSON(
+          endpoint_id="1",
+          project="testproject",
+          location="us-central1",
+          batch_bucket_boundaries=[16, 32])
+
+  def test_exception_on_private_without_network(self):
+    self.assertRaises(
+        ValueError,
+        VertexAIModelHandlerJSON,
+        endpoint_id="1",
+        project="testproject",
+        location="us-central1",
+        private=True)
+
+
+class RetrieveEndpointErrorMessageTest(unittest.TestCase):
+  def _create_handler(self):
+    import unittest.mock as mock
+
+    with mock.patch.object(VertexAIModelHandlerJSON,
+                           '_retrieve_endpoint',
+                           return_value=None):
+      with mock.patch('google.cloud.aiplatform.init'):
+        return VertexAIModelHandlerJSON(
+            endpoint_id="1", project="testproject", location="us-central1")
+
+  def test_endpoint_without_models_message(self):
+    import unittest.mock as mock
+
+    handler = self._create_handler()
+    endpoint = mock.Mock()
+    endpoint.list_models.return_value = []
+    with mock.patch('google.cloud.aiplatform.Endpoint', return_value=endpoint):
+      with self.assertRaisesRegex(
+          ValueError, r'^Endpoint 123 has no models deployed to it\.$'):
+        handler._retrieve_endpoint('123', 'us-central1', False)
+
+  def test_unreachable_endpoint_message(self):
+    import unittest.mock as mock
+
+    handler = self._create_handler()
+    endpoint = mock.Mock()
+    endpoint.list_models.side_effect = RuntimeError('boom')
+    with mock.patch('google.cloud.aiplatform.Endpoint', return_value=endpoint):
+      with self.assertRaisesRegex(
+          ValueError, r'^Failed to contact endpoint 123, got exception: boom$'):
+        handler._retrieve_endpoint('123', 'us-central1', False)
+
+
+class ParseInvokeResponseTest(unittest.TestCase):
+  """Tests for _parse_invoke_response method."""
+  def _create_handler_with_invoke_route(self, invoke_route="/test"):
+    """Creates a mock handler with invoke_route for testing."""
+    import unittest.mock as mock
+
+    # Mock both _retrieve_endpoint and aiplatform.init to prevent test
+    # pollution of global aiplatform state
+    with mock.patch.object(VertexAIModelHandlerJSON,
+                           '_retrieve_endpoint',
+                           return_value=None):
+      with mock.patch('google.cloud.aiplatform.init'):
+        handler = VertexAIModelHandlerJSON(
+            endpoint_id="1",
+            project="testproject",
+            location="us-central1",
+            invoke_route=invoke_route)
+    return handler
+
+  def test_parse_invoke_response_with_predictions_key(self):
+    """Test parsing response with standard 'predictions' key."""
+    handler = self._create_handler_with_invoke_route()
+    batch = [{"input": "test1"}, {"input": "test2"}]
+    response = (
+        b'{"predictions": ["result1", "result2"], '
+        b'"deployedModelId": "model123"}')
+
+    results = list(handler._parse_invoke_response(batch, response))
+
+    self.assertEqual(len(results), 2)
+    self.assertEqual(results[0].example, {"input": "test1"})
+    self.assertEqual(results[0].inference, "result1")
+    self.assertEqual(results[1].example, {"input": "test2"})
+    self.assertEqual(results[1].inference, "result2")
+
+  def test_parse_invoke_response_list_format(self):
+    """Test parsing response as a list of predictions."""
+    handler = self._create_handler_with_invoke_route()
+    batch = [{"input": "test1"}, {"input": "test2"}]
+    response = b'["result1", "result2"]'
+
+    results = list(handler._parse_invoke_response(batch, response))
+
+    self.assertEqual(len(results), 2)
+    self.assertEqual(results[0].inference, "result1")
+    self.assertEqual(results[1].inference, "result2")
+
+  def test_parse_invoke_response_single_prediction(self):
+    """Test parsing response with a single prediction."""
+    handler = self._create_handler_with_invoke_route()
+    batch = [{"input": "test1"}]
+    response = b'{"output": "single result"}'
+
+    results = list(handler._parse_invoke_response(batch, response))
+
+    self.assertEqual(len(results), 1)
+    self.assertEqual(results[0].inference, {"output": "single result"})
+
+  def test_parse_invoke_response_non_json(self):
+    """Test handling non-JSON response."""
+    handler = self._create_handler_with_invoke_route()
+    batch = [{"input": "test1"}]
+    response = b'not valid json'
+
+    results = list(handler._parse_invoke_response(batch, response))
+
+    self.assertEqual(len(results), 1)
+    self.assertEqual(results[0].inference, response)
+
+
+if __name__ == '__main__':
+  unittest.main()

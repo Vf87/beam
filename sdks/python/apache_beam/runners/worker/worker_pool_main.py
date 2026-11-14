@@ -37,9 +37,7 @@ import sys
 import threading
 import time
 import traceback
-from typing import Dict
 from typing import Optional
-from typing import Tuple
 
 import grpc
 
@@ -47,24 +45,45 @@ from apache_beam.portability.api import beam_fn_api_pb2
 from apache_beam.portability.api import beam_fn_api_pb2_grpc
 from apache_beam.runners.worker import sdk_worker
 from apache_beam.utils import thread_pool_executor
+from apache_beam.utils.sentinel import Sentinel
 
 _LOGGER = logging.getLogger(__name__)
 
 
+def kill_process_gracefully(proc, timeout=10):
+  """
+  Kill a worker process gracefully by sending a SIGTERM and waiting for
+  it to finish. A SIGKILL will be sent if the process has not finished
+  after ``timeout`` seconds.
+  """
+  def _kill():
+    proc.terminate()
+    try:
+      proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+      _LOGGER.warning('Worker process did not respond, killing it.')
+      proc.kill()
+      proc.wait()  # Avoid zombies
+
+  kill_thread = threading.Thread(target=_kill)
+  kill_thread.start()
+  kill_thread.join()
+
+
 class BeamFnExternalWorkerPoolServicer(
     beam_fn_api_pb2_grpc.BeamFnExternalWorkerPoolServicer):
-
-  def __init__(self,
-               use_process=False,
-               container_executable=None,  # type: Optional[str]
-               state_cache_size=0,
-               data_buffer_time_limit_ms=0
-              ):
+  def __init__(
+      self,
+      use_process=False,
+      container_executable: Optional[str] = None,
+      state_cache_size=0,
+      data_buffer_time_limit_ms=0):
     self._use_process = use_process
     self._container_executable = container_executable
     self._state_cache_size = state_cache_size
     self._data_buffer_time_limit_ms = data_buffer_time_limit_ms
-    self._worker_processes = {}  # type: Dict[str, subprocess.Popen]
+    self._worker_processes: dict[str, subprocess.Popen] = {}
+    self._worker_threads: dict[str, sdk_worker.SdkHarness] = {}
 
   @classmethod
   def start(
@@ -73,9 +92,7 @@ class BeamFnExternalWorkerPoolServicer(
       port=0,
       state_cache_size=0,
       data_buffer_time_limit_ms=-1,
-      container_executable=None  # type: Optional[str]
-  ):
-    # type: (...) -> Tuple[str, grpc.Server]
+      container_executable: Optional[str] = None) -> tuple[str, grpc.Server]:
     options = [("grpc.http2.max_pings_without_data", 0),
                ("grpc.http2.max_ping_strikes", 0)]
     worker_server = grpc.server(
@@ -95,17 +112,16 @@ class BeamFnExternalWorkerPoolServicer(
     # Register to kill the subprocesses on exit.
     def kill_worker_processes():
       for worker_process in worker_pool._worker_processes.values():
-        worker_process.kill()
+        kill_process_gracefully(worker_process)
 
     atexit.register(kill_worker_processes)
 
     return worker_address, worker_server
 
-  def StartWorker(self,
-                  start_worker_request,  # type: beam_fn_api_pb2.StartWorkerRequest
-                  unused_context
-                 ):
-    # type: (...) -> beam_fn_api_pb2.StartWorkerResponse
+  def StartWorker(
+      self,
+      start_worker_request: beam_fn_api_pb2.StartWorkerRequest,
+      unused_context) -> beam_fn_api_pb2.StartWorkerResponse:
     try:
       if self._use_process:
         command = [
@@ -152,6 +168,7 @@ class BeamFnExternalWorkerPoolServicer(
             worker_id=start_worker_request.worker_id,
             state_cache_size=self._state_cache_size,
             data_buffer_time_limit_ms=self._data_buffer_time_limit_ms)
+        self._worker_threads[start_worker_request.worker_id] = worker
         worker_thread = threading.Thread(
             name='run_worker_%s' % start_worker_request.worker_id,
             target=worker.run)
@@ -162,29 +179,26 @@ class BeamFnExternalWorkerPoolServicer(
     except Exception:
       return beam_fn_api_pb2.StartWorkerResponse(error=traceback.format_exc())
 
-  def StopWorker(self,
-                 stop_worker_request,  # type: beam_fn_api_pb2.StopWorkerRequest
-                 unused_context
-                ):
-    # type: (...) -> beam_fn_api_pb2.StopWorkerResponse
+  def StopWorker(
+      self,
+      stop_worker_request: beam_fn_api_pb2.StopWorkerRequest,
+      unused_context) -> beam_fn_api_pb2.StopWorkerResponse:
     # applicable for process mode to ensure process cleanup
     # thread based workers terminate automatically
     worker_process = self._worker_processes.pop(
         stop_worker_request.worker_id, None)
     if worker_process:
-
-      def kill_worker_process():
-        try:
-          worker_process.kill()
-        except OSError:
-          # ignore already terminated process
-          return
-
       _LOGGER.info("Stopping worker %s" % stop_worker_request.worker_id)
-      # communicate is necessary to avoid zombie process
-      # time box communicate (it has no timeout parameter in Py2)
-      threading.Timer(1, kill_worker_process).start()
-      worker_process.communicate()
+      kill_process_gracefully(worker_process)
+
+    # applicable for thread mode to ensure thread cleanup by
+    # unblocking the harness request stream.
+    worker_thread_harness = self._worker_threads.pop(
+        stop_worker_request.worker_id, None)
+    if worker_thread_harness:
+      _LOGGER.info("Stopping thread worker %s" % stop_worker_request.worker_id)
+      worker_thread_harness._responses.put(Sentinel.sentinel)
+
     return beam_fn_api_pb2.StopWorkerResponse()
 
 

@@ -17,60 +17,49 @@
  */
 package org.apache.beam.sdk.io.clickhouse;
 
-import com.github.dockerjava.api.command.CreateContainerCmd;
-import com.github.dockerjava.api.model.Image;
+import static org.testcontainers.containers.ClickHouseContainer.HTTP_PORT;
+
+import com.clickhouse.client.api.Client;
+import com.clickhouse.client.api.query.GenericRecord;
+import com.clickhouse.client.api.query.Records;
 import java.io.IOException;
-import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
-import java.util.List;
-import org.apache.beam.sdk.util.BackOff;
-import org.apache.beam.sdk.util.BackOffUtils;
-import org.apache.beam.sdk.util.FluentBackoff;
-import org.apache.beam.sdk.util.Sleeper;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
-import org.joda.time.Duration;
+import java.util.concurrent.TimeUnit;
+import org.junit.After;
 import org.junit.AfterClass;
+import org.junit.Before;
 import org.junit.BeforeClass;
-import org.rnorth.ducttape.unreliables.Unreliables;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.BindMode;
 import org.testcontainers.containers.ClickHouseContainer;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
-import org.testcontainers.utility.DockerImageName;
 
 /** Base setup for ClickHouse containers. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
   "unchecked",
 })
 public class BaseClickHouseTest {
 
+  public static ClickHouseContainer clickHouse;
+  public static String clickHouseUrl;
+  public static String database;
   public static Network network;
   public static GenericContainer zookeeper;
-  public static ClickHouseContainer clickHouse;
-
-  private static final String ZOOKEEPER_VERSION = "3.4.13";
-
-  // yandex/clickhouse-server:19.1.6
-  // use SHA256 not to pull docker hub for tag if image already exists locally
-  private static final String CLICKHOUSE_IMAGE =
-      "yandex/clickhouse-server@"
-          + "sha256:c75f66f3619ca70a9f7215966505eaed2fc0ca0ee7d6a7b5407d1b14df8ddefc";
+  static final int CLIENT_TIMEOUT = 30;
 
   private static final Logger LOG = LoggerFactory.getLogger(BaseClickHouseTest.class);
 
+  private Client client;
+
   @BeforeClass
   public static void setup() throws IOException, InterruptedException {
-    // network sharing doesn't work with ClassRule
+    System.setProperty("api.version", "1.44");
     network = Network.newNetwork();
 
     zookeeper =
-        new GenericContainer<>(DockerImageName.parse("zookeeper").withTag(ZOOKEEPER_VERSION))
+        new GenericContainer<>("zookeeper:3.8.4")
             .withStartupAttempts(10)
             .withExposedPorts(2181)
             .withNetwork(network)
@@ -80,84 +69,140 @@ public class BaseClickHouseTest {
     zookeeper.start();
 
     clickHouse =
-        (ClickHouseContainer)
-            new ClickHouseContainer(CLICKHOUSE_IMAGE)
-                .withStartupAttempts(10)
-                .withCreateContainerCmdModifier(
-                    // type inference for `(CreateContainerCmd) -> cmd.` doesn't work
-                    cmd ->
-                        ((CreateContainerCmd) cmd)
-                            .withMemory(256 * 1024 * 1024L)
-                            .withMemorySwap(4L * 1024 * 1024 * 1024L))
-                .withNetwork(network)
-                .withClasspathResourceMapping(
-                    "config.d/zookeeper_default.xml",
-                    "/etc/clickhouse-server/config.d/zookeeper_default.xml",
-                    BindMode.READ_ONLY);
-
-    BackOff backOff =
-        FluentBackoff.DEFAULT
-            .withMaxRetries(3)
-            .withInitialBackoff(Duration.standardSeconds(15))
-            .backoff();
-
-    // try to start clickhouse-server a couple of times, see BEAM-6639
-    while (true) {
-      try {
-        Unreliables.retryUntilSuccess(
-            10,
-            () -> {
-              DockerClientFactory.instance()
-                  .checkAndPullImage(DockerClientFactory.instance().client(), CLICKHOUSE_IMAGE);
-
-              return null;
-            });
-
-        clickHouse.start();
-        break;
-      } catch (Exception e) {
-        if (!BackOffUtils.next(Sleeper.DEFAULT, backOff)) {
-          throw e;
-        } else {
-          List<Image> images =
-              DockerClientFactory.instance().client().listImagesCmd().withShowAll(true).exec();
-          String listImagesOutput = "listImagesCmd:\n" + Joiner.on('\n').join(images) + "\n";
-
-          LOG.warn("failed to start clickhouse-server\n\n" + listImagesOutput, e);
-        }
-      }
-    }
+        new ClickHouseContainer("clickhouse/clickhouse-server:23.8")
+            .withStartupAttempts(10)
+            .withNetwork(network)
+            .withClasspathResourceMapping(
+                "config.d/zookeeper_default.xml",
+                "/etc/clickhouse-server/config.d/zookeeper_default.xml",
+                BindMode.READ_ONLY);
+    ;
+    clickHouse.start();
+    LOG.info("Start Clickhouse");
+    clickHouseUrl = "http://" + clickHouse.getHost() + ":" + clickHouse.getMappedPort(HTTP_PORT);
+    database = "default";
   }
 
   @AfterClass
   public static void tearDown() {
-    clickHouse.close();
-    zookeeper.close();
+    if (clickHouse != null) {
+      clickHouse.close();
+    }
+    if (zookeeper != null) {
+      zookeeper.close();
+    }
+  }
 
+  @Before
+  public void setUp() throws Exception {
+    // Create ClickHouse Java Client
+    Client.Builder clientBuilder =
+        new Client.Builder()
+            .addEndpoint(clickHouseUrl)
+            .setUsername(clickHouse.getUsername())
+            .setPassword(clickHouse.getPassword())
+            .setDefaultDatabase(database);
+
+    client = clientBuilder.build();
+  }
+
+  @After
+  public void after() {
+    if (client != null) {
+      try {
+        client.close();
+      } catch (Exception e) {
+        LOG.warn("Failed to close ClickHouse client", e);
+      } finally {
+        client = null;
+      }
+    }
+  }
+
+  /**
+   * Executes a SQL statement (DDL, DML, etc.).
+   *
+   * @param sql SQL statement to execute
+   * @return true if execution was successful
+   * @throws Exception if execution fails
+   */
+  boolean executeSql(String sql) throws Exception {
     try {
-      network.close();
+      client.query(sql).get(CLIENT_TIMEOUT, TimeUnit.SECONDS);
+      return true;
     } catch (Exception e) {
-      // ignore
+      LOG.error("Failed to execute SQL: {}", sql, e);
+      throw e;
     }
   }
 
-  boolean executeSql(String sql) throws SQLException {
-    try (Connection connection = clickHouse.createConnection("");
-        Statement statement = connection.createStatement()) {
-      return statement.execute(sql);
+  /**
+   * Executes a query and returns the results.
+   *
+   * @param sql SQL query to execute
+   * @return Records containing query results
+   * @throws Exception if query fails
+   */
+  Records executeQuery(String sql) throws Exception {
+    try {
+      return client.queryRecords(sql).get(CLIENT_TIMEOUT, TimeUnit.SECONDS);
+    } catch (Exception e) {
+      LOG.error("Failed to execute query: {}", sql, e);
+      throw e;
     }
   }
 
-  ResultSet executeQuery(String sql) throws SQLException {
-    try (Connection connection = clickHouse.createConnection("");
-        Statement statement = connection.createStatement()) {
-      return statement.executeQuery(sql);
+  /**
+   * Executes a query and returns the first column of the first row as a long. Useful for COUNT
+   * queries or other single-value results.
+   *
+   * @param sql SQL query to execute
+   * @return long value from first column of first row
+   * @throws Exception if query fails or result is empty
+   */
+  long executeQueryAsLong(String sql) throws Exception {
+    try (Records records = executeQuery(sql)) {
+      for (GenericRecord record : records) {
+        // Get the first column value - assuming it's numeric
+        return record.getLong(1); // Column index is 1-based
+      }
+      throw new IllegalStateException("Query returned no results: " + sql);
+    } catch (Exception e) {
+      LOG.error("Failed to execute query as long: {}", sql, e);
+      throw e;
     }
   }
 
-  long executeQueryAsLong(String sql) throws SQLException {
-    ResultSet rs = executeQuery(sql);
-    rs.next();
-    return rs.getLong(1);
+  /**
+   * Executes a query and returns the first column of the first row as a String.
+   *
+   * @param sql SQL query to execute
+   * @return String value from first column of first row
+   * @throws Exception if query fails or result is empty
+   */
+  String executeQueryAsString(String sql) throws Exception {
+    try (Records records = executeQuery(sql)) {
+      for (GenericRecord record : records) {
+        return record.getString(1); // Column index is 1-based
+      }
+      throw new IllegalStateException("Query returned no results: " + sql);
+    } catch (Exception e) {
+      LOG.error("Failed to execute query as string: {}", sql, e);
+      throw e;
+    }
+  }
+
+  /**
+   * Checks if the ClickHouse server is alive and responsive.
+   *
+   * @return true if server responds to ping
+   */
+  boolean isServerAlive() {
+    try {
+      return client != null && client.ping();
+    } catch (Exception e) {
+      LOG.warn("Server ping failed", e);
+      return false;
+    }
   }
 }

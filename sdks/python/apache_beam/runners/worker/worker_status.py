@@ -17,7 +17,9 @@
 
 """Worker status api handler for reporting SDK harness debug info."""
 
+import gc
 import logging
+import os
 import queue
 import sys
 import threading
@@ -30,6 +32,7 @@ import grpc
 from apache_beam.portability.api import beam_fn_api_pb2
 from apache_beam.portability.api import beam_fn_api_pb2_grpc
 from apache_beam.runners.worker.channel_factory import GRPCChannelFactory
+from apache_beam.runners.worker.statecache import StateCache
 from apache_beam.runners.worker.worker_id_interceptor import WorkerIdInterceptor
 from apache_beam.utils.sentinel import Sentinel
 
@@ -52,13 +55,35 @@ LOG_LULL_FULL_THREAD_DUMP_INTERVAL_S = 20 * 60
 LOG_LULL_FULL_THREAD_DUMP_LULL_S = 20 * 60
 
 
-def thread_dump():
-  """Get a thread dump for the current SDK worker harness. """
+def _current_frames():
+  # Work around https://github.com/python/cpython/issues/106883
+  if (sys.version_info.minor == 11 and sys.version_info.major == 3 and
+      gc.isenabled()):
+    gc.disable()
+    frames = sys._current_frames()  # pylint: disable=protected-access
+    gc.enable()
+    return frames
+  else:
+    return sys._current_frames()  # pylint: disable=protected-access
+
+
+def thread_dump(thread_prefix=None):
+  """Get a thread dump for the current SDK harness.
+
+  Args:
+    thread_prefix: (str) An optional prefix to filter threads by.
+  """
   # deduplicate threads with same stack trace
   stack_traces = defaultdict(list)
-  frames = sys._current_frames()  # pylint: disable=protected-access
+  frames = _current_frames()
 
-  for t in threading.enumerate():
+  threads_to_dump = threading.enumerate()
+  if thread_prefix:
+    threads_to_dump = [
+        t for t in threads_to_dump if t.name.startswith(thread_prefix)
+    ]
+
+  for t in threads_to_dump:
     try:
       stack_trace = ''.join(traceback.format_stack(frames[t.ident]))
     except KeyError:
@@ -84,6 +109,135 @@ def thread_dump():
   return '\n'.join(all_traces)
 
 
+def _process_memory_stats():
+  """Process-level memory usage (RSS), to gauge total footprint over time."""
+  lines = ['--- Process memory ---']
+  try:
+    import resource
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    # ru_maxrss is reported in kilobytes on Linux but in bytes on macOS/BSD.
+    if sys.platform == 'darwin':
+      peak_bytes = usage.ru_maxrss
+    else:
+      peak_bytes = usage.ru_maxrss * 1024
+    lines.append('peak RSS (ru_maxrss): %d bytes' % peak_bytes)
+  except Exception as e:  # pylint: disable=broad-except
+    lines.append('resource stats unavailable: %s' % e)
+  try:
+    # /proc/self/statm reports counts in pages; field 1 is resident set size.
+    with open('/proc/self/statm') as f:
+      resident_pages = int(f.read().split()[1])
+    lines.append(
+        'current RSS (/proc/self/statm): %d bytes' %
+        (resident_pages * os.sysconf('SC_PAGE_SIZE')))
+  except Exception:  # pylint: disable=broad-except
+    # /proc is Linux-only; skip silently on other platforms.
+    pass
+  return '\n'.join(lines)
+
+
+def _python_memory_stats():
+  """CPython allocator and garbage-collector stats.
+
+  Together with the native-heap stats these help distinguish memory growth in
+  Python objects from growth on the native (C) heap.
+  """
+  lines = ['--- Python allocations ---']
+  try:
+    lines.append('sys.getallocatedblocks: %d' % sys.getallocatedblocks())
+  except Exception as e:  # pylint: disable=broad-except
+    lines.append('sys.getallocatedblocks unavailable: %s' % e)
+  try:
+    lines.append('gc.get_count (gen0, gen1, gen2): %s' % (gc.get_count(), ))
+    for i, stat in enumerate(gc.get_stats()):
+      lines.append(
+          'gc gen%d: collections=%s collected=%s uncollectable=%s' % (
+              i,
+              stat.get('collections'),
+              stat.get('collected'),
+              stat.get('uncollectable')))
+  except Exception as e:  # pylint: disable=broad-except
+    lines.append('gc stats unavailable: %s' % e)
+  return '\n'.join(lines)
+
+
+def _glibc_malloc_stats():
+  """glibc allocator stats, useful for reasoning about native-heap growth and
+  fragmentation.
+
+  ``fordblks`` (free space the allocator retains rather than returning to the
+  OS) growing relative to ``uordblks`` (space in use) is a signal of native
+  heap fragmentation. Only available with glibc (Linux); degrades gracefully
+  elsewhere.
+  """
+  lines = ['--- glibc malloc (native heap) ---']
+  if not sys.platform.startswith('linux'):
+    lines.append('unavailable: glibc malloc stats are only collected on Linux.')
+    return '\n'.join(lines)
+  try:
+    import ctypes
+
+    class _MallInfo2(ctypes.Structure):
+      # Mirrors glibc's ``struct mallinfo2`` (all fields are size_t).
+      _fields_ = [
+          ('arena', ctypes.c_size_t),
+          ('ordblks', ctypes.c_size_t),
+          ('smblks', ctypes.c_size_t),
+          ('hblks', ctypes.c_size_t),
+          ('hblkhd', ctypes.c_size_t),
+          ('usmblks', ctypes.c_size_t),
+          ('fsmblks', ctypes.c_size_t),
+          ('uordblks', ctypes.c_size_t),
+          ('fordblks', ctypes.c_size_t),
+          ('keepcost', ctypes.c_size_t),
+      ]
+
+    libc = ctypes.CDLL('libc.so.6')
+    if not hasattr(libc, 'mallinfo2'):
+      # The older mallinfo() uses int fields that overflow past 2GB and would
+      # misreport exactly when memory is the concern, so we do not fall back.
+      lines.append('unavailable: mallinfo2 not found (needs glibc >= 2.33).')
+      return '\n'.join(lines)
+    libc.mallinfo2.restype = _MallInfo2
+    libc.mallinfo2.argtypes = []
+    info = libc.mallinfo2()
+    lines.append('arena (non-mmapped bytes from sbrk): %d' % info.arena)
+    lines.append('hblkhd (mmapped bytes): %d' % info.hblkhd)
+    lines.append('uordblks (in-use bytes): %d' % info.uordblks)
+    lines.append(
+        'fordblks (free bytes retained by allocator): %d' % info.fordblks)
+    lines.append(
+        'keepcost (releasable top-most free bytes): %d' % info.keepcost)
+    footprint = info.arena + info.hblkhd
+    if footprint:
+      lines.append(
+          'fragmentation (fordblks / (arena + hblkhd)): %.2f%%' %
+          (100.0 * info.fordblks / footprint))
+  except Exception as e:  # pylint: disable=broad-except
+    lines.append('unavailable: %s' % e)
+  return '\n'.join(lines)
+
+
+def memory_stats():
+  """Collect process, Python and native-heap memory statistics.
+
+  This complements the guppy heap dump with information that helps distinguish
+  memory growth on the native (C) heap from Python-object allocations, and with
+  glibc allocator stats that hint at native-heap fragmentation. Every collector
+  degrades gracefully and never raises when a source is unavailable on the
+  current platform.
+  """
+  banner = '=' * 10 + ' MEMORY STATS ' + '=' * 10
+  sections = [
+      banner,
+      _process_memory_stats(),
+      _python_memory_stats(),
+      _glibc_malloc_stats(),
+      '=' * 30,
+  ]
+  return '\n'.join(sections)
+
+
 def heap_dump():
   """Get a heap dump for the current SDK worker harness. """
   banner = '=' * 10 + ' HEAP DUMP ' + '=' * 10 + '\n'
@@ -92,23 +246,34 @@ def heap_dump():
   else:
     heap = '%s\n' % hpy().heap()
   ending = '=' * 30
-  return banner + heap + ending
+  return banner + heap + ending + '\n' + memory_stats()
 
 
-def _active_processing_bundles_state(bundle_process_cache):
+def _state_cache_stats(state_cache: StateCache) -> str:
+  """Gather state cache statistics."""
+  cache_stats = ['=' * 10 + ' CACHE STATS ' + '=' * 10]
+  if not state_cache.is_cache_enabled():
+    cache_stats.append("Cache disabled")
+  else:
+    cache_stats.append(state_cache.describe_stats())
+  return '\n'.join(cache_stats)
+
+
+def _active_processing_bundles_state(bundle_processor_cache):
   """Gather information about the currently in-processing active bundles.
 
   The result only keeps the longest lasting 10 bundles to avoid excessive
   spamming.
   """
   active_bundles = ['=' * 10 + ' ACTIVE PROCESSING BUNDLES ' + '=' * 10]
-  if not bundle_process_cache.active_bundle_processors:
+  if (not bundle_processor_cache.active_bundle_processors and
+      not bundle_processor_cache.processors_being_created):
     active_bundles.append("No active processing bundles.")
   else:
     cache = []
     for instruction in list(
-        bundle_process_cache.active_bundle_processors.keys()):
-      processor = bundle_process_cache.lookup(instruction)
+        bundle_processor_cache.active_bundle_processors.keys()):
+      processor = bundle_processor_cache.lookup(instruction)
       if processor:
         info = processor.state_sampler.get_info()
         cache.append((
@@ -125,6 +290,18 @@ def _active_processing_bundles_state(bundle_process_cache):
       state += "time since transition: %.2f seconds\n" % (s[3] / 1e9)
       active_bundles.append(state)
 
+    if bundle_processor_cache.processors_being_created:
+      active_bundles.append("Processors being created:\n")
+      current_time = time.time()
+      for instruction, (bundle_id, thread, creation_time) in (
+          bundle_processor_cache.processors_being_created.items()):
+        state = '--- instruction %s ---\n' % instruction
+        state += 'ProcessBundleDescriptorId: %s\n' % bundle_id
+        state += "tracked thread: %s\n" % thread
+        state += "time since creation started: %.2f seconds\n" % (
+            current_time - creation_time)
+        active_bundles.append(state)
+
   active_bundles.append('=' * 30)
   return '\n'.join(active_bundles)
 
@@ -137,24 +314,36 @@ class FnApiWorkerStatusHandler(object):
   def __init__(
       self,
       status_address,
-      bundle_process_cache=None,
+      bundle_processor_cache=None,
+      state_cache=None,
       enable_heap_dump=False,
-      log_lull_timeout_ns=DEFAULT_LOG_LULL_TIMEOUT_NS):
+      worker_id=None,
+      log_lull_timeout_ns=DEFAULT_LOG_LULL_TIMEOUT_NS,
+      element_processing_timeout_minutes=None):
     """Initialize FnApiWorkerStatusHandler.
 
     Args:
       status_address: The URL Runner uses to host the WorkerStatus server.
-      bundle_process_cache: The BundleProcessor cache dict from sdk worker.
+      bundle_processor_cache: The BundleProcessor cache dict from sdk worker.
+      state_cache: The StateCache form sdk worker.
     """
     self._alive = True
-    self._bundle_process_cache = bundle_process_cache
+    self._bundle_processor_cache = bundle_processor_cache
+    self._state_cache = state_cache
     ch = GRPCChannelFactory.insecure_channel(status_address)
     grpc.channel_ready_future(ch).result(timeout=60)
-    self._status_channel = grpc.intercept_channel(ch, WorkerIdInterceptor())
+    self._status_channel = grpc.intercept_channel(
+        ch, WorkerIdInterceptor(worker_id))
     self._status_stub = beam_fn_api_pb2_grpc.BeamFnWorkerStatusStub(
         self._status_channel)
     self._responses = queue.Queue()
     self.log_lull_timeout_ns = log_lull_timeout_ns
+    if (element_processing_timeout_minutes and
+        element_processing_timeout_minutes > 0):
+      self._element_processing_timeout_ns = (
+          element_processing_timeout_minutes * 60 * 1e9)
+    else:
+      self._element_processing_timeout_ns = None
     self._last_full_thread_dump_secs = 0.0
     self._last_lull_logged_secs = 0.0
     self._server = threading.Thread(
@@ -164,7 +353,7 @@ class FnApiWorkerStatusHandler(object):
     self._server.start()
     self._lull_logger = threading.Thread(
         target=lambda: self._log_lull_in_bundle_processor(
-            self._bundle_process_cache),
+            self._bundle_processor_cache),
         name='lull_operation_logger')
     self._lull_logger.daemon = True
     self._lull_logger.start()
@@ -193,9 +382,14 @@ class FnApiWorkerStatusHandler(object):
                   "status page: %s" % traceback_string))
 
   def generate_status_response(self):
-    all_status_sections = [
-        _active_processing_bundles_state(self._bundle_process_cache)
-    ] if self._bundle_process_cache else []
+    all_status_sections = []
+
+    if self._state_cache:
+      all_status_sections.append(_state_cache_stats(self._state_cache))
+
+    if self._bundle_processor_cache:
+      all_status_sections.append(
+          _active_processing_bundles_state(self._bundle_processor_cache))
 
     all_status_sections.append(thread_dump())
     if self._enable_heap_dump:
@@ -206,47 +400,120 @@ class FnApiWorkerStatusHandler(object):
   def close(self):
     self._responses.put(DONE, timeout=5)
 
-  def _log_lull_in_bundle_processor(self, bundle_process_cache):
+  def _log_lull_in_bundle_processor(self, bundle_processor_cache):
     while True:
       time.sleep(2 * 60)
-      if bundle_process_cache.active_bundle_processors:
-        for instruction in list(
-            bundle_process_cache.active_bundle_processors.keys()):
-          processor = bundle_process_cache.lookup(instruction)
-          if processor:
-            info = processor.state_sampler.get_info()
-            self._log_lull_sampler_info(info)
+      if not bundle_processor_cache:
+        continue
 
-  def _log_lull_sampler_info(self, sampler_info):
-    if not self._passed_lull_timeout_since_last_log():
+      for instruction in list(
+          bundle_processor_cache.active_bundle_processors.keys()):
+        processor = bundle_processor_cache.lookup(instruction)
+        if processor:
+          info = processor.state_sampler.get_info()
+          self._log_lull_sampler_info(info, instruction)
+
+      for instruction, (bundle_id, thread, creation_time) in list(
+          bundle_processor_cache.processors_being_created.items()):
+        self._log_lull_in_creating_bundle_descriptor(
+            instruction, bundle_id, thread, creation_time)
+
+  def _log_lull_in_creating_bundle_descriptor(
+      self, instruction, bundle_id, thread, creation_time):
+    time_since_creation_ns = (time.time() - creation_time) * 1e9
+
+    if (self._element_processing_timeout_ns and
+        time_since_creation_ns > self._element_processing_timeout_ns):
+      stack_trace = self._get_stack_trace(thread)
+      _LOGGER.error((
+          'Creation of bundle processor for instruction %s (bundle %s) '
+          'has exceeded the specified timeout of %.2f minutes. '
+          'This might indicate stuckness in DoFn.setup() or in DoFn creation. '
+          'SDK harness will be terminated.\n'
+          'Current Traceback:\n%s'),
+                    instruction,
+                    bundle_id,
+                    self._element_processing_timeout_ns / 1e9 / 60,
+                    stack_trace)
+      from apache_beam.runners.worker.sdk_worker_main import terminate_sdk_harness
+      terminate_sdk_harness()
+
+    if (time_since_creation_ns > self.log_lull_timeout_ns and
+        self._passed_lull_timeout_since_last_log()):
+      stack_trace = self._get_stack_trace(thread)
+      _LOGGER.warning((
+          'Bundle processor for instruction %s (bundle %s) '
+          'has been creating for at least %.2f seconds.\n'
+          'This might indicate slowness in DoFn.setup() or in DoFn creation. '
+          'Current Traceback:\n%s'),
+                      instruction,
+                      bundle_id,
+                      time_since_creation_ns / 1e9,
+                      stack_trace)
+
+  def _log_lull_sampler_info(self, sampler_info, instruction):
+    if (not sampler_info or not sampler_info.time_since_transition):
       return
-    if (sampler_info and sampler_info.time_since_transition and
-        sampler_info.time_since_transition > self.log_lull_timeout_ns):
-      step_name = sampler_info.state_name.step_name
-      state_name = sampler_info.state_name.name
-      lull_seconds = sampler_info.time_since_transition / 1e9
-      state_lull_log = (
-          'Operation ongoing for over %.2f seconds in state %s' %
-          (lull_seconds, state_name))
-      step_name_log = (' in step %s ' % step_name) if step_name else ''
 
-      exec_thread = getattr(sampler_info, 'tracked_thread', None)
-      if exec_thread is not None:
-        thread_frame = sys._current_frames().get(exec_thread.ident)  # pylint: disable=protected-access
-        stack_trace = '\n'.join(
-            traceback.format_stack(thread_frame)) if thread_frame else ''
-      else:
-        stack_trace = '-NOT AVAILABLE-'
+    log_lull = (
+        sampler_info.time_since_transition > self.log_lull_timeout_ns and
+        self._passed_lull_timeout_since_last_log())
+    timeout_exceeded = (
+        self._element_processing_timeout_ns and
+        sampler_info.time_since_transition
+        > self._element_processing_timeout_ns)
 
-      _LOGGER.warning(
-          '%s%s without returning. Current Traceback:\n%s',
-          state_lull_log,
+    if not (log_lull or timeout_exceeded):
+      return
+
+    lull_seconds = sampler_info.time_since_transition / 1e9
+    step_name = sampler_info.state_name.step_name
+    state_name = sampler_info.state_name.name
+    if step_name and state_name:
+      step_name_log = (
+          ' for PTransform{name=%s, state=%s}' % (step_name, state_name))
+    else:
+      step_name_log = ''
+    stack_trace = self._get_stack_trace(sampler_info.tracked_thread)
+
+    if timeout_exceeded:
+      _LOGGER.error(
+          (
+              'Processing of an element in bundle %s%s has exceeded the '
+              'specified timeout of %.2f minutes. SDK harness will be '
+              'terminated.\n'
+              'Current Traceback:\n%s'),
+          instruction,
           step_name_log,
-          stack_trace)
+          self._element_processing_timeout_ns / 1e9 / 60,
+          stack_trace,
+      )
+      from apache_beam.runners.worker.sdk_worker_main import terminate_sdk_harness
+      terminate_sdk_harness()
+
+    if log_lull:
+      _LOGGER.warning(
+          (
+              'Operation ongoing in bundle %s%s for at least %.2f seconds'
+              ' without outputting or completing.\n'
+              'Current Traceback:\n%s'),
+          instruction,
+          step_name_log,
+          lull_seconds,
+          stack_trace,
+      )
+
+  def _get_stack_trace(self, thread):
+    if thread:
+      thread_frame = _current_frames().get(thread.ident)
+      return '\n'.join(
+          traceback.format_stack(thread_frame)) if thread_frame else ''
+    else:
+      return '-NOT AVAILABLE-'
 
   def _passed_lull_timeout_since_last_log(self) -> bool:
-    if (time.time() - self._last_lull_logged_secs >
-        self.log_lull_timeout_ns / 1e9):
+    if (time.time() - self._last_lull_logged_secs
+        > self.log_lull_timeout_ns / 1e9):
       self._last_lull_logged_secs = time.time()
       return True
     else:

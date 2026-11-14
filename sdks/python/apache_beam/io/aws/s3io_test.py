@@ -98,7 +98,7 @@ class TestS3IO(unittest.TestCase):
       self.aws = s3io.S3IO(self.client)
 
     else:
-      self.aws = s3io.S3IO(options=pipeline_options.S3Options())
+      self.aws = s3io.S3IO(options=pipeline_options.AwsOptions())
       self.client = self.aws.client
 
   def test_size(self):
@@ -113,13 +113,13 @@ class TestS3IO(unittest.TestCase):
     self.aws.delete(file_name)
 
   def test_last_updated(self):
-    self.skipTest('BEAM-9532 fix issue with s3 last updated')
     file_name = self.TEST_DATA_PATH + 'dummy_file'
     file_size = 1234
 
     self._insert_random_file(self.client, file_name, file_size)
     self.assertTrue(self.aws.exists(file_name))
-
+    # The time difference should be tiny for the mock client.
+    # A loose tolerance is for the consideration of real s3 client.
     tolerance = 5 * 60  # 5 mins
     result = self.aws.last_updated(file_name)
     self.assertAlmostEqual(result, time.time(), delta=tolerance)
@@ -128,7 +128,6 @@ class TestS3IO(unittest.TestCase):
     self.aws.delete(file_name)
 
   def test_checksum(self):
-
     file_name = self.TEST_DATA_PATH + 'checksum'
     file_size = 1024
     file_ = self._insert_random_file(self.client, file_name, file_size)
@@ -149,20 +148,39 @@ class TestS3IO(unittest.TestCase):
     # Clean up
     self.aws.delete(file_name)
 
+  def test_file_status(self):
+    file_name = self.TEST_DATA_PATH + 'metadata'
+    file_size = 1024
+    self._insert_random_file(self.client, file_name, file_size)
+    file_checksum = self.aws.checksum(file_name)
+    file_timestamp = self.aws.last_updated(file_name)
+
+    file_status = self.aws._status(file_name)
+
+    self.assertEqual(file_status['size'], file_size)
+    self.assertEqual(file_status['checksum'], file_checksum)
+    self.assertEqual(file_status['last_updated'], file_timestamp)
+
+    # Clean up
+    self.aws.delete(file_name)
+
   def test_copy(self):
     src_file_name = self.TEST_DATA_PATH + 'source'
     dest_file_name = self.TEST_DATA_PATH + 'dest'
     file_size = 1024
     self._insert_random_file(self.client, src_file_name, file_size)
 
-    self.assertTrue(src_file_name in self.aws.list_prefix(self.TEST_DATA_PATH))
+    self.assertTrue(
+        src_file_name in dict(self.aws.list_files(self.TEST_DATA_PATH)))
     self.assertFalse(
-        dest_file_name in self.aws.list_prefix(self.TEST_DATA_PATH))
+        dest_file_name in dict(self.aws.list_files(self.TEST_DATA_PATH)))
 
     self.aws.copy(src_file_name, dest_file_name)
 
-    self.assertTrue(src_file_name in self.aws.list_prefix(self.TEST_DATA_PATH))
-    self.assertTrue(dest_file_name in self.aws.list_prefix(self.TEST_DATA_PATH))
+    self.assertTrue(
+        src_file_name in dict(self.aws.list_files(self.TEST_DATA_PATH)))
+    self.assertTrue(
+        dest_file_name in dict(self.aws.list_files(self.TEST_DATA_PATH)))
 
     # Clean up
     self.aws.delete_files([src_file_name, dest_file_name])
@@ -275,9 +293,9 @@ class TestS3IO(unittest.TestCase):
       dest_file_name = dest_dir_name + path
       self._insert_random_file(self.client, src_file_name, file_size)
       self.assertTrue(
-          src_file_name in self.aws.list_prefix(self.TEST_DATA_PATH))
+          src_file_name in dict(self.aws.list_files(self.TEST_DATA_PATH)))
       self.assertFalse(
-          dest_file_name in self.aws.list_prefix(self.TEST_DATA_PATH))
+          dest_file_name in dict(self.aws.list_files(self.TEST_DATA_PATH)))
 
     results = self.aws.copy_tree(src_dir_name, dest_dir_name)
 
@@ -288,9 +306,9 @@ class TestS3IO(unittest.TestCase):
       self.assertIsNone(err)
 
       self.assertTrue(
-          src_file_name in self.aws.list_prefix(self.TEST_DATA_PATH))
+          src_file_name in dict(self.aws.list_files(self.TEST_DATA_PATH)))
       self.assertTrue(
-          dest_file_name in self.aws.list_prefix(self.TEST_DATA_PATH))
+          dest_file_name in dict(self.aws.list_files(self.TEST_DATA_PATH)))
 
     # Clean up
     for path in paths:
@@ -305,14 +323,17 @@ class TestS3IO(unittest.TestCase):
 
     self._insert_random_file(self.client, src_file_name, file_size)
 
-    self.assertTrue(src_file_name in self.aws.list_prefix(self.TEST_DATA_PATH))
+    self.assertTrue(
+        src_file_name in dict(self.aws.list_files(self.TEST_DATA_PATH)))
     self.assertFalse(
-        dest_file_name in self.aws.list_prefix(self.TEST_DATA_PATH))
+        dest_file_name in dict(self.aws.list_files(self.TEST_DATA_PATH)))
 
     self.aws.rename(src_file_name, dest_file_name)
 
-    self.assertFalse(src_file_name in self.aws.list_prefix(self.TEST_DATA_PATH))
-    self.assertTrue(dest_file_name in self.aws.list_prefix(self.TEST_DATA_PATH))
+    self.assertFalse(
+        src_file_name in dict(self.aws.list_files(self.TEST_DATA_PATH)))
+    self.assertTrue(
+        dest_file_name in dict(self.aws.list_files(self.TEST_DATA_PATH)))
 
     # Clean up
     self.aws.delete_files([src_file_name, dest_file_name])
@@ -424,7 +445,7 @@ class TestS3IO(unittest.TestCase):
 
     # Create the file and check that it was created
     self._insert_random_file(self.aws.client, file_name, file_size)
-    files = self.aws.list_prefix(self.TEST_DATA_PATH)
+    files = dict(self.aws.list_files(self.TEST_DATA_PATH))
     self.assertTrue(file_name in files)
 
     # Delete the file and check that it was deleted
@@ -733,7 +754,7 @@ class TestS3IO(unittest.TestCase):
     # Clean up
     self.aws.delete(file_name)
 
-  def test_list_prefix(self):
+  def test_list_files(self):
 
     objects = [
         ('jerry/pigpen/phil', 5),
@@ -770,12 +791,28 @@ class TestS3IO(unittest.TestCase):
       expected_file_names = [(self.TEST_DATA_PATH + object_name, size)
                              for (object_name, size) in expected_object_names]
       self.assertEqual(
-          set(self.aws.list_prefix(file_pattern).items()),
+          set(dict(self.aws.list_files(file_pattern)).items()),
           set(expected_file_names))
 
     # Clean up
     for (object_name, size) in objects:
       self.aws.delete(self.TEST_DATA_PATH + object_name)
+
+  def test_midsize_file(self):
+    file_name = self.TEST_DATA_PATH + 'midsized'
+    file_size = 6 * 1024 * 1024
+    self._insert_random_file(self.aws.client, file_name, file_size)
+    with self.aws.open(file_name, 'r') as f:
+      self.assertEqual(len(f.read()), file_size)
+    self.aws.delete(file_name)
+
+  def test_zerosize_file(self):
+    file_name = self.TEST_DATA_PATH + 'zerosized'
+    file_size = 0
+    self._insert_random_file(self.aws.client, file_name, file_size)
+    with self.aws.open(file_name, 'r') as f:
+      self.assertEqual(len(f.read()), file_size)
+    self.aws.delete(file_name)
 
 
 if __name__ == '__main__':

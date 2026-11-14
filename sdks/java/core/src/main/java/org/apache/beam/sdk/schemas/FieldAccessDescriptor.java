@@ -17,8 +17,8 @@
  */
 package org.apache.beam.sdk.schemas;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import com.google.auto.value.AutoOneOf;
 import com.google.auto.value.AutoValue;
@@ -33,8 +33,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.schemas.FieldAccessDescriptor.FieldDescriptor.ListQualifier;
 import org.apache.beam.sdk.schemas.FieldAccessDescriptor.FieldDescriptor.MapQualifier;
 import org.apache.beam.sdk.schemas.FieldAccessDescriptor.FieldDescriptor.Qualifier;
@@ -42,14 +40,14 @@ import org.apache.beam.sdk.schemas.Schema.Field;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.schemas.Schema.TypeName;
 import org.apache.beam.sdk.schemas.parser.FieldAccessDescriptorParser;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.LinkedListMultimap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Maps;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Multimap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Sets;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.LinkedListMultimap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Maps;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Multimap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -58,10 +56,9 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  *
  * <p>This class always puts the selected fields in a deterministic order.
  */
-@Experimental(Kind.SCHEMAS)
 @AutoValue
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public abstract class FieldAccessDescriptor implements Serializable {
   /** Description of a single field. */
@@ -87,7 +84,7 @@ public abstract class FieldAccessDescriptor implements Serializable {
         MAP
       };
 
-      public abstract Kind getKind();
+      public abstract Qualifier.Kind getKind();
 
       public abstract ListQualifier getList();
 
@@ -542,14 +539,12 @@ public abstract class FieldAccessDescriptor implements Serializable {
       // Resolve the field id of the field that has nested access.
       if (entry.getKey().getFieldId() == null) {
         fieldDescriptor =
-            fieldDescriptor
-                .toBuilder()
+            fieldDescriptor.toBuilder()
                 .setFieldId(schema.indexOf(fieldDescriptor.getFieldName()))
                 .build();
       } else if (entry.getKey().getFieldName() == null) {
         fieldDescriptor =
-            fieldDescriptor
-                .toBuilder()
+            fieldDescriptor.toBuilder()
                 .setFieldName(schema.nameOf(fieldDescriptor.getFieldId()))
                 .build();
       }
@@ -656,7 +651,7 @@ public abstract class FieldAccessDescriptor implements Serializable {
   }
 
   @Override
-  public String toString() {
+  public final String toString() {
     if (getAllFields()) {
       return "*";
     }

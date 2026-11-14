@@ -23,11 +23,14 @@ For internal use only; no backwards-compatibility guarantees.
 
 import logging
 import re
+import string
+from urllib.parse import urlparse
 
 from apache_beam.internal import pickler
 from apache_beam.options.pipeline_options import DebugOptions
 from apache_beam.options.pipeline_options import GoogleCloudOptions
 from apache_beam.options.pipeline_options import PortableOptions
+from apache_beam.options.pipeline_options import ProfilingOptions
 from apache_beam.options.pipeline_options import SetupOptions
 from apache_beam.options.pipeline_options import StandardOptions
 from apache_beam.options.pipeline_options import TestOptions
@@ -53,6 +56,7 @@ class PipelineOptionsValidator(object):
       DebugOptions,
       GoogleCloudOptions,
       PortableOptions,
+      ProfilingOptions,
       SetupOptions,
       StandardOptions,
       TestOptions,
@@ -92,6 +96,8 @@ class PipelineOptionsValidator(object):
   ERR_INVALID_PROJECT_ID = (
       'Invalid Project ID (%s). Please make sure you specified the Project ID, '
       'not project description.')
+  ERR_INVALID_ENDPOINT = (
+      'Invalid url (%s) for dataflow endpoint. Please provide a valid url.')
   ERR_INVALID_NOT_POSITIVE = (
       'Invalid value (%s) for option: %s. Value needs '
       'to be positive.')
@@ -112,6 +118,18 @@ class PipelineOptionsValidator(object):
       'Option %s is required for environment type %s.')
   ERR_NUM_WORKERS_TOO_HIGH = (
       'num_workers (%s) cannot exceed max_num_workers (%s)')
+  ERR_REPEATABLE_OPTIONS_NOT_SET_AS_LIST = (
+      '(%s) is a string. Programmatically set PipelineOptions like (%s) '
+      'options need to be specified as a list.')
+  ERR_DILL_NOT_INSTALLED = (
+      'Option pickle_library=dill requires dill==0.3.1.1. Install apache-beam '
+      'with the dill extra e.g. apache-beam[gcp, dill]. Dill package was not '
+      'found')
+  ERR_UNSAFE_DILL_VERSION = (
+      'Dill version 0.3.1.1 is required when using pickle_library=dill. Other '
+      'versions of dill are untested with Apache Beam. To install the supported'
+      ' dill version instal apache-beam[dill] extra. To use an unsupported '
+      'dill version, use pickle_library=dill_unsafe. %s')
 
   # GCS path specific patterns.
   GCS_URI = '(?P<SCHEME>[^:]+)://(?P<BUCKET>[^/]+)(/(?P<OBJECT>.*))?'
@@ -122,7 +140,6 @@ class PipelineOptionsValidator(object):
   JOB_PATTERN = '[a-z]([-a-z0-9]*[a-z0-9])?'
   PROJECT_ID_PATTERN = '[a-z][-a-z0-9:.]+[a-z0-9]'
   PROJECT_NUMBER_PATTERN = '[0-9]*'
-  ENDPOINT_PATTERN = r'https://[\S]*googleapis\.com[/]?'
 
   def __init__(self, options, runner):
     self.options = options
@@ -151,11 +168,13 @@ class PipelineOptionsValidator(object):
 
     dataflow_endpoint = (
         self.options.view_as(GoogleCloudOptions).dataflow_endpoint)
-    is_service_endpoint = (
-        dataflow_endpoint is not None and
-        self.is_full_string_match(self.ENDPOINT_PATTERN, dataflow_endpoint))
-
-    return is_service_runner and is_service_endpoint
+    # An unset endpoint means the default Dataflow service endpoint,
+    # so only an explicit localhost endpoint opts out.
+    if dataflow_endpoint:
+      endpoint_parts = urlparse(dataflow_endpoint, allow_fragments=False)
+      if endpoint_parts.netloc.startswith("localhost"):
+        return False
+    return is_service_runner
 
   def is_full_string_match(self, pattern, string):
     """Returns True if the pattern matches the whole string."""
@@ -184,9 +203,35 @@ class PipelineOptionsValidator(object):
 
     if not self.is_full_string_match(self.GCS_BUCKET, bucket):
       return self._validate_error(self.ERR_INVALID_GCS_BUCKET, arg, arg_name)
-    if gcs_object is None or '\n' in gcs_object or '\r' in gcs_object:
+    if gcs_object is None:
+      return self._validate_error(
+          "Invalid GCS path: '%s' given for option: %s. "
+          "Did you mean: 'gs://%s/ or gs://some_bucket/%s'?",
+          arg,
+          arg_name,
+          bucket,
+          bucket)
+    if '\n' in gcs_object or '\r' in gcs_object:
       return self._validate_error(self.ERR_INVALID_GCS_OBJECT, arg, arg_name)
+    return []
 
+  def validate_pickle_library(self, view):
+    """Validates the pickle_library option."""
+    if view.pickle_library == 'default' or view.pickle_library == 'cloudpickle':
+      return []
+
+    if view.pickle_library == 'dill_unsafe':
+      return []
+
+    if view.pickle_library == 'dill':
+      try:
+        import dill
+        if dill.__version__ != "0.3.1.1":
+          return self._validate_error(
+              self.ERR_UNSAFE_DILL_VERSION,
+              f"Dill version found {dill.__version__}")
+      except ImportError:
+        return self._validate_error(self.ERR_DILL_NOT_INSTALLED)
     return []
 
   def validate_cloud_options(self, view):
@@ -228,6 +273,14 @@ class PipelineOptionsValidator(object):
         errors.extend(self._validate_error(self.ERR_MISSING_OPTION, 'region'))
       else:
         view.region = default_region
+    dataflow_endpoint = view.dataflow_endpoint
+    # When dataflow_endpoint is unset, the client library resolves
+    # the endpoint (honoring GOOGLE_CLOUD_UNIVERSE_DOMAIN).
+    if dataflow_endpoint:
+      valid_endpoint = self.validate_endpoint_url(dataflow_endpoint)
+      if valid_endpoint is False:
+        errors.extend(
+            self._validate_error(self.ERR_INVALID_ENDPOINT, dataflow_endpoint))
     return errors
 
   def validate_sdk_container_image_options(self, view):
@@ -250,6 +303,18 @@ class PipelineOptionsValidator(object):
       # Set legacy option to value of new option.
       view.worker_harness_container_image = view.sdk_container_image
 
+    return errors
+
+  def validate_container_prebuilding_options(self, view):
+    errors = []
+    custom_image = self.options.view_as(WorkerOptions).sdk_container_image
+    if (view.prebuild_sdk_container_base_image is not None and
+        custom_image != view.prebuild_sdk_container_base_image):
+      errors.extend(
+          self._validate_error(
+              'Don\'t use the deprecated option '
+              '--prebuild_sdk_container_base_image. Use --sdk_container_image '
+              'instead.'))
     return errors
 
   def validate_num_workers(self, view):
@@ -276,7 +341,7 @@ class PipelineOptionsValidator(object):
           self._validate_error(
               'Cannot use deprecated flag --zone along with worker_region or '
               'worker_zone.'))
-    if self.options.view_as(DebugOptions).lookup_experiment('worker_region')\
+    if self.options.view_as(DebugOptions).lookup_experiment('worker_region') \
         and (view.worker_region or view.worker_zone):
       errors.extend(
           self._validate_error(
@@ -365,3 +430,30 @@ class PipelineOptionsValidator(object):
           self._validate_error(
               self.ERR_INVALID_ENVIRONMENT, 'environment_config', 'LOOPBACK'))
     return errors
+
+  def validate_repeatable_argument_passed_as_list(self, view, arg_name):
+    """Validates that repeatable PipelineOptions like dataflow_service_options
+    or experiments are specified as a list when set programmatically. This
+    way, users do not inadvertently specify it as a string, mirroring the way
+    they are set via the command lineRepeatable options, which are as passed a
+    list.
+    """
+    arg = getattr(view, arg_name, None)
+    if not isinstance(arg, list):
+      return self._validate_error(
+          self.ERR_REPEATABLE_OPTIONS_NOT_SET_AS_LIST, arg, arg_name)
+    return []
+
+  # Minimally validates the endpoint url. This is not a strict application
+  # of http://www.faqs.org/rfcs/rfc1738.html.
+  # If the url matches localhost, set
+  def validate_endpoint_url(self, endpoint_url):
+    url_parts = urlparse(endpoint_url, allow_fragments=False)
+    if not url_parts.scheme or not url_parts.netloc:
+      return False
+    if url_parts.scheme not in ['http', 'https']:
+      return False
+    if set(url_parts.netloc) <= set(string.ascii_letters + string.digits +
+                                    '-.'):
+      return True
+    return False

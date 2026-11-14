@@ -17,8 +17,8 @@
  */
 package org.apache.beam.sdk.io.gcp.bigquery;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import com.google.api.services.bigquery.model.Table;
 import com.google.api.services.bigquery.model.TableReference;
@@ -28,23 +28,26 @@ import java.io.ObjectInputStream;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryServices.DatasetService;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.display.DisplayData;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** A {@link org.apache.beam.sdk.io.Source} representing reading from a table. */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class BigQueryStorageTableSource<T> extends BigQueryStorageSourceBase<T> {
 
   private static final Logger LOG = LoggerFactory.getLogger(BigQueryStorageTableSource.class);
 
+  private final ValueProvider<TableReference> tableReferenceProvider;
+  private final boolean projectionPushdownApplied;
+
+  private transient AtomicReference<@Nullable Table> cachedTable;
+
   public static <T> BigQueryStorageTableSource<T> create(
       ValueProvider<TableReference> tableRefProvider,
       DataFormat format,
@@ -52,9 +55,18 @@ public class BigQueryStorageTableSource<T> extends BigQueryStorageSourceBase<T> 
       @Nullable ValueProvider<String> rowRestriction,
       SerializableFunction<SchemaAndRecord, T> parseFn,
       Coder<T> outputCoder,
-      BigQueryServices bqServices) {
+      BigQueryServices bqServices,
+      boolean projectionPushdownApplied) {
     return new BigQueryStorageTableSource<>(
-        tableRefProvider, format, selectedFields, rowRestriction, parseFn, outputCoder, bqServices);
+        tableRefProvider,
+        format,
+        selectedFields,
+        rowRestriction,
+        parseFn,
+        outputCoder,
+        bqServices,
+        projectionPushdownApplied,
+        /* picosTimestampPrecision= */ null);
   }
 
   public static <T> BigQueryStorageTableSource<T> create(
@@ -65,23 +77,59 @@ public class BigQueryStorageTableSource<T> extends BigQueryStorageSourceBase<T> 
       Coder<T> outputCoder,
       BigQueryServices bqServices) {
     return new BigQueryStorageTableSource<>(
-        tableRefProvider, null, selectedFields, rowRestriction, parseFn, outputCoder, bqServices);
+        tableRefProvider,
+        null,
+        selectedFields,
+        rowRestriction,
+        parseFn,
+        outputCoder,
+        bqServices,
+        /* projectionPushdownApplied= */ false,
+        /* picosTimestampPrecision= */ null);
   }
 
-  private final ValueProvider<TableReference> tableReferenceProvider;
-
-  private transient AtomicReference<Table> cachedTable;
+  public static <T> BigQueryStorageTableSource<T> create(
+      ValueProvider<TableReference> tableRefProvider,
+      DataFormat format,
+      @Nullable ValueProvider<List<String>> selectedFields,
+      @Nullable ValueProvider<String> rowRestriction,
+      SerializableFunction<SchemaAndRecord, T> parseFn,
+      Coder<T> outputCoder,
+      BigQueryServices bqServices,
+      boolean projectionPushdownApplied,
+      @Nullable TimestampPrecision picosTimestampPrecision) {
+    return new BigQueryStorageTableSource<>(
+        tableRefProvider,
+        format,
+        selectedFields,
+        rowRestriction,
+        parseFn,
+        outputCoder,
+        bqServices,
+        projectionPushdownApplied,
+        picosTimestampPrecision);
+  }
 
   private BigQueryStorageTableSource(
       ValueProvider<TableReference> tableRefProvider,
-      DataFormat format,
+      @Nullable DataFormat format,
       @Nullable ValueProvider<List<String>> selectedFields,
       @Nullable ValueProvider<String> rowRestriction,
       SerializableFunction<SchemaAndRecord, T> parseFn,
       Coder<T> outputCoder,
-      BigQueryServices bqServices) {
-    super(format, selectedFields, rowRestriction, parseFn, outputCoder, bqServices);
+      BigQueryServices bqServices,
+      boolean projectionPushdownApplied,
+      @Nullable TimestampPrecision picosTimestampPrecision) {
+    super(
+        format,
+        selectedFields,
+        rowRestriction,
+        parseFn,
+        outputCoder,
+        bqServices,
+        picosTimestampPrecision);
     this.tableReferenceProvider = checkNotNull(tableRefProvider, "tableRefProvider");
+    this.projectionPushdownApplied = projectionPushdownApplied;
     cachedTable = new AtomicReference<>();
   }
 
@@ -93,9 +141,21 @@ public class BigQueryStorageTableSource<T> extends BigQueryStorageSourceBase<T> 
   @Override
   public void populateDisplayData(DisplayData.Builder builder) {
     super.populateDisplayData(builder);
-    builder.addIfNotNull(
-        DisplayData.item("table", BigQueryHelpers.displayTable(tableReferenceProvider))
-            .withLabel("Table"));
+    builder
+        .addIfNotNull(
+            DisplayData.item("table", BigQueryHelpers.displayTable(tableReferenceProvider))
+                .withLabel("Table"))
+        .addIfNotDefault(
+            DisplayData.item("projectionPushdownApplied", projectionPushdownApplied)
+                .withLabel("Projection Pushdown Applied"),
+            false);
+
+    if (selectedFieldsProvider != null && selectedFieldsProvider.isAccessible()) {
+      builder.add(
+          DisplayData.item("selectedFields", String.join(", ", selectedFieldsProvider.get()))
+              .withLabel("Selected Fields"));
+    }
+
     // Note: This transform does not set launchesBigQueryJobs because it doesn't launch
     // BigQuery jobs, but instead uses the storage api to directly read the table.
   }
@@ -103,12 +163,13 @@ public class BigQueryStorageTableSource<T> extends BigQueryStorageSourceBase<T> 
   @Override
   public long getEstimatedSizeBytes(PipelineOptions options) throws Exception {
     Table table = getTargetTable(options.as(BigQueryOptions.class));
-    if (table != null) {
+    if (table != null && table.getNumBytes() != null) {
       return table.getNumBytes();
     }
     // If the table does not exist, then it will be null.
     // Avoid the NullPointerException here, allow a more meaningful table "not_found"
     // error to be shown to the user, upon table read.
+    // Lakehouse runtime catalog (BigLake metastore) tables exist but report no numBytes.
     return 0;
   }
 
@@ -134,8 +195,11 @@ public class BigQueryStorageTableSource<T> extends BigQueryStorageSourceBase<T> 
   }
 
   @Override
-  protected @Nullable Table getTargetTable(BigQueryOptions options) throws Exception {
-    if (cachedTable.get() == null) {
+  protected Table getTargetTable(BigQueryOptions options) throws Exception {
+    Table maybeTable = cachedTable.get();
+    if (maybeTable != null) {
+      return maybeTable;
+    } else {
       TableReference tableReference = tableReferenceProvider.get();
       if (Strings.isNullOrEmpty(tableReference.getProjectId())) {
         checkState(
@@ -153,10 +217,14 @@ public class BigQueryStorageTableSource<T> extends BigQueryStorageSourceBase<T> 
                 ? options.getProject()
                 : options.getBigQueryProject());
       }
-      Table table = bqServices.getDatasetService(options).getTable(tableReference);
-      cachedTable.compareAndSet(null, table);
+      try (DatasetService datasetService = bqServices.getDatasetService(options)) {
+        Table table = datasetService.getTable(tableReference);
+        if (table == null) {
+          throw new IllegalArgumentException("Table not found" + table);
+        }
+        cachedTable.compareAndSet(null, table);
+        return table;
+      }
     }
-
-    return cachedTable.get();
   }
 }

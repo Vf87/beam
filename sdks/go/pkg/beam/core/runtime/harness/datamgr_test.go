@@ -16,17 +16,23 @@
 package harness
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
+	"net"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/runtime/exec"
 	fnpb "github.com/apache/beam/sdks/v2/go/pkg/beam/model/fnexecution_v1"
+	"google.golang.org/grpc"
 )
 
 const extraData = 2
@@ -39,6 +45,7 @@ type fakeDataClient struct {
 	calls          int
 	err            error
 	skipFirstError bool
+	isLastCall     int
 
 	blocked sync.Mutex // Prevent data from being read by the gotourtinr.
 }
@@ -53,6 +60,9 @@ func (f *fakeDataClient) Recv() (*fnpb.Elements, error) {
 		InstructionId: "inst_ref",
 		Data:          data,
 		TransformId:   "ptr",
+	}
+	if f.isLastCall == f.calls {
+		elemData.IsLast = true
 	}
 
 	msg := fnpb.Elements{}
@@ -87,7 +97,7 @@ func (f *fakeDataClient) Send(*fnpb.Elements) error {
 	// We skip errors on the first call to test that  errors can be returned
 	// on the sentinel value send in dataWriter.Close
 	// Otherwise, we return an io.EOF similar to semantics documented
-	// in https://godoc.org/google.golang.org/grpc#ClientConn.NewStream
+	// in https://pkg.go.dev/google.golang.org/grpc#ClientConn.NewStream
 	if f.skipFirstError && f.err != nil {
 		f.skipFirstError = false
 		return nil
@@ -97,89 +107,333 @@ func (f *fakeDataClient) Send(*fnpb.Elements) error {
 	return nil
 }
 
-func TestDataChannelTerminate_dataReader(t *testing.T) {
-	// The logging of channels closed is quite noisy for this test
-	log.SetOutput(ioutil.Discard)
+type fakeChanClient struct {
+	ch  chan *fnpb.Elements
+	err error
+}
 
-	expectedError := fmt.Errorf("EXPECTED ERROR")
+func (f *fakeChanClient) Recv() (*fnpb.Elements, error) {
+	e, ok := <-f.ch
+	if !ok {
+		return nil, f.err
+	}
+	return e, nil
+}
 
+func (f *fakeChanClient) Send(e *fnpb.Elements) error {
+	f.ch <- e
+	return nil
+}
+
+func (f *fakeChanClient) Close() {
+	f.err = io.EOF
+	close(f.ch)
+}
+
+func (f *fakeChanClient) CloseWith(err error) {
+	f.err = err
+	close(f.ch)
+}
+
+func TestElementChan(t *testing.T) {
+	const instID = "inst_ref"
+	dataID := "dataTransform"
+	timerID := "timerTransform"
+	timerFamily := "timerFamily"
+	setupClient := func(t *testing.T) (context.Context, *fakeChanClient, *DataChannel) {
+		t.Helper()
+		client := &fakeChanClient{ch: make(chan *fnpb.Elements, bufElements)}
+		ctx, cancelFn := context.WithCancel(context.Background())
+		t.Cleanup(cancelFn)
+		t.Cleanup(func() { client.Close() })
+
+		c := makeDataChannel(ctx, "id", client, cancelFn)
+		return ctx, client, c
+	}
+	drainAndSum := func(t *testing.T, elms <-chan exec.Elements) (sum, count int) {
+		t.Helper()
+		for e := range elms { // only exits if data channel is closed.
+			if len(e.Data) != 0 {
+				sum += int(e.Data[0])
+				count++
+			}
+			if len(e.Timers) != 0 {
+				if e.TimerFamilyID != timerFamily {
+					t.Errorf("timer received without family set: %v, state= sum %v, count %v", e, sum, count)
+				}
+				sum += int(e.Timers[0])
+				count++
+			}
+		}
+		return sum, count
+	}
+
+	timerElm := func(val byte, isLast bool) *fnpb.Elements_Timers {
+		return &fnpb.Elements_Timers{InstructionId: instID, TransformId: timerID, Timers: []byte{val}, IsLast: isLast, TimerFamilyId: timerFamily}
+	}
+	dataElm := func(val byte, isLast bool) *fnpb.Elements_Data {
+		return &fnpb.Elements_Data{InstructionId: instID, TransformId: dataID, Data: []byte{val}, IsLast: isLast}
+	}
+	noTimerElm := func() *fnpb.Elements_Timers {
+		return &fnpb.Elements_Timers{InstructionId: instID, TransformId: timerID, Timers: []byte{}, IsLast: true}
+	}
+	noDataElm := func() *fnpb.Elements_Data {
+		return &fnpb.Elements_Data{InstructionId: instID, TransformId: dataID, Data: []byte{}, IsLast: true}
+	}
+	openChan := func(ctx context.Context, t *testing.T, c *DataChannel, timers ...string) <-chan exec.Elements {
+		t.Helper()
+		runtime.Gosched() // Encourage the "read" goroutine to schedule before this call, if necessary.
+		elms, err := c.OpenElementChan(ctx, dataID, instID, timers)
+		if err != nil {
+			t.Errorf("Unexpected error from OpenElementChan(%v, %v, nil): %v", dataID, instID, err)
+		}
+		return elms
+	}
+
+	// Most Cases
 	tests := []struct {
-		name          string
-		expectedError error
-		caseFn        func(t *testing.T, r io.ReadCloser, client *fakeDataClient, c *DataChannel)
+		name               string
+		sequenceFn         func(context.Context, *testing.T, *fakeChanClient, *DataChannel) <-chan exec.Elements
+		wantSum, wantCount int
 	}{
 		{
-			name:          "onClose",
-			expectedError: io.EOF,
-			caseFn: func(t *testing.T, r io.ReadCloser, client *fakeDataClient, c *DataChannel) {
-				// We don't read up all the buffered data, but immediately close the reader.
-				// Previously, since nothing was consuming the incoming gRPC data, the whole
-				// data channel would get stuck, and the client.Recv() call was eventually
-				// no longer called.
-				r.Close()
+			name: "ReadThenData_singleRecv",
+			sequenceFn: func(ctx context.Context, t *testing.T, client *fakeChanClient, c *DataChannel) <-chan exec.Elements {
+				elms := openChan(ctx, t, c)
+				client.Send(&fnpb.Elements{
+					Data: []*fnpb.Elements_Data{
+						dataElm(1, false),
+						dataElm(2, false),
+						dataElm(3, true),
+					},
+				})
+				return elms
+			},
+			wantSum: 6, wantCount: 3,
+		}, {
+			name: "ReadThenData_multipleRecv",
+			sequenceFn: func(ctx context.Context, t *testing.T, client *fakeChanClient, c *DataChannel) <-chan exec.Elements {
+				elms := openChan(ctx, t, c)
+				client.Send(&fnpb.Elements{Data: []*fnpb.Elements_Data{dataElm(1, false)}})
+				client.Send(&fnpb.Elements{Data: []*fnpb.Elements_Data{dataElm(2, false)}})
+				client.Send(&fnpb.Elements{Data: []*fnpb.Elements_Data{dataElm(3, true)}})
+				return elms
+			},
+			wantSum: 6, wantCount: 3,
+		}, {
+			name: "ReadThenNoData",
+			sequenceFn: func(ctx context.Context, t *testing.T, client *fakeChanClient, c *DataChannel) <-chan exec.Elements {
+				elms := openChan(ctx, t, c)
+				client.Send(&fnpb.Elements{Data: []*fnpb.Elements_Data{noDataElm()}})
+				return elms
+			},
+			wantSum: 0, wantCount: 0,
+		}, {
+			name: "NoDataThenRead",
+			sequenceFn: func(ctx context.Context, t *testing.T, client *fakeChanClient, c *DataChannel) <-chan exec.Elements {
+				client.Send(&fnpb.Elements{Data: []*fnpb.Elements_Data{noDataElm()}})
+				elms := openChan(ctx, t, c)
+				return elms
+			},
+			wantSum: 0, wantCount: 0,
+		}, {
+			name: "NoDataInstEndsThenRead",
+			sequenceFn: func(ctx context.Context, t *testing.T, client *fakeChanClient, c *DataChannel) <-chan exec.Elements {
+				client.Send(&fnpb.Elements{Data: []*fnpb.Elements_Data{noDataElm()}})
+				c.removeInstruction(instID)
+				elms := openChan(ctx, t, c)
+				return elms
+			},
+			wantSum: 0, wantCount: 0,
+		}, {
+			name: "ReadThenDataAndTimers",
+			sequenceFn: func(ctx context.Context, t *testing.T, client *fakeChanClient, c *DataChannel) <-chan exec.Elements {
+				elms := openChan(ctx, t, c, timerID)
+				client.Send(&fnpb.Elements{Data: []*fnpb.Elements_Data{dataElm(1, false)}})
+				client.Send(&fnpb.Elements{Timers: []*fnpb.Elements_Timers{timerElm(2, true)}})
+				client.Send(&fnpb.Elements{Data: []*fnpb.Elements_Data{dataElm(3, true)}})
+				return elms
+			},
+			wantSum: 6, wantCount: 3,
+		}, {
+			name: "AllDataAndTimersThenRead",
+			sequenceFn: func(ctx context.Context, t *testing.T, client *fakeChanClient, c *DataChannel) <-chan exec.Elements {
+				client.Send(&fnpb.Elements{Data: []*fnpb.Elements_Data{dataElm(1, false)}})
+				client.Send(&fnpb.Elements{Timers: []*fnpb.Elements_Timers{timerElm(2, true)}})
+				client.Send(&fnpb.Elements{Data: []*fnpb.Elements_Data{dataElm(3, true)}})
+				elms := openChan(ctx, t, c, timerID)
+				return elms
+			},
+			wantSum: 6, wantCount: 3,
+		}, {
+			name: "DataThenReaderThenLast",
+			sequenceFn: func(ctx context.Context, t *testing.T, client *fakeChanClient, c *DataChannel) <-chan exec.Elements {
+				client.Send(&fnpb.Elements{
+					Data: []*fnpb.Elements_Data{
+						dataElm(1, false),
+						dataElm(2, false),
+					},
+				})
+				elms := openChan(ctx, t, c)
+				client.Send(&fnpb.Elements{Data: []*fnpb.Elements_Data{dataElm(3, true)}})
+				return elms
+			},
+			wantSum: 6, wantCount: 3,
+		}, {
+			name: "PartialTimersAllDataReadThenLastTimer",
+			sequenceFn: func(ctx context.Context, t *testing.T, client *fakeChanClient, c *DataChannel) <-chan exec.Elements {
+				client.Send(&fnpb.Elements{
+					Timers: []*fnpb.Elements_Timers{
+						timerElm(1, false),
+						timerElm(2, false),
+					},
+				})
+				client.Send(&fnpb.Elements{Data: []*fnpb.Elements_Data{noDataElm()}})
 
-				// If done is signaled, that means client.Recv() has been called to flush the
-				// channel, meaning consumer code isn't stuck.
-				<-client.done
+				elms := openChan(ctx, t, c, timerID)
+				client.Send(&fnpb.Elements{Timers: []*fnpb.Elements_Timers{timerElm(3, true)}})
+
+				return elms
 			},
+			wantSum: 6, wantCount: 3,
 		}, {
-			name:          "onSentinel",
-			expectedError: io.EOF,
-			caseFn: func(t *testing.T, r io.ReadCloser, client *fakeDataClient, c *DataChannel) {
-				// fakeDataClient eventually returns a sentinel element.
+			name: "AllTimerThenReaderThenDataClose",
+			sequenceFn: func(ctx context.Context, t *testing.T, client *fakeChanClient, c *DataChannel) <-chan exec.Elements {
+				client.Send(&fnpb.Elements{
+					Timers: []*fnpb.Elements_Timers{
+						timerElm(1, false),
+						timerElm(2, false),
+						timerElm(3, true),
+					},
+				})
+
+				elms := openChan(ctx, t, c, timerID)
+				client.Send(&fnpb.Elements{Data: []*fnpb.Elements_Data{noDataElm()}})
+
+				return elms
 			},
+			wantSum: 6, wantCount: 3,
 		}, {
-			name:          "onRecvError",
-			expectedError: expectedError,
-			caseFn: func(t *testing.T, r io.ReadCloser, client *fakeDataClient, c *DataChannel) {
-				// The SDK starts reading in a goroutine immeadiately after open.
-				// Set the 2nd Recv call to have an error.
-				client.err = expectedError
+			name: "NoTimersThenReaderThenNoData",
+			sequenceFn: func(ctx context.Context, t *testing.T, client *fakeChanClient, c *DataChannel) <-chan exec.Elements {
+				client.Send(&fnpb.Elements{Timers: []*fnpb.Elements_Timers{noTimerElm()}})
+				elms := openChan(ctx, t, c, timerID)
+				client.Send(&fnpb.Elements{Data: []*fnpb.Elements_Data{noDataElm()}})
+				return elms
 			},
+			wantSum: 0, wantCount: 0,
 		}, {
-			name:          "onInstructionEnd",
-			expectedError: io.EOF,
-			caseFn: func(t *testing.T, r io.ReadCloser, client *fakeDataClient, c *DataChannel) {
-				c.removeInstruction("inst_ref")
+			name: "SomeTimersThenReaderThenAData",
+			sequenceFn: func(ctx context.Context, t *testing.T, client *fakeChanClient, c *DataChannel) <-chan exec.Elements {
+				client.Send(&fnpb.Elements{Timers: []*fnpb.Elements_Timers{timerElm(1, false), timerElm(2, true)}})
+				elms := openChan(ctx, t, c, timerID)
+				client.Send(&fnpb.Elements{Data: []*fnpb.Elements_Data{dataElm(3, true)}})
+				return elms
 			},
+			wantSum: 6, wantCount: 3,
+		}, {
+			name: "SomeTimersAndADataThenReader",
+			sequenceFn: func(ctx context.Context, t *testing.T, client *fakeChanClient, c *DataChannel) <-chan exec.Elements {
+				client.Send(&fnpb.Elements{
+					Timers: []*fnpb.Elements_Timers{timerElm(1, false), timerElm(2, true)},
+					Data:   []*fnpb.Elements_Data{dataElm(3, true)},
+				})
+				elms := openChan(ctx, t, c, timerID)
+				return elms
+			},
+			wantSum: 6, wantCount: 3,
+		}, {
+			name: "PartialReadThenEndInstruction",
+			sequenceFn: func(ctx context.Context, t *testing.T, client *fakeChanClient, c *DataChannel) <-chan exec.Elements {
+				client.Send(&fnpb.Elements{
+					Data: []*fnpb.Elements_Data{
+						dataElm(1, false),
+						dataElm(2, false),
+					},
+				})
+				elms := openChan(ctx, t, c)
+				var sum int
+				e := <-elms
+				sum += int(e.Data[0])
+				e = <-elms
+				sum += int(e.Data[0])
+
+				if got, want := sum, 3; got != want {
+					t.Errorf("got sum %v, want sum %v", got, want)
+				}
+
+				// Simulate a split, where the remaining buffer wouldn't be read further, and the instruction ends.
+				c.removeInstruction(instID)
+
+				// Instruction is ended, so further data for this instruction is ignored.
+				client.Send(&fnpb.Elements{
+					Data: []*fnpb.Elements_Data{
+						dataElm(3, false),
+						dataElm(4, true),
+					},
+				})
+
+				elms = openChan(ctx, t, c)
+				return elms
+			},
+			wantSum: 0, wantCount: 0,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			done := make(chan bool, 1)
-			client := &fakeDataClient{t: t, done: done}
+			ctx, client, c := setupClient(t)
+			elms := test.sequenceFn(ctx, t, client, c)
+			sum, count := drainAndSum(t, elms)
+			if wantSum, wantCount := test.wantSum, test.wantCount; sum != wantSum || count != wantCount {
+				t.Errorf("got sum %v, count %v, want sum %v, count %v", sum, count, wantSum, wantCount)
+			}
+		})
+	}
+}
+
+func BenchmarkElementChan(b *testing.B) {
+	benches := []struct {
+		size int
+	}{
+		{1},
+		{10},
+		{100},
+		{1000},
+		{10000},
+	}
+
+	for _, bench := range benches {
+		b.Run(fmt.Sprintf("batchSize:%v", bench.size), func(b *testing.B) {
+			client := &fakeChanClient{ch: make(chan *fnpb.Elements, bufElements)}
 			ctx, cancelFn := context.WithCancel(context.Background())
 			c := makeDataChannel(ctx, "id", client, cancelFn)
 
-			r := c.OpenRead(ctx, "ptr", "inst_ref")
-
-			n, err := r.Read(make([]byte, 4))
+			const instID = "inst_ref"
+			dataID := "dataTransform"
+			elms, err := c.OpenElementChan(ctx, dataID, instID, nil)
 			if err != nil {
-				t.Errorf("Unexpected error from read: %v, read %d bytes.", err, n)
+				b.Errorf("Unexpected error from OpenElementChan(%v, %v, nil): %v", dataID, instID, err)
 			}
-			test.caseFn(t, r, client, c)
-			// Drain the reader.
-			i := 1 // For the earlier Read.
-			for err == nil {
-				read := make([]byte, 4)
-				_, err = r.Read(read)
-				i++
+			e := &fnpb.Elements_Data{InstructionId: instID, TransformId: dataID, Data: []byte{1}, IsLast: false}
+			es := make([]*fnpb.Elements_Data, 0, bench.size)
+			for i := 0; i < bench.size; i++ {
+				es = append(es, e)
 			}
-
-			if got, want := err, test.expectedError; got != want {
-				t.Errorf("Unexpected error from read %d: got %v, want %v", i, got, want)
+			batch := &fnpb.Elements{Data: es}
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for range elms {
+				}
+			}()
+			// Batch elements sizes.
+			for i := 0; i < b.N; i += bench.size {
+				client.Send(batch)
 			}
-			// Verify that new readers return the same error on their reads after client.Recv is done.
-			if n, err := c.OpenRead(ctx, "ptr", "inst_ref").Read(make([]byte, 4)); err != test.expectedError {
-				t.Errorf("Unexpected error from read: got %v, want, %v read %d bytes.", err, test.expectedError, n)
-			}
-
-			select {
-			case <-ctx.Done(): // Assert that the context must have been cancelled on read failures.
-				return
-			case <-time.After(time.Second * 5):
-				t.Fatal("context wasn't cancelled")
-			}
+			client.Close()
+			// Wait until we've consumed all sent batches.
+			wg.Wait()
 		})
 	}
 }
@@ -195,16 +449,9 @@ func TestDataChannelRemoveInstruction_dataAfterClose(t *testing.T) {
 
 	client.blocked.Unlock()
 
-	r := c.OpenRead(ctx, "ptr", "inst_ref")
-
-	dr := r.(*dataReader)
-	if !dr.completed || dr.err != io.EOF {
-		t.Errorf("Expected a closed reader, but was still open: completed: %v, err: %v", dr.completed, dr.err)
-	}
-
-	n, err := r.Read(make([]byte, 4))
-	if err != io.EOF {
-		t.Errorf("Unexpected error from read: %v, read %d bytes.", err, n)
+	_, err := c.OpenElementChan(ctx, "ptr", "inst_ref", nil)
+	if err != nil {
+		t.Errorf("Unexpected error from read: %v,", err)
 	}
 }
 
@@ -216,7 +463,7 @@ func TestDataChannelRemoveInstruction_limitInstructionCap(t *testing.T) {
 
 	for i := 0; i < endedInstructionCap+10; i++ {
 		instID := instructionID(fmt.Sprintf("inst_ref%d", i))
-		c.OpenRead(ctx, "ptr", instID)
+		c.OpenElementChan(ctx, "ptr", instID, nil)
 		c.removeInstruction(instID)
 	}
 	if got, want := len(c.endedInstructions), endedInstructionCap; got != want {
@@ -226,7 +473,7 @@ func TestDataChannelRemoveInstruction_limitInstructionCap(t *testing.T) {
 
 func TestDataChannelTerminate_Writes(t *testing.T) {
 	// The logging of channels closed is quite noisy for this test
-	log.SetOutput(ioutil.Discard)
+	log.SetOutput(io.Discard)
 
 	expectedError := fmt.Errorf("EXPECTED ERROR")
 
@@ -285,7 +532,7 @@ func TestDataChannelTerminate_Writes(t *testing.T) {
 				t.Errorf("Unexpected error: got %v, want %v", got, want)
 			}
 			// Verify that new readers return the same error for writes after stream termination.
-			// TODO(lostluck) 2019.11.26: use the the go 1.13 errors package to check this rather
+			// TODO(lostluck) 2019.11.26: use the go 1.13 errors package to check this rather
 			// than a strings.Contains check once testing infrastructure can use go 1.13.
 			if n, err := c.OpenWrite(ctx, "ptr", instID).Write(msg); err != nil && !strings.Contains(err.Error(), expectedError.Error()) {
 				t.Errorf("Unexpected error from write: got %v, want, %v read %d bytes.", err, expectedError, n)
@@ -296,6 +543,383 @@ func TestDataChannelTerminate_Writes(t *testing.T) {
 			case <-time.After(time.Second * 5):
 				t.Fatal("context wasn't cancelled")
 			}
+		})
+	}
+}
+
+type teardownDataClient struct{ block chan struct{} }
+
+func (f *teardownDataClient) Recv() (*fnpb.Elements, error) { <-f.block; return nil, io.EOF }
+func (f *teardownDataClient) Send(*fnpb.Elements) error     { return nil }
+
+func TestDataChannelManagerClose(t *testing.T) {
+	m := &DataChannelManager{ports: map[string]*DataChannel{}}
+	var cancelled [2]atomic.Bool
+	var unblock sync.Once
+	block := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		i := i
+		ch := makeDataChannel(context.Background(), "port", &teardownDataClient{block: block}, func() {
+			cancelled[i].Store(true)
+			unblock.Do(func() { close(block) })
+		})
+		ch.forceRecreate = func(string, error) {
+			m.mu.Lock()
+			_ = m.ports
+			m.mu.Unlock()
+		}
+		m.ports["p"+string(rune('0'+i))] = ch
+	}
+
+	m.Close()
+
+	for i := range cancelled {
+		if !cancelled[i].Load() {
+			t.Errorf("channel %d not cancelled", i)
+		}
+	}
+	m.mu.Lock()
+	left := m.ports
+	m.mu.Unlock()
+	if left != nil {
+		t.Error("ports not cleared")
+	}
+	m.Close()
+}
+
+type eofOnSendClient struct {
+	recvForever chan struct{}
+}
+
+func (c *eofOnSendClient) Send(*fnpb.Elements) error { return io.EOF }
+func (c *eofOnSendClient) Recv() (*fnpb.Elements, error) {
+	<-c.recvForever
+	return nil, io.EOF
+}
+
+func TestDataWriterSendEOF(t *testing.T) {
+	ch := &DataChannel{
+		id:       "id",
+		client:   &eofOnSendClient{recvForever: make(chan struct{})},
+		cancelFn: func() {},
+	}
+	w := &dataWriter{ch: ch, id: clientID{ptransformID: "pt", instID: "inst"}}
+
+	done := make(chan error, 1)
+	go func() {
+		ch.mu.Lock()
+		defer ch.mu.Unlock()
+		done <- w.send(&fnpb.Elements{})
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("send succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("send blocked")
+	}
+}
+
+func TestTimerWriterSendEOF(t *testing.T) {
+	ch := &DataChannel{
+		id:       "id",
+		client:   &eofOnSendClient{recvForever: make(chan struct{})},
+		cancelFn: func() {},
+	}
+	w := &timerWriter{ch: ch, id: clientID{ptransformID: "pt", instID: "inst"}, timerFamilyID: "fam"}
+
+	done := make(chan error, 1)
+	go func() {
+		ch.mu.Lock()
+		defer ch.mu.Unlock()
+		done <- w.send(&fnpb.Elements{})
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("send succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("send blocked")
+	}
+}
+
+type failLastClient struct{ block chan struct{} }
+
+func (f *failLastClient) Recv() (*fnpb.Elements, error) { <-f.block; return nil, io.EOF }
+func (f *failLastClient) Send(e *fnpb.Elements) error {
+	for _, d := range e.GetData() {
+		if d.GetIsLast() {
+			return errors.New("Unavailable")
+		}
+	}
+	for _, tm := range e.GetTimers() {
+		if tm.GetIsLast() {
+			return errors.New("Unavailable")
+		}
+	}
+	return nil
+}
+
+func TestDataWriter_Close(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := &failLastClient{block: make(chan struct{})}
+	defer close(client.block)
+	c := makeDataChannel(ctx, "id", client, cancel)
+
+	w := c.OpenWrite(ctx, "ptr", "inst1")
+	if _, err := w.Write([]byte("element")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err == nil || !strings.Contains(err.Error(), "dataWriter[") {
+		t.Fatalf("Close = %v, want dataWriter attribution", err)
+	}
+	tw := c.OpenTimerWrite(ctx, "ptr", "inst2", "family")
+	if err := tw.Close(); err == nil || !strings.Contains(err.Error(), "timerWriter[") {
+		t.Fatalf("timer Close = %v, want timerWriter attribution", err)
+	}
+}
+
+// Production Open against closeInstruction.
+// Flush holds ch.mu inside client.Send.
+// Close takes m.mu and waits on ch.mu.
+// Then the stream fails.
+func TestDataChannelTerminate_recreate(t *testing.T) {
+	hs := newHoldDataServer()
+	lis := newStallListener(t)
+	gs := grpc.NewServer()
+	fnpb.RegisterBeamFnDataServer(gs, hs)
+	go gs.Serve(lis)
+	defer func() {
+		lis.fail()
+		gs.Stop()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := &DataChannelManager{}
+	s := NewScopedDataManager(m, "inst1")
+	w, err := s.OpenWrite(ctx, exec.StreamID{Port: exec.Port{URL: lis.Addr().String()}, PtransformID: "pt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-hs.entered
+	lis.stall()
+
+	flushDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 4e6)
+		for {
+			if _, err := w.Write(buf); err != nil {
+				flushDone <- err
+				return
+			}
+			if _, err := w.Write([]byte{1}); err != nil {
+				flushDone <- err
+				return
+			}
+		}
+	}()
+	select {
+	case err := <-flushDone:
+		t.Fatalf("flush returned before Close: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- s.Close() }()
+	time.Sleep(200 * time.Millisecond)
+	lis.fail()
+
+	timeout := time.After(3 * time.Second)
+	gotFlush, gotClose := false, false
+	for !gotFlush || !gotClose {
+		select {
+		case <-flushDone:
+			gotFlush = true
+		case <-closeDone:
+			gotClose = true
+		case <-timeout:
+			t.Fatal("recreate and closeInstruction deadlocked")
+		}
+	}
+}
+
+// After a stream fails, the next Open must dial a new channel.
+// It must not return the channel whose stream is already dead.
+func TestDataChannelOpen_skipsFailedChannel(t *testing.T) {
+	hs := newHoldDataServer()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gs := grpc.NewServer()
+	fnpb.RegisterBeamFnDataServer(gs, hs)
+	go gs.Serve(lis)
+	defer gs.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := &DataChannelManager{}
+	port := exec.Port{URL: lis.Addr().String()}
+	ch1, err := m.Open(ctx, port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-hs.entered
+	ch1.mu.Lock()
+	ch1.terminateStreamOnError(io.EOF)
+	ch1.mu.Unlock()
+
+	ch2, err := m.Open(ctx, port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch2 == ch1 {
+		t.Fatal("Open returned a failed channel")
+	}
+}
+
+type holdDataServer struct {
+	fnpb.UnimplementedBeamFnDataServer
+	entered chan struct{}
+	once    sync.Once
+}
+
+func newHoldDataServer() *holdDataServer {
+	return &holdDataServer{entered: make(chan struct{})}
+}
+
+func (s *holdDataServer) Data(stream fnpb.BeamFnData_DataServer) error {
+	s.once.Do(func() { close(s.entered) })
+	<-stream.Context().Done()
+	return stream.Context().Err()
+}
+
+type stallListener struct {
+	net.Listener
+	mu    sync.Mutex
+	conns []*stallConn
+}
+
+func newStallListener(t *testing.T) *stallListener {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &stallListener{Listener: l}
+}
+
+func (l *stallListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetReadBuffer(2048)
+		_ = tc.SetWriteBuffer(2048)
+	}
+	sc := &stallConn{Conn: c, closed: make(chan struct{})}
+	l.mu.Lock()
+	l.conns = append(l.conns, sc)
+	l.mu.Unlock()
+	return sc, nil
+}
+
+func (l *stallListener) stall() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, c := range l.conns {
+		c.stalled.Store(true)
+	}
+}
+
+func (l *stallListener) fail() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, c := range l.conns {
+		c.fail()
+	}
+}
+
+type stallConn struct {
+	net.Conn
+	stalled atomic.Bool
+	once    sync.Once
+	closed  chan struct{}
+}
+
+func (c *stallConn) Read(p []byte) (int, error) {
+	if c.stalled.Load() {
+		<-c.closed
+		return 0, io.EOF
+	}
+	return c.Conn.Read(p)
+}
+
+func (c *stallConn) fail() {
+	c.stalled.Store(true)
+	c.once.Do(func() {
+		_ = c.Conn.Close()
+		close(c.closed)
+	})
+}
+
+type noopDataClient struct {
+}
+
+func (*noopDataClient) Recv() (*fnpb.Elements, error) {
+	return nil, nil
+}
+
+func (*noopDataClient) Send(*fnpb.Elements) error {
+	return nil
+}
+
+func BenchmarkDataWriter(b *testing.B) {
+	fourB := []byte{42, 23, 78, 159}
+	sixteenB := bytes.Repeat(fourB, 4)
+	oneKiloB := bytes.Repeat(sixteenB, 64)
+	oneMegaB := bytes.Repeat(oneKiloB, 1024)
+	benches := []struct {
+		name string
+		data []byte
+	}{
+		{"4B", fourB},
+		{"16B", sixteenB},
+		{"1KB", oneKiloB},
+		{"4KB", bytes.Repeat(oneKiloB, 4)},
+		{"100KB", bytes.Repeat(oneKiloB, 100)},
+		{"1MB", oneMegaB},
+		{"10MB", bytes.Repeat(oneMegaB, 10)},
+		{"100MB", bytes.Repeat(oneMegaB, 100)},
+		{"256MB", bytes.Repeat(oneMegaB, 256)},
+	}
+	for _, bench := range benches {
+		b.Run(bench.name, func(b *testing.B) {
+			ndc := &noopDataClient{}
+			dc := &DataChannel{
+				id:      "dcid",
+				client:  ndc,
+				writers: map[instructionID]map[string]*dataWriter{},
+			}
+			w := dataWriter{
+				ch: dc,
+				id: clientID{
+					ptransformID: "pid",
+					instID:       instructionID("instID"),
+				},
+			}
+
+			for i := 0; i < b.N; i++ {
+				w.Write(bench.data)
+			}
+			w.Close()
 		})
 	}
 }

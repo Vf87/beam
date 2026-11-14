@@ -16,11 +16,11 @@
 // Package protox contains utilities for working with protobufs.
 package protox
 
-import "github.com/golang/protobuf/proto"
+import "google.golang.org/protobuf/proto"
 
 // MustEncode encode the message and panics on failure.
 func MustEncode(msg proto.Message) []byte {
-	data, err := proto.Marshal(msg)
+	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
 	if err != nil {
 		panic(err)
 	}

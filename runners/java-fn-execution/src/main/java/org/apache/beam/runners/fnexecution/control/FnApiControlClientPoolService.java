@@ -17,7 +17,7 @@
  */
 package org.apache.beam.runners.fnexecution.control;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -28,10 +28,9 @@ import org.apache.beam.model.fnexecution.v1.BeamFnApi;
 import org.apache.beam.model.fnexecution.v1.BeamFnControlGrpc;
 import org.apache.beam.sdk.fn.server.FnService;
 import org.apache.beam.sdk.fn.server.HeaderAccessor;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.Status;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.StatusException;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.StreamObserver;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Status;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.StatusException;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -82,11 +81,6 @@ public class FnApiControlClientPoolService extends BeamFnControlGrpc.BeamFnContr
   public StreamObserver<BeamFnApi.InstructionResponse> control(
       StreamObserver<BeamFnApi.InstructionRequest> requestObserver) {
     final String workerId = headerAccessor.getSdkWorkerId();
-    if (Strings.isNullOrEmpty(workerId)) {
-      // TODO(BEAM-4149): Enforce proper worker id.
-      LOG.warn("No worker_id header provided in control request");
-    }
-
     LOG.info("Beam Fn Control client connected with id {}", workerId);
     FnApiControlClient newClient =
         FnApiControlClient.forRequestObserver(workerId, requestObserver, processBundleDescriptors);
@@ -99,7 +93,7 @@ public class FnApiControlClientPoolService extends BeamFnControlGrpc.BeamFnContr
       synchronized (lock) {
         checkState(
             !closed, "%s already closed", FnApiControlClientPoolService.class.getSimpleName());
-        // TODO: https://issues.apache.org/jira/browse/BEAM-4151: Prevent stale client references
+        // TODO: https://github.com/apache/beam/issues/18790: Prevent stale client references
         // from leaking.
         vendedClients.put(workerId, newClient);
       }
@@ -123,7 +117,7 @@ public class FnApiControlClientPoolService extends BeamFnControlGrpc.BeamFnContr
       String msg =
           String.format("ProcessBundleDescriptor with id %s not found", bundleDescriptorId);
       responseObserver.onError(new StatusException(Status.NOT_FOUND.withDescription(msg)));
-      LOG.error(msg);
+      LOG.error("{}", msg);
     } else {
       responseObserver.onNext(descriptor);
       responseObserver.onCompleted();

@@ -17,12 +17,12 @@
  */
 package org.apache.beam.sdk.io.splunk;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.auto.value.AutoValue;
+import com.google.gson.JsonObject;
 import com.google.gson.annotations.SerializedName;
-import org.apache.beam.sdk.schemas.AutoValueSchema;
-import org.apache.beam.sdk.schemas.annotations.DefaultSchema;
+import org.apache.beam.sdk.coders.DefaultCoder;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -39,9 +39,17 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  *   <li>index
  * </ul>
  */
-@DefaultSchema(AutoValueSchema.class)
+@DefaultCoder(SplunkEventCoder.class)
 @AutoValue
 public abstract class SplunkEvent {
+
+  public static final String TIME = "time";
+  public static final String HOST = "host";
+  public static final String SOURCE = "source";
+  public static final String SOURCE_TYPE = "sourcetype";
+  public static final String INDEX = "index";
+  public static final String FIELDS = "fields";
+  public static final String EVENT = "event";
 
   /** Provides a builder for creating {@link SplunkEvent} objects. */
   public static Builder newBuilder() {
@@ -59,6 +67,8 @@ public abstract class SplunkEvent {
 
   public abstract @Nullable String index();
 
+  public abstract @Nullable JsonObject fields();
+
   public abstract @Nullable String event();
 
   /** A builder class for creating a {@link SplunkEvent}. */
@@ -74,6 +84,8 @@ public abstract class SplunkEvent {
     abstract Builder setSourceType(String sourceType);
 
     abstract Builder setIndex(String index);
+
+    abstract Builder setFields(JsonObject fields);
 
     abstract Builder setEvent(String event);
 
@@ -134,6 +146,17 @@ public abstract class SplunkEvent {
       checkNotNull(index, "withIndex(index) called with null input.");
 
       return setIndex(index);
+    }
+
+    /**
+     * Assigns fields value to the event metadata.
+     *
+     * @param fields fields value to assign
+     */
+    public Builder withFields(JsonObject fields) {
+      checkNotNull(fields, "withFields(fields) called with null input.");
+
+      return setFields(fields);
     }
 
     /**

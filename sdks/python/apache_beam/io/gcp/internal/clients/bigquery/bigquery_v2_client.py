@@ -29,13 +29,13 @@ class BigqueryV2(base_api.BaseApiClient):
 
   MESSAGES_MODULE = messages
   BASE_URL = 'https://bigquery.googleapis.com/bigquery/v2/'
-  MTLS_BASE_URL = 'https://www.mtls.googleapis.com/bigquery/v2/'
+  MTLS_BASE_URL = 'https://bigquery.mtls.googleapis.com/bigquery/v2/'
 
   _PACKAGE = 'bigquery'
-  _SCOPES = ['https://www.googleapis.com/auth/bigquery', 'https://www.googleapis.com/auth/bigquery.insertdata', 'https://www.googleapis.com/auth/bigquery.readonly', 'https://www.googleapis.com/auth/cloud-platform', 'https://www.googleapis.com/auth/cloud-platform.read-only', 'https://www.googleapis.com/auth/devstorage.full_control', 'https://www.googleapis.com/auth/devstorage.read_only', 'https://www.googleapis.com/auth/devstorage.read_write']
+  _SCOPES = ['https://www.googleapis.com/auth/bigquery', 'https://www.googleapis.com/auth/bigquery.insertdata', 'https://www.googleapis.com/auth/cloud-platform', 'https://www.googleapis.com/auth/cloud-platform.read-only', 'https://www.googleapis.com/auth/devstorage.full_control', 'https://www.googleapis.com/auth/devstorage.read_only', 'https://www.googleapis.com/auth/devstorage.read_write']
   _VERSION = 'v2'
-  _CLIENT_ID = '1042881264118.apps.googleusercontent.com'
-  _CLIENT_SECRET = 'x_Tw5K8nnjoRAqULM9PFAC2b'
+  _CLIENT_ID = 'CLIENT_ID'
+  _CLIENT_SECRET = 'CLIENT_SECRET'
   _USER_AGENT = 'x_Tw5K8nnjoRAqULM9PFAC2b'
   _CLIENT_CLASS_NAME = 'BigqueryV2'
   _URL_VERSION = 'v2'
@@ -72,11 +72,10 @@ class BigqueryV2(base_api.BaseApiClient):
 
     def __init__(self, client):
       super().__init__(client)
-      self._upload_configs = {
-          }
+      self._upload_configs = {}
 
     def Delete(self, request, global_params=None):
-      r"""Deletes the dataset specified by the datasetId value. Before you can delete a dataset, you must delete all its tables, either manually or by specifying deleteContents. Immediately after deletion, you can create another dataset with the same name.
+      r"""Deletes the dataset specified by the datasetId value. Before you can delete a dataset, you must delete all its tables, either manually or by specifying deleteContents. Immediately after deletion, you can create another dataset with the same name. # IAM Permissions Requires the `bigquery.datasets.delete` permission on the dataset.
 
       Args:
         request: (BigqueryDatasetsDeleteRequest) input message
@@ -89,12 +88,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     Delete.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}',
         http_method='DELETE',
         method_id='bigquery.datasets.delete',
         ordered_params=['projectId', 'datasetId'],
         path_params=['datasetId', 'projectId'],
         query_params=['deleteContents'],
-        relative_path='projects/{projectId}/datasets/{datasetId}',
+        relative_path='projects/{+projectId}/datasets/{+datasetId}',
         request_field='',
         request_type_name='BigqueryDatasetsDeleteRequest',
         response_type_name='BigqueryDatasetsDeleteResponse',
@@ -102,7 +102,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def Get(self, request, global_params=None):
-      r"""Returns the dataset specified by datasetID.
+      r"""Returns the dataset specified by datasetID. # IAM Permissions Requires the `bigquery.datasets.get` permission on the dataset.
 
       Args:
         request: (BigqueryDatasetsGetRequest) input message
@@ -115,12 +115,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     Get.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}',
         http_method='GET',
         method_id='bigquery.datasets.get',
         ordered_params=['projectId', 'datasetId'],
         path_params=['datasetId', 'projectId'],
-        query_params=[],
-        relative_path='projects/{projectId}/datasets/{datasetId}',
+        query_params=['accessPolicyVersion', 'datasetView'],
+        relative_path='projects/{+projectId}/datasets/{+datasetId}',
         request_field='',
         request_type_name='BigqueryDatasetsGetRequest',
         response_type_name='Dataset',
@@ -128,7 +129,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def Insert(self, request, global_params=None):
-      r"""Creates a new empty dataset.
+      r"""Creates a new empty dataset. # IAM Permissions Requires the `bigquery.datasets.create` permission on the project.
 
       Args:
         request: (BigqueryDatasetsInsertRequest) input message
@@ -141,12 +142,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     Insert.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets',
         http_method='POST',
         method_id='bigquery.datasets.insert',
         ordered_params=['projectId'],
         path_params=['projectId'],
-        query_params=[],
-        relative_path='projects/{projectId}/datasets',
+        query_params=['accessPolicyVersion'],
+        relative_path='projects/{+projectId}/datasets',
         request_field='dataset',
         request_type_name='BigqueryDatasetsInsertRequest',
         response_type_name='Dataset',
@@ -154,7 +156,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def List(self, request, global_params=None):
-      r"""Lists all datasets in the specified project to which you have been granted the READER dataset role.
+      r"""Lists all datasets in the specified project to which the user has been granted the READER dataset role. # IAM Permissions Requires no specific IAM permission(s) to use this method. Results are filtered to only include datasets on which the caller has the `bigquery.datasets.get` permission.
 
       Args:
         request: (BigqueryDatasetsListRequest) input message
@@ -167,12 +169,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     List.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets',
         http_method='GET',
         method_id='bigquery.datasets.list',
         ordered_params=['projectId'],
         path_params=['projectId'],
         query_params=['all', 'filter', 'maxResults', 'pageToken'],
-        relative_path='projects/{projectId}/datasets',
+        relative_path='projects/{+projectId}/datasets',
         request_field='',
         request_type_name='BigqueryDatasetsListRequest',
         response_type_name='DatasetList',
@@ -180,7 +183,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def Patch(self, request, global_params=None):
-      r"""Updates information in an existing dataset. The update method replaces the entire dataset resource, whereas the patch method only replaces fields that are provided in the submitted dataset resource. This method supports patch semantics.
+      r"""Updates information in an existing dataset. The update method replaces the entire dataset resource, whereas the patch method only replaces fields that are provided in the submitted dataset resource. This method supports RFC5789 patch semantics. # IAM Permissions Requires the following IAM permission(s) to use this method: - `bigquery.datasets.update` on the dataset. - `bigquery.datasets.get` on the dataset.
 
       Args:
         request: (BigqueryDatasetsPatchRequest) input message
@@ -193,20 +196,48 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     Patch.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}',
         http_method='PATCH',
         method_id='bigquery.datasets.patch',
         ordered_params=['projectId', 'datasetId'],
         path_params=['datasetId', 'projectId'],
-        query_params=[],
-        relative_path='projects/{projectId}/datasets/{datasetId}',
+        query_params=['accessPolicyVersion', 'updateMode'],
+        relative_path='projects/{+projectId}/datasets/{+datasetId}',
         request_field='dataset',
         request_type_name='BigqueryDatasetsPatchRequest',
         response_type_name='Dataset',
         supports_download=False,
     )
 
+    def Undelete(self, request, global_params=None):
+      r"""Undeletes a dataset which is within time travel window based on datasetId. If a time is specified, the dataset version deleted at that time is undeleted, else the last live version is undeleted. # IAM Permissions Requires the following IAM permission(s) to use this method: - `bigquery.datasets.create` on the project. - `bigquery.datasets.get` on the dataset.
+
+      Args:
+        request: (BigqueryDatasetsUndeleteRequest) input message
+        global_params: (StandardQueryParameters, default: None) global arguments
+      Returns:
+        (Dataset) The response message.
+      """
+      config = self.GetMethodConfig('Undelete')
+      return self._RunMethod(
+          config, request, global_params=global_params)
+
+    Undelete.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}:undelete',
+        http_method='POST',
+        method_id='bigquery.datasets.undelete',
+        ordered_params=['projectId', 'datasetId'],
+        path_params=['datasetId', 'projectId'],
+        query_params=[],
+        relative_path='projects/{+projectId}/datasets/{+datasetId}:undelete',
+        request_field='undeleteDatasetRequest',
+        request_type_name='BigqueryDatasetsUndeleteRequest',
+        response_type_name='Dataset',
+        supports_download=False,
+    )
+
     def Update(self, request, global_params=None):
-      r"""Updates information in an existing dataset. The update method replaces the entire dataset resource, whereas the patch method only replaces fields that are provided in the submitted dataset resource.
+      r"""Updates information in an existing dataset. The update method replaces the entire dataset resource, whereas the patch method only replaces fields that are provided in the submitted dataset resource. # IAM Permissions Requires the `bigquery.datasets.update` permission on the dataset.
 
       Args:
         request: (BigqueryDatasetsUpdateRequest) input message
@@ -219,12 +250,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     Update.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}',
         http_method='PUT',
         method_id='bigquery.datasets.update',
         ordered_params=['projectId', 'datasetId'],
         path_params=['datasetId', 'projectId'],
-        query_params=[],
-        relative_path='projects/{projectId}/datasets/{datasetId}',
+        query_params=['accessPolicyVersion', 'updateMode'],
+        relative_path='projects/{+projectId}/datasets/{+datasetId}',
         request_field='dataset',
         request_type_name='BigqueryDatasetsUpdateRequest',
         response_type_name='Dataset',
@@ -243,14 +275,14 @@ class BigqueryV2(base_api.BaseApiClient):
               accept=['*/*'],
               max_size=None,
               resumable_multipart=True,
-              resumable_path='/resumable/upload/bigquery/v2/projects/{projectId}/jobs',
+              resumable_path='/resumable/upload/bigquery/v2/projects/{+projectId}/jobs',
               simple_multipart=True,
-              simple_path='/upload/bigquery/v2/projects/{projectId}/jobs',
+              simple_path='/upload/bigquery/v2/projects/{+projectId}/jobs',
           ),
           }
 
     def Cancel(self, request, global_params=None):
-      r"""Requests that a job be cancelled. This call will return immediately, and the client will need to poll for the job status to see if the cancel completed successfully. Cancelled jobs may still incur costs.
+      r"""Requests that a job be cancelled. This call will return immediately, and the client will need to poll for the job status to see if the cancel completed successfully. Cancelled jobs may still incur costs. # IAM Permissions Requires the `bigquery.jobs.update` permission on the job resource. If the user matches the creator of the job, the `bigquery.jobs.create` permission on the project is required instead.
 
       Args:
         request: (BigqueryJobsCancelRequest) input message
@@ -263,20 +295,48 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     Cancel.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/jobs/{jobsId}/cancel',
         http_method='POST',
         method_id='bigquery.jobs.cancel',
         ordered_params=['projectId', 'jobId'],
         path_params=['jobId', 'projectId'],
         query_params=['location'],
-        relative_path='projects/{projectId}/jobs/{jobId}/cancel',
+        relative_path='projects/{+projectId}/jobs/{+jobId}/cancel',
         request_field='',
         request_type_name='BigqueryJobsCancelRequest',
         response_type_name='JobCancelResponse',
         supports_download=False,
     )
 
+    def Delete(self, request, global_params=None):
+      r"""Requests the deletion of the metadata of a job. This call returns when the job's metadata is deleted. # IAM Permissions Requires the `bigquery.jobs.delete` permission on the job resource.
+
+      Args:
+        request: (BigqueryJobsDeleteRequest) input message
+        global_params: (StandardQueryParameters, default: None) global arguments
+      Returns:
+        (BigqueryJobsDeleteResponse) The response message.
+      """
+      config = self.GetMethodConfig('Delete')
+      return self._RunMethod(
+          config, request, global_params=global_params)
+
+    Delete.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/jobs/{jobsId}/delete',
+        http_method='DELETE',
+        method_id='bigquery.jobs.delete',
+        ordered_params=['projectId', 'jobId'],
+        path_params=['jobId', 'projectId'],
+        query_params=['location'],
+        relative_path='projects/{+projectId}/jobs/{+jobId}/delete',
+        request_field='',
+        request_type_name='BigqueryJobsDeleteRequest',
+        response_type_name='BigqueryJobsDeleteResponse',
+        supports_download=False,
+    )
+
     def Get(self, request, global_params=None):
-      r"""Returns information about a specific job. Job information is available for a six month period after creation. Requires that you're the person who ran the job, or have the Is Owner project role.
+      r"""Returns information about a specific job. Job information is available for a six month period after creation. Requires that you're the person who ran the job, or have the Is Owner project role. # IAM Permissions Requires the `bigquery.jobs.get` permission on the job resource. If the user matches the creator of the job, the `bigquery.jobs.create` permission on the project is required instead.
 
       Args:
         request: (BigqueryJobsGetRequest) input message
@@ -289,12 +349,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     Get.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/jobs/{jobsId}',
         http_method='GET',
         method_id='bigquery.jobs.get',
         ordered_params=['projectId', 'jobId'],
         path_params=['jobId', 'projectId'],
         query_params=['location'],
-        relative_path='projects/{projectId}/jobs/{jobId}',
+        relative_path='projects/{+projectId}/jobs/{+jobId}',
         request_field='',
         request_type_name='BigqueryJobsGetRequest',
         response_type_name='Job',
@@ -302,7 +363,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def GetQueryResults(self, request, global_params=None):
-      r"""Retrieves the results of a query job.
+      r"""RPC to get the results of a query job. # IAM Permissions Requires the following IAM permission(s) to use this method: - `bigquery.jobs.get` on the job. - `bigquery.tables.getData` on the destination table. If the user matches the creator of the job, the following IAM permission(s) are required instead: - `bigquery.jobs.create` on the project. - `bigquery.tables.getData` on the destination table.
 
       Args:
         request: (BigqueryJobsGetQueryResultsRequest) input message
@@ -315,12 +376,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     GetQueryResults.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/queries/{queriesId}',
         http_method='GET',
         method_id='bigquery.jobs.getQueryResults',
         ordered_params=['projectId', 'jobId'],
         path_params=['jobId', 'projectId'],
-        query_params=['location', 'maxResults', 'pageToken', 'startIndex', 'timeoutMs'],
-        relative_path='projects/{projectId}/queries/{jobId}',
+        query_params=['formatOptions_timestampOutputFormat', 'formatOptions_useInt64Timestamp', 'location', 'maxResults', 'pageToken', 'startIndex', 'timeoutMs'],
+        relative_path='projects/{+projectId}/queries/{+jobId}',
         request_field='',
         request_type_name='BigqueryJobsGetQueryResultsRequest',
         response_type_name='GetQueryResultsResponse',
@@ -328,7 +390,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def Insert(self, request, global_params=None, upload=None):
-      r"""Starts a new asynchronous job. Requires the Can View project role.
+      r"""Starts a new asynchronous job. This API has two different kinds of endpoint URIs, as this method supports a variety of use cases. * The *Metadata* URI is used for most interactions, as it accepts the job configuration directly. * The *Upload* URI is ONLY for the case when you're sending both a load job configuration and a data stream together. In this case, the Upload URI accepts the job configuration and the data as two distinct multipart MIME parts. # IAM Permissions Requires the `bigquery.jobs.create` permission on the project resource. Additional permissions are required depending on the job type: - **Load, Export, and Copy jobs**: Generally require data-level permissions such as `bigquery.tables.export` or access to external storage. - **Query jobs**: Permissions are dependent on the SQL statement. Complex queries (DDL, DCL) may require additional permissions to create reservations, modify IAM policies, or update project settings.
 
       Args:
         request: (BigqueryJobsInsertRequest) input message
@@ -345,12 +407,13 @@ class BigqueryV2(base_api.BaseApiClient):
           upload=upload, upload_config=upload_config)
 
     Insert.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/jobs',
         http_method='POST',
         method_id='bigquery.jobs.insert',
         ordered_params=['projectId'],
         path_params=['projectId'],
         query_params=[],
-        relative_path='projects/{projectId}/jobs',
+        relative_path='projects/{+projectId}/jobs',
         request_field='job',
         request_type_name='BigqueryJobsInsertRequest',
         response_type_name='Job',
@@ -358,7 +421,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def List(self, request, global_params=None):
-      r"""Lists all jobs that you started in the specified project. Job information is available for a six month period after creation. The job list is sorted in reverse chronological order, by job creation time. Requires the Can View project role, or the Is Owner project role if you set the allUsers property.
+      r"""Lists all jobs that you started in the specified project. Job information is available for a six month period after creation. The job list is sorted in reverse chronological order, by job creation time. Requires the Can View project role, or the Is Owner project role if you set the allUsers property. # IAM Permissions Requires no specific IAM permission(s) to use this method. Users are able to list the jobs they created. Additional access is granted based on the following permissions: - Users with the `bigquery.jobs.listAll` permission can list all jobs with all metadata. - Users with the `bigquery.jobs.list` permission can list all jobs, but with redacted information for jobs they did not create.
 
       Args:
         request: (BigqueryJobsListRequest) input message
@@ -371,12 +434,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     List.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/jobs',
         http_method='GET',
         method_id='bigquery.jobs.list',
         ordered_params=['projectId'],
         path_params=['projectId'],
         query_params=['allUsers', 'maxCreationTime', 'maxResults', 'minCreationTime', 'pageToken', 'parentJobId', 'projection', 'stateFilter'],
-        relative_path='projects/{projectId}/jobs',
+        relative_path='projects/{+projectId}/jobs',
         request_field='',
         request_type_name='BigqueryJobsListRequest',
         response_type_name='JobList',
@@ -384,7 +448,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def Query(self, request, global_params=None):
-      r"""Runs a BigQuery SQL query synchronously and returns query results if the query completes within a specified timeout.
+      r"""Runs a BigQuery SQL query synchronously and returns query results if the query completes within a specified timeout. # IAM Permissions Requires the `bigquery.jobs.create` permission on the project resource. Data-level permissions are highly dependent on the SQL statement being executed. While standard queries require data access (such as `bigquery.tables.getData`), complex operations like DDL or DCL may require permissions to manage reservations, IAM policies, or project settings.
 
       Args:
         request: (BigqueryJobsQueryRequest) input message
@@ -397,12 +461,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     Query.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/queries',
         http_method='POST',
         method_id='bigquery.jobs.query',
         ordered_params=['projectId'],
         path_params=['projectId'],
         query_params=[],
-        relative_path='projects/{projectId}/queries',
+        relative_path='projects/{+projectId}/queries',
         request_field='queryRequest',
         request_type_name='BigqueryJobsQueryRequest',
         response_type_name='QueryResponse',
@@ -416,11 +481,10 @@ class BigqueryV2(base_api.BaseApiClient):
 
     def __init__(self, client):
       super().__init__(client)
-      self._upload_configs = {
-          }
+      self._upload_configs = {}
 
     def Delete(self, request, global_params=None):
-      r"""Deletes the model specified by modelId from the dataset.
+      r"""Deletes the model specified by modelId from the dataset. # IAM Permissions Requires the `bigquery.models.delete` permission on the model.
 
       Args:
         request: (BigqueryModelsDeleteRequest) input message
@@ -447,7 +511,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def Get(self, request, global_params=None):
-      r"""Gets the specified model resource by model ID.
+      r"""Gets the specified model resource by model ID. # IAM Permissions Requires the `bigquery.models.getMetadata` permission on the model.
 
       Args:
         request: (BigqueryModelsGetRequest) input message
@@ -474,7 +538,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def List(self, request, global_params=None):
-      r"""Lists all models in the specified dataset. Requires the READER dataset role.
+      r"""Lists all models in the specified dataset. Requires the READER dataset role. After retrieving the list of models, you can get information about a particular model by calling the models.get method. # IAM Permissions Requires the `bigquery.models.list` permission on the dataset.
 
       Args:
         request: (BigqueryModelsListRequest) input message
@@ -501,7 +565,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def Patch(self, request, global_params=None):
-      r"""Patch specific fields in the specified model.
+      r"""Patch specific fields in the specified model. # IAM Permissions Requires the `bigquery.models.updateMetadata` permission on the model.
 
       Args:
         request: (BigqueryModelsPatchRequest) input message
@@ -534,11 +598,10 @@ class BigqueryV2(base_api.BaseApiClient):
 
     def __init__(self, client):
       super().__init__(client)
-      self._upload_configs = {
-          }
+      self._upload_configs = {}
 
     def GetServiceAccount(self, request, global_params=None):
-      r"""Returns the email address of the service account for your project used for interactions with Google Cloud KMS.
+      r"""RPC to get the service account for a project used for interactions with Google Cloud KMS. Requires the `bigquery.jobs.create` permission on the project resource. This permission is required to authorize the retrieval of the project's service identity for technical management tasks like encryption configuration.
 
       Args:
         request: (BigqueryProjectsGetServiceAccountRequest) input message
@@ -551,12 +614,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     GetServiceAccount.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/serviceAccount',
         http_method='GET',
         method_id='bigquery.projects.getServiceAccount',
         ordered_params=['projectId'],
         path_params=['projectId'],
         query_params=[],
-        relative_path='projects/{projectId}/serviceAccount',
+        relative_path='projects/{+projectId}/serviceAccount',
         request_field='',
         request_type_name='BigqueryProjectsGetServiceAccountRequest',
         response_type_name='GetServiceAccountResponse',
@@ -564,7 +628,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def List(self, request, global_params=None):
-      r"""Lists all projects to which you have been granted any project role.
+      r"""RPC to list projects to which the user has been granted any project role. Users of this method are encouraged to consider the [Resource Manager](https://cloud.google.com/resource-manager/docs/) API, which provides the underlying data for this method and has more capabilities. # IAM Permissions Requires no specific IAM permission(s) to use this method. The results are filtered to only include projects on which the caller has been granted a project-level role such as a BigQuery predefined IAM role or a basic role such as Viewer or Owner.
 
       Args:
         request: (BigqueryProjectsListRequest) input message
@@ -596,11 +660,10 @@ class BigqueryV2(base_api.BaseApiClient):
 
     def __init__(self, client):
       super().__init__(client)
-      self._upload_configs = {
-          }
+      self._upload_configs = {}
 
     def Delete(self, request, global_params=None):
-      r"""Deletes the routine specified by routineId from the dataset.
+      r"""Deletes the routine specified by routineId from the dataset. # IAM Permissions Requires the `bigquery.routines.delete` permission on the routine.
 
       Args:
         request: (BigqueryRoutinesDeleteRequest) input message
@@ -627,7 +690,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def Get(self, request, global_params=None):
-      r"""Gets the specified routine resource by routine ID.
+      r"""Gets the specified routine resource by routine ID. # IAM Permissions Requires the `bigquery.routines.get` permission on the routine.
 
       Args:
         request: (BigqueryRoutinesGetRequest) input message
@@ -653,8 +716,35 @@ class BigqueryV2(base_api.BaseApiClient):
         supports_download=False,
     )
 
+    def GetIamPolicy(self, request, global_params=None):
+      r"""Gets the access control policy for a resource. Returns an empty policy if the resource exists and does not have a policy set.
+
+      Args:
+        request: (BigqueryRoutinesGetIamPolicyRequest) input message
+        global_params: (StandardQueryParameters, default: None) global arguments
+      Returns:
+        (Policy) The response message.
+      """
+      config = self.GetMethodConfig('GetIamPolicy')
+      return self._RunMethod(
+          config, request, global_params=global_params)
+
+    GetIamPolicy.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/routines/{routinesId}:getIamPolicy',
+        http_method='POST',
+        method_id='bigquery.routines.getIamPolicy',
+        ordered_params=['resource'],
+        path_params=['resource'],
+        query_params=[],
+        relative_path='{+resource}:getIamPolicy',
+        request_field='getIamPolicyRequest',
+        request_type_name='BigqueryRoutinesGetIamPolicyRequest',
+        response_type_name='Policy',
+        supports_download=False,
+    )
+
     def Insert(self, request, global_params=None):
-      r"""Creates a new routine in the dataset.
+      r"""Creates a new routine in the dataset. # IAM Permissions Requires the `bigquery.routines.create` permission on the dataset.
 
       Args:
         request: (BigqueryRoutinesInsertRequest) input message
@@ -681,7 +771,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def List(self, request, global_params=None):
-      r"""Lists all routines in the specified dataset. Requires the READER dataset role.
+      r"""Lists all routines in the specified dataset. Requires the READER dataset role. # IAM Permissions Requires the `bigquery.routines.list` permission on the dataset.
 
       Args:
         request: (BigqueryRoutinesListRequest) input message
@@ -707,8 +797,62 @@ class BigqueryV2(base_api.BaseApiClient):
         supports_download=False,
     )
 
+    def SetIamPolicy(self, request, global_params=None):
+      r"""Sets the access control policy on the specified resource. Replaces any existing policy. Can return `NOT_FOUND`, `INVALID_ARGUMENT`, and `PERMISSION_DENIED` errors.
+
+      Args:
+        request: (BigqueryRoutinesSetIamPolicyRequest) input message
+        global_params: (StandardQueryParameters, default: None) global arguments
+      Returns:
+        (Policy) The response message.
+      """
+      config = self.GetMethodConfig('SetIamPolicy')
+      return self._RunMethod(
+          config, request, global_params=global_params)
+
+    SetIamPolicy.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/routines/{routinesId}:setIamPolicy',
+        http_method='POST',
+        method_id='bigquery.routines.setIamPolicy',
+        ordered_params=['resource'],
+        path_params=['resource'],
+        query_params=[],
+        relative_path='{+resource}:setIamPolicy',
+        request_field='setIamPolicyRequest',
+        request_type_name='BigqueryRoutinesSetIamPolicyRequest',
+        response_type_name='Policy',
+        supports_download=False,
+    )
+
+    def TestIamPermissions(self, request, global_params=None):
+      r"""Returns permissions that a caller has on the specified resource. If the resource does not exist, this will return an empty set of permissions, not a `NOT_FOUND` error. Note: This operation is designed to be used for building permission-aware UIs and command-line tools, not for authorization checking. This operation may "fail open" without warning.
+
+      Args:
+        request: (BigqueryRoutinesTestIamPermissionsRequest) input message
+        global_params: (StandardQueryParameters, default: None) global arguments
+      Returns:
+        (TestIamPermissionsResponse) The response message.
+      """
+      config = self.GetMethodConfig('TestIamPermissions')
+      return self._RunMethod(
+          config, request, global_params=global_params)
+
+    TestIamPermissions.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/routines/{routinesId}:testIamPermissions',
+        http_method='POST',
+        method_id='bigquery.routines.testIamPermissions',
+        ordered_params=['resource'],
+        path_params=['resource'],
+        query_params=[],
+        relative_path='{+resource}:testIamPermissions',
+        request_field='testIamPermissionsRequest',
+        request_type_name='BigqueryRoutinesTestIamPermissionsRequest',
+        response_type_name='TestIamPermissionsResponse',
+        supports_download=False,
+    )
+
     def Update(self, request, global_params=None):
-      r"""Updates information in an existing routine. The update method replaces the entire Routine resource.
+      r"""Updates information in an existing routine. The update method replaces the entire Routine resource. # IAM Permissions Requires the `bigquery.routines.update` permission on the routine.
 
       Args:
         request: (BigqueryRoutinesUpdateRequest) input message
@@ -741,11 +885,145 @@ class BigqueryV2(base_api.BaseApiClient):
 
     def __init__(self, client):
       super().__init__(client)
-      self._upload_configs = {
-          }
+      self._upload_configs = {}
+
+    def BatchDelete(self, request, global_params=None):
+      r"""Deletes provided row access policies. # IAM Permissions Requires the following IAM permission(s) on the table: - `bigquery.rowAccessPolicies.delete` - `bigquery.rowAccessPolicies.setIamPolicy`.
+
+      Args:
+        request: (BigqueryRowAccessPoliciesBatchDeleteRequest) input message
+        global_params: (StandardQueryParameters, default: None) global arguments
+      Returns:
+        (BigqueryRowAccessPoliciesBatchDeleteResponse) The response message.
+      """
+      config = self.GetMethodConfig('BatchDelete')
+      return self._RunMethod(
+          config, request, global_params=global_params)
+
+    BatchDelete.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/tables/{tablesId}/rowAccessPolicies:batchDelete',
+        http_method='POST',
+        method_id='bigquery.rowAccessPolicies.batchDelete',
+        ordered_params=['projectId', 'datasetId', 'tableId'],
+        path_params=['datasetId', 'projectId', 'tableId'],
+        query_params=[],
+        relative_path='projects/{+projectId}/datasets/{+datasetId}/tables/{+tableId}/rowAccessPolicies:batchDelete',
+        request_field='batchDeleteRowAccessPoliciesRequest',
+        request_type_name='BigqueryRowAccessPoliciesBatchDeleteRequest',
+        response_type_name='BigqueryRowAccessPoliciesBatchDeleteResponse',
+        supports_download=False,
+    )
+
+    def Delete(self, request, global_params=None):
+      r"""Deletes a row access policy. # IAM Permissions Requires the following IAM permission(s) on the table: - `bigquery.rowAccessPolicies.delete` - `bigquery.rowAccessPolicies.setIamPolicy`.
+
+      Args:
+        request: (BigqueryRowAccessPoliciesDeleteRequest) input message
+        global_params: (StandardQueryParameters, default: None) global arguments
+      Returns:
+        (BigqueryRowAccessPoliciesDeleteResponse) The response message.
+      """
+      config = self.GetMethodConfig('Delete')
+      return self._RunMethod(
+          config, request, global_params=global_params)
+
+    Delete.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/tables/{tablesId}/rowAccessPolicies/{rowAccessPoliciesId}',
+        http_method='DELETE',
+        method_id='bigquery.rowAccessPolicies.delete',
+        ordered_params=['projectId', 'datasetId', 'tableId', 'policyId'],
+        path_params=['datasetId', 'policyId', 'projectId', 'tableId'],
+        query_params=['force'],
+        relative_path='projects/{+projectId}/datasets/{+datasetId}/tables/{+tableId}/rowAccessPolicies/{+policyId}',
+        request_field='',
+        request_type_name='BigqueryRowAccessPoliciesDeleteRequest',
+        response_type_name='BigqueryRowAccessPoliciesDeleteResponse',
+        supports_download=False,
+    )
+
+    def Get(self, request, global_params=None):
+      r"""Gets the specified row access policy by policy ID. # IAM Permissions Requires the `bigquery.rowAccessPolicies.get` permission on the table.
+
+      Args:
+        request: (BigqueryRowAccessPoliciesGetRequest) input message
+        global_params: (StandardQueryParameters, default: None) global arguments
+      Returns:
+        (RowAccessPolicy) The response message.
+      """
+      config = self.GetMethodConfig('Get')
+      return self._RunMethod(
+          config, request, global_params=global_params)
+
+    Get.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/tables/{tablesId}/rowAccessPolicies/{rowAccessPoliciesId}',
+        http_method='GET',
+        method_id='bigquery.rowAccessPolicies.get',
+        ordered_params=['projectId', 'datasetId', 'tableId', 'policyId'],
+        path_params=['datasetId', 'policyId', 'projectId', 'tableId'],
+        query_params=[],
+        relative_path='projects/{+projectId}/datasets/{+datasetId}/tables/{+tableId}/rowAccessPolicies/{+policyId}',
+        request_field='',
+        request_type_name='BigqueryRowAccessPoliciesGetRequest',
+        response_type_name='RowAccessPolicy',
+        supports_download=False,
+    )
+
+    def GetIamPolicy(self, request, global_params=None):
+      r"""Gets the access control policy for a resource. Returns an empty policy if the resource exists and does not have a policy set.
+
+      Args:
+        request: (BigqueryRowAccessPoliciesGetIamPolicyRequest) input message
+        global_params: (StandardQueryParameters, default: None) global arguments
+      Returns:
+        (Policy) The response message.
+      """
+      config = self.GetMethodConfig('GetIamPolicy')
+      return self._RunMethod(
+          config, request, global_params=global_params)
+
+    GetIamPolicy.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/tables/{tablesId}/rowAccessPolicies/{rowAccessPoliciesId}:getIamPolicy',
+        http_method='POST',
+        method_id='bigquery.rowAccessPolicies.getIamPolicy',
+        ordered_params=['resource'],
+        path_params=['resource'],
+        query_params=[],
+        relative_path='{+resource}:getIamPolicy',
+        request_field='getIamPolicyRequest',
+        request_type_name='BigqueryRowAccessPoliciesGetIamPolicyRequest',
+        response_type_name='Policy',
+        supports_download=False,
+    )
+
+    def Insert(self, request, global_params=None):
+      r"""Creates a row access policy. # IAM Permissions Requires the following IAM permission(s) on the table: - `bigquery.rowAccessPolicies.create` - `bigquery.rowAccessPolicies.setIamPolicy` - `bigquery.tables.getData`.
+
+      Args:
+        request: (BigqueryRowAccessPoliciesInsertRequest) input message
+        global_params: (StandardQueryParameters, default: None) global arguments
+      Returns:
+        (RowAccessPolicy) The response message.
+      """
+      config = self.GetMethodConfig('Insert')
+      return self._RunMethod(
+          config, request, global_params=global_params)
+
+    Insert.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/tables/{tablesId}/rowAccessPolicies',
+        http_method='POST',
+        method_id='bigquery.rowAccessPolicies.insert',
+        ordered_params=['projectId', 'datasetId', 'tableId'],
+        path_params=['datasetId', 'projectId', 'tableId'],
+        query_params=[],
+        relative_path='projects/{+projectId}/datasets/{+datasetId}/tables/{+tableId}/rowAccessPolicies',
+        request_field='rowAccessPolicy',
+        request_type_name='BigqueryRowAccessPoliciesInsertRequest',
+        response_type_name='RowAccessPolicy',
+        supports_download=False,
+    )
 
     def List(self, request, global_params=None):
-      r"""Lists all row access policies on the specified table.
+      r"""Lists all row access policies on the specified table. # IAM Permissions Requires the `bigquery.rowAccessPolicies.list` permission on the table.
 
       Args:
         request: (BigqueryRowAccessPoliciesListRequest) input message
@@ -771,6 +1049,60 @@ class BigqueryV2(base_api.BaseApiClient):
         supports_download=False,
     )
 
+    def TestIamPermissions(self, request, global_params=None):
+      r"""Returns permissions that a caller has on the specified resource. If the resource does not exist, this will return an empty set of permissions, not a `NOT_FOUND` error. Note: This operation is designed to be used for building permission-aware UIs and command-line tools, not for authorization checking. This operation may "fail open" without warning.
+
+      Args:
+        request: (BigqueryRowAccessPoliciesTestIamPermissionsRequest) input message
+        global_params: (StandardQueryParameters, default: None) global arguments
+      Returns:
+        (TestIamPermissionsResponse) The response message.
+      """
+      config = self.GetMethodConfig('TestIamPermissions')
+      return self._RunMethod(
+          config, request, global_params=global_params)
+
+    TestIamPermissions.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/tables/{tablesId}/rowAccessPolicies/{rowAccessPoliciesId}:testIamPermissions',
+        http_method='POST',
+        method_id='bigquery.rowAccessPolicies.testIamPermissions',
+        ordered_params=['resource'],
+        path_params=['resource'],
+        query_params=[],
+        relative_path='{+resource}:testIamPermissions',
+        request_field='testIamPermissionsRequest',
+        request_type_name='BigqueryRowAccessPoliciesTestIamPermissionsRequest',
+        response_type_name='TestIamPermissionsResponse',
+        supports_download=False,
+    )
+
+    def Update(self, request, global_params=None):
+      r"""Updates a row access policy. # IAM Permissions Requires the following IAM permission(s) on the table: - `bigquery.rowAccessPolicies.update` - `bigquery.rowAccessPolicies.setIamPolicy` - `bigquery.tables.getData`.
+
+      Args:
+        request: (BigqueryRowAccessPoliciesUpdateRequest) input message
+        global_params: (StandardQueryParameters, default: None) global arguments
+      Returns:
+        (RowAccessPolicy) The response message.
+      """
+      config = self.GetMethodConfig('Update')
+      return self._RunMethod(
+          config, request, global_params=global_params)
+
+    Update.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/tables/{tablesId}/rowAccessPolicies/{rowAccessPoliciesId}',
+        http_method='PUT',
+        method_id='bigquery.rowAccessPolicies.update',
+        ordered_params=['projectId', 'datasetId', 'tableId', 'policyId'],
+        path_params=['datasetId', 'policyId', 'projectId', 'tableId'],
+        query_params=[],
+        relative_path='projects/{+projectId}/datasets/{+datasetId}/tables/{+tableId}/rowAccessPolicies/{+policyId}',
+        request_field='rowAccessPolicy',
+        request_type_name='BigqueryRowAccessPoliciesUpdateRequest',
+        response_type_name='RowAccessPolicy',
+        supports_download=False,
+    )
+
   class TabledataService(base_api.BaseApiService):
     """Service class for the tabledata resource."""
 
@@ -778,11 +1110,10 @@ class BigqueryV2(base_api.BaseApiClient):
 
     def __init__(self, client):
       super().__init__(client)
-      self._upload_configs = {
-          }
+      self._upload_configs = {}
 
     def InsertAll(self, request, global_params=None):
-      r"""Streams data into BigQuery one record at a time without needing to run a load job. Requires the WRITER dataset role.
+      r"""Streams data into BigQuery one record at a time without needing to run a load job. # IAM Permissions Requires the following IAM permission(s) to use this method: - `bigquery.tables.updateData` on the table. - `bigquery.tables.get` on the table. - `bigquery.datasets.get` on the dataset.
 
       Args:
         request: (BigqueryTabledataInsertAllRequest) input message
@@ -795,12 +1126,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     InsertAll.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/tables/{tablesId}/insertAll',
         http_method='POST',
         method_id='bigquery.tabledata.insertAll',
         ordered_params=['projectId', 'datasetId', 'tableId'],
         path_params=['datasetId', 'projectId', 'tableId'],
         query_params=[],
-        relative_path='projects/{projectId}/datasets/{datasetId}/tables/{tableId}/insertAll',
+        relative_path='projects/{+projectId}/datasets/{+datasetId}/tables/{+tableId}/insertAll',
         request_field='tableDataInsertAllRequest',
         request_type_name='BigqueryTabledataInsertAllRequest',
         response_type_name='TableDataInsertAllResponse',
@@ -808,7 +1140,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def List(self, request, global_params=None):
-      r"""Retrieves table data from a specified set of rows. Requires the READER dataset role.
+      r"""List the content of a table in rows. # IAM Permissions Requires the `bigquery.tables.getData` permission on the table.
 
       Args:
         request: (BigqueryTabledataListRequest) input message
@@ -821,12 +1153,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     List.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/tables/{tablesId}/data',
         http_method='GET',
         method_id='bigquery.tabledata.list',
         ordered_params=['projectId', 'datasetId', 'tableId'],
         path_params=['datasetId', 'projectId', 'tableId'],
-        query_params=['maxResults', 'pageToken', 'selectedFields', 'startIndex'],
-        relative_path='projects/{projectId}/datasets/{datasetId}/tables/{tableId}/data',
+        query_params=['formatOptions_timestampOutputFormat', 'formatOptions_useInt64Timestamp', 'maxResults', 'pageToken', 'selectedFields', 'startIndex'],
+        relative_path='projects/{+projectId}/datasets/{+datasetId}/tables/{+tableId}/data',
         request_field='',
         request_type_name='BigqueryTabledataListRequest',
         response_type_name='TableDataList',
@@ -840,11 +1173,10 @@ class BigqueryV2(base_api.BaseApiClient):
 
     def __init__(self, client):
       super().__init__(client)
-      self._upload_configs = {
-          }
+      self._upload_configs = {}
 
     def Delete(self, request, global_params=None):
-      r"""Deletes the table specified by tableId from the dataset. If the table contains data, all the data will be deleted.
+      r"""Deletes the table specified by tableId from the dataset. If the table contains data, all the data will be deleted. # IAM Permissions Requires the `bigquery.tables.delete` permission on the table.
 
       Args:
         request: (BigqueryTablesDeleteRequest) input message
@@ -857,12 +1189,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     Delete.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/tables/{tablesId}',
         http_method='DELETE',
         method_id='bigquery.tables.delete',
         ordered_params=['projectId', 'datasetId', 'tableId'],
         path_params=['datasetId', 'projectId', 'tableId'],
         query_params=[],
-        relative_path='projects/{projectId}/datasets/{datasetId}/tables/{tableId}',
+        relative_path='projects/{+projectId}/datasets/{+datasetId}/tables/{+tableId}',
         request_field='',
         request_type_name='BigqueryTablesDeleteRequest',
         response_type_name='BigqueryTablesDeleteResponse',
@@ -870,7 +1203,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def Get(self, request, global_params=None):
-      r"""Gets the specified table resource by table ID. This method does not return the data in the table, it only returns the table resource, which describes the structure of this table.
+      r"""Gets the specified table resource by table ID. This method does not return the data in the table, it only returns the table resource, which describes the structure of this table. # IAM Permissions Requires the `bigquery.tables.get` permission on the table.
 
       Args:
         request: (BigqueryTablesGetRequest) input message
@@ -883,12 +1216,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     Get.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/tables/{tablesId}',
         http_method='GET',
         method_id='bigquery.tables.get',
         ordered_params=['projectId', 'datasetId', 'tableId'],
         path_params=['datasetId', 'projectId', 'tableId'],
-        query_params=['selectedFields'],
-        relative_path='projects/{projectId}/datasets/{datasetId}/tables/{tableId}',
+        query_params=['selectedFields', 'view'],
+        relative_path='projects/{+projectId}/datasets/{+datasetId}/tables/{+tableId}',
         request_field='',
         request_type_name='BigqueryTablesGetRequest',
         response_type_name='Table',
@@ -923,7 +1257,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def Insert(self, request, global_params=None):
-      r"""Creates a new, empty table in the dataset.
+      r"""Creates a new, empty table in the dataset. # IAM Permissions Requires the `bigquery.tables.create` permission on the dataset.
 
       Args:
         request: (BigqueryTablesInsertRequest) input message
@@ -936,12 +1270,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     Insert.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/tables',
         http_method='POST',
         method_id='bigquery.tables.insert',
         ordered_params=['projectId', 'datasetId'],
         path_params=['datasetId', 'projectId'],
         query_params=[],
-        relative_path='projects/{projectId}/datasets/{datasetId}/tables',
+        relative_path='projects/{+projectId}/datasets/{+datasetId}/tables',
         request_field='table',
         request_type_name='BigqueryTablesInsertRequest',
         response_type_name='Table',
@@ -949,7 +1284,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def List(self, request, global_params=None):
-      r"""Lists all tables in the specified dataset. Requires the READER dataset role.
+      r"""Lists all tables in the specified dataset. Requires the READER dataset role. # IAM Permissions Requires the `bigquery.tables.list` permission on the dataset.
 
       Args:
         request: (BigqueryTablesListRequest) input message
@@ -962,12 +1297,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     List.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/tables',
         http_method='GET',
         method_id='bigquery.tables.list',
         ordered_params=['projectId', 'datasetId'],
         path_params=['datasetId', 'projectId'],
         query_params=['maxResults', 'pageToken'],
-        relative_path='projects/{projectId}/datasets/{datasetId}/tables',
+        relative_path='projects/{+projectId}/datasets/{+datasetId}/tables',
         request_field='',
         request_type_name='BigqueryTablesListRequest',
         response_type_name='TableList',
@@ -975,7 +1311,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def Patch(self, request, global_params=None):
-      r"""Updates information in an existing table. The update method replaces the entire table resource, whereas the patch method only replaces fields that are provided in the submitted table resource. This method supports patch semantics.
+      r"""Updates information in an existing table. The update method replaces the entire table resource, whereas the patch method only replaces fields that are provided in the submitted table resource. This method supports RFC5789 patch semantics. # IAM Permissions Requires the following IAM permission(s) on the table: - `bigquery.tables.update` - `bigquery.tables.get`.
 
       Args:
         request: (BigqueryTablesPatchRequest) input message
@@ -988,12 +1324,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     Patch.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/tables/{tablesId}',
         http_method='PATCH',
         method_id='bigquery.tables.patch',
         ordered_params=['projectId', 'datasetId', 'tableId'],
         path_params=['datasetId', 'projectId', 'tableId'],
-        query_params=[],
-        relative_path='projects/{projectId}/datasets/{datasetId}/tables/{tableId}',
+        query_params=['autodetect_schema'],
+        relative_path='projects/{+projectId}/datasets/{+datasetId}/tables/{+tableId}',
         request_field='table',
         request_type_name='BigqueryTablesPatchRequest',
         response_type_name='Table',
@@ -1055,7 +1392,7 @@ class BigqueryV2(base_api.BaseApiClient):
     )
 
     def Update(self, request, global_params=None):
-      r"""Updates information in an existing table. The update method replaces the entire table resource, whereas the patch method only replaces fields that are provided in the submitted table resource.
+      r"""Updates information in an existing table. The update method replaces the entire Table resource, whereas the patch method only replaces fields that are provided in the submitted Table resource. # IAM Permissions Requires the `bigquery.tables.update` permission on the table.
 
       Args:
         request: (BigqueryTablesUpdateRequest) input message
@@ -1068,12 +1405,13 @@ class BigqueryV2(base_api.BaseApiClient):
           config, request, global_params=global_params)
 
     Update.method_config = lambda: base_api.ApiMethodInfo(
+        flat_path='projects/{projectsId}/datasets/{datasetsId}/tables/{tablesId}',
         http_method='PUT',
         method_id='bigquery.tables.update',
         ordered_params=['projectId', 'datasetId', 'tableId'],
         path_params=['datasetId', 'projectId', 'tableId'],
-        query_params=[],
-        relative_path='projects/{projectId}/datasets/{datasetId}/tables/{tableId}',
+        query_params=['autodetect_schema'],
+        relative_path='projects/{+projectId}/datasets/{+datasetId}/tables/{+tableId}',
         request_field='table',
         request_type_name='BigqueryTablesUpdateRequest',
         response_type_name='Table',

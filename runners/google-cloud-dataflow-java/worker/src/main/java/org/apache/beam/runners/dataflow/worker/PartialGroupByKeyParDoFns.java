@@ -43,19 +43,21 @@ import org.apache.beam.sdk.options.StreamingOptions;
 import org.apache.beam.sdk.state.BagState;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.util.AppliedCombineFn;
+import org.apache.beam.sdk.util.DoFnInfo;
 import org.apache.beam.sdk.util.SerializableUtils;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.util.common.ElementByteSizeObserver;
 import org.apache.beam.sdk.values.KV;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.ByteStreams;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.CountingOutputStream;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.ByteStreams;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.CountingOutputStream;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
 /** A factory class that creates {@link ParDoFn} for {@link PartialGroupByKeyInstruction}. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class PartialGroupByKeyParDoFns {
   public static <K, InputT, AccumT> ParDoFn create(
@@ -113,7 +115,7 @@ public class PartialGroupByKeyParDoFns {
           GroupingTables.bufferingAndSampling(
               new WindowingCoderGroupingKeyCreator<>(keyCoder),
               PairInfo.create(),
-              new CoderSizeEstimator<>(WindowedValue.getValueOnlyCoder(keyCoder)),
+              new CoderSizeEstimator<>(WindowedValues.getValueOnlyCoder(keyCoder)),
               new CoderSizeEstimator<>(inputCoder),
               0.001, /*sizeEstimatorSampleRate*/
               maxSizeBytes /*maxSizeBytes*/);
@@ -128,7 +130,7 @@ public class PartialGroupByKeyParDoFns {
               new WindowingCoderGroupingKeyCreator<>(keyCoder),
               PairInfo.create(),
               valueCombiner,
-              new CoderSizeEstimator<>(WindowedValue.getValueOnlyCoder(keyCoder)),
+              new CoderSizeEstimator<>(WindowedValues.getValueOnlyCoder(keyCoder)),
               new CoderSizeEstimator<>(combineFn.getAccumulatorCoder()),
               0.001, /*sizeEstimatorSampleRate*/
               maxSizeBytes /*maxSizeBytes*/);
@@ -242,8 +244,12 @@ public class PartialGroupByKeyParDoFns {
     public Object createGroupingKey(WindowedValue<K> key) throws Exception {
       // Ignore timestamp for grouping purposes.
       // The PGBK output will inherit the timestamp of one of its inputs.
-      return WindowedValue.of(
-          coder.structuralValue(key.getValue()), ignored, key.getWindows(), key.getPane());
+      return WindowedValues.builder(key)
+          .withValue(coder.structuralValue(key.getValue()))
+          .setTimestamp(ignored)
+          .setWindows(key.getWindows())
+          .setPaneInfo(key.getPaneInfo())
+          .build();
     }
   }
 
@@ -304,7 +310,7 @@ public class PartialGroupByKeyParDoFns {
       WindowedValue<KV<K, InputT>> input = (WindowedValue<KV<K, InputT>>) elem;
       for (BoundedWindow w : input.getWindows()) {
         WindowedValue<KV<K, InputT>> windowsExpandedInput =
-            WindowedValue.of(input.getValue(), input.getTimestamp(), w, input.getPane());
+            WindowedValues.of(input.getValue(), input.getTimestamp(), w, input.getPaneInfo());
         groupingTable.put(windowsExpandedInput, receiver);
       }
     }
@@ -313,12 +319,20 @@ public class PartialGroupByKeyParDoFns {
     public void processTimers() {}
 
     @Override
+    public void finishKey(Object key) throws Exception {}
+
+    @Override
     public void finishBundle() throws Exception {
       groupingTable.flush(receiver);
     }
 
     @Override
     public void abort() throws Exception {}
+
+    @Override
+    public @Nullable DoFnInfo<?, ?> getDoFnInfo() {
+      return null;
+    }
   }
 
   static class StreamingSideInputPGBKParDoFn<K, InputT, AccumT, W extends BoundedWindow>
@@ -361,7 +375,7 @@ public class PartialGroupByKeyParDoFns {
       WindowedValue<KV<K, InputT>> input = (WindowedValue<KV<K, InputT>>) elem;
       for (BoundedWindow w : input.getWindows()) {
         WindowedValue<KV<K, InputT>> windowsExpandedInput =
-            WindowedValue.of(input.getValue(), input.getTimestamp(), w, input.getPane());
+            WindowedValues.of(input.getValue(), input.getTimestamp(), w, input.getPaneInfo());
 
         if (!sideInputFetcher.storeIfBlocked(windowsExpandedInput)) {
           groupingTable.put(windowsExpandedInput, receiver);
@@ -373,6 +387,9 @@ public class PartialGroupByKeyParDoFns {
     public void processTimers() {}
 
     @Override
+    public void finishKey(Object key) throws Exception {}
+
+    @Override
     public void finishBundle() throws Exception {
       groupingTable.flush(receiver);
       sideInputFetcher.persist();
@@ -380,5 +397,10 @@ public class PartialGroupByKeyParDoFns {
 
     @Override
     public void abort() throws Exception {}
+
+    @Override
+    public @Nullable DoFnInfo<?, ?> getDoFnInfo() {
+      return null;
+    }
   }
 }

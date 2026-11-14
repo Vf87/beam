@@ -27,11 +27,7 @@ import threading
 import weakref
 from multiprocessing.pool import ThreadPool
 from typing import Any
-from typing import Dict
 from typing import Iterable
-from typing import List
-from typing import Tuple
-from typing import Type
 from typing import TypeVar
 from typing import Union
 
@@ -66,12 +62,11 @@ class ArgumentPlaceholder(object):
     return hash(type(self))
 
 
-def remove_objects_from_args(args,  # type: Iterable[Any]
-                             kwargs,  # type: Dict[str, Any]
-                             pvalue_class  # type: Union[Type[T], Tuple[Type[T], ...]]
-                            ):
-  # type: (...) -> Tuple[List[Any], Dict[str, Any], List[T]]
-
+def remove_objects_from_args(
+    args: Iterable[Any],
+    kwargs: dict[str, Any],
+    pvalue_class: Union[type[T], tuple[type[T], ...]]
+) -> tuple[list[Any], dict[str, Any], list[T]]:
   """For internal use only; no backwards-compatibility guarantees.
 
   Replaces all objects of a given type in args/kwargs with a placeholder.
@@ -98,8 +93,7 @@ def remove_objects_from_args(args,  # type: Iterable[Any]
   # by sorting the entries first. This will be important when putting back
   # PValues.
   new_kwargs = dict((k, swapper(v)) if isinstance(v, pvalue_class) else (k, v)
-                    for k,
-                    v in sorted(kwargs.items()))
+                    for k, v in sorted(kwargs.items()))
   return (new_args, new_kwargs, pvals)
 
 
@@ -124,8 +118,8 @@ def insert_values_in_args(args, kwargs, values):
       for arg in args
   ]
   new_kwargs = dict(
-      (k, next(v_iter)) if isinstance(v, ArgumentPlaceholder) else (k, v) for k,
-      v in sorted(kwargs.items()))
+      (k, next(v_iter)) if isinstance(v, ArgumentPlaceholder) else (k, v)
+      for k, v in sorted(kwargs.items()))
   return (new_args, new_kwargs)
 
 

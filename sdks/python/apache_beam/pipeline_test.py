@@ -22,23 +22,27 @@
 import copy
 import platform
 import unittest
+import uuid
 
+import mock
 import pytest
 
 import apache_beam as beam
+from apache_beam import coders
 from apache_beam import typehints
 from apache_beam.coders import BytesCoder
 from apache_beam.io import Read
-from apache_beam.metrics import Metrics
+from apache_beam.io.iobase import SourceBase
 from apache_beam.options.pipeline_options import PortableOptions
 from apache_beam.pipeline import Pipeline
 from apache_beam.pipeline import PipelineOptions
 from apache_beam.pipeline import PipelineVisitor
 from apache_beam.pipeline import PTransformOverride
 from apache_beam.portability import common_urns
+from apache_beam.portability.api import beam_runner_api_pb2
 from apache_beam.pvalue import AsSingleton
 from apache_beam.pvalue import TaggedOutput
-from apache_beam.runners.dataflow.native_io.iobase import NativeSource
+from apache_beam.runners.runner import PipelineRunner
 from apache_beam.testing.test_pipeline import TestPipeline
 from apache_beam.testing.util import assert_that
 from apache_beam.testing.util import equal_to
@@ -54,44 +58,17 @@ from apache_beam.transforms.display import DisplayDataItem
 from apache_beam.transforms.environments import ProcessEnvironment
 from apache_beam.transforms.resources import ResourceHint
 from apache_beam.transforms.userstate import BagStateSpec
+from apache_beam.transforms.window import FixedWindows
+from apache_beam.transforms.window import IntervalWindow
 from apache_beam.transforms.window import SlidingWindows
 from apache_beam.transforms.window import TimestampedValue
+from apache_beam.typehints import TypeCheckError
 from apache_beam.utils import windowed_value
 from apache_beam.utils.timestamp import MIN_TIMESTAMP
 
-# TODO(BEAM-1555): Test is failing on the service, with FakeSource.
 
-
-class FakeSource(NativeSource):
-  """Fake source returning a fixed list of values."""
-  class _Reader(object):
-    def __init__(self, vals):
-      self._vals = vals
-      self._output_counter = Metrics.counter('main', 'outputs')
-
-    def __enter__(self):
-      return self
-
-    def __exit__(self, exception_type, exception_value, traceback):
-      pass
-
-    def __iter__(self):
-      for v in self._vals:
-        self._output_counter.inc()
-        yield v
-
-  def __init__(self, vals):
-    self._vals = vals
-
-  def reader(self):
-    return FakeSource._Reader(self._vals)
-
-
-class FakeUnboundedSource(NativeSource):
+class FakeUnboundedSource(SourceBase):
   """Fake unbounded source. Does not work at runtime"""
-  def reader(self):
-    return None
-
   def is_bounded(self):
     return False
 
@@ -182,6 +159,41 @@ class PipelineTest(unittest.TestCase):
       pcoll3 = pcoll2 | 'do' >> FlatMap(lambda x: [x + 10])
       assert_that(pcoll3, equal_to([14, 15, 16]), label='pcoll3')
 
+  def test_unexpected_PDone_errmsg(self):
+    """
+    Test that a nice error message is raised if a transform that
+    returns None (i.e. produces no PCollection) is used as input
+    to a PTransform.
+    """
+    class DoNothingTransform(PTransform):
+      def expand(self, pcoll):
+        return None
+
+    class ParentTransform(PTransform):
+      def expand(self, pcoll):
+        return pcoll | DoNothingTransform()
+
+    with pytest.raises(TypeCheckError, match=r".*applied to the output"):
+      with TestPipeline() as pipeline:
+        _ = pipeline | ParentTransform() | beam.Map(lambda x: x + 1)
+
+  @mock.patch('logging.info')
+  @pytest.mark.uses_dill
+  def test_runner_overrides_default_pickler(self, mock_info):
+    pytest.importorskip("dill")
+    with mock.patch.object(PipelineRunner,
+                           'default_pickle_library_override') as mock_fn:
+      mock_fn.return_value = 'dill'
+      with TestPipeline() as pipeline:
+        pcoll = pipeline | 'label1' >> Create([1, 2, 3])
+        assert_that(pcoll, equal_to([1, 2, 3]))
+
+        from apache_beam.internal import dill_pickler
+        from apache_beam.internal import pickler
+        self.assertIs(pickler.desired_pickle_lib, dill_pickler)
+    mock_info.assert_any_call(
+        'Runner defaulting to pickling library: %s.', 'dill')
+
   def test_flatmap_builtin(self):
     with TestPipeline() as pipeline:
       pcoll = pipeline | 'label1' >> Create([1, 2, 3])
@@ -257,24 +269,6 @@ class PipelineTest(unittest.TestCase):
       pcoll = pipeline | 'label' >> Create([[1, 2, 3]])
       assert_that(pcoll, equal_to([[1, 2, 3]]))
 
-  # TODO(BEAM-1555): Test is failing on the service, with FakeSource.
-  # @pytest.mark.it_validatesrunner
-  def test_metrics_in_fake_source(self):
-    pipeline = TestPipeline()
-    pcoll = pipeline | Read(FakeSource([1, 2, 3, 4, 5, 6]))
-    assert_that(pcoll, equal_to([1, 2, 3, 4, 5, 6]))
-    res = pipeline.run()
-    metric_results = res.metrics().query()
-    outputs_counter = metric_results['counters'][0]
-    self.assertEqual(outputs_counter.key.step, 'Read')
-    self.assertEqual(outputs_counter.key.metric.name, 'outputs')
-    self.assertEqual(outputs_counter.committed, 6)
-
-  def test_fake_read(self):
-    with TestPipeline() as pipeline:
-      pcoll = pipeline | 'read' >> Read(FakeSource([1, 2, 3]))
-      assert_that(pcoll, equal_to([1, 2, 3]))
-
   def test_visit_entire_graph(self):
     pipeline = Pipeline()
     pcoll1 = pipeline | 'pcoll' >> beam.Impulse()
@@ -310,8 +304,59 @@ class PipelineTest(unittest.TestCase):
     self.assertEqual(
         cm.exception.args[0],
         'A transform with label "CustomTransform" already exists in the '
-        'pipeline. To apply a transform with a specified label write '
-        'pvalue | "label" >> transform')
+        'pipeline. To apply a transform with a specified label, write '
+        'pvalue | "label" >> transform or use the option '
+        '"auto_unique_labels" to automatically generate unique '
+        'transform labels. Note "auto_unique_labels" '
+        'could cause data loss when updating a pipeline or '
+        'reloading the job state. This is not recommended for '
+        'streaming jobs.')
+
+  @mock.patch('logging.info')  # Mock the logging.info function
+  def test_no_wait_until_finish(self, mock_info):
+    with Pipeline(runner='DirectRunner',
+                  options=PipelineOptions(["--no_wait_until_finish"])) as p:
+      _ = p | beam.Create(['test'])
+    mock_info.assert_any_call(
+        'Job execution continues without waiting for completion. '
+        'Use "wait_until_finish" in PipelineResult to block until finished.')
+    p.result.wait_until_finish()
+
+  def test_auto_unique_labels(self):
+
+    opts = PipelineOptions(["--auto_unique_labels"])
+
+    mock_uuids = [mock.Mock(hex='UUID01XXX'), mock.Mock(hex='UUID02XXX')]
+    mock_uuid_gen = mock.Mock(side_effect=mock_uuids)
+
+    original_generate_unique_label = Pipeline._generate_unique_label
+
+    def patched_generate_unique_label(self, transform):
+      with mock.patch.object(uuid, 'uuid4', return_value=mock_uuid_gen()):
+        return original_generate_unique_label(self, transform)
+
+    with mock.patch.object(Pipeline,
+                           '_generate_unique_label',
+                           patched_generate_unique_label):
+      with TestPipeline(options=opts) as pipeline:
+        pcoll = pipeline | 'pcoll' >> Create([1, 2, 3])
+
+        def identity(x):
+          return x
+
+        pcoll2 = pcoll | Map(identity)
+        pcoll3 = pcoll2 | Map(identity)
+        pcoll4 = pcoll3 | Map(identity)
+        assert_that(pcoll4, equal_to([1, 2, 3]))
+
+    map_id_full_labels = {
+        label
+        for label in pipeline.applied_labels if "Map(identity)" in label
+    }
+    map_id_leaf_labels = {label.split(":")[-1] for label in map_id_full_labels}
+    # Only the first 6 chars of the UUID hex should be used
+    assert map_id_leaf_labels == set(
+        ["Map(identity)", "Map(identity)_UUID01", "Map(identity)_UUID02"])
 
   def test_reuse_cloned_custom_transform_instance(self):
     with TestPipeline() as pipeline:
@@ -389,7 +434,7 @@ class PipelineTest(unittest.TestCase):
     def raise_exception(exn):
       raise exn
 
-    with self.assertRaises(ValueError):
+    with self.assertRaises(Exception):
       with Pipeline() as p:
         # pylint: disable=expression-not-assigned
         p | Create([ValueError('msg')]) | Map(raise_exception)
@@ -597,6 +642,35 @@ class PipelineTest(unittest.TestCase):
     self.assertNotIn(multi.letters, visitor.visited)
     self.assertNotIn(multi.numbers, visitor.visited)
 
+  def test_filter_typehint(self):
+    # Check input type hint and output type hint are both specified.
+    def always_true_with_all_typehints(x: int) -> bool:
+      return True
+
+    # Check only input type hint is specified.
+    def always_true_only_inptype(x: int):
+      return True
+
+    # Check only output type hint is specified.
+    def always_true_only_outptype(x) -> bool:
+      return True
+
+    # Check if inp type hint is Any that we can still infer
+    # from the input pcollection type
+    def always_true_any_inptype(x: typehints.Any) -> bool:
+      return True
+
+    for filter_fn in [always_true_with_all_typehints,
+                      always_true_only_inptype,
+                      always_true_only_outptype,
+                      always_true_any_inptype]:
+      with TestPipeline() as p:
+        pcoll = (
+            p
+            | beam.Create([1, 2, 3]).with_input_types(int)
+            | beam.Filter(filter_fn))
+      self.assertEqual(pcoll.element_type, int)
+
   def test_kv_ptransform_honor_type_hints(self):
 
     # The return type of this DoFn cannot be inferred by the default
@@ -678,6 +752,40 @@ class PipelineTest(unittest.TestCase):
     self.assertIs(pcoll1_unbounded.is_bounded, False)
     self.assertIs(pcoll2_unbounded.is_bounded, False)
     self.assertIs(merged.is_bounded, False)
+
+  def test_incompatible_pcollection_errmsg(self):
+    with pytest.raises(Exception,
+                       match=r".*Map\(print\).*Got a PBegin/Pipeline instead."):
+      with beam.Pipeline() as pipeline:
+        _ = (pipeline | beam.Map(print))
+
+    class ParentTransform(PTransform):
+      def expand(self, pcoll):
+        return pcoll | beam.Map(print)
+
+    with pytest.raises(
+        Exception,
+        match=r".*ParentTransform/Map\(print\).*Got a PBegin/Pipeline instead."
+    ):
+      with beam.Pipeline() as pipeline:
+        _ = (pipeline | ParentTransform())
+
+  def test_incompatible_submission_and_runtime_envs_fail_pipeline(self):
+    with mock.patch(
+        'apache_beam.transforms.environments.sdk_base_version_capability'
+    ) as base_version:
+      base_version.side_effect = [
+          f"beam:version:sdk_base:apache/beam_python3.5_sdk:2.{i}.0"
+          for i in range(100)
+      ]
+      with self.assertRaisesRegex(
+          RuntimeError,
+          'Pipeline construction environment and pipeline runtime '
+          'environment are not compatible.'):
+        # TODO(https://github.com/apache/beam/issues/34549): Prism doesn't
+        # pass through capabilities as part of the ProcessBundleDescriptor.
+        with TestPipeline('FnApiRunner') as p:
+          _ = p | Create([None])
 
 
 class DoFnTest(unittest.TestCase):
@@ -761,6 +869,18 @@ class DoFnTest(unittest.TestCase):
                     ((7, (0, 10)), (0, 10)), ((7, (5, 15)), (5, 15))]),
           label='doubled windows')
 
+  def test_windowed_value_param(self):
+    with TestPipeline() as pipeline:
+      pcoll = (
+          pipeline
+          | Create([1, 7])
+          | Map(lambda x: TimestampedValue(x, x))
+          | WindowInto(windowfn=FixedWindows(5))
+          | Map(lambda _, wv=DoFn.WindowedValueParam: (wv.value, wv.windows)))
+      assert_that(
+          pcoll,
+          equal_to([(1, [IntervalWindow(0, 5)]), (7, [IntervalWindow(5, 10)])]))  # pylint: disable=too-many-function-args
+
   def test_timestamp_param(self):
     class TestDoFn(DoFn):
       def process(self, element, timestamp=DoFn.TimestampParam):
@@ -795,6 +915,20 @@ class DoFnTest(unittest.TestCase):
           ]),
           label='CheckGrouped')
 
+  def test_context_params(self):
+    def test_map(
+        x,
+        context_a=DoFn.BundleContextParam(_TestContext, args=('a')),
+        context_b=DoFn.BundleContextParam(_TestContext, args=('b')),
+        context_c=DoFn.SetupContextParam(_TestContext, args=('c'))):
+      return (x, context_a, context_b, context_c)
+
+    self.assertEqual(_TestContext.live_contexts, 0)
+    with TestPipeline('FnApiRunner') as p:
+      pcoll = p | Create([1, 2]) | beam.Map(test_map)
+      assert_that(pcoll, equal_to([(1, 'a', 'b', 'c'), (2, 'a', 'b', 'c')]))
+    self.assertEqual(_TestContext.live_contexts, 0)
+
   def test_incomparable_default(self):
     class IncomparableType(object):
       def __eq__(self, other):
@@ -814,6 +948,21 @@ class DoFnTest(unittest.TestCase):
           | beam.Create([None])
           | Map(lambda e, x=IncomparableType(): (e, type(x).__name__)))
       assert_that(pcoll, equal_to([(None, 'IncomparableType')]))
+
+
+class _TestContext:
+
+  live_contexts = 0
+
+  def __init__(self, value):
+    self._value = value
+
+  def __enter__(self):
+    _TestContext.live_contexts += 1
+    return self._value
+
+  def __exit__(self, *args):
+    _TestContext.live_contexts -= 1
 
 
 class Bacon(PipelineOptions):
@@ -874,10 +1023,13 @@ class PipelineOptionsTest(unittest.TestCase):
     self.assertEqual({
         'from_dictionary',
         'get_all_options',
+        'is_compat_version_prior_to',
         'slices',
         'style',
         'view_as',
-        'display_data'
+        'display_data',
+        'from_runner_api',
+        'to_runner_api',
     },
                      {
                          attr
@@ -887,9 +1039,12 @@ class PipelineOptionsTest(unittest.TestCase):
     self.assertEqual({
         'from_dictionary',
         'get_all_options',
+        'is_compat_version_prior_to',
         'style',
         'view_as',
-        'display_data'
+        'display_data',
+        'from_runner_api',
+        'to_runner_api',
     },
                      {
                          attr
@@ -922,6 +1077,38 @@ class RunnerApiTest(unittest.TestCase):
     self.assertTrue(
         common_urns.requirements.REQUIRES_BUNDLE_FINALIZATION.urn,
         proto.requirements)
+
+  def test_coder_version_tag_included_in_runner_api_key(self):
+    class MyClass:
+      def __init__(self, value: int):
+        self.value = value
+
+    class VersionedCoder(coders.Coder):
+      def encode(self, value):
+        return str(value.value).encode()
+
+      def decode(self, encoded):
+        return MyClass(int(encoded.decode()))
+
+      def version_tag(self):
+        return "v269"
+
+      def to_type_hint(self):
+        return MyClass
+
+    coders.registry.register_coder(MyClass, VersionedCoder)
+    p = beam.Pipeline()
+    _ = (p | beam.Impulse() | beam.Map(lambda _: MyClass(1)))
+    pipeline_proto = p.to_runner_api()
+    coder_keys = sorted(list(pipeline_proto.components.coders.keys()))
+
+    self.assertListEqual(
+        coder_keys,
+        [
+            'ref_Coder_BytesCoder_1',
+            'ref_Coder_GlobalWindowCoder_2',
+            'ref_Coder_VersionedCoder_v269_3'
+        ])
 
   def test_annotations(self):
     some_proto = BytesCoder().to_runner_api(None)
@@ -958,6 +1145,51 @@ class RunnerApiTest(unittest.TestCase):
         self.assertEqual(
             transform.annotations['proto'], some_proto.SerializeToString())
     self.assertEqual(seen, 2)
+
+  def assertHasAnnotation(self, pipeline_proto, transform, key, value):
+    for transform_proto in pipeline_proto.components.transforms.values():
+      if transform_proto.unique_name == transform:
+        self.assertIn(key, transform_proto.annotations.keys())
+        self.assertEqual(transform_proto.annotations[key], value)
+        break
+    else:
+      self.fail(
+          "Unknown transform: %r not in %s" % (
+              transform,
+              sorted([
+                  t.unique_name
+                  for t in pipeline_proto.components.transforms.values()
+              ])))
+
+  def test_pipeline_context_annotations(self):
+    p = beam.Pipeline()
+    with p.transform_annotations(foo='first'):
+      pcoll = p | beam.Create([1, 2, 3]) | 'First' >> beam.Map(lambda x: x + 1)
+    with p.transform_annotations(foo='second'):
+      _ = pcoll | 'Second' >> beam.Map(lambda x: x * 2)
+      with p.transform_annotations(foo='nested', another='more'):
+        _ = pcoll | 'Nested' >> beam.Map(lambda x: x * 3)
+
+    proto = p.to_runner_api()
+    self.assertHasAnnotation(proto, 'First', 'foo', b'first')
+    self.assertHasAnnotation(proto, 'Second', 'foo', b'second')
+    self.assertHasAnnotation(proto, 'Nested', 'foo', b'nested')
+    self.assertHasAnnotation(proto, 'Nested', 'another', b'more')
+
+  def test_beam_context_annotations(self):
+    p = beam.Pipeline()
+    with beam.transform_annotations(foo='first'):
+      pcoll = p | beam.Create([1, 2, 3]) | 'First' >> beam.Map(lambda x: x + 1)
+    with beam.transform_annotations(foo='second'):
+      _ = pcoll | 'Second' >> beam.Map(lambda x: x * 2)
+      with beam.transform_annotations(foo='nested', another='more'):
+        _ = pcoll | 'Nested' >> beam.Map(lambda x: x * 3)
+
+    proto = p.to_runner_api()
+    self.assertHasAnnotation(proto, 'First', 'foo', b'first')
+    self.assertHasAnnotation(proto, 'Second', 'foo', b'second')
+    self.assertHasAnnotation(proto, 'Nested', 'foo', b'nested')
+    self.assertHasAnnotation(proto, 'Nested', 'another', b'more')
 
   def test_transform_ids(self):
     class MyPTransform(beam.PTransform):
@@ -996,7 +1228,7 @@ class RunnerApiTest(unittest.TestCase):
         self.p = p
         return p | beam.Create([None])
 
-      def display_data(self):  # type: () -> dict
+      def display_data(self) -> dict:
         parent_dd = super().display_data()
         parent_dd['p_dd_string'] = DisplayDataItem(
             'p_dd_string_value', label='p_dd_string_label')
@@ -1010,7 +1242,7 @@ class RunnerApiTest(unittest.TestCase):
         self.p = p
         return p | beam.Create([None])
 
-      def display_data(self):  # type: () -> dict
+      def display_data(self) -> dict:
         parent_dd = super().display_data()
         parent_dd['dd_string'] = DisplayDataItem(
             'dd_string_value', label='dd_string_label')
@@ -1021,7 +1253,6 @@ class RunnerApiTest(unittest.TestCase):
 
     p = beam.Pipeline()
     p | MyPTransform()  # pylint: disable=expression-not-assigned
-    from apache_beam.portability.api import beam_runner_api_pb2
 
     proto_pipeline = Pipeline.to_runner_api(p, use_fake_coders=True)
     my_transform, = [
@@ -1127,7 +1358,7 @@ class RunnerApiTest(unittest.TestCase):
 
       @classmethod
       def get_merged_value(
-          cls, outer_value, inner_value):  # type: (bytes, bytes) -> bytes
+          cls, outer_value: bytes, inner_value: bytes) -> bytes:
         return ResourceHint._use_max(outer_value, inner_value)
 
     ResourceHint.register_resource_hint('foo_hint', FooHint)
@@ -1256,7 +1487,7 @@ class RunnerApiTest(unittest.TestCase):
 
       @classmethod
       def get_merged_value(
-          cls, outer_value, inner_value):  # type: (bytes, bytes) -> bytes
+          cls, outer_value: bytes, inner_value: bytes) -> bytes:
         return ResourceHint._use_max(outer_value, inner_value)
 
     ResourceHint.register_resource_hint('foo_hint', FooHint)
@@ -1290,6 +1521,136 @@ class RunnerApiTest(unittest.TestCase):
             b'second_application', environment.resource_hints.get('foo_urn'))
         count += 1
     assert count == 2
+
+  def test_environments_are_deduplicated(self):
+    def file_artifact(path, hash, staged_name):
+      return beam_runner_api_pb2.ArtifactInformation(
+          type_urn=common_urns.artifact_types.FILE.urn,
+          type_payload=beam_runner_api_pb2.ArtifactFilePayload(
+              path=path, sha256=hash).SerializeToString(),
+          role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+          role_payload=beam_runner_api_pb2.ArtifactStagingToRolePayload(
+              staged_name=staged_name).SerializeToString(),
+      )
+
+    proto = beam_runner_api_pb2.Pipeline(
+        components=beam_runner_api_pb2.Components(
+            transforms={
+                f'transform{ix}': beam_runner_api_pb2.PTransform(
+                    environment_id=f'e{ix}')
+                for ix in range(8)
+            },
+            environments={
+                # Same hash and destination.
+                'e1': beam_runner_api_pb2.Environment(
+                    dependencies=[file_artifact('a1', 'x', 'dest')]),
+                'e2': beam_runner_api_pb2.Environment(
+                    dependencies=[file_artifact('a2', 'x', 'dest')]),
+                'e3': beam_runner_api_pb2.Environment(
+                    dependencies=[file_artifact('a3', 'y', 'dest')
+                                  ]),  # Different hash.
+                'e4': beam_runner_api_pb2.Environment(
+                    dependencies=[file_artifact('a4', 'y', 'dest2')
+                                  ]),  # Different destination.
+                'e5': beam_runner_api_pb2.Environment(
+                    dependencies=[
+                        file_artifact('a1', 'x', 'dest'),
+                        file_artifact('b1', 'xb', 'destB')
+                    ]),  # Multiple files with same hash and destinations.
+                'e6': beam_runner_api_pb2.Environment(
+                    dependencies=[
+                        file_artifact('a2', 'x', 'dest'),
+                        file_artifact('b2', 'xb', 'destB')
+                    ]),
+                'e7': beam_runner_api_pb2.Environment(
+                    dependencies=[
+                        file_artifact('a1', 'x', 'dest'),
+                        file_artifact('b2', 'y', 'destB')
+                    ]),  # Overlapping, but not identical, files.
+                'e0': beam_runner_api_pb2.Environment(
+                    resource_hints={'hint': b'value'},
+                    dependencies=[file_artifact('a1', 'x', 'dest')]
+                ),  # Same files as first, but differing other properties.
+            }))
+    Pipeline.merge_compatible_environments(proto)
+
+    # These environments are equivalent.
+    self.assertEqual(
+        proto.components.transforms['transform1'].environment_id,
+        proto.components.transforms['transform2'].environment_id)
+
+    self.assertEqual(
+        proto.components.transforms['transform5'].environment_id,
+        proto.components.transforms['transform6'].environment_id)
+
+    # These are not.
+    self.assertNotEqual(
+        proto.components.transforms['transform1'].environment_id,
+        proto.components.transforms['transform3'].environment_id)
+    self.assertNotEqual(
+        proto.components.transforms['transform4'].environment_id,
+        proto.components.transforms['transform3'].environment_id)
+    self.assertNotEqual(
+        proto.components.transforms['transform6'].environment_id,
+        proto.components.transforms['transform7'].environment_id)
+    self.assertNotEqual(
+        proto.components.transforms['transform1'].environment_id,
+        proto.components.transforms['transform0'].environment_id)
+
+    self.assertEqual(len(proto.components.environments), 6)
+
+  def test_multiple_outputs_composite_ptransform(self):
+    """
+    Test that a composite PTransform with multiple outputs is represented
+    correctly in the pipeline proto.
+    """
+    class SalesSplitter(beam.DoFn):
+      def process(self, element):
+        price = element['price']
+        if price > 100:
+          yield beam.pvalue.TaggedOutput('premium_sales', element)
+        else:
+          yield beam.pvalue.TaggedOutput('standard_sales', element)
+
+    class ParentSalesSplitter(beam.PTransform):
+      def expand(self, pcoll):
+        return pcoll | beam.ParDo(SalesSplitter()).with_outputs(
+            'premium_sales', 'standard_sales')
+
+    sales_data = [
+        {
+            'item': 'Laptop', 'price': 1200
+        },
+        {
+            'item': 'Mouse', 'price': 25
+        },
+        {
+            'item': 'Keyboard', 'price': 75
+        },
+        {
+            'item': 'Monitor', 'price': 350
+        },
+        {
+            'item': 'Headphones', 'price': 90
+        },
+    ]
+
+    with beam.Pipeline() as pipeline:
+      sales_records = pipeline | 'Create Sales' >> beam.Create(sales_data)
+      _ = sales_records | 'Split Sales' >> ParentSalesSplitter()
+    current_transforms = list(pipeline.transforms_stack)
+    all_applied_transforms = {
+        xform.full_label: xform
+        for xform in current_transforms
+    }
+    while current_transforms:
+      xform = current_transforms.pop()
+      all_applied_transforms[xform.full_label] = xform
+      current_transforms.extend(xform.parts)
+    xform = all_applied_transforms['Split Sales']
+    # Confirm that Split Sales correctly has two outputs as specified by
+    #  ParDo.with_outputs in ParentSalesSplitter.
+    assert len(xform.outputs) == 2
 
 
 if __name__ == '__main__':

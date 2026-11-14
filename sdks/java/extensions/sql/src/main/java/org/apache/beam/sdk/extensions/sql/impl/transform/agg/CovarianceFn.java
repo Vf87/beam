@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.extensions.sql.impl.transform.agg;
 
-import static org.apache.beam.vendor.calcite.v1_26_0.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.math.BigDecimal;
 import java.math.MathContext;
@@ -32,7 +32,7 @@ import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.runtime.SqlFunctions;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.runtime.SqlFunctions;
 
 /**
  * {@link Combine.CombineFn} for <em>Covariance</em> on {@link Number} types.
@@ -44,8 +44,8 @@ import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.runtime.SqlFunc
  */
 @Internal
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class CovarianceFn<T extends Number>
     extends Combine.CombineFn<Row, CovarianceAccumulator, T> {
@@ -58,7 +58,7 @@ public class CovarianceFn<T extends Number>
   private boolean isSample; // flag to determine return value should be Covariance Pop or Sample
   private SerializableFunction<BigDecimal, T> decimalConverter;
 
-  public static <V extends Number> CovarianceFn newPopulation(Schema.TypeName typeName) {
+  public static CovarianceFn newPopulation(Schema.TypeName typeName) {
     return newPopulation(BigDecimalConverter.forSqlType(typeName));
   }
 
@@ -68,7 +68,7 @@ public class CovarianceFn<T extends Number>
     return new CovarianceFn<>(POP, decimalConverter);
   }
 
-  public static <V extends Number> CovarianceFn newSample(Schema.TypeName typeName) {
+  public static CovarianceFn newSample(Schema.TypeName typeName) {
     return newSample(BigDecimalConverter.forSqlType(typeName));
   }
 
@@ -125,7 +125,7 @@ public class CovarianceFn<T extends Number>
         this.isSample ? covariance.count().subtract(BigDecimal.ONE) : covariance.count();
 
     // Avoid ArithmeticException: Division is undefined when adjustedCount is 0
-    if (adjustedCount.equals(BigDecimal.ZERO)) {
+    if (adjustedCount.compareTo(BigDecimal.ZERO) == 0) {
       return BigDecimal.ZERO;
     }
 

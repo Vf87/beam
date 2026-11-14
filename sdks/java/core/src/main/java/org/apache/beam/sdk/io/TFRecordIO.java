@@ -17,8 +17,8 @@
  */
 package org.apache.beam.sdk.io;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import com.google.auto.value.AutoValue;
 import java.io.IOException;
@@ -27,8 +27,6 @@ import java.nio.ByteOrder;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.util.NoSuchElementException;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.coders.ByteArrayCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.io.fs.MatchResult;
@@ -44,9 +42,9 @@ import org.apache.beam.sdk.util.MimeTypes;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.hash.HashFunction;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.hash.Hashing;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.hash.HashFunction;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.hash.Hashing;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -59,7 +57,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * {@link FileIO#write} or {@link FileIO#writeDynamic}.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class TFRecordIO {
   /** The default coder, which returns each record of the input file as a byte array. */
@@ -159,7 +157,9 @@ public class TFRecordIO {
       return toBuilder().setValidate(false).build();
     }
 
-    /** @deprecated Use {@link #withCompression}. */
+    /**
+     * @deprecated Use {@link #withCompression}.
+     */
     @Deprecated
     public Read withCompressionType(TFRecordIO.CompressionType compressionType) {
       return withCompression(compressionType.canonical);
@@ -276,6 +276,9 @@ public class TFRecordIO {
     /** Whether to skip the spilling of data caused by having maxNumWritersPerBundle. */
     abstract boolean getNoSpilling();
 
+    /** Maximum number of writers created in a bundle before spilling to shuffle. */
+    abstract @Nullable Integer getMaxNumWritersPerBundle();
+
     abstract Builder toBuilder();
 
     @AutoValue.Builder
@@ -291,6 +294,8 @@ public class TFRecordIO {
       abstract Builder setCompression(Compression compression);
 
       abstract Builder setNoSpilling(boolean noSpilling);
+
+      abstract Builder setMaxNumWritersPerBundle(@Nullable Integer maxNumWritersPerBundle);
 
       abstract Write build();
     }
@@ -316,13 +321,11 @@ public class TFRecordIO {
      *
      * <p>For more information on filenames, see {@link DefaultFilenamePolicy}.
      */
-    @Experimental(Kind.FILESYSTEM)
     public Write to(ResourceId outputResource) {
       return toResource(StaticValueProvider.of(outputResource));
     }
 
     /** Like {@link #to(ResourceId)}. */
-    @Experimental(Kind.FILESYSTEM)
     public Write toResource(ValueProvider<ResourceId> outputResource) {
       return toBuilder().setOutputPrefix(outputResource).build();
     }
@@ -371,7 +374,9 @@ public class TFRecordIO {
       return withNumShards(1).withShardNameTemplate("");
     }
 
-    /** @deprecated use {@link #withCompression}. */
+    /**
+     * @deprecated use {@link #withCompression}.
+     */
     @Deprecated
     public Write withCompressionType(CompressionType compressionType) {
       return withCompression(compressionType.canonical);
@@ -392,6 +397,11 @@ public class TFRecordIO {
       return toBuilder().setNoSpilling(true).build();
     }
 
+    /** See {@link WriteFiles#withMaxNumWritersPerBundle()}. */
+    public Write withMaxNumWritersPerBundle(@Nullable Integer maxNumWritersPerBundle) {
+      return toBuilder().setMaxNumWritersPerBundle(maxNumWritersPerBundle).build();
+    }
+
     @Override
     public PDone expand(PCollection<byte[]> input) {
       checkState(
@@ -406,6 +416,9 @@ public class TFRecordIO {
       }
       if (getNoSpilling()) {
         write = write.withNoSpilling();
+      }
+      if (getMaxNumWritersPerBundle() != null) {
+        write = write.withMaxNumWritersPerBundle(getMaxNumWritersPerBundle());
       }
       input.apply("Write", write);
       return PDone.in(input.getPipeline());
@@ -451,19 +464,21 @@ public class TFRecordIO {
     }
   }
 
-  /** @deprecated Use {@link Compression}. */
+  /**
+   * @deprecated Use {@link Compression}.
+   */
   @Deprecated
   public enum CompressionType {
-    /** @see Compression#AUTO */
+    /** See {@link Compression#AUTO}. */
     AUTO(Compression.AUTO),
 
-    /** @see Compression#UNCOMPRESSED */
+    /** See {@link Compression#UNCOMPRESSED}. */
     NONE(Compression.UNCOMPRESSED),
 
-    /** @see Compression#GZIP */
+    /** See {@link Compression#GZIP}. */
     GZIP(Compression.GZIP),
 
-    /** @see Compression#DEFLATE */
+    /** See {@link Compression#DEFLATE}. */
     ZLIB(Compression.DEFLATE);
 
     private final Compression canonical;
@@ -472,7 +487,7 @@ public class TFRecordIO {
       this.canonical = canonical;
     }
 
-    /** @see Compression#matches */
+    /** See {@link Compression#matches}. */
     public boolean matches(String filename) {
       return canonical.matches(filename);
     }

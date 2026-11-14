@@ -17,37 +17,42 @@
  */
 package org.apache.beam.sdk.io.redis;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.auto.value.AutoValue;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
+import java.util.Map;
+import java.util.stream.Collectors;
+import org.apache.beam.sdk.coders.ByteArrayCoder;
 import org.apache.beam.sdk.coders.KvCoder;
-import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.io.range.ByteKey;
+import org.apache.beam.sdk.io.range.ByteKeyRange;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Filter;
+import org.apache.beam.sdk.transforms.Latest;
+import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.transforms.Reshuffle;
 import org.apache.beam.sdk.transforms.SerializableFunctions;
+import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.display.DisplayData;
-import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
+import org.apache.beam.sdk.transforms.splittabledofn.RestrictionTracker;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.PDone;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ArrayListMultimap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Multimap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.primitives.Longs;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import redis.clients.jedis.Jedis;
-import redis.clients.jedis.Pipeline;
-import redis.clients.jedis.ScanParams;
-import redis.clients.jedis.ScanResult;
+import redis.clients.jedis.StreamEntryID;
+import redis.clients.jedis.Transaction;
+import redis.clients.jedis.params.ScanParams;
+import redis.clients.jedis.params.XAddParams;
+import redis.clients.jedis.resps.ScanResult;
 
 /**
  * An IO to manipulate Redis key/value database.
@@ -105,10 +110,57 @@ import redis.clients.jedis.ScanResult;
  *   .apply(RedisIO.write().withEndpoint("::1", 6379))
  *
  * }</pre>
+ *
+ * <p>{@link #writeBytes()} is similar to {@link #write()} but works with key/value pairs
+ * represented as byte arrays:
+ *
+ * <pre>{@code
+ * pipeline.apply(...)
+ *   // here we a have a PCollection<byte[], byte[]> with key/value pairs
+ *   .apply(RedisIO.<byte[], byte[]>writeBytes().withEndpoint("::1", 6379))
+ *
+ * }</pre>
+ *
+ * <h3>Writing Redis Streams</h3>
+ *
+ * <p>{@link #writeStreams()} appends the entries of a {@link PCollection} of key/value pairs
+ * represented as {@link KV} to the Redis stream at the specified key using the <a
+ * href='https://redis.io/commands/XADD'>XADD</a> API.
+ *
+ * <p>To configure the target Redis server, you have to provide a Redis server hostname and port
+ * number. The following example illustrates how to configure a sink:
+ *
+ * <pre>{@code
+ * pipeline.apply(...)
+ *   // here we have a PCollection<KV<String, Map<String, String>>>
+ *   .apply(RedisIO.writeStreams().withEndpoint("::1", 6379))
+ * }</pre>
+ *
+ * <p>Redis Streams optionally can be capped to a specific or exact length (see the documentation
+ * for the <a href="https://redis.io/commands/xtrim">XTRIM</a> API); {@link #writeStreams()} lets
+ * you specify MAXLEN using the {@code withMaxLen()} option.
+ *
+ * <p>Trimming a stream to an exact length is noted in the Redis documentation as being inefficient;
+ * the {@code withApproximateTrim()} boolean option will add the {@code ~} prefix to {@code MAXLEN},
+ * which tells Redis to use "almost exact" trimming.
+ *
+ * <p>See the <a href="https://redis.io/topics/streams-intro">Redis Streams documentation</a> for a
+ * deeper discussion of the issues involved.
+ *
+ * <p>The following example illustrates how to configure a sink with trimming:
+ *
+ * <pre>{@code
+ * pipeline.apply(...)
+ *   // here we have a PCollection<KV<String, Map<String, String>>>
+ *   .apply(RedisIO.writeStreams()
+ *     .withEndpoint("::1", 6379)
+ *     .withMaxLen(1024L)
+ *     .withApproximateTrim(true)
+ *    )
+ * }</pre>
  */
-@Experimental(Kind.SOURCE_SINK)
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class RedisIO {
 
@@ -122,12 +174,32 @@ public class RedisIO {
         .build();
   }
 
+  /** Read binary data from a Redis server. */
+  public static ReadBytes readBytes() {
+    return new AutoValue_RedisIO_ReadBytes.Builder()
+        .setConnectionConfiguration(RedisConnectionConfiguration.create())
+        .setKeyPattern("*")
+        .setBatchSize(1000)
+        .setOutputParallelization(true)
+        .build();
+  }
+
   /**
    * Like {@link #read()} but executes multiple instances of the Redis query substituting each
    * element of a {@link PCollection} as key pattern.
    */
   public static ReadKeyPatterns readKeyPatterns() {
     return new AutoValue_RedisIO_ReadKeyPatterns.Builder()
+        .setReadKeyPatternsBytes(readKeyPatternsBytes())
+        .build();
+  }
+
+  /**
+   * Like {@link #read()} but executes multiple instances of the Redis query substituting each
+   * element of a {@link PCollection} as key pattern.
+   */
+  public static ReadKeyPatternsBytes readKeyPatternsBytes() {
+    return new AutoValue_RedisIO_ReadKeyPatternsBytes.Builder()
         .setConnectionConfiguration(RedisConnectionConfiguration.create())
         .setBatchSize(1000)
         .setOutputParallelization(true)
@@ -136,9 +208,29 @@ public class RedisIO {
 
   /** Write data to a Redis server. */
   public static Write write() {
-    return new AutoValue_RedisIO_Write.Builder()
+    return new AutoValue_RedisIO_Write.Builder().setWriteBytes(writeBytes()).build();
+  }
+
+  /** Write data to a Redis server. */
+  public static WriteBytes writeBytes() {
+    return new AutoValue_RedisIO_WriteBytes.Builder()
         .setConnectionConfiguration(RedisConnectionConfiguration.create())
         .setMethod(Write.Method.APPEND)
+        .build();
+  }
+
+  /** Write stream data to a Redis server. */
+  public static WriteStreams writeStreams() {
+    return new AutoValue_RedisIO_WriteStreams.Builder()
+        .setWriteStreamsBytes(writeStreamsBytes())
+        .build();
+  }
+
+  public static WriteStreamsBytes writeStreamsBytes() {
+    return new AutoValue_RedisIO_WriteStreamsBytes.Builder()
+        .setConnectionConfiguration(RedisConnectionConfiguration.create())
+        .setMaxLen(0L)
+        .setApproximateTrim(true)
         .build();
   }
 
@@ -228,7 +320,6 @@ public class RedisIO {
 
       return input
           .apply(Create.of(keyPattern()))
-          .apply(ParDo.of(new ReadKeysWithPattern(connectionConfiguration())))
           .apply(
               RedisIO.readKeyPatterns()
                   .withConnectionConfiguration(connectionConfiguration())
@@ -237,10 +328,177 @@ public class RedisIO {
     }
   }
 
+  /** Implementation of {@link #readBytes()}. */
+  @AutoValue
+  public abstract static class ReadBytes
+      extends PTransform<PBegin, PCollection<KV<byte[], byte[]>>> {
+
+    abstract @Nullable RedisConnectionConfiguration connectionConfiguration();
+
+    abstract @Nullable String keyPattern();
+
+    abstract int batchSize();
+
+    abstract boolean outputParallelization();
+
+    abstract Builder toBuilder();
+
+    public ReadBytes withEndpoint(String host, int port) {
+      checkArgument(host != null, "host can not be null");
+      checkArgument(0 < port && port < 65536, "port must be a positive integer less than 65536");
+      return toBuilder()
+          .setConnectionConfiguration(connectionConfiguration().withHost(host).withPort(port))
+          .build();
+    }
+
+    public ReadBytes withAuth(String auth) {
+      checkArgument(auth != null, "auth can not be null");
+      return toBuilder()
+          .setConnectionConfiguration(connectionConfiguration().withAuth(auth))
+          .build();
+    }
+
+    public ReadBytes withTimeout(int timeout) {
+      checkArgument(timeout >= 0, "timeout can not be negative");
+      return toBuilder()
+          .setConnectionConfiguration(connectionConfiguration().withTimeout(timeout))
+          .build();
+    }
+
+    public ReadBytes withKeyPattern(String keyPattern) {
+      checkArgument(keyPattern != null, "keyPattern can not be null");
+      return toBuilder().setKeyPattern(keyPattern).build();
+    }
+
+    public ReadBytes withConnectionConfiguration(RedisConnectionConfiguration connection) {
+      checkArgument(connection != null, "connection can not be null");
+      return toBuilder().setConnectionConfiguration(connection).build();
+    }
+
+    public ReadBytes withBatchSize(int batchSize) {
+      return toBuilder().setBatchSize(batchSize).build();
+    }
+
+    /**
+     * Whether to reshuffle the resulting PCollection so results are distributed to all workers. The
+     * default is to parallelize and should only be changed if this is known to be unnecessary.
+     */
+    public ReadBytes withOutputParallelization(boolean outputParallelization) {
+      return toBuilder().setOutputParallelization(outputParallelization).build();
+    }
+
+    @Override
+    public void populateDisplayData(DisplayData.Builder builder) {
+      connectionConfiguration().populateDisplayData(builder);
+    }
+
+    @Override
+    public PCollection<KV<byte[], byte[]>> expand(PBegin input) {
+      checkArgument(connectionConfiguration() != null, "withConnectionConfiguration() is required");
+
+      return input
+          .apply(Create.of(keyPattern()))
+          .apply(
+              RedisIO.readKeyPatternsBytes()
+                  .withConnectionConfiguration(connectionConfiguration())
+                  .withBatchSize(batchSize())
+                  .withOutputParallelization(outputParallelization()));
+    }
+
+    @AutoValue.Builder
+    abstract static class Builder {
+
+      abstract @Nullable Builder setConnectionConfiguration(
+          RedisConnectionConfiguration connection);
+
+      abstract @Nullable Builder setKeyPattern(String keyPattern);
+
+      abstract Builder setBatchSize(int batchSize);
+
+      abstract Builder setOutputParallelization(boolean outputParallelization);
+
+      abstract ReadBytes build();
+    }
+  }
+
   /** Implementation of {@link #readKeyPatterns()}. */
   @AutoValue
   public abstract static class ReadKeyPatterns
       extends PTransform<PCollection<String>, PCollection<KV<String, String>>> {
+
+    abstract ReadKeyPatternsBytes readKeyPatternsBytes();
+
+    abstract Builder toBuilder();
+
+    public ReadKeyPatterns withEndpoint(String host, int port) {
+      return toBuilder()
+          .setReadKeyPatternsBytes(readKeyPatternsBytes().withEndpoint(host, port))
+          .build();
+    }
+
+    public ReadKeyPatterns withAuth(String auth) {
+      return toBuilder().setReadKeyPatternsBytes(readKeyPatternsBytes().withAuth(auth)).build();
+    }
+
+    public ReadKeyPatterns withTimeout(int timeout) {
+      return toBuilder()
+          .setReadKeyPatternsBytes(readKeyPatternsBytes().withTimeout(timeout))
+          .build();
+    }
+
+    public ReadKeyPatterns withConnectionConfiguration(RedisConnectionConfiguration connection) {
+      return toBuilder()
+          .setReadKeyPatternsBytes(readKeyPatternsBytes().withConnectionConfiguration(connection))
+          .build();
+    }
+
+    public ReadKeyPatterns withBatchSize(int batchSize) {
+      return toBuilder()
+          .setReadKeyPatternsBytes(readKeyPatternsBytes().withBatchSize(batchSize))
+          .build();
+    }
+
+    /**
+     * Whether to reshuffle the resulting PCollection so results are distributed to all workers. The
+     * default is to parallelize and should only be changed if this is known to be unnecessary.
+     */
+    public ReadKeyPatterns withOutputParallelization(boolean outputParallelization) {
+      return toBuilder()
+          .setReadKeyPatternsBytes(
+              readKeyPatternsBytes().withOutputParallelization(outputParallelization))
+          .build();
+    }
+
+    @Override
+    public PCollection<KV<String, String>> expand(PCollection<String> input) {
+
+      return input
+          .apply(readKeyPatternsBytes())
+          .apply(
+              MapElements.via(
+                  new SimpleFunction<KV<byte[], byte[]>, KV<String, String>>() {
+                    @Override
+                    public KV<String, String> apply(KV<byte[], byte[]> input) {
+                      return KV.of(
+                          new String(input.getKey(), StandardCharsets.UTF_8),
+                          new String(input.getValue(), StandardCharsets.UTF_8));
+                    }
+                  }));
+    }
+
+    @AutoValue.Builder
+    abstract static class Builder {
+
+      abstract Builder setReadKeyPatternsBytes(ReadKeyPatternsBytes readKeyPatternsBytes);
+
+      abstract ReadKeyPatterns build();
+    }
+  }
+
+  /** Implementation of {@link #readKeyPatternsBytes()}. */
+  @AutoValue
+  public abstract static class ReadKeyPatternsBytes
+      extends PTransform<PCollection<String>, PCollection<KV<byte[], byte[]>>> {
 
     abstract @Nullable RedisConnectionConfiguration connectionConfiguration();
 
@@ -249,6 +507,60 @@ public class RedisIO {
     abstract boolean outputParallelization();
 
     abstract Builder toBuilder();
+
+    public ReadKeyPatternsBytes withEndpoint(String host, int port) {
+      checkArgument(host != null, "host can not be null");
+      checkArgument(port > 0, "port can not be negative or 0");
+      return toBuilder()
+          .setConnectionConfiguration(connectionConfiguration().withHost(host).withPort(port))
+          .build();
+    }
+
+    public ReadKeyPatternsBytes withAuth(String auth) {
+      checkArgument(auth != null, "auth can not be null");
+      return toBuilder()
+          .setConnectionConfiguration(connectionConfiguration().withAuth(auth))
+          .build();
+    }
+
+    public ReadKeyPatternsBytes withTimeout(int timeout) {
+      checkArgument(timeout >= 0, "timeout can not be negative");
+      return toBuilder()
+          .setConnectionConfiguration(connectionConfiguration().withTimeout(timeout))
+          .build();
+    }
+
+    public ReadKeyPatternsBytes withConnectionConfiguration(
+        RedisConnectionConfiguration connection) {
+      checkArgument(connection != null, "connection can not be null");
+      return toBuilder().setConnectionConfiguration(connection).build();
+    }
+
+    public ReadKeyPatternsBytes withBatchSize(int batchSize) {
+      return toBuilder().setBatchSize(batchSize).build();
+    }
+
+    /**
+     * Whether to reshuffle the resulting PCollection so results are distributed to all workers. The
+     * default is to parallelize and should only be changed if this is known to be unnecessary.
+     */
+    public ReadKeyPatternsBytes withOutputParallelization(boolean outputParallelization) {
+      return toBuilder().setOutputParallelization(outputParallelization).build();
+    }
+
+    @Override
+    public PCollection<KV<byte[], byte[]>> expand(PCollection<String> input) {
+      checkArgument(connectionConfiguration() != null, "withConnectionConfiguration() is required");
+
+      PCollection<KV<byte[], byte[]>> output =
+          input
+              .apply(ParDo.of(new ReadFn(connectionConfiguration())))
+              .setCoder(KvCoder.of(ByteArrayCoder.of(), ByteArrayCoder.of()));
+      if (outputParallelization()) {
+        output = output.apply(new Reparallelize());
+      }
+      return output;
+    }
 
     @AutoValue.Builder
     abstract static class Builder {
@@ -260,68 +572,17 @@ public class RedisIO {
 
       abstract Builder setOutputParallelization(boolean outputParallelization);
 
-      abstract ReadKeyPatterns build();
-    }
-
-    public ReadKeyPatterns withEndpoint(String host, int port) {
-      checkArgument(host != null, "host can not be null");
-      checkArgument(port > 0, "port can not be negative or 0");
-      return toBuilder()
-          .setConnectionConfiguration(connectionConfiguration().withHost(host).withPort(port))
-          .build();
-    }
-
-    public ReadKeyPatterns withAuth(String auth) {
-      checkArgument(auth != null, "auth can not be null");
-      return toBuilder()
-          .setConnectionConfiguration(connectionConfiguration().withAuth(auth))
-          .build();
-    }
-
-    public ReadKeyPatterns withTimeout(int timeout) {
-      checkArgument(timeout >= 0, "timeout can not be negative");
-      return toBuilder()
-          .setConnectionConfiguration(connectionConfiguration().withTimeout(timeout))
-          .build();
-    }
-
-    public ReadKeyPatterns withConnectionConfiguration(RedisConnectionConfiguration connection) {
-      checkArgument(connection != null, "connection can not be null");
-      return toBuilder().setConnectionConfiguration(connection).build();
-    }
-
-    public ReadKeyPatterns withBatchSize(int batchSize) {
-      return toBuilder().setBatchSize(batchSize).build();
-    }
-
-    /**
-     * Whether to reshuffle the resulting PCollection so results are distributed to all workers. The
-     * default is to parallelize and should only be changed if this is known to be unnecessary.
-     */
-    public ReadKeyPatterns withOutputParallelization(boolean outputParallelization) {
-      return toBuilder().setOutputParallelization(outputParallelization).build();
-    }
-
-    @Override
-    public PCollection<KV<String, String>> expand(PCollection<String> input) {
-      checkArgument(connectionConfiguration() != null, "withConnectionConfiguration() is required");
-      PCollection<KV<String, String>> output =
-          input
-              .apply(ParDo.of(new ReadFn(connectionConfiguration(), batchSize())))
-              .setCoder(KvCoder.of(StringUtf8Coder.of(), StringUtf8Coder.of()));
-      if (outputParallelization()) {
-        output = output.apply(new Reparallelize());
-      }
-      return output;
+      abstract ReadKeyPatternsBytes build();
     }
   }
 
-  private abstract static class BaseReadFn<T> extends DoFn<String, T> {
-    protected final RedisConnectionConfiguration connectionConfiguration;
+  @DoFn.BoundedPerElement
+  private static class ReadFn extends DoFn<String, KV<byte[], byte[]>> {
 
+    protected final RedisConnectionConfiguration connectionConfiguration;
     transient Jedis jedis;
 
-    BaseReadFn(RedisConnectionConfiguration connectionConfiguration) {
+    ReadFn(RedisConnectionConfiguration connectionConfiguration) {
       this.connectionConfiguration = connectionConfiguration;
     }
 
@@ -334,126 +595,127 @@ public class RedisIO {
     public void teardown() {
       jedis.close();
     }
-  }
 
-  private static class ReadKeysWithPattern extends BaseReadFn<String> {
-
-    ReadKeysWithPattern(RedisConnectionConfiguration connectionConfiguration) {
-      super(connectionConfiguration);
+    @GetInitialRestriction
+    public ByteKeyRange getInitialRestriction() {
+      return ByteKeyRange.of(ByteKey.of(0x00), ByteKey.EMPTY);
     }
 
     @ProcessElement
-    public void processElement(ProcessContext c) {
+    public void processElement(
+        ProcessContext c, RestrictionTracker<ByteKeyRange, ByteKey> tracker) {
+      ByteKey cursor = tracker.currentRestriction().getStartKey();
+      RedisCursor redisCursor = RedisCursor.byteKeyToRedisCursor(cursor, jedis.dbSize(), true);
       ScanParams scanParams = new ScanParams();
       scanParams.match(c.element());
-
-      String cursor = ScanParams.SCAN_POINTER_START;
-      boolean finished = false;
-      while (!finished) {
-        ScanResult<String> scanResult = jedis.scan(cursor, scanParams);
-        List<String> keys = scanResult.getResult();
-        for (String k : keys) {
-          c.output(k);
-        }
-        cursor = scanResult.getCursor();
-        if (cursor.equals(ScanParams.SCAN_POINTER_START)) {
-          finished = true;
-        }
-      }
-    }
-  }
-
-  /** A {@link DoFn} requesting Redis server to get key/value pairs. */
-  private static class ReadFn extends BaseReadFn<KV<String, String>> {
-    transient @Nullable Multimap<BoundedWindow, String> bundles = null;
-    @Nullable AtomicInteger batchCount = null;
-    private final int batchSize;
-
-    ReadFn(RedisConnectionConfiguration connectionConfiguration, int batchSize) {
-      super(connectionConfiguration);
-      this.batchSize = batchSize;
-    }
-
-    @StartBundle
-    public void startBundle() {
-      bundles = ArrayListMultimap.create();
-      batchCount = new AtomicInteger();
-    }
-
-    @ProcessElement
-    public void processElement(ProcessContext c, BoundedWindow window) {
-      String key = c.element();
-      bundles.put(window, key);
-      if (batchCount.incrementAndGet() > getBatchSize()) {
-        Multimap<BoundedWindow, KV<String, String>> kvs = fetchAndFlush();
-        for (BoundedWindow w : kvs.keySet()) {
-          for (KV<String, String> kv : kvs.get(w)) {
-            c.output(kv);
+      while (tracker.tryClaim(cursor)) {
+        byte[] cursorBytes = redisCursor.getCursor().getBytes(StandardCharsets.UTF_8);
+        ScanResult<byte[]> scanResult = jedis.scan(cursorBytes, scanParams);
+        if (scanResult.getResult().size() > 0) {
+          byte[][] keys = scanResult.getResult().toArray(new byte[scanResult.getResult().size()][]);
+          List<byte[]> results = jedis.mget(keys);
+          for (int i = 0; i < results.size(); i++) {
+            if (results.get(i) != null) {
+              c.output(KV.of(keys[i], results.get(i)));
+            }
           }
         }
+        redisCursor = RedisCursor.of(scanResult.getCursor(), jedis.dbSize(), false);
+        cursor = RedisCursor.redisCursorToByteKey(redisCursor);
       }
-    }
-
-    @FinishBundle
-    public void finishBundle(FinishBundleContext context) {
-      Multimap<BoundedWindow, KV<String, String>> kvs = fetchAndFlush();
-      for (BoundedWindow w : kvs.keySet()) {
-        for (KV<String, String> kv : kvs.get(w)) {
-          context.output(kv, w.maxTimestamp(), w);
-        }
-      }
-    }
-
-    private int getBatchSize() {
-      return batchSize;
-    }
-
-    private Multimap<BoundedWindow, KV<String, String>> fetchAndFlush() {
-      Multimap<BoundedWindow, KV<String, String>> kvs = ArrayListMultimap.create();
-      for (BoundedWindow w : bundles.keySet()) {
-        String[] keys = new String[bundles.get(w).size()];
-        bundles.get(w).toArray(keys);
-        List<String> results = jedis.mget(keys);
-        for (int i = 0; i < results.size(); i++) {
-          if (results.get(i) != null) {
-            kvs.put(w, KV.of(keys[i], results.get(i)));
-          }
-        }
-      }
-      bundles = ArrayListMultimap.create();
-      batchCount.set(0);
-      return kvs;
     }
   }
 
   private static class Reparallelize
-      extends PTransform<PCollection<KV<String, String>>, PCollection<KV<String, String>>> {
+      extends PTransform<PCollection<KV<byte[], byte[]>>, PCollection<KV<byte[], byte[]>>> {
 
     @Override
-    public PCollection<KV<String, String>> expand(PCollection<KV<String, String>> input) {
+    public PCollection<KV<byte[], byte[]>> expand(PCollection<KV<byte[], byte[]>> input) {
       // reparallelize mimics the same behavior as in JdbcIO, used to break fusion
-      PCollectionView<Iterable<KV<String, String>>> empty =
+      PCollectionView<Iterable<KV<byte[], byte[]>>> empty =
           input
               .apply("Consume", Filter.by(SerializableFunctions.constant(false)))
               .apply(View.asIterable());
-      PCollection<KV<String, String>> materialized =
+      PCollection<KV<byte[], byte[]>> materialized =
           input.apply(
               "Identity",
               ParDo.of(
-                      new DoFn<KV<String, String>, KV<String, String>>() {
+                      new DoFn<KV<byte[], byte[]>, KV<byte[], byte[]>>() {
                         @ProcessElement
                         public void processElement(ProcessContext c) {
                           c.output(c.element());
                         }
                       })
                   .withSideInputs(empty));
-      return materialized.apply(Reshuffle.viaRandomKey());
+      /* Redis Scan may return a given element multiple times, so we use the Latest.perKey() transform to remove duplicates,
+      see "Scan guarantees" in https://redis.io/commands/scan */
+      return materialized.apply(Latest.perKey());
     }
   }
 
   /** A {@link PTransform} to write to a Redis server. */
   @AutoValue
   public abstract static class Write extends PTransform<PCollection<KV<String, String>>, PDone> {
+
+    abstract WriteBytes writeBytes();
+
+    public abstract Builder toBuilder();
+
+    public Write withEndpoint(String host, int port) {
+      return toBuilder().setWriteBytes(writeBytes().withEndpoint(host, port)).build();
+    }
+
+    public Write withAuth(String auth) {
+      return toBuilder().setWriteBytes(writeBytes().withAuth(auth)).build();
+    }
+
+    public Write withTimeout(int timeout) {
+      return toBuilder().setWriteBytes(writeBytes().withTimeout(timeout)).build();
+    }
+
+    public Write withConnectionConfiguration(RedisConnectionConfiguration connection) {
+      return toBuilder()
+          .setWriteBytes(writeBytes().withConnectionConfiguration(connection))
+          .build();
+    }
+
+    public Write withMethod(Method method) {
+      return toBuilder().setWriteBytes(writeBytes().withMethod(method)).build();
+    }
+
+    public Write withExpireTime(Long expireTimeMillis) {
+      return toBuilder().setWriteBytes(writeBytes().withExpireTime(expireTimeMillis)).build();
+    }
+
+    @Override
+    public PDone expand(PCollection<KV<String, String>> input) {
+      MapElements<KV<String, String>, KV<byte[], byte[]>> toBytes;
+      Method method = writeBytes().method();
+      if (Method.INCRBY == method || Method.DECRBY == method) {
+        toBytes =
+            MapElements.via(
+                new SimpleFunction<KV<String, String>, KV<byte[], byte[]>>() {
+                  @Override
+                  public KV<byte[], byte[]> apply(KV<String, String> input) {
+                    long value = Long.parseLong(input.getValue().trim());
+                    return KV.of(
+                        input.getKey().getBytes(StandardCharsets.UTF_8), Longs.toByteArray(value));
+                  }
+                });
+      } else {
+        toBytes =
+            MapElements.via(
+                new SimpleFunction<KV<String, String>, KV<byte[], byte[]>>() {
+                  @Override
+                  public KV<byte[], byte[]> apply(KV<String, String> input) {
+                    return KV.of(
+                        input.getKey().getBytes(StandardCharsets.UTF_8),
+                        input.getValue().getBytes(StandardCharsets.UTF_8));
+                  }
+                });
+      }
+      return input.apply(toBytes).apply(writeBytes());
+    }
 
     /** Determines the method used to insert data in Redis. */
     public enum Method {
@@ -494,9 +756,23 @@ public class RedisIO {
       DECRBY,
     }
 
+    @AutoValue.Builder
+    abstract static class Builder {
+
+      abstract Builder setWriteBytes(WriteBytes writeBytes);
+
+      abstract Write build();
+    }
+  }
+
+  /** A {@link PTransform} to write to a Redis server. */
+  @AutoValue
+  public abstract static class WriteBytes
+      extends PTransform<PCollection<KV<byte[], byte[]>>, PDone> {
+
     abstract @Nullable RedisConnectionConfiguration connectionConfiguration();
 
-    abstract @Nullable Method method();
+    abstract Write.@Nullable Method method();
 
     abstract @Nullable Long expireTime();
 
@@ -508,14 +784,14 @@ public class RedisIO {
       abstract Builder setConnectionConfiguration(
           RedisConnectionConfiguration connectionConfiguration);
 
-      abstract Builder setMethod(Method method);
+      abstract Builder setMethod(Write.Method method);
 
       abstract Builder setExpireTime(Long expireTimeMillis);
 
-      abstract Write build();
+      abstract WriteBytes build();
     }
 
-    public Write withEndpoint(String host, int port) {
+    public WriteBytes withEndpoint(String host, int port) {
       checkArgument(host != null, "host can not be null");
       checkArgument(port > 0, "port can not be negative or 0");
       return toBuilder()
@@ -523,56 +799,56 @@ public class RedisIO {
           .build();
     }
 
-    public Write withAuth(String auth) {
+    public WriteBytes withAuth(String auth) {
       checkArgument(auth != null, "auth can not be null");
       return toBuilder()
           .setConnectionConfiguration(connectionConfiguration().withAuth(auth))
           .build();
     }
 
-    public Write withTimeout(int timeout) {
+    public WriteBytes withTimeout(int timeout) {
       checkArgument(timeout >= 0, "timeout can not be negative");
       return toBuilder()
           .setConnectionConfiguration(connectionConfiguration().withTimeout(timeout))
           .build();
     }
 
-    public Write withConnectionConfiguration(RedisConnectionConfiguration connection) {
+    public WriteBytes withConnectionConfiguration(RedisConnectionConfiguration connection) {
       checkArgument(connection != null, "connection can not be null");
       return toBuilder().setConnectionConfiguration(connection).build();
     }
 
-    public Write withMethod(Method method) {
+    public WriteBytes withMethod(Write.Method method) {
       checkArgument(method != null, "method can not be null");
       return toBuilder().setMethod(method).build();
     }
 
-    public Write withExpireTime(Long expireTimeMillis) {
+    public WriteBytes withExpireTime(Long expireTimeMillis) {
       checkArgument(expireTimeMillis != null, "expireTimeMillis can not be null");
       checkArgument(expireTimeMillis > 0, "expireTimeMillis can not be negative or 0");
       return toBuilder().setExpireTime(expireTimeMillis).build();
     }
 
     @Override
-    public PDone expand(PCollection<KV<String, String>> input) {
+    public PDone expand(PCollection<KV<byte[], byte[]>> input) {
       checkArgument(connectionConfiguration() != null, "withConnectionConfiguration() is required");
 
       input.apply(ParDo.of(new WriteFn(this)));
       return PDone.in(input.getPipeline());
     }
 
-    private static class WriteFn extends DoFn<KV<String, String>, Void> {
+    private static class WriteFn extends DoFn<KV<byte[], byte[]>, Void> {
 
       private static final int DEFAULT_BATCH_SIZE = 1000;
 
-      private final Write spec;
+      private final WriteBytes spec;
 
       private transient Jedis jedis;
-      private transient Pipeline pipeline;
+      private transient @Nullable Transaction transaction;
 
       private int batchCount;
 
-      public WriteFn(Write spec) {
+      public WriteFn(WriteBytes spec) {
         this.spec = spec;
       }
 
@@ -583,123 +859,352 @@ public class RedisIO {
 
       @StartBundle
       public void startBundle() {
-        pipeline = jedis.pipelined();
-        pipeline.multi();
+        transaction = jedis.multi();
         batchCount = 0;
       }
 
       @ProcessElement
       public void processElement(ProcessContext c) {
-        KV<String, String> record = c.element();
+        KV<byte[], byte[]> record = c.element();
 
         writeRecord(record);
 
         batchCount++;
 
         if (batchCount >= DEFAULT_BATCH_SIZE) {
-          pipeline.exec();
-          pipeline.sync();
-          pipeline.multi();
+          transaction.exec();
+          transaction.multi();
           batchCount = 0;
         }
       }
 
-      private void writeRecord(KV<String, String> record) {
-        Method method = spec.method();
+      private void writeRecord(KV<byte[], byte[]> record) {
+        Write.Method method = spec.method();
         Long expireTime = spec.expireTime();
 
-        if (Method.APPEND == method) {
+        if (Write.Method.APPEND == method) {
           writeUsingAppendCommand(record, expireTime);
-        } else if (Method.SET == method) {
+        } else if (Write.Method.SET == method) {
           writeUsingSetCommand(record, expireTime);
-        } else if (Method.LPUSH == method || Method.RPUSH == method) {
+        } else if (Write.Method.LPUSH == method || Write.Method.RPUSH == method) {
           writeUsingListCommand(record, method, expireTime);
-        } else if (Method.SADD == method) {
+        } else if (Write.Method.SADD == method) {
           writeUsingSaddCommand(record, expireTime);
-        } else if (Method.PFADD == method) {
+        } else if (Write.Method.PFADD == method) {
           writeUsingHLLCommand(record, expireTime);
-        } else if (Method.INCRBY == method) {
-          writeUsingIncrBy(record);
-        } else if (Method.DECRBY == method) {
-          writeUsingDecrBy(record);
+        } else if (Write.Method.INCRBY == method) {
+          writeUsingIncrBy(record, expireTime);
+        } else if (Write.Method.DECRBY == method) {
+          writeUsingDecrBy(record, expireTime);
         }
       }
 
-      private void writeUsingAppendCommand(KV<String, String> record, Long expireTime) {
-        String key = record.getKey();
-        String value = record.getValue();
+      private void writeUsingAppendCommand(KV<byte[], byte[]> record, Long expireTime) {
+        byte[] key = record.getKey();
+        byte[] value = record.getValue();
 
-        pipeline.append(key, value);
+        transaction.append(key, value);
 
         setExpireTimeWhenRequired(key, expireTime);
       }
 
-      private void writeUsingSetCommand(KV<String, String> record, Long expireTime) {
-        String key = record.getKey();
-        String value = record.getValue();
+      private void writeUsingSetCommand(KV<byte[], byte[]> record, Long expireTime) {
+        byte[] key = record.getKey();
+        byte[] value = record.getValue();
 
         if (expireTime != null) {
-          pipeline.psetex(key, expireTime, value);
+          transaction.psetex(key, expireTime, value);
         } else {
-          pipeline.set(key, value);
+          transaction.set(key, value);
         }
       }
 
       private void writeUsingListCommand(
-          KV<String, String> record, Method method, Long expireTime) {
+          KV<byte[], byte[]> record, Write.Method method, Long expireTime) {
 
-        String key = record.getKey();
-        String value = record.getValue();
+        byte[] key = record.getKey();
+        byte[] value = record.getValue();
 
-        if (Method.LPUSH == method) {
-          pipeline.lpush(key, value);
-        } else if (Method.RPUSH == method) {
-          pipeline.rpush(key, value);
+        if (Write.Method.LPUSH == method) {
+          transaction.lpush(key, value);
+        } else if (Write.Method.RPUSH == method) {
+          transaction.rpush(key, value);
         }
 
         setExpireTimeWhenRequired(key, expireTime);
       }
 
-      private void writeUsingSaddCommand(KV<String, String> record, Long expireTime) {
-        String key = record.getKey();
-        String value = record.getValue();
+      private void writeUsingSaddCommand(KV<byte[], byte[]> record, Long expireTime) {
+        byte[] key = record.getKey();
+        byte[] value = record.getValue();
 
-        pipeline.sadd(key, value);
+        transaction.sadd(key, value);
+
+        setExpireTimeWhenRequired(key, expireTime);
       }
 
-      private void writeUsingHLLCommand(KV<String, String> record, Long expireTime) {
-        String key = record.getKey();
-        String value = record.getValue();
+      private void writeUsingHLLCommand(KV<byte[], byte[]> record, Long expireTime) {
+        byte[] key = record.getKey();
+        byte[] value = record.getValue();
 
-        pipeline.pfadd(key, value);
+        transaction.pfadd(key, value);
+
+        setExpireTimeWhenRequired(key, expireTime);
       }
 
-      private void writeUsingIncrBy(KV<String, String> record) {
-        String key = record.getKey();
-        String value = record.getValue();
-        long inc = Long.parseLong(value);
-        pipeline.incrBy(key, inc);
+      private void writeUsingIncrBy(KV<byte[], byte[]> record, Long expireTime) {
+        byte[] key = record.getKey();
+        byte[] value = record.getValue();
+        long inc = Longs.fromByteArray(value);
+        transaction.incrBy(key, inc);
+
+        setExpireTimeWhenRequired(key, expireTime);
       }
 
-      private void writeUsingDecrBy(KV<String, String> record) {
-        String key = record.getKey();
-        String value = record.getValue();
-        long decr = Long.parseLong(value);
-        pipeline.decrBy(key, decr);
+      private void writeUsingDecrBy(KV<byte[], byte[]> record, Long expireTime) {
+        byte[] key = record.getKey();
+        byte[] value = record.getValue();
+        long decr = Longs.fromByteArray(value);
+        transaction.decrBy(key, decr);
+
+        setExpireTimeWhenRequired(key, expireTime);
       }
 
-      private void setExpireTimeWhenRequired(String key, Long expireTime) {
+      private void setExpireTimeWhenRequired(byte[] key, Long expireTime) {
         if (expireTime != null) {
-          pipeline.pexpire(key, expireTime);
+          transaction.pexpire(key, expireTime);
         }
       }
 
       @FinishBundle
       public void finishBundle() {
-        if (pipeline.isInMulti()) {
-          pipeline.exec();
-          pipeline.sync();
+        if (batchCount > 0) {
+          transaction.exec();
         }
+        if (transaction != null) {
+          transaction.close();
+        }
+        transaction = null;
+        batchCount = 0;
+      }
+
+      @Teardown
+      public void teardown() {
+        jedis.close();
+      }
+    }
+  }
+
+  @AutoValue
+  public abstract static class WriteStreams
+      extends PTransform<PCollection<KV<String, Map<String, String>>>, PDone> {
+
+    abstract WriteStreamsBytes writeStreamsBytes();
+
+    public abstract Builder toBuilder();
+
+    public WriteStreams withMaxLen(long maxLen) {
+      return toBuilder().setWriteStreamsBytes(writeStreamsBytes().withMaxLen(maxLen)).build();
+    }
+
+    public WriteStreams withEndpoint(String host, int port) {
+      return toBuilder().setWriteStreamsBytes(writeStreamsBytes().withEndpoint(host, port)).build();
+    }
+
+    public WriteStreams withConnectionConfiguration(RedisConnectionConfiguration connection) {
+      return toBuilder()
+          .setWriteStreamsBytes(writeStreamsBytes().withConnectionConfiguration(connection))
+          .build();
+    }
+
+    /**
+     * If {@link #withMaxLen(long)} is used, set the "~" prefix to the MAXLEN value, indicating to
+     * the server that it should use "close enough" trimming.
+     */
+    public WriteStreams withApproximateTrim(boolean approximateTrim) {
+      return toBuilder()
+          .setWriteStreamsBytes(writeStreamsBytes().withApproximateTrim(approximateTrim))
+          .build();
+    }
+
+    @Override
+    public PDone expand(PCollection<KV<String, Map<String, String>>> input) {
+      return input.apply(ParDo.of(new StringToByteFn())).apply(writeStreamsBytes());
+    }
+
+    @AutoValue.Builder
+    abstract static class Builder {
+
+      abstract Builder setWriteStreamsBytes(WriteStreamsBytes writeStreamsBytes);
+
+      abstract WriteStreams build();
+    }
+
+    private static class StringToByteFn
+        extends DoFn<KV<String, Map<String, String>>, KV<byte[], Map<byte[], byte[]>>> {
+
+      @ProcessElement
+      public void processElement(
+          @Element KV<String, Map<String, String>> element,
+          OutputReceiver<KV<byte[], Map<byte[], byte[]>>> out) {
+        byte[] key = element.getKey().getBytes(StandardCharsets.UTF_8);
+        Map<byte[], byte[]> byteMap =
+            element.getValue().entrySet().stream()
+                .collect(
+                    Collectors.toMap(
+                        e -> e.getKey().getBytes(StandardCharsets.UTF_8),
+                        e -> e.getValue().getBytes(StandardCharsets.UTF_8)));
+        out.output(KV.of(key, byteMap));
+      }
+    }
+  }
+
+  /**
+   * A {@link PTransform} to write stream key pairs (https://redis.io/topics/streams-intro) to a
+   * Redis server.
+   */
+  @AutoValue
+  public abstract static class WriteStreamsBytes
+      extends PTransform<PCollection<KV<byte[], Map<byte[], byte[]>>>, PDone> {
+
+    abstract RedisConnectionConfiguration connectionConfiguration();
+
+    abstract long maxLen();
+
+    abstract boolean approximateTrim();
+
+    abstract Builder toBuilder();
+
+    /** Set the hostname and port of the Redis server to connect to. */
+    public WriteStreamsBytes withEndpoint(String host, int port) {
+      checkArgument(host != null, "host can not be null");
+      checkArgument(port > 0, "port can not be negative or 0");
+      return toBuilder()
+          .setConnectionConfiguration(connectionConfiguration().withHost(host).withPort(port))
+          .build();
+    }
+
+    /**
+     * Use the redis AUTH command when connecting to the server; the format of the string can be
+     * either just a password or a username and password separated by a space. See
+     * https://redis.io/commands/auth for details
+     */
+    public WriteStreamsBytes withAuth(String auth) {
+      checkArgument(auth != null, "auth can not be null");
+      return toBuilder()
+          .setConnectionConfiguration(connectionConfiguration().withAuth(auth))
+          .build();
+    }
+
+    /** Set the connection timeout for the Redis server connection. */
+    public WriteStreamsBytes withTimeout(int timeout) {
+      checkArgument(timeout >= 0, "timeout can not be negative");
+      return toBuilder()
+          .setConnectionConfiguration(connectionConfiguration().withTimeout(timeout))
+          .build();
+    }
+
+    /** Predefine a {@link RedisConnectionConfiguration} and pass it to the builder. */
+    public WriteStreamsBytes withConnectionConfiguration(RedisConnectionConfiguration connection) {
+      checkArgument(connection != null, "connection can not be null");
+      return toBuilder().setConnectionConfiguration(connection).build();
+    }
+
+    /** When appending (XADD) to a stream, set a MAXLEN option. */
+    public WriteStreamsBytes withMaxLen(long maxLen) {
+      checkArgument(maxLen >= 0L, "maxLen must be positive if set");
+      return toBuilder().setMaxLen(maxLen).build();
+    }
+
+    /**
+     * If {@link #withMaxLen(long)} is used, set the "~" prefix to the MAXLEN value, indicating to
+     * the server that it should use "close enough" trimming.
+     */
+    public WriteStreamsBytes withApproximateTrim(boolean approximateTrim) {
+      return toBuilder().setApproximateTrim(approximateTrim).build();
+    }
+
+    @Override
+    public PDone expand(PCollection<KV<byte[], Map<byte[], byte[]>>> input) {
+      checkArgument(connectionConfiguration() != null, "withConnectionConfiguration() is required");
+
+      input.apply(ParDo.of(new WriteStreamFn(this)));
+      return PDone.in(input.getPipeline());
+    }
+
+    @AutoValue.Builder
+    abstract static class Builder {
+
+      abstract Builder setConnectionConfiguration(
+          RedisConnectionConfiguration connectionConfiguration);
+
+      abstract Builder setMaxLen(long maxLen);
+
+      abstract Builder setApproximateTrim(boolean approximateTrim);
+
+      abstract WriteStreamsBytes build();
+    }
+
+    private static class WriteStreamFn extends DoFn<KV<byte[], Map<byte[], byte[]>>, Void> {
+
+      private static final int DEFAULT_BATCH_SIZE = 1000;
+
+      private final WriteStreamsBytes spec;
+      private transient Jedis jedis;
+      private transient @Nullable Transaction transaction;
+
+      private int batchCount;
+
+      public WriteStreamFn(WriteStreamsBytes spec) {
+        this.spec = spec;
+      }
+
+      @Setup
+      public void setup() {
+        jedis = spec.connectionConfiguration().connect();
+      }
+
+      @StartBundle
+      public void startBundle() {
+        transaction = jedis.multi();
+        batchCount = 0;
+      }
+
+      @ProcessElement
+      public void processElement(ProcessContext c) {
+        KV<byte[], Map<byte[], byte[]>> record = c.element();
+
+        writeRecord(record);
+
+        batchCount++;
+
+        if (batchCount >= DEFAULT_BATCH_SIZE) {
+          transaction.exec();
+          transaction.multi();
+          batchCount = 0;
+        }
+      }
+
+      private void writeRecord(KV<byte[], Map<byte[], byte[]>> record) {
+        final XAddParams params = new XAddParams().id(StreamEntryID.NEW_ENTRY);
+        if (spec.maxLen() > 0L) {
+          params.maxLen(spec.maxLen());
+          if (spec.approximateTrim()) {
+            params.approximateTrimming();
+          }
+        }
+        transaction.xadd(record.getKey(), params, record.getValue());
+      }
+
+      @FinishBundle
+      public void finishBundle() {
+        if (batchCount > 0) {
+          transaction.exec();
+        }
+        if (transaction != null) {
+          transaction.close();
+        }
+        transaction = null;
         batchCount = 0;
       }
 

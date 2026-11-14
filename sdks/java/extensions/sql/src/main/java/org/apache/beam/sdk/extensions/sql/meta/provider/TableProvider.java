@@ -35,10 +35,12 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * <p><i>Note:</i> all implementations marked with {@code @AutoService(TableProvider.class)} are
  * automatically loaded by CLI or other cases when {@link JdbcDriver} is used with default
  * connection parameters.
+ *
+ * <p>To support {@code WITH ('key' = value, ...)} options on your tables, override {@link
+ * BeamSqlTable#forRead} and {@link BeamSqlTable#forWrite} in the tables this provider builds. To
+ * support {@code CHANGES(...)}, override {@link BeamSqlTable#forChanges} as well, and {@link
+ * BeamSqlTable#getChangeMetadataColumns} if the changes have metadata columns.
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public interface TableProvider {
   /** Gets the table type this provider handles. */
   String getTableType();
@@ -76,7 +78,20 @@ public interface TableProvider {
    * Returns a sub-provider, e.g. sub-schema. Temporary, this logic needs to live in {@link
    * BeamCalciteSchema}.
    */
-  default TableProvider getSubProvider(String name) {
+  default @Nullable TableProvider getSubProvider(String name) {
     return null;
+  }
+
+  default boolean supportsPartitioning(Table table) {
+    return false;
+  }
+
+  default boolean supportsPrimaryKey(Table table) {
+    return false;
+  }
+
+  default AlterTableOps alterTable(String name) {
+    throw new UnsupportedOperationException(
+        String.format("ALTER is not supported for table '%s' of type '%s'.", name, getTableType()));
   }
 }

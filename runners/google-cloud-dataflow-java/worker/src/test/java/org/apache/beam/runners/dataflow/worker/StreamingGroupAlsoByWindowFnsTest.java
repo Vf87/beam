@@ -19,16 +19,14 @@ package org.apache.beam.runners.dataflow.worker;
 
 import static org.apache.beam.sdk.TestUtils.KvMatcher.isKv;
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.containsInAnyOrder;
-import static org.hamcrest.Matchers.emptyIterable;
-import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.*;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import org.apache.beam.model.fnexecution.v1.BeamFnApi;
 import org.apache.beam.runners.core.DoFnRunner;
 import org.apache.beam.runners.core.DoFnRunners;
 import org.apache.beam.runners.core.InMemoryStateInternals;
@@ -49,6 +47,7 @@ import org.apache.beam.runners.dataflow.worker.windmill.Windmill;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill.InputMessageBundle;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill.Timer;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill.WorkItem;
+import org.apache.beam.runners.dataflow.worker.windmill.state.WindmillTagEncodingV1;
 import org.apache.beam.sdk.coders.BigEndianLongCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.Coder.Context;
@@ -71,13 +70,18 @@ import org.apache.beam.sdk.transforms.windowing.Sessions;
 import org.apache.beam.sdk.transforms.windowing.SlidingWindows;
 import org.apache.beam.sdk.transforms.windowing.TimestampCombiner;
 import org.apache.beam.sdk.util.AppliedCombineFn;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.ByteStringOutputStream;
+import org.apache.beam.sdk.util.WindowedValueReceiver;
+import org.apache.beam.sdk.values.CausedByDrain;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -106,6 +110,11 @@ public class StreamingGroupAlsoByWindowFnsTest {
     stepContext = new TestStepContext(STEP_NAME);
   }
 
+  @After
+  public void tearDown() {
+    WindowedValues.WindowedValueCoder.setMetadataNotSupported();
+  }
+
   @Test
   public void testReshufle() throws Exception {
     GroupAlsoByWindowFn<?, ?> fn =
@@ -123,7 +132,8 @@ public class StreamingGroupAlsoByWindowFnsTest {
     ListOutputManager outputManager = new ListOutputManager();
     DoFnRunner<KeyedWorkItem<String, String>, KV<String, Iterable<String>>> runner =
         makeRunner(
-            outputTag, outputManager, WindowingStrategy.of(FixedWindows.of(Duration.millis(10))));
+            output -> outputManager.output(outputTag, output),
+            WindowingStrategy.of(FixedWindows.of(Duration.millis(10))));
 
     runner.startBundle();
 
@@ -144,15 +154,17 @@ public class StreamingGroupAlsoByWindowFnsTest {
         .getTimersBuilder()
         .addTimersBuilder()
         .setTag(
-            WindmillTimerInternals.timerTag(
-                WindmillNamespacePrefix.SYSTEM_NAMESPACE_PREFIX,
-                TimerData.of(
-                    namespace,
-                    timestamp,
-                    timestamp,
-                    type == Windmill.Timer.Type.WATERMARK
-                        ? TimeDomain.EVENT_TIME
-                        : TimeDomain.PROCESSING_TIME)))
+            WindmillTagEncodingV1.instance()
+                .timerTag(
+                    WindmillTimerType.SYSTEM_TIMER,
+                    TimerData.of(
+                        namespace,
+                        timestamp,
+                        timestamp,
+                        type == Windmill.Timer.Type.WATERMARK
+                            ? TimeDomain.EVENT_TIME
+                            : TimeDomain.PROCESSING_TIME,
+                        CausedByDrain.NORMAL)))
         .setTimestamp(WindmillTimeUtils.harnessToWindmillTimestamp(timestamp))
         .setType(type)
         .setStateFamily(STATE_FAMILY);
@@ -169,11 +181,16 @@ public class StreamingGroupAlsoByWindowFnsTest {
     Coder<Collection<? extends BoundedWindow>> windowsCoder =
         (Coder) CollectionCoder.of(windowCoder);
 
-    ByteString.Output dataOutput = ByteString.newOutput();
+    ByteStringOutputStream dataOutput = new ByteStringOutputStream();
     valueCoder.encode(value, dataOutput, Context.OUTER);
     messageBundle
         .addMessagesBuilder()
-        .setMetadata(WindmillSink.encodeMetadata(windowsCoder, windows, PaneInfo.NO_FIRING))
+        .setMetadata(
+            WindmillSink.encodeMetadata(
+                windowsCoder,
+                windows,
+                PaneInfo.NO_FIRING,
+                BeamFnApi.Elements.ElementMetadata.newBuilder().build()))
         .setData(dataOutput.toByteString())
         .setTimestamp(WindmillTimeUtils.harnessToWindmillTimestamp(timestamp));
   }
@@ -185,7 +202,29 @@ public class StreamingGroupAlsoByWindowFnsTest {
     return new ValueInEmptyWindows<>(
         (KeyedWorkItem<String, T>)
             new WindmillKeyedWorkItem<>(
-                KEY, workItem.build(), windowCoder, wildcardWindowsCoder, valueCoder));
+                KEY,
+                workItem.build(),
+                windowCoder,
+                wildcardWindowsCoder,
+                valueCoder,
+                WindmillTagEncodingV1.instance(),
+                false));
+  }
+
+  private <T> WindowedValue<KeyedWorkItem<String, T>> createDrainingValue(
+      WorkItem.Builder workItem, Coder<T> valueCoder) {
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    Coder<Collection<? extends BoundedWindow>> wildcardWindowsCoder = (Coder) windowsCoder;
+    return new ValueInEmptyWindows<>(
+        (KeyedWorkItem<String, T>)
+            new WindmillKeyedWorkItem<>(
+                KEY,
+                workItem.build(),
+                windowCoder,
+                wildcardWindowsCoder,
+                valueCoder,
+                WindmillTagEncodingV1.instance(),
+                true));
   }
 
   @Test
@@ -194,7 +233,8 @@ public class StreamingGroupAlsoByWindowFnsTest {
     ListOutputManager outputManager = new ListOutputManager();
     DoFnRunner<KeyedWorkItem<String, String>, KV<String, Iterable<String>>> runner =
         makeRunner(
-            outputTag, outputManager, WindowingStrategy.of(FixedWindows.of(Duration.millis(10))));
+            output -> outputManager.output(outputTag, output),
+            WindowingStrategy.of(FixedWindows.of(Duration.millis(10))));
 
     when(mockTimerInternals.currentInputWatermarkTime()).thenReturn(new Instant(0));
 
@@ -246,13 +286,85 @@ public class StreamingGroupAlsoByWindowFnsTest {
   }
 
   @Test
+  public void testFixedWindowsWithDraining() throws Exception {
+    WindowedValues.WindowedValueCoder.setMetadataSupported();
+    TupleTag<KV<String, Iterable<String>>> outputTag = new TupleTag<>();
+    ListOutputManager outputManager = new ListOutputManager();
+    DoFnRunner<KeyedWorkItem<String, String>, KV<String, Iterable<String>>> runner =
+        makeRunner(
+            output -> outputManager.output(outputTag, output),
+            WindowingStrategy.of(FixedWindows.of(Duration.millis(10))));
+
+    when(mockTimerInternals.currentInputWatermarkTime()).thenReturn(new Instant(0));
+
+    runner.startBundle();
+
+    WorkItem.Builder workItem1 = WorkItem.newBuilder();
+    workItem1.setKey(ByteString.copyFromUtf8(KEY));
+    workItem1.setWorkToken(WORK_TOKEN);
+    InputMessageBundle.Builder messageBundle = workItem1.addMessageBundlesBuilder();
+    messageBundle.setSourceComputationId(SOURCE_COMPUTATION_ID);
+
+    Coder<String> valueCoder = StringUtf8Coder.of();
+    addElement(messageBundle, Arrays.asList(window(0, 10)), new Instant(1), valueCoder, "v1");
+    addElement(messageBundle, Arrays.asList(window(0, 10)), new Instant(2), valueCoder, "v2");
+    addElement(messageBundle, Arrays.asList(window(0, 10)), new Instant(0), valueCoder, "v0");
+    addElement(messageBundle, Arrays.asList(window(10, 20)), new Instant(13), valueCoder, "v3");
+    runner.processElement(createValue(workItem1, valueCoder));
+
+    runner.finishBundle();
+    runner.startBundle();
+
+    WorkItem.Builder workItem2 = WorkItem.newBuilder();
+    workItem2.setKey(ByteString.copyFromUtf8(KEY));
+    workItem2.setWorkToken(WORK_TOKEN);
+    InputMessageBundle.Builder messageBundle2 = workItem1.addMessageBundlesBuilder();
+    messageBundle2.setSourceComputationId(SOURCE_COMPUTATION_ID);
+    addTimer(workItem2, window(0, 10), new Instant(9), Timer.Type.WATERMARK);
+    when(mockTimerInternals.currentInputWatermarkTime()).thenReturn(new Instant(10));
+
+    runner.processElement(createValue(workItem2, valueCoder));
+    runner.finishBundle();
+
+    runner.startBundle();
+
+    WorkItem.Builder workItem3 = WorkItem.newBuilder();
+    workItem3.setKey(ByteString.copyFromUtf8(KEY));
+    workItem3.setWorkToken(WORK_TOKEN);
+    addTimer(workItem3, window(10, 20), new Instant(19), Timer.Type.WATERMARK);
+
+    when(mockTimerInternals.currentInputWatermarkTime()).thenReturn(new Instant(20));
+    runner.processElement(createDrainingValue(workItem3, valueCoder));
+    runner.finishBundle();
+
+    List<WindowedValue<KV<String, Iterable<String>>>> result = outputManager.getOutput(outputTag);
+
+    assertThat(result.size(), equalTo(2));
+
+    assertThat(
+        result,
+        containsInAnyOrder(
+            WindowMatchers.isSingleWindowedValue(
+                isKv(equalTo(KEY), containsInAnyOrder("v0", "v1", "v2")),
+                equalTo(window(0, 10).maxTimestamp()),
+                equalTo(window(0, 10)),
+                anything(),
+                is(CausedByDrain.NORMAL)),
+            WindowMatchers.isSingleWindowedValue(
+                isKv(equalTo(KEY), containsInAnyOrder("v3")),
+                equalTo(window(10, 20).maxTimestamp()),
+                equalTo(window(10, 20)),
+                anything(),
+                is(CausedByDrain.CAUSED_BY_DRAIN))));
+  }
+
+  @Test
   public void testSlidingWindows() throws Exception {
     TupleTag<KV<String, Iterable<String>>> outputTag = new TupleTag<>();
     ListOutputManager outputManager = new ListOutputManager();
     DoFnRunner<KeyedWorkItem<String, String>, KV<String, Iterable<String>>> runner =
         makeRunner(
-            outputTag,
-            outputManager,
+            output -> outputManager.output(outputTag, output),
             WindowingStrategy.of(SlidingWindows.of(Duration.millis(20)).every(Duration.millis(10)))
                 .withTimestampCombiner(TimestampCombiner.EARLIEST));
 
@@ -339,7 +451,8 @@ public class StreamingGroupAlsoByWindowFnsTest {
             new StepContextStateInternalsFactory<String>(stepContext),
             StringUtf8Coder.of());
     DoFnRunner<KeyedWorkItem<String, String>, KV<String, Iterable<String>>> runner =
-        makeRunner(outputTag, outputManager, windowingStrategy, fn);
+        makeRunnerForGabwFn(
+            output -> outputManager.output(outputTag, output), windowingStrategy, fn);
 
     when(mockTimerInternals.currentInputWatermarkTime()).thenReturn(new Instant(15));
 
@@ -425,8 +538,7 @@ public class StreamingGroupAlsoByWindowFnsTest {
     ListOutputManager outputManager = new ListOutputManager();
     DoFnRunner<KeyedWorkItem<String, String>, KV<String, Iterable<String>>> runner =
         makeRunner(
-            outputTag,
-            outputManager,
+            output -> outputManager.output(outputTag, output),
             WindowingStrategy.of(Sessions.withGapDuration(Duration.millis(10)))
                 .withTimestampCombiner(TimestampCombiner.EARLIEST));
 
@@ -542,9 +654,8 @@ public class StreamingGroupAlsoByWindowFnsTest {
 
     ListOutputManager outputManager = new ListOutputManager();
     DoFnRunner<KeyedWorkItem<String, Long>, KV<String, Long>> runner =
-        makeRunner(
-            outputTag,
-            outputManager,
+        makeRunnerForAppliedCombineFn(
+            output -> outputManager.output(outputTag, output),
             WindowingStrategy.of(Sessions.withGapDuration(Duration.millis(10))),
             appliedCombineFn);
 
@@ -600,8 +711,7 @@ public class StreamingGroupAlsoByWindowFnsTest {
   }
 
   private DoFnRunner<KeyedWorkItem<String, String>, KV<String, Iterable<String>>> makeRunner(
-      TupleTag<KV<String, Iterable<String>>> outputTag,
-      DoFnRunners.OutputManager outputManager,
+      WindowedValueReceiver<KV<String, Iterable<String>>> outputReceiver,
       WindowingStrategy<? super String, IntervalWindow> windowingStrategy)
       throws Exception {
 
@@ -611,12 +721,11 @@ public class StreamingGroupAlsoByWindowFnsTest {
             new StepContextStateInternalsFactory<String>(stepContext),
             StringUtf8Coder.of());
 
-    return makeRunner(outputTag, outputManager, windowingStrategy, fn);
+    return makeRunnerForGabwFn(outputReceiver, windowingStrategy, fn);
   }
 
-  private DoFnRunner<KeyedWorkItem<String, Long>, KV<String, Long>> makeRunner(
-      TupleTag<KV<String, Long>> outputTag,
-      DoFnRunners.OutputManager outputManager,
+  private DoFnRunner<KeyedWorkItem<String, Long>, KV<String, Long>> makeRunnerForAppliedCombineFn(
+      WindowedValueReceiver<KV<String, Long>> outputManager,
       WindowingStrategy<? super String, IntervalWindow> windowingStrategy,
       AppliedCombineFn<String, Long, ?, Long> combineFn)
       throws Exception {
@@ -628,13 +737,12 @@ public class StreamingGroupAlsoByWindowFnsTest {
             combineFn,
             StringUtf8Coder.of());
 
-    return makeRunner(outputTag, outputManager, windowingStrategy, fn);
+    return makeRunnerForGabwFn(outputManager, windowingStrategy, fn);
   }
 
   private <InputT, OutputT>
-      DoFnRunner<KeyedWorkItem<String, InputT>, KV<String, OutputT>> makeRunner(
-          TupleTag<KV<String, OutputT>> outputTag,
-          DoFnRunners.OutputManager outputManager,
+      DoFnRunner<KeyedWorkItem<String, InputT>, KV<String, OutputT>> makeRunnerForGabwFn(
+          WindowedValueReceiver<KV<String, OutputT>> outputManager,
           WindowingStrategy<? super String, IntervalWindow> windowingStrategy,
           GroupAlsoByWindowFn<KeyedWorkItem<String, InputT>, KV<String, OutputT>> fn)
           throws Exception {
@@ -644,10 +752,8 @@ public class StreamingGroupAlsoByWindowFnsTest {
             fn,
             NullSideInputReader.empty(),
             outputManager,
-            outputTag,
             stepContext);
-    return DoFnRunners.lateDataDroppingRunner(
-        doFnRunner, stepContext.timerInternals(), windowingStrategy);
+    return DoFnRunners.lateDataDroppingRunner(doFnRunner, stepContext, windowingStrategy);
   }
 
   private IntervalWindow window(long start, long end) {

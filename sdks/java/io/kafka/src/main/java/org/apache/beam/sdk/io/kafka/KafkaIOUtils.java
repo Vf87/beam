@@ -17,23 +17,35 @@
  */
 package org.apache.beam.sdk.io.kafka;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import org.apache.beam.sdk.transforms.SerializableFunction;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.primitives.Longs;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetAndTimestamp;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.checkerframework.checker.nullness.qual.Nullable;
+import org.joda.time.Instant;
 
 /**
  * Common utility functions and default configurations for {@link KafkaIO.Read} and {@link
  * KafkaIO.ReadSourceDescriptors}.
  */
-final class KafkaIOUtils {
+public final class KafkaIOUtils {
+
+  private static final Random RANDOM = new Random();
+
   // A set of config defaults.
   static final Map<String, Object> DEFAULT_CONSUMER_PROPERTIES =
       ImmutableMap.of(
@@ -60,7 +72,7 @@ final class KafkaIOUtils {
           false);
 
   // A set of properties that are not required or don't make sense for our consumer.
-  static final Map<String, String> DISALLOWED_CONSUMER_PROPERTIES =
+  public static final Map<String, String> DISALLOWED_CONSUMER_PROPERTIES =
       ImmutableMap.of(
           ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "Set keyDeserializer instead",
           ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "Set valueDeserializer instead"
@@ -94,7 +106,7 @@ final class KafkaIOUtils {
   }
 
   static Map<String, Object> getOffsetConsumerConfig(
-      String name, Map<String, Object> offsetConfig, Map<String, Object> consumerConfig) {
+      String name, @Nullable Map<String, Object> offsetConfig, Map<String, Object> consumerConfig) {
     Map<String, Object> offsetConsumerConfig = new HashMap<>(consumerConfig);
     offsetConsumerConfig.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
 
@@ -103,7 +115,7 @@ final class KafkaIOUtils {
     String offsetGroupId =
         String.format(
             "%s_offset_consumer_%d_%s",
-            name, (new Random()).nextInt(Integer.MAX_VALUE), (groupId == null ? "none" : groupId));
+            name, RANDOM.nextInt(Integer.MAX_VALUE), (groupId == null ? "none" : groupId));
     offsetConsumerConfig.put(ConsumerConfig.GROUP_ID_CONFIG, offsetGroupId);
 
     if (offsetConfig != null) {
@@ -126,19 +138,94 @@ final class KafkaIOUtils {
     return offsetConsumerConfig;
   }
 
-  // Maintains approximate average over last 1000 elements
-  static class MovingAvg {
-    private static final int MOVING_AVG_WINDOW = 1000;
-    private double avg = 0;
-    private long numUpdates = 0;
+  static Map<String, Object> overrideBootstrapServersConfig(
+      Map<String, Object> currentConfig, KafkaSourceDescriptor description) {
+    checkState(
+        currentConfig.containsKey(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG)
+            || description.getBootStrapServers() != null);
+    Map<String, Object> config = new HashMap<>(currentConfig);
+    if (description.getBootStrapServers() != null && description.getBootStrapServers().size() > 0) {
+      config.put(
+          ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,
+          String.join(",", description.getBootStrapServers()));
+    }
+    return config;
+  }
 
-    void update(double quantity) {
-      numUpdates++;
-      avg += (quantity - avg) / Math.min(MOVING_AVG_WINDOW, numUpdates);
+  /**
+   * Look up the offset for the given partition by timestamp. Throws RuntimeException if there are
+   * no messages later than timestamp or if this partition does not support timestamp based offset.
+   */
+  static long offsetForTime(Consumer<?, ?> consumer, TopicPartition topicPartition, Instant time) {
+    // 'value' in the map returned by offsetsForTimes() is null if there is no offset for the time.
+    OffsetAndTimestamp offsetAndTimestamp =
+        Iterables.getOnlyElement(
+            consumer.offsetsForTimes(ImmutableMap.of(topicPartition, time.getMillis())).values());
+
+    if (offsetAndTimestamp == null) {
+      throw new RuntimeException(
+          "There are no messages has a timestamp that is greater than or "
+              + "equals to the target time or the message format version in this partition is "
+              + "before 0.10.0, topicPartition is: "
+              + topicPartition);
+    } else {
+      return offsetAndTimestamp.offset();
+    }
+  }
+
+  /*
+   * Maintains approximate average over last 1000 elements.
+   * Usage is only thread-safe for a single producer and multiple consumers.
+   */
+  public static final class MovingAvg {
+    private static final AtomicLongFieldUpdater<MovingAvg> AVG =
+        AtomicLongFieldUpdater.newUpdater(MovingAvg.class, "avg");
+    private static final int MOVING_AVG_WINDOW = 1000;
+
+    private volatile long avg;
+    private long numUpdates;
+
+    private double getAvg() {
+      return Double.longBitsToDouble(avg);
     }
 
-    double get() {
-      return avg;
+    private void setAvg(final double value) {
+      AVG.lazySet(this, Double.doubleToRawLongBits(value));
+    }
+
+    public void update(final double quantity) {
+      final double prevAvg = getAvg(); // volatile load (acquire)
+
+      final long nextNumUpdates = numUpdates + 1; // normal load
+      final double nextAvg = prevAvg + (quantity - prevAvg) / nextNumUpdates;
+
+      numUpdates = Math.min(MOVING_AVG_WINDOW, nextNumUpdates); // normal store
+      setAvg(nextAvg); // ordered store (release)
+    }
+
+    public void update(final double sum, final long count) {
+      final double prevAvg = getAvg(); // volatile load (acquire)
+
+      final long nextNumUpdates = numUpdates + count; // normal load
+      final double nextAvg = prevAvg + (sum / count - prevAvg) * ((double) count / nextNumUpdates);
+
+      numUpdates = Math.min(MOVING_AVG_WINDOW, nextNumUpdates); // normal store
+      setAvg(nextAvg); // ordered store (release)
+    }
+
+    public double get() {
+      return getAvg(); // volatile load (acquire)
+    }
+  }
+
+  static final class OffsetBasedDeduplication {
+
+    static byte[] encodeOffset(long offset) {
+      return Longs.toByteArray(offset);
+    }
+
+    static byte[] getUniqueId(String topic, int partition, long offset) {
+      return (topic + "-" + partition + "-" + offset).getBytes(StandardCharsets.UTF_8);
     }
   }
 }

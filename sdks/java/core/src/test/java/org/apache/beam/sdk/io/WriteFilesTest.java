@@ -19,7 +19,7 @@ package org.apache.beam.sdk.io;
 
 import static org.apache.beam.sdk.transforms.display.DisplayDataMatchers.hasDisplayItem;
 import static org.apache.beam.sdk.transforms.display.DisplayDataMatchers.includesDisplayDataFor;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects.firstNonNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects.firstNonNull;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
@@ -30,11 +30,16 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.WritableByteChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
@@ -43,6 +48,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -60,7 +67,9 @@ import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptionsFactoryTest.TestPipelineOptions;
 import org.apache.beam.sdk.options.ValueProvider.StaticValueProvider;
+import org.apache.beam.sdk.testing.BeamParallelJunit4Runner;
 import org.apache.beam.sdk.testing.NeedsRunner;
+import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.testing.TestStream;
 import org.apache.beam.sdk.testing.UsesTestStream;
@@ -78,22 +87,24 @@ import org.apache.beam.sdk.transforms.Top;
 import org.apache.beam.sdk.transforms.Values;
 import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.display.DisplayData;
+import org.apache.beam.sdk.transforms.errorhandling.ErrorHandler.BadRecordErrorHandler;
+import org.apache.beam.sdk.transforms.errorhandling.ErrorHandlingTestUtils.ErrorSinkTransform;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.transforms.windowing.Sessions;
 import org.apache.beam.sdk.transforms.windowing.Window;
+import org.apache.beam.sdk.util.MimeTypes;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollection.IsBounded;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.ShardedKey;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Charsets;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Optional;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Optional;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.apache.commons.compress.utils.Sets;
 import org.hamcrest.Matchers;
 import org.joda.time.Duration;
@@ -106,14 +117,18 @@ import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
 
 /** Tests for the WriteFiles PTransform. */
-@RunWith(JUnit4.class)
+@RunWith(BeamParallelJunit4Runner.class)
 public class WriteFilesTest {
   @Rule public TemporaryFolder tmpFolder = new TemporaryFolder();
   @Rule public final TestPipeline p = TestPipeline.create();
   @Rule public ExpectedException thrown = ExpectedException.none();
+
+  private static final int CUSTOM_FILE_TRIGGERING_RECORD_COUNT = 50000;
+  private static final int CUSTOM_FILE_TRIGGERING_BYTE_COUNT = 32 * 1024 * 1024; // 32MiB
+  private static final Duration CUSTOM_FILE_TRIGGERING_RECORD_BUFFERING_DURATION =
+      Duration.standardSeconds(4);
 
   @SuppressWarnings("unchecked") // covariant cast
   private static final PTransform<PCollection<String>, PCollection<String>> IDENTITY_MAP =
@@ -330,6 +345,35 @@ public class WriteFilesTest {
   }
 
   @Test
+  @Category({NeedsRunner.class, UsesUnboundedPCollections.class})
+  public void testWithShardingUnbounded() throws IOException {
+    runShardedWrite(
+        Arrays.asList("one", "two", "three", "four", "five", "six"),
+        Window.into(FixedWindows.of(Duration.standardSeconds(10))),
+        getBaseOutputFilename(),
+        WriteFiles.to(makeSimpleSink()).withWindowedWrites().withAutoSharding(),
+        null,
+        true);
+  }
+
+  @Test
+  @Category({NeedsRunner.class, UsesUnboundedPCollections.class})
+  public void testWriteUnboundedWithCustomBatchParameters() throws IOException {
+    runShardedWrite(
+        Arrays.asList("one", "two", "three", "four", "five", "six"),
+        Window.into(FixedWindows.of(Duration.standardSeconds(10))),
+        getBaseOutputFilename(),
+        WriteFiles.to(makeSimpleSink())
+            .withWindowedWrites()
+            .withAutoSharding()
+            .withBatchSize(CUSTOM_FILE_TRIGGERING_RECORD_COUNT)
+            .withBatchSizeBytes(CUSTOM_FILE_TRIGGERING_BYTE_COUNT)
+            .withBatchMaxBufferingDuration(CUSTOM_FILE_TRIGGERING_RECORD_BUFFERING_DURATION),
+        null,
+        true);
+  }
+
+  @Test
   @Category({
     NeedsRunner.class,
     UsesUnboundedPCollections.class,
@@ -455,6 +499,169 @@ public class WriteFilesTest {
   }
 
   @Test
+  @Category(NeedsRunner.class)
+  public void testWriteEvictWritersWhenFull() throws IOException {
+    List<String> inputs = Lists.newArrayList();
+    for (int i = 0; i < 100; ++i) {
+      inputs.add("mambo_number_" + i);
+    }
+    runWrite(
+        inputs,
+        Window.into(FixedWindows.of(Duration.millis(1))),
+        getBaseOutputFilename(),
+        WriteFiles.to(makeSimpleSink())
+            .withMaxNumWritersPerBundle(2)
+            .withWindowedWrites()
+            .withEvictWritersWhenFull());
+  }
+
+  private static class EmitElementsInSingleBundleFn extends DoFn<String, String> {
+    private final List<String> elementsToEmit;
+
+    EmitElementsInSingleBundleFn(List<String> elementsToEmit) {
+      this.elementsToEmit = elementsToEmit;
+    }
+
+    @ProcessElement
+    public void processElement(ProcessContext c) {
+      for (String elem : elementsToEmit) {
+        c.output(elem);
+      }
+    }
+  }
+
+  private static final class FailingCloseOnEvictSink
+      extends FileBasedSink<String, Integer, String> {
+    static final AtomicReference<ResourceId> EVICTED_TEMP_FILE = new AtomicReference<>();
+    static final AtomicBoolean THREW_ON_CLOSE = new AtomicBoolean(false);
+
+    FailingCloseOnEvictSink(
+        ResourceId tempDirectory,
+        DynamicDestinations<String, Integer, String> dynamicDestinations) {
+      super(StaticValueProvider.of(tempDirectory), dynamicDestinations, Compression.UNCOMPRESSED);
+    }
+
+    @Override
+    public WriteOperation<Integer, String> createWriteOperation() {
+      return new FailingCloseWriteOperation(this);
+    }
+
+    private static final class FailingCloseWriteOperation extends WriteOperation<Integer, String> {
+      FailingCloseWriteOperation(FailingCloseOnEvictSink sink) {
+        super(sink);
+      }
+
+      @Override
+      public Writer<Integer, String> createWriter() {
+        return new Writer<Integer, String>(this, MimeTypes.TEXT) {
+          private WritableByteChannel channel;
+
+          @Override
+          protected void prepareWrite(WritableByteChannel channel) {
+            this.channel = channel;
+          }
+
+          @Override
+          public void write(String value) throws Exception {
+            channel.write(ByteBuffer.wrap((value + "\n").getBytes(StandardCharsets.UTF_8)));
+          }
+
+          @Override
+          protected void writeFooter() throws Exception {
+            if (THREW_ON_CLOSE.compareAndSet(false, true)) {
+              EVICTED_TEMP_FILE.set(getOutputFile());
+              assertTrue(new File(getOutputFile().toString()).exists());
+              throw new IOException("Simulated close failure on eviction");
+            }
+          }
+        };
+      }
+    }
+  }
+
+  @Test
+  @Category(NeedsRunner.class)
+  public void testWriteEvictWritersWhenFullLruOrderAndReopen() throws IOException {
+    TestDestinations dynamicDestinations = new TestDestinations(getBaseOutputDirectory());
+    SimpleSink<Integer> sink =
+        new SimpleSink<>(getBaseOutputDirectory(), dynamicDestinations, Compression.UNCOMPRESSED);
+
+    WriteOptions options = TestPipeline.testingPipelineOptions().as(WriteOptions.class);
+    options.setTestFlag("test_value");
+    Pipeline p = TestPipeline.create(options);
+
+    // Emit all elements in a single bundle with maxNumWritersPerBundle = 1 (allows up to 2 open
+    // writers simultaneously before evicting):
+    // - "0" (dest 0): opens dest 0. Open writers (LRU -> MRU): [0]
+    // - "1" (dest 1): opens dest 1. Open writers (LRU -> MRU): [0, 1]
+    // - "5" (dest 0): writes to existing open writer for dest 0, refreshing its recency.
+    //                 Open writers (LRU -> MRU): [1, 0]
+    // - "2" (dest 2): capacity exceeded -> evicts least recently used writer (dest 1, even though
+    //                 dest 0 was opened first), opens dest 2. Open writers (LRU -> MRU): [0, 2]
+    // - "10" (dest 0): writes to still-open writer for dest 0 (proving dest 1 was evicted, not
+    //                  dest 0). Open writers (LRU -> MRU): [2, 0]
+    // - "6" (dest 1): dest 1 was previously evicted -> evicts least recently used writer (dest 2),
+    //                 re-opens a second writer for dest 1. Open writers (LRU -> MRU): [0, 1]
+    List<String> bundleElements = Arrays.asList("0", "1", "5", "2", "10", "6");
+
+    WriteFilesResult<Integer> res =
+        p.apply(Create.of("trigger"))
+            .apply(ParDo.of(new EmitElementsInSingleBundleFn(bundleElements)))
+            .apply(WriteFiles.to(sink).withMaxNumWritersPerBundle(1).withEvictWritersWhenFull());
+    res.getPerDestinationOutputFilenames().apply(new VerifyFilesExist<>());
+    p.run();
+
+    // Destination 0 stayed open across all three of its elements due to LRU refresh -> 1 shard.
+    ResourceId base0 =
+        getBaseOutputDirectory().resolve("file_0", StandardResolveOptions.RESOLVE_FILE);
+    checkFileContents(
+        base0.toString(), Arrays.asList("record_0", "record_5", "record_10"), Optional.of(1), true);
+
+    // Destination 1 became LRU after "5" accessed dest 0, was evicted when "2" arrived, and was
+    // re-opened when "6" arrived -> 2 shards.
+    ResourceId base1 =
+        getBaseOutputDirectory().resolve("file_1", StandardResolveOptions.RESOLVE_FILE);
+    checkFileContents(
+        base1.toString(), Arrays.asList("record_1", "record_6"), Optional.of(2), true);
+
+    // Destination 2 was opened once and evicted when "6" arrived -> 1 shard.
+    ResourceId base2 =
+        getBaseOutputDirectory().resolve("file_2", StandardResolveOptions.RESOLVE_FILE);
+    checkFileContents(
+        base2.toString(), Collections.singletonList("record_2"), Optional.of(1), true);
+  }
+
+  @Test
+  @Category(NeedsRunner.class)
+  @BeamParallelJunit4Runner.SerialTest
+  public void testWriteEvictWritersWhenFullCloseExceptionCleanup() {
+    FailingCloseOnEvictSink.EVICTED_TEMP_FILE.set(null);
+    FailingCloseOnEvictSink.THREW_ON_CLOSE.set(false);
+
+    TestDestinations dynamicDestinations = new TestDestinations(getBaseOutputDirectory());
+    FailingCloseOnEvictSink sink =
+        new FailingCloseOnEvictSink(getBaseOutputDirectory(), dynamicDestinations);
+
+    WriteOptions options = TestPipeline.testingPipelineOptions().as(WriteOptions.class);
+    options.setTestFlag("test_value");
+    Pipeline p = TestPipeline.create(options);
+
+    // Emitting 3 distinct destinations ("0", "1", "2") in a single bundle with
+    // maxNumWritersPerBundle = 1 triggers evictOldestWriter() when "2" arrives.
+    p.apply(Create.of("trigger"))
+        .apply(ParDo.of(new EmitElementsInSingleBundleFn(Arrays.asList("0", "1", "2"))))
+        .apply(WriteFiles.to(sink).withMaxNumWritersPerBundle(1).withEvictWritersWhenFull());
+
+    Pipeline.PipelineExecutionException thrownException =
+        assertThrows(Pipeline.PipelineExecutionException.class, p::run);
+    assertThat(
+        thrownException.getCause().getMessage(),
+        containsString("Simulated close failure on eviction"));
+    assertNotNull(FailingCloseOnEvictSink.EVICTED_TEMP_FILE.get());
+    assertFalse(new File(FailingCloseOnEvictSink.EVICTED_TEMP_FILE.get().toString()).exists());
+  }
+
+  @Test
   public void testBuildWrite() {
     SimpleSink<Void> sink = makeSimpleSink();
     WriteFiles<String, ?, String> write = WriteFiles.to(sink).withNumShards(3);
@@ -475,6 +682,12 @@ public class WriteFilesTest {
     WriteFiles<String, ?, ?> writeUnsharded = write2.withRunnerDeterminedSharding();
     assertThat(writeUnsharded.getComputeNumShards(), nullValue());
     assertThat(write.getComputeNumShards(), equalTo(originalSharding));
+    assertFalse(write.getEvictWritersWhenFull());
+    assertTrue(write.withEvictWritersWhenFull().getEvictWritersWhenFull());
+    assertTrue(write.withEvictWritersWhenFull(true).getEvictWritersWhenFull());
+    assertFalse(write.withEvictWritersWhenFull(false).getEvictWritersWhenFull());
+    assertEquals(50, write.withMaxNumWritersPerBundle(50).getMaxNumWritersPerBundle());
+    assertThrows(IllegalArgumentException.class, () -> write.withMaxNumWritersPerBundle(0));
   }
 
   @Test
@@ -630,6 +843,134 @@ public class WriteFilesTest {
           base.toString(),
           expected,
           Optional.of(numShards),
+          bounded /* expectRemovedTempDirectory */);
+    }
+  }
+
+  // Test FailingDynamicDestinations class. Expects user values to be string-encoded integers.
+  // Throws exceptions when trying to format records or get destinations based on the mod
+  // of the element
+  static class FailingTestDestinations extends DynamicDestinations<String, Integer, String> {
+    private ResourceId baseOutputDirectory;
+
+    FailingTestDestinations(ResourceId baseOutputDirectory) {
+      this.baseOutputDirectory = baseOutputDirectory;
+    }
+
+    @Override
+    public String formatRecord(String record) {
+      int value = Integer.valueOf(record);
+      // deterministically fail to format 1/3rd of records
+      if (value % 3 == 0) {
+        throw new RuntimeException("Failed To Format Record");
+      }
+      return "record_" + record;
+    }
+
+    @Override
+    public Integer getDestination(String element) {
+      int value = Integer.valueOf(element);
+      // deterministically fail to find the destination for 1/7th of records
+      if (value % 7 == 0) {
+        throw new RuntimeException("Failed To Get Destination");
+      }
+      return value % 5;
+    }
+
+    @Override
+    public Integer getDefaultDestination() {
+      return 0;
+    }
+
+    @Override
+    public FilenamePolicy getFilenamePolicy(Integer destination) {
+      return new PerWindowFiles(
+          baseOutputDirectory.resolve("file_" + destination, StandardResolveOptions.RESOLVE_FILE),
+          "simple");
+    }
+  }
+
+  @Test
+  @Category(NeedsRunner.class)
+  public void testFailingDynamicDestinationsBounded() throws Exception {
+    testFailingDynamicDestinationsHelper(true, false);
+  }
+
+  @Test
+  @Category({NeedsRunner.class, UsesUnboundedPCollections.class})
+  public void testFailingDynamicDestinationsUnbounded() throws Exception {
+    testFailingDynamicDestinationsHelper(false, false);
+  }
+
+  @Test
+  @Category({NeedsRunner.class, UsesUnboundedPCollections.class})
+  public void testFailingDynamicDestinationsAutosharding() throws Exception {
+    testFailingDynamicDestinationsHelper(false, true);
+  }
+
+  private void testFailingDynamicDestinationsHelper(boolean bounded, boolean autosharding)
+      throws IOException {
+    FailingTestDestinations dynamicDestinations =
+        new FailingTestDestinations(getBaseOutputDirectory());
+    SimpleSink<Integer> sink =
+        new SimpleSink<>(getBaseOutputDirectory(), dynamicDestinations, Compression.UNCOMPRESSED);
+
+    // Flag to validate that the pipeline options are passed to the Sink.
+    WriteOptions options = TestPipeline.testingPipelineOptions().as(WriteOptions.class);
+    options.setTestFlag("test_value");
+    Pipeline p = TestPipeline.create(options);
+
+    final int numInputs = 100;
+    long expectedFailures = 0;
+    List<String> inputs = Lists.newArrayList();
+    for (int i = 0; i < numInputs; ++i) {
+      inputs.add(Integer.toString(i));
+      if (i % 7 == 0 || i % 3 == 0) {
+        expectedFailures++;
+      }
+    }
+    // Prepare timestamps for the elements.
+    List<Long> timestamps = new ArrayList<>();
+    for (long i = 0; i < inputs.size(); i++) {
+      timestamps.add(i + 1);
+    }
+
+    BadRecordErrorHandler<PCollection<Long>> errorHandler =
+        p.registerBadRecordErrorHandler(new ErrorSinkTransform());
+    int numShards = autosharding ? 0 : 2;
+    WriteFiles<String, Integer, String> writeFiles =
+        WriteFiles.to(sink).withNumShards(numShards).withBadRecordErrorHandler(errorHandler);
+
+    PCollection<String> input = p.apply(Create.timestamped(inputs, timestamps));
+    WriteFilesResult<Integer> res;
+    if (!bounded) {
+      input.setIsBoundedInternal(IsBounded.UNBOUNDED);
+      input = input.apply(Window.into(FixedWindows.of(Duration.standardDays(1))));
+      res = input.apply(writeFiles.withWindowedWrites());
+    } else {
+      res = input.apply(writeFiles);
+    }
+
+    errorHandler.close();
+
+    PAssert.thatSingleton(errorHandler.getOutput()).isEqualTo(expectedFailures);
+
+    res.getPerDestinationOutputFilenames().apply(new VerifyFilesExist<>());
+    p.run();
+
+    for (int i = 0; i < 5; ++i) {
+      ResourceId base =
+          getBaseOutputDirectory().resolve("file_" + i, StandardResolveOptions.RESOLVE_FILE);
+      List<String> expected = Lists.newArrayList();
+      for (int j = i; j < numInputs; j += 5) {
+        if (j % 3 != 0 && j % 7 != 0) {
+          expected.add("record_" + j);
+        }
+      }
+      checkFileContents(
+          base.toString(),
+          expected,
+          Optional.fromNullable(autosharding ? null : numShards),
           bounded /* expectRemovedTempDirectory */);
     }
   }
@@ -870,7 +1211,8 @@ public class WriteFilesTest {
     List<String> actual = Lists.newArrayList();
     for (File outputFile : outputFiles) {
       List<String> actualShard = Lists.newArrayList();
-      try (BufferedReader reader = Files.newBufferedReader(outputFile.toPath(), Charsets.UTF_8)) {
+      try (BufferedReader reader =
+          Files.newBufferedReader(outputFile.toPath(), StandardCharsets.UTF_8)) {
         for (; ; ) {
           String line = reader.readLine();
           if (line == null) {

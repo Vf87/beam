@@ -31,11 +31,12 @@ import org.apache.beam.runners.fnexecution.environment.ProcessManager;
 import org.apache.beam.runners.fnexecution.provisioning.JobInfo;
 import org.apache.beam.runners.jobsubmission.JobInvocation;
 import org.apache.beam.runners.jobsubmission.JobInvoker;
+import org.apache.beam.runners.jobsubmission.JobServerDriver;
 import org.apache.beam.runners.jobsubmission.PortablePipelineResult;
 import org.apache.beam.runners.jobsubmission.PortablePipelineRunner;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.ListeningExecutorService;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ListeningExecutorService;
 import org.apache.flink.api.common.time.Deadline;
 import org.kohsuke.args4j.CmdLineException;
 import org.kohsuke.args4j.CmdLineParser;
@@ -55,7 +56,7 @@ import org.slf4j.LoggerFactory;
  * protos offline. Allows the driver program to access actual execution environment and services, on
  * par with code executed by SDK workers.
  *
- * <p>The entry point starts the job server and provides the endpoint to the the driver program.
+ * <p>The entry point starts the job server and provides the endpoint to the driver program.
  *
  * <p>The external driver program constructs the Beam pipeline and submits it to the job service.
  *
@@ -68,19 +69,15 @@ import org.slf4j.LoggerFactory;
  * <p>Finally Flink launches the job.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class FlinkPortableClientEntryPoint {
   private static final Logger LOG = LoggerFactory.getLogger(FlinkPortableClientEntryPoint.class);
   private static final String JOB_ENDPOINT_FLAG = "--job_endpoint";
-  private static final Duration JOB_INVOCATION_TIMEOUT = Duration.ofSeconds(30);
-  private static final Duration JOB_SERVICE_STARTUP_TIMEOUT = Duration.ofSeconds(30);
-
   private final String driverCmd;
   private FlinkJobServerDriver jobServer;
   private Thread jobServerThread;
   private DetachedJobInvokerFactory jobInvokerFactory;
-  private int jobPort = 0; // pick any free port
 
   public FlinkPortableClientEntryPoint(String driverCmd) {
     Preconditions.checkState(
@@ -96,8 +93,8 @@ public class FlinkPortableClientEntryPoint {
     FlinkPortableClientEntryPoint runner =
         new FlinkPortableClientEntryPoint(configuration.driverCmd);
     try {
-      runner.startJobService();
-      runner.runDriverProgram();
+      runner.startJobService(configuration);
+      runner.runDriverProgram(Duration.ofSeconds(configuration.jobInvocationTimeoutSeconds));
     } catch (Exception e) {
       throw new RuntimeException(String.format("Job %s failed.", configuration.driverCmd), e);
     } finally {
@@ -107,7 +104,8 @@ public class FlinkPortableClientEntryPoint {
     LOG.info("Job submitted successfully.");
   }
 
-  private static class EntryPointConfiguration {
+  private static class EntryPointConfiguration
+      extends FlinkJobServerDriver.FlinkServerConfiguration {
     @Option(
         name = "--driver-cmd",
         required = true,
@@ -115,6 +113,16 @@ public class FlinkPortableClientEntryPoint {
             "Command that launches the Python driver program. "
                 + "(The job service endpoint will be appended as --job_endpoint=localhost:<port>.)")
     private String driverCmd;
+
+    @Option(
+        name = "--job-service-startup-timeout-seconds",
+        usage = "Timeout for the job service start in seconds")
+    private long jobServiceStartupTimeoutSeconds = 30;
+
+    @Option(
+        name = "--job-invocation-timeout-seconds",
+        usage = "Timeout for the job submission in seconds")
+    private long jobInvocationTimeoutSeconds = 30;
   }
 
   private static EntryPointConfiguration parseArgs(String[] args) {
@@ -127,20 +135,20 @@ public class FlinkPortableClientEntryPoint {
       parser.printUsage(System.err);
       throw new IllegalArgumentException("Unable to parse command line arguments.", e);
     }
+    configuration.setPort(0);
+    configuration.setArtifactPort(0);
+    configuration.setExpansionPort(0);
     return configuration;
   }
 
-  private void startJobService() throws Exception {
+  private void startJobService(EntryPointConfiguration configuration) throws Exception {
     jobInvokerFactory = new DetachedJobInvokerFactory();
-    jobServer =
-        FlinkJobServerDriver.fromConfig(
-            FlinkJobServerDriver.parseArgs(
-                new String[] {"--job-port=" + jobPort, "--artifact-port=0", "--expansion-port=0"}),
-            jobInvokerFactory);
+    jobServer = FlinkJobServerDriver.fromConfig(configuration, jobInvokerFactory);
     jobServerThread = new Thread(jobServer);
     jobServerThread.start();
 
-    Deadline deadline = Deadline.fromNow(JOB_SERVICE_STARTUP_TIMEOUT);
+    Deadline deadline =
+        Deadline.fromNow(Duration.ofSeconds(configuration.jobServiceStartupTimeoutSeconds));
     while (jobServer.getJobServerUrl() == null && deadline.hasTimeLeft()) {
       try {
         Thread.sleep(500);
@@ -160,7 +168,7 @@ public class FlinkPortableClientEntryPoint {
     }
   }
 
-  private void runDriverProgram() throws Exception {
+  private void runDriverProgram(Duration startTimeout) throws Exception {
     ProcessManager processManager = ProcessManager.create();
     String executable = "bash";
     List<String> args =
@@ -177,7 +185,7 @@ public class FlinkPortableClientEntryPoint {
       LOG.info("Started driver program");
 
       // await effect of the driver program submitting the job
-      jobInvokerFactory.executeDetachedJob();
+      jobInvokerFactory.executeDetachedJob(startTimeout);
     } catch (Exception e) {
       try {
         processManager.stopProcess(processId);
@@ -203,7 +211,7 @@ public class FlinkPortableClientEntryPoint {
     }
   }
 
-  private class DetachedJobInvokerFactory implements FlinkJobServerDriver.JobInvokerFactory {
+  private class DetachedJobInvokerFactory implements JobServerDriver.JobInvokerFactory {
 
     private CountDownLatch latch = new CountDownLatch(1);
     private volatile PortablePipelineRunner actualPipelineRunner;
@@ -247,13 +255,13 @@ public class FlinkPortableClientEntryPoint {
       };
     }
 
-    private void executeDetachedJob() throws Exception {
-      long timeoutSeconds = JOB_INVOCATION_TIMEOUT.getSeconds();
-      if (latch.await(timeoutSeconds, TimeUnit.SECONDS)) {
+    private void executeDetachedJob(Duration startTimeout) throws Exception {
+      if (latch.await(startTimeout.getSeconds(), TimeUnit.SECONDS)) {
         actualPipelineRunner.run(pipeline, jobInfo);
       } else {
         throw new TimeoutException(
-            String.format("Timeout of %s seconds waiting for job submission.", timeoutSeconds));
+            String.format(
+                "Timeout of %s seconds waiting for job submission.", startTimeout.getSeconds()));
       }
     }
   }

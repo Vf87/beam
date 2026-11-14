@@ -17,8 +17,8 @@
  */
 package org.apache.beam.sdk.io.influxdb;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 import static org.influxdb.BatchOptions.DEFAULT_BUFFER_LIMIT;
 
 import com.google.auto.value.AutoValue;
@@ -33,8 +33,6 @@ import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 import okhttp3.OkHttpClient;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.BoundedSource;
@@ -47,6 +45,7 @@ import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.influxdb.InfluxDB;
 import org.influxdb.InfluxDB.ConsistencyLevel;
@@ -56,8 +55,6 @@ import org.influxdb.dto.Query;
 import org.influxdb.dto.QueryResult;
 import org.influxdb.dto.QueryResult.Result;
 import org.influxdb.dto.QueryResult.Series;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * IO to read and write from InfluxDB.
@@ -98,12 +95,10 @@ import org.slf4j.LoggerFactory;
  *
  * <p>The source and sink also accepts optional configuration: {@code withRetentionPolicy()}
  */
-@Experimental(Kind.SOURCE_SINK)
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class InfluxDbIO {
-  private static final Logger LOG = LoggerFactory.getLogger(InfluxDbIO.class);
 
   private static final String DEFAULT_RETENTION_POLICY = "autogen";
 
@@ -239,6 +234,7 @@ public class InfluxDbIO {
       builder.addIfNotNull(DisplayData.item("query", query()));
     }
   }
+
   /** A InfluxDb {@link BoundedSource} reading {@link String} from a given instance. */
   static class InfluxDBSource extends BoundedSource<String> {
     private final Read spec;
@@ -571,11 +567,19 @@ public class InfluxDbIO {
   @AutoValue
   public abstract static class DataSourceConfiguration implements Serializable {
 
+    @VisibleForTesting
+    @FunctionalInterface
+    public interface ConnectionFactory extends Serializable {
+      InfluxDB create(DataSourceConfiguration configuration, boolean disableCertificateValidation);
+    }
+
     abstract ValueProvider<String> url();
 
     abstract ValueProvider<String> userName();
 
     abstract ValueProvider<String> password();
+
+    abstract @Nullable ConnectionFactory connectionFactory();
 
     abstract Builder builder();
 
@@ -588,6 +592,8 @@ public class InfluxDbIO {
 
       abstract Builder setPassword(ValueProvider<String> password);
 
+      abstract Builder setConnectionFactory(@Nullable ConnectionFactory connectionFactory);
+
       abstract DataSourceConfiguration build();
     }
 
@@ -598,6 +604,14 @@ public class InfluxDbIO {
           .setUserName(userName)
           .setPassword(password)
           .build();
+    }
+
+    /**
+     * For testing only. Note that userName and password are ignored when connectionFactory is set.
+     */
+    @VisibleForTesting
+    DataSourceConfiguration withConnectionFactory(ConnectionFactory connectionFactory) {
+      return builder().setConnectionFactory(connectionFactory).build();
     }
 
     void populateDisplayData(DisplayData.Builder builder) {
@@ -648,6 +662,9 @@ public class InfluxDbIO {
 
   public static InfluxDB getConnection(
       DataSourceConfiguration configuration, boolean disableCertificateValidation) {
+    if (configuration.connectionFactory() != null) {
+      return configuration.connectionFactory().create(configuration, disableCertificateValidation);
+    }
     if (!disableCertificateValidation) {
       return InfluxDBFactory.connect(
           configuration.url().get(),

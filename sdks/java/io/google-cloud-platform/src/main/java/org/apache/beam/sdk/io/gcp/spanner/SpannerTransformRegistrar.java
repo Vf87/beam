@@ -23,12 +23,11 @@ import static com.google.cloud.spanner.TimestampBound.Mode.READ_TIMESTAMP;
 import com.google.auto.service.AutoService;
 import com.google.cloud.Timestamp;
 import com.google.cloud.spanner.Mutation;
+import com.google.cloud.spanner.Options.RpcPriority;
 import com.google.cloud.spanner.TimestampBound;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.apache.beam.model.pipeline.v1.SchemaApi;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.expansion.ExternalTransformRegistrar;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.SchemaTranslation;
@@ -38,26 +37,27 @@ import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.InvalidProtocolBufferException;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 
 /**
- * Exposes {@link SpannerIO.WriteRows} and {@link SpannerIO.ReadRows} as an external transform for
- * cross-language usage.
+ * Exposes {@link SpannerIO.WriteRows}, {@link SpannerIO.ReadRows} and {@link
+ * SpannerIO.ChangeStreamRead} as an external transform for cross-language usage.
  */
-@Experimental(Kind.PORTABILITY)
 @AutoService(ExternalTransformRegistrar.class)
 public class SpannerTransformRegistrar implements ExternalTransformRegistrar {
-  public static final String INSERT_URN = "beam:external:java:spanner:insert:v1";
-  public static final String UPDATE_URN = "beam:external:java:spanner:update:v1";
-  public static final String REPLACE_URN = "beam:external:java:spanner:replace:v1";
+  public static final String INSERT_URN = "beam:transform:org.apache.beam:spanner_insert:v1";
+  public static final String UPDATE_URN = "beam:transform:org.apache.beam:spanner_update:v1";
+  public static final String REPLACE_URN = "beam:transform:org.apache.beam:spanner_replace:v1";
   public static final String INSERT_OR_UPDATE_URN =
-      "beam:external:java:spanner:insert_or_update:v1";
-  public static final String DELETE_URN = "beam:external:java:spanner:delete:v1";
-  public static final String READ_URN = "beam:external:java:spanner:read:v1";
+      "beam:transform:org.apache.beam:spanner_insert_or_update:v1";
+  public static final String DELETE_URN = "beam:transform:org.apache.beam:spanner_delete:v1";
+  public static final String READ_URN = "beam:transform:org.apache.beam:spanner_read:v1";
+  public static final String READ_CHANGE_STREAM_URN =
+      "beam:transform:org.apache.beam:spanner_change_stream_reader:v1";
 
   @Override
   @NonNull
@@ -69,6 +69,7 @@ public class SpannerTransformRegistrar implements ExternalTransformRegistrar {
         .put(INSERT_OR_UPDATE_URN, new InsertOrUpdateBuilder())
         .put(DELETE_URN, new DeleteBuilder())
         .put(READ_URN, new ReadBuilder())
+        .put(READ_CHANGE_STREAM_URN, new ChangeStreamReaderBuilder())
         .build();
   }
 
@@ -78,6 +79,10 @@ public class SpannerTransformRegistrar implements ExternalTransformRegistrar {
     String projectId = "";
     @Nullable String host;
     @Nullable String emulatorHost;
+    @Nullable String experimentalHost;
+    @Nullable Boolean plainText;
+    @Nullable String clientCertPath;
+    @Nullable String clientCertKeyPath;
 
     public void setInstanceId(String instanceId) {
       this.instanceId = instanceId;
@@ -99,6 +104,22 @@ public class SpannerTransformRegistrar implements ExternalTransformRegistrar {
       this.emulatorHost = emulatorHost;
     }
 
+    public void setExperimentalHost(@Nullable String experimentalHost) {
+      this.experimentalHost = experimentalHost;
+    }
+
+    public void setPlainText(@Nullable Boolean plainText) {
+      this.plainText = plainText;
+    }
+
+    public void setClientCertPath(@Nullable String clientCertPath) {
+      this.clientCertPath = clientCertPath;
+    }
+
+    public void setClientCertKeyPath(@Nullable String clientCertKeyPath) {
+      this.clientCertKeyPath = clientCertKeyPath;
+    }
+
     void checkMandatoryFields() {
       if (projectId.isEmpty()) {
         throw new IllegalArgumentException("projectId can't be empty");
@@ -109,15 +130,19 @@ public class SpannerTransformRegistrar implements ExternalTransformRegistrar {
       if (instanceId.isEmpty()) {
         throw new IllegalArgumentException("instanceId can't be empty");
       }
+      if ((clientCertPath != null) != (clientCertKeyPath != null)) {
+        throw new IllegalArgumentException(
+            "Both clientCertPath and clientCertKeyPath must be specified together.");
+      }
     }
   }
 
-  @Experimental(Kind.PORTABILITY)
   public static class ReadBuilder
       implements ExternalTransformBuilder<ReadBuilder.Configuration, PBegin, PCollection<Row>> {
 
     public static class Configuration extends CrossLanguageConfiguration {
-      // TODO: BEAM-10851 Come up with something to determine schema without this explicit parameter
+      // TODO: https://github.com/apache/beam/issues/20415 Come up with something to determine
+      // schema without this explicit parameter
       private Schema schema = Schema.builder().build();
       private @Nullable String sql;
       private @Nullable String table;
@@ -215,7 +240,8 @@ public class SpannerTransformRegistrar implements ExternalTransformRegistrar {
 
     @Override
     @NonNull
-    public PTransform<PBegin, PCollection<Row>> buildExternal(Configuration configuration) {
+    public PTransform<PBegin, PCollection<Row>> buildExternal(
+        ReadBuilder.Configuration configuration) {
       configuration.checkMandatoryFields();
 
       SpannerIO.Read readTransform =
@@ -231,6 +257,17 @@ public class SpannerTransformRegistrar implements ExternalTransformRegistrar {
       if (configuration.emulatorHost != null) {
         readTransform = readTransform.withEmulatorHost(configuration.emulatorHost);
       }
+      if (configuration.experimentalHost != null) {
+        readTransform = readTransform.withExperimentalHost(configuration.experimentalHost);
+      }
+      if (configuration.plainText != null) {
+        readTransform = readTransform.withUsingPlainTextChannel(configuration.plainText);
+      }
+      if (configuration.clientCertPath != null && configuration.clientCertKeyPath != null) {
+        readTransform =
+            readTransform.withClientCert(
+                configuration.clientCertPath, configuration.clientCertKeyPath);
+      }
       @Nullable TimestampBound timestampBound = configuration.getTimestampBound();
       if (timestampBound != null) {
         readTransform = readTransform.withTimestampBound(timestampBound);
@@ -243,42 +280,36 @@ public class SpannerTransformRegistrar implements ExternalTransformRegistrar {
     }
   }
 
-  @Experimental(Kind.PORTABILITY)
   public static class InsertBuilder extends WriteBuilder {
     public InsertBuilder() {
       super(Mutation.Op.INSERT);
     }
   }
 
-  @Experimental(Kind.PORTABILITY)
   public static class UpdateBuilder extends WriteBuilder {
     public UpdateBuilder() {
       super(Mutation.Op.UPDATE);
     }
   }
 
-  @Experimental(Kind.PORTABILITY)
   public static class InsertOrUpdateBuilder extends WriteBuilder {
     public InsertOrUpdateBuilder() {
       super(Mutation.Op.INSERT_OR_UPDATE);
     }
   }
 
-  @Experimental(Kind.PORTABILITY)
   public static class ReplaceBuilder extends WriteBuilder {
     public ReplaceBuilder() {
       super(Mutation.Op.REPLACE);
     }
   }
 
-  @Experimental(Kind.PORTABILITY)
   public static class DeleteBuilder extends WriteBuilder {
     public DeleteBuilder() {
       super(Mutation.Op.DELETE);
     }
   }
 
-  @Experimental(Kind.PORTABILITY)
   private abstract static class WriteBuilder
       implements ExternalTransformBuilder<WriteBuilder.Configuration, PCollection<Row>, PDone> {
 
@@ -296,6 +327,8 @@ public class SpannerTransformRegistrar implements ExternalTransformRegistrar {
       private @Nullable Integer groupingFactor;
       private @Nullable Duration commitDeadline;
       private @Nullable Duration maxCumulativeBackoff;
+      private @Nullable String failureMode;
+      private Boolean highPriority = false;
 
       public void setTable(String table) {
         this.table = table;
@@ -330,11 +363,20 @@ public class SpannerTransformRegistrar implements ExternalTransformRegistrar {
           this.maxCumulativeBackoff = Duration.standardSeconds(maxCumulativeBackoff);
         }
       }
+
+      public void setFailureMode(@Nullable String failureMode) {
+        this.failureMode = failureMode;
+      }
+
+      public void setHighPriority(Boolean highPriority) {
+        this.highPriority = highPriority;
+      }
     }
 
     @Override
     @NonNull
-    public PTransform<PCollection<Row>, PDone> buildExternal(Configuration configuration) {
+    public PTransform<PCollection<Row>, PDone> buildExternal(
+        WriteBuilder.Configuration configuration) {
       configuration.checkMandatoryFields();
 
       SpannerIO.Write writeTransform =
@@ -343,6 +385,9 @@ public class SpannerTransformRegistrar implements ExternalTransformRegistrar {
               .withDatabaseId(configuration.databaseId)
               .withInstanceId(configuration.instanceId);
 
+      if (configuration.highPriority) {
+        writeTransform = writeTransform.withHighPriority();
+      }
       if (configuration.maxBatchSizeBytes != null) {
         writeTransform = writeTransform.withBatchSizeBytes(configuration.maxBatchSizeBytes);
       }
@@ -361,6 +406,17 @@ public class SpannerTransformRegistrar implements ExternalTransformRegistrar {
       if (configuration.emulatorHost != null) {
         writeTransform = writeTransform.withEmulatorHost(configuration.emulatorHost);
       }
+      if (configuration.experimentalHost != null) {
+        writeTransform = writeTransform.withExperimentalHost(configuration.experimentalHost);
+      }
+      if (configuration.plainText != null) {
+        writeTransform = writeTransform.withUsingPlainTextChannel(configuration.plainText);
+      }
+      if (configuration.clientCertPath != null && configuration.clientCertKeyPath != null) {
+        writeTransform =
+            writeTransform.withClientCert(
+                configuration.clientCertPath, configuration.clientCertKeyPath);
+      }
       if (configuration.commitDeadline != null) {
         writeTransform = writeTransform.withCommitDeadline(configuration.commitDeadline);
       }
@@ -368,7 +424,127 @@ public class SpannerTransformRegistrar implements ExternalTransformRegistrar {
         writeTransform =
             writeTransform.withMaxCumulativeBackoff(configuration.maxCumulativeBackoff);
       }
+      if (configuration.failureMode != null) {
+        writeTransform =
+            writeTransform.withFailureMode(
+                SpannerIO.FailureMode.valueOf(configuration.failureMode));
+      }
       return SpannerIO.WriteRows.of(writeTransform, operation, configuration.table);
+    }
+  }
+
+  public static class ChangeStreamReaderBuilder
+      implements ExternalTransformBuilder<
+          ChangeStreamReaderBuilder.Configuration, PBegin, PCollection<String>> {
+
+    public static class Configuration extends CrossLanguageConfiguration {
+      private String changeStreamName = "";
+      private String metadataDatabase = "";
+      private String metadataInstance = "";
+      private @Nullable Timestamp inclusiveStartAt;
+      private @Nullable Timestamp inclusiveEndAt;
+      private @Nullable String metadataTable;
+      private @Nullable RpcPriority rpcPriority;
+      private @Nullable Duration watermarkRefreshRate;
+
+      public void setChangeStreamName(String changeStreamName) {
+        this.changeStreamName = changeStreamName;
+      }
+
+      public void setInclusiveStartAt(@Nullable String inclusiveStartAtString) {
+        if (inclusiveStartAtString != null) {
+          this.inclusiveStartAt = Timestamp.parseTimestamp(inclusiveStartAtString);
+        }
+      }
+
+      public void setInclusiveEndAt(@Nullable String inclusiveEndAtString) {
+        if (inclusiveEndAtString != null) {
+          this.inclusiveEndAt = Timestamp.parseTimestamp(inclusiveEndAtString);
+        }
+      }
+
+      public void setMetadataDatabase(String metadataDatabase) {
+        this.metadataDatabase = metadataDatabase;
+      }
+
+      public void setMetadataInstance(String metadataInstance) {
+        this.metadataInstance = metadataInstance;
+      }
+
+      public void setMetadataTable(@Nullable String metadataTable) {
+        this.metadataTable = metadataTable;
+      }
+
+      public void setRpcPriority(@Nullable String rpcPriorityString) {
+        if (rpcPriorityString != null) {
+          this.rpcPriority = RpcPriority.valueOf(rpcPriorityString);
+        }
+      }
+
+      public void setWatermarkRefreshRate(@Nullable String watermarkRefreshRateString) {
+        if (watermarkRefreshRateString != null) {
+          this.watermarkRefreshRate = Duration.parse(watermarkRefreshRateString);
+        }
+      }
+    }
+
+    @Override
+    @NonNull
+    public PTransform<PBegin, PCollection<String>> buildExternal(
+        ChangeStreamReaderBuilder.Configuration configuration) {
+
+      configuration.checkMandatoryFields();
+
+      if (configuration.changeStreamName.isEmpty()) {
+        throw new IllegalArgumentException("ChangeStreamName can't be empty");
+      }
+
+      if (configuration.metadataInstance.isEmpty()) {
+        throw new IllegalArgumentException("MetadataInstance can't be empty");
+      }
+
+      if (configuration.metadataDatabase.isEmpty()) {
+        throw new IllegalArgumentException("MetadataDatabase can't be empty");
+      }
+
+      SpannerIO.ReadChangeStream readChangeStream =
+          SpannerIO.readChangeStream()
+              .withProjectId(configuration.projectId)
+              .withInstanceId(configuration.instanceId)
+              .withDatabaseId(configuration.databaseId)
+              .withChangeStreamName(configuration.changeStreamName)
+              .withMetadataInstance(configuration.metadataInstance)
+              .withMetadataDatabase(configuration.metadataDatabase);
+
+      if (configuration.inclusiveStartAt != null) {
+        readChangeStream = readChangeStream.withInclusiveStartAt(configuration.inclusiveStartAt);
+      }
+
+      if (configuration.inclusiveEndAt != null) {
+        readChangeStream = readChangeStream.withInclusiveEndAt(configuration.inclusiveEndAt);
+      }
+
+      if (configuration.metadataTable != null) {
+        readChangeStream = readChangeStream.withMetadataTable(configuration.metadataTable);
+      }
+
+      if (configuration.clientCertPath != null && configuration.clientCertKeyPath != null) {
+        readChangeStream =
+            readChangeStream.withClientCert(
+                configuration.clientCertPath, configuration.clientCertKeyPath);
+      }
+
+      if (configuration.rpcPriority != null) {
+
+        readChangeStream = readChangeStream.withRpcPriority(configuration.rpcPriority);
+      }
+
+      if (configuration.watermarkRefreshRate != null) {
+        readChangeStream =
+            readChangeStream.withWatermarkRefreshRate(configuration.watermarkRefreshRate);
+      }
+
+      return new SpannerIO.ChangeStreamRead(readChangeStream);
     }
   }
 }

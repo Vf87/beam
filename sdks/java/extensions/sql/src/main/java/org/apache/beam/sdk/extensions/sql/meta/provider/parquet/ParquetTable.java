@@ -17,6 +17,8 @@
  */
 package org.apache.beam.sdk.extensions.sql.meta.provider.parquet;
 
+import static org.apache.beam.sdk.util.Preconditions.checkArgumentNotNull;
+
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
@@ -25,7 +27,7 @@ import org.apache.avro.Schema;
 import org.apache.avro.Schema.Field;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.annotations.Internal;
-import org.apache.beam.sdk.extensions.sql.impl.BeamTableStatistics;
+import org.apache.beam.sdk.extensions.avro.schemas.utils.AvroUtils;
 import org.apache.beam.sdk.extensions.sql.meta.BeamSqlTableFilter;
 import org.apache.beam.sdk.extensions.sql.meta.ProjectSupport;
 import org.apache.beam.sdk.extensions.sql.meta.SchemaBaseBeamTable;
@@ -33,9 +35,7 @@ import org.apache.beam.sdk.extensions.sql.meta.Table;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.parquet.ParquetIO;
 import org.apache.beam.sdk.io.parquet.ParquetIO.Read;
-import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.schemas.transforms.Convert;
-import org.apache.beam.sdk.schemas.utils.AvroUtils;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollection.IsBounded;
@@ -45,7 +45,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 @Internal
-@SuppressWarnings({"nullness"})
 class ParquetTable extends SchemaBaseBeamTable implements Serializable {
   private static final Logger LOG = LoggerFactory.getLogger(ParquetTable.class);
 
@@ -59,7 +58,8 @@ class ParquetTable extends SchemaBaseBeamTable implements Serializable {
   @Override
   public PCollection<Row> buildIOReader(PBegin begin) {
     final Schema schema = AvroUtils.toAvroSchema(table.getSchema());
-    Read read = ParquetIO.read(schema).withBeamSchemas(true).from(table.getLocation() + "/*");
+    String filePattern = resolveFilePattern(checkArgumentNotNull(table.getLocation()));
+    Read read = ParquetIO.read(schema).withBeamSchemas(true).from(filePattern);
     return begin.apply("ParquetIORead", read).apply("ToRows", Convert.toRows());
   }
 
@@ -67,10 +67,11 @@ class ParquetTable extends SchemaBaseBeamTable implements Serializable {
   public PCollection<Row> buildIOReader(
       PBegin begin, BeamSqlTableFilter filters, List<String> fieldNames) {
     final Schema schema = AvroUtils.toAvroSchema(table.getSchema());
-    Read read = ParquetIO.read(schema).withBeamSchemas(true).from(table.getLocation() + "/*");
+    String filePattern = resolveFilePattern(checkArgumentNotNull(table.getLocation()));
+    Read read = ParquetIO.read(schema).withBeamSchemas(true).from(filePattern);
     if (!fieldNames.isEmpty()) {
       Schema projectionSchema = projectSchema(schema, fieldNames);
-      LOG.info("Projecting fields schema : " + projectionSchema.toString());
+      LOG.info("Projecting fields schema: {}", projectionSchema);
       read = read.withProjection(projectionSchema, projectionSchema);
     }
     return begin.apply("ParquetIORead", read).apply("ToRows", Convert.toRows());
@@ -112,7 +113,9 @@ class ParquetTable extends SchemaBaseBeamTable implements Serializable {
         .apply("ToGenericRecords", Convert.to(GenericRecord.class))
         .apply(
             "ParquetIOWrite",
-            FileIO.<GenericRecord>write().via(ParquetIO.sink(schema)).to(table.getLocation()));
+            FileIO.<GenericRecord>write()
+                .via(ParquetIO.sink(schema))
+                .to(checkArgumentNotNull(table.getLocation())));
   }
 
   @Override
@@ -121,12 +124,14 @@ class ParquetTable extends SchemaBaseBeamTable implements Serializable {
   }
 
   @Override
-  public BeamTableStatistics getTableStatistics(PipelineOptions options) {
-    return BeamTableStatistics.BOUNDED_UNKNOWN;
-  }
-
-  @Override
   public ProjectSupport supportsProjects() {
     return ProjectSupport.WITH_FIELD_REORDERING;
+  }
+
+  private String resolveFilePattern(String location) {
+    if (location.endsWith("/")) {
+      return location + "*";
+    }
+    return location;
   }
 }

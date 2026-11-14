@@ -27,7 +27,7 @@ import org.slf4j.LoggerFactory;
 /** Static methods for creating and working with {@link MutationDetector}. */
 @Internal
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class MutationDetectors {
   private static final Logger LOG = LoggerFactory.getLogger(MutationDetectors.class);
@@ -75,7 +75,7 @@ public class MutationDetectors {
    *
    * @param <T> the type of values checked for mutation
    */
-  private static class CodedValueMutationDetector<T> implements MutationDetector {
+  private static final class CodedValueMutationDetector<T> implements MutationDetector {
 
     private final Coder<T> coder;
     private final T clonedOriginalValue;

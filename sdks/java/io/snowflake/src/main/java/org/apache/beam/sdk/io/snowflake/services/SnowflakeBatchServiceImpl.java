@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.io.snowflake.services;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
@@ -33,16 +33,12 @@ import org.apache.beam.sdk.io.snowflake.data.SnowflakeTableSchema;
 import org.apache.beam.sdk.io.snowflake.enums.CreateDisposition;
 import org.apache.beam.sdk.io.snowflake.enums.WriteDisposition;
 import org.apache.beam.sdk.transforms.SerializableFunction;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-/** Implemenation of {@link SnowflakeService} used in production. */
+/** Implemenation of {@link SnowflakeServices.BatchService} used in production. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
-public class SnowflakeBatchServiceImpl implements SnowflakeService<SnowflakeBatchServiceConfig> {
-  private static final Logger LOG = LoggerFactory.getLogger(SnowflakeBatchServiceImpl.class);
+public class SnowflakeBatchServiceImpl implements SnowflakeServices.BatchService {
   private static final String SNOWFLAKE_GCS_PREFIX = "gcs://";
   private static final String GCS_PREFIX = "gs://";
 
@@ -86,7 +82,7 @@ public class SnowflakeBatchServiceImpl implements SnowflakeService<SnowflakeBatc
 
     String copyQuery =
         String.format(
-            "COPY INTO '%s' FROM %s STORAGE_INTEGRATION=%s FILE_FORMAT=(TYPE=CSV COMPRESSION=GZIP FIELD_OPTIONALLY_ENCLOSED_BY='%s');",
+            "COPY INTO '%s' FROM %s STORAGE_INTEGRATION=%s FILE_FORMAT=(TYPE=CSV COMPRESSION=GZIP FIELD_OPTIONALLY_ENCLOSED_BY='%s' ESCAPE='\\\\');",
             getProperBucketDir(stagingBucketDir),
             source,
             storageIntegrationName,
@@ -136,13 +132,14 @@ public class SnowflakeBatchServiceImpl implements SnowflakeService<SnowflakeBatc
     files = files.replaceAll(stagingBucketDir, "");
     DataSource dataSource = dataSourceProviderFn.apply(null);
 
-    prepareTableAccordingCreateDisposition(dataSource, table, tableSchema, createDisposition);
+    prepareTableAccordingCreateDisposition(
+        dataSource, database, schema, table, tableSchema, createDisposition);
     prepareTableAccordingWriteDisposition(dataSource, table, writeDisposition);
 
     if (!storageIntegrationName.isEmpty()) {
       query =
           String.format(
-              "COPY INTO %s FROM %s FILES=(%s) FILE_FORMAT=(TYPE=CSV FIELD_OPTIONALLY_ENCLOSED_BY='%s' COMPRESSION=GZIP) STORAGE_INTEGRATION=%s;",
+              "COPY INTO %s FROM %s FILES=(%s) FILE_FORMAT=(TYPE=CSV FIELD_OPTIONALLY_ENCLOSED_BY='%s' ESCAPE='\\\\' COMPRESSION=GZIP) STORAGE_INTEGRATION=%s;",
               getTablePath(database, schema, table),
               getProperBucketDir(source),
               files,
@@ -151,7 +148,7 @@ public class SnowflakeBatchServiceImpl implements SnowflakeService<SnowflakeBatc
     } else {
       query =
           String.format(
-              "COPY INTO %s FROM %s FILES=(%s) FILE_FORMAT=(TYPE=CSV FIELD_OPTIONALLY_ENCLOSED_BY='%s' COMPRESSION=GZIP);",
+              "COPY INTO %s FROM %s FILES=(%s) FILE_FORMAT=(TYPE=CSV FIELD_OPTIONALLY_ENCLOSED_BY='%s' ESCAPE='\\\\' COMPRESSION=GZIP);",
               table, source, files, getASCIICharRepresentation(config.getQuotationMark()));
     }
 
@@ -171,7 +168,7 @@ public class SnowflakeBatchServiceImpl implements SnowflakeService<SnowflakeBatc
         selectQuery,
         resultSet -> {
           assert resultSet != null;
-          checkIfTableIsEmpty((ResultSet) resultSet);
+          checkIfTableIsEmpty(resultSet);
         });
   }
 
@@ -197,6 +194,8 @@ public class SnowflakeBatchServiceImpl implements SnowflakeService<SnowflakeBatc
 
   private void prepareTableAccordingCreateDisposition(
       DataSource dataSource,
+      String database,
+      String schema,
       String table,
       SnowflakeTableSchema tableSchema,
       CreateDisposition createDisposition)
@@ -205,7 +204,7 @@ public class SnowflakeBatchServiceImpl implements SnowflakeService<SnowflakeBatc
       case CREATE_NEVER:
         break;
       case CREATE_IF_NEEDED:
-        createTableIfNotExists(dataSource, table, tableSchema);
+        createTableIfNotExists(dataSource, database, schema, table, tableSchema);
         break;
     }
   }
@@ -226,18 +225,23 @@ public class SnowflakeBatchServiceImpl implements SnowflakeService<SnowflakeBatc
   }
 
   private void createTableIfNotExists(
-      DataSource dataSource, String table, SnowflakeTableSchema tableSchema) throws SQLException {
+      DataSource dataSource,
+      String database,
+      String schema,
+      String table,
+      SnowflakeTableSchema tableSchema)
+      throws SQLException {
     String query =
         String.format(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '%s');",
-            table.toUpperCase());
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_catalog = '%s' AND table_schema = '%s' AND table_name = '%s');",
+            database.toUpperCase(), schema.toUpperCase(), table.toUpperCase());
 
     runConnectionWithStatement(
         dataSource,
         query,
         resultSet -> {
           assert resultSet != null;
-          if (!checkResultIfTableExists((ResultSet) resultSet)) {
+          if (!checkResultIfTableExists(resultSet)) {
             try {
               createTable(dataSource, table, tableSchema);
             } catch (SQLException e) {
@@ -274,13 +278,15 @@ public class SnowflakeBatchServiceImpl implements SnowflakeService<SnowflakeBatc
   }
 
   private static void runConnectionWithStatement(
-      DataSource dataSource, String query, Consumer resultSetMethod) throws SQLException {
+      DataSource dataSource, String query, Consumer<ResultSet> resultSetMethod)
+      throws SQLException {
     Connection connection = dataSource.getConnection();
     runStatement(query, connection, resultSetMethod);
     connection.close();
   }
 
-  private static void runStatement(String query, Connection connection, Consumer resultSetMethod)
+  private static void runStatement(
+      String query, Connection connection, Consumer<ResultSet> resultSetMethod)
       throws SQLException {
     PreparedStatement statement = connection.prepareStatement(query);
     try {

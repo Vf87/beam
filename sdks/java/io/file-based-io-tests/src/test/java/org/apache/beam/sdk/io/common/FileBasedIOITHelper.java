@@ -19,14 +19,13 @@ package org.apache.beam.sdk.io.common;
 
 import java.io.IOException;
 import java.util.Collections;
-import java.util.Date;
 import java.util.HashSet;
 import java.util.Set;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.fs.MatchResult;
 import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 
 /** Contains helper methods for file based IO Integration tests. */
 public class FileBasedIOITHelper {
@@ -38,7 +37,7 @@ public class FileBasedIOITHelper {
   }
 
   public static String appendTimestampSuffix(String text) {
-    return String.format("%s_%s", text, new Date().getTime());
+    return String.format("%s_%s", text, java.time.Instant.now().toEpochMilli());
   }
 
   /** Constructs text lines in files used for testing. */

@@ -20,9 +20,10 @@ package org.apache.beam.sdk.io.hadoop.format;
 import static org.apache.beam.sdk.io.common.IOITHelper.executeWithRetry;
 import static org.apache.beam.sdk.io.common.IOITHelper.readIOTestPipelineOptions;
 import static org.apache.beam.sdk.io.common.TestRow.getExpectedHashForRowCount;
+import static org.junit.Assert.assertNotEquals;
 
-import com.google.cloud.Timestamp;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
@@ -102,8 +103,6 @@ public class HadoopFormatIOIT {
   private static Integer numberOfRows;
   private static String tableName;
   private static SerializableConfiguration hadoopConfiguration;
-  private static String bigQueryDataset;
-  private static String bigQueryTable;
   private static InfluxDBSettings settings;
   private static HadoopFormatIOITOptions options;
 
@@ -133,8 +132,6 @@ public class HadoopFormatIOIT {
     dataSource = DatabaseTestHelper.getPostgresDataSource(options);
     numberOfRows = options.getNumberOfRecords();
     tableName = DatabaseTestHelper.getTestTableName("HadoopFormatIOIT");
-    bigQueryDataset = options.getBigQueryDataset();
-    bigQueryTable = options.getBigQueryTable();
     if (!options.isWithTestcontainers()) {
       settings =
           InfluxDBSettings.builder()
@@ -211,7 +208,7 @@ public class HadoopFormatIOIT {
                     new HDFSSynchronization(tmpFolder.getRoot().getAbsolutePath())));
 
     PipelineResult writeResult = writePipeline.run();
-    writeResult.waitUntilFinish();
+    PipelineResult.State writeState = writeResult.waitUntilFinish();
 
     PCollection<String> consolidatedHashcode =
         readPipeline
@@ -227,16 +224,19 @@ public class HadoopFormatIOIT {
     PAssert.thatSingleton(consolidatedHashcode).isEqualTo(getExpectedHashForRowCount(numberOfRows));
 
     PipelineResult readResult = readPipeline.run();
-    readResult.waitUntilFinish();
+    PipelineResult.State readState = readResult.waitUntilFinish();
 
     if (!options.isWithTestcontainers()) {
       collectAndPublishMetrics(writeResult, readResult);
     }
+    // Fail the test if pipeline failed.
+    assertNotEquals(PipelineResult.State.FAILED, writeState);
+    assertNotEquals(PipelineResult.State.FAILED, readState);
   }
 
   private void collectAndPublishMetrics(PipelineResult writeResult, PipelineResult readResult) {
     String uuid = UUID.randomUUID().toString();
-    String timestamp = Timestamp.now().toString();
+    String timestamp = Instant.now().toString();
 
     Set<Function<MetricsReader, NamedTestResult>> readSuppliers = getReadSuppliers(uuid, timestamp);
     Set<Function<MetricsReader, NamedTestResult>> writeSuppliers =
@@ -246,9 +246,7 @@ public class HadoopFormatIOIT {
         new IOITMetrics(readSuppliers, readResult, NAMESPACE, uuid, timestamp);
     IOITMetrics writeMetrics =
         new IOITMetrics(writeSuppliers, writeResult, NAMESPACE, uuid, timestamp);
-    readMetrics.publish(bigQueryDataset, bigQueryTable);
     readMetrics.publishToInflux(settings);
-    writeMetrics.publish(bigQueryDataset, bigQueryTable);
     writeMetrics.publishToInflux(settings);
   }
 

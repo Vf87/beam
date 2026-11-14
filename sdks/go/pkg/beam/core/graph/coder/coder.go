@@ -84,6 +84,18 @@ func (c *CustomCoder) String() string {
 	return fmt.Sprintf("%v[%v;%v]", c.Type, c.Name, c.ID)
 }
 
+// IsDeterministic reports whether this CustomCoder produces a deterministic
+// encoding. A CustomCoder is deterministic iff the user opted in by
+// registering the coder via RegisterDeterministicCoder. Default is false
+// (conservative): a non-deterministic key coder would silently corrupt state
+// keying in stateful DoFns.
+func (c *CustomCoder) IsDeterministic() bool {
+	if c == nil {
+		return false
+	}
+	return isCustomCoderDeterministic(c.Type)
+}
+
 // Type signatures of encode/decode for verification.
 var (
 	encodeSig = &funcx.Signature{
@@ -101,15 +113,15 @@ var (
 
 // ElementEncoder encapsulates being able to encode an element into a writer.
 type ElementEncoder interface {
-	Encode(element interface{}, w io.Writer) error
+	Encode(element any, w io.Writer) error
 }
 
 // ElementDecoder encapsulates being able to decode an element from a reader.
 type ElementDecoder interface {
-	Decode(r io.Reader) (interface{}, error)
+	Decode(r io.Reader) (any, error)
 }
 
-func validateEncoder(t reflect.Type, encode interface{}) error {
+func validateEncoder(t reflect.Type, encode any) error {
 	// Check if it uses the real type in question.
 	if err := funcx.Satisfy(encode, funcx.Replace(encodeSig, typex.TType, t)); err != nil {
 		return errors.WithContext(err, "validateEncoder: validating signature")
@@ -118,19 +130,23 @@ func validateEncoder(t reflect.Type, encode interface{}) error {
 	return nil
 }
 
-func validateDecoder(t reflect.Type, decode interface{}) error {
+func validateDecoder(t reflect.Type, decode any) error {
 	// Check if it uses the real type in question.
 	if err := funcx.Satisfy(decode, funcx.Replace(decodeSig, typex.TType, t)); err != nil {
 		return errors.WithContext(err, "validateDecoder: validating signature")
 	}
-	// TODO(lostluck): 2019.02.03 - Expand cases to avoid []byte -> interface{} conversion
+	// TODO(lostluck): 2019.02.03 - Expand cases to avoid []byte -> any conversion
 	// in exec, & a beam Decoder interface.
 	return nil
 }
 
 // NewCustomCoder creates a coder for the supplied parameters defining a
 // particular encoding strategy.
-func NewCustomCoder(id string, t reflect.Type, encode, decode interface{}) (*CustomCoder, error) {
+//
+// encode and decode must be functions matching one of the signatures documented
+// on RegisterCoder. NewCustomCoder returns an error if either function fails
+// signature validation.
+func NewCustomCoder(id string, t reflect.Type, encode, decode any) (*CustomCoder, error) {
 	if err := validateEncoder(t, encode); err != nil {
 		return nil, errors.WithContext(err, "NewCustomCoder")
 	}
@@ -156,6 +172,20 @@ func NewCustomCoder(id string, t reflect.Type, encode, decode interface{}) (*Cus
 	return c, nil
 }
 
+// NewCustomCoderWithFuncs creates a CustomCoder from pre-wrapped
+// reflectx.Func values. This allows the caller to control the Name()
+// returned by each function — critical for closures inside Go generic
+// functions where the compiler assigns identical names to different
+// type instantiations.
+func NewCustomCoderWithFuncs(id string, t reflect.Type, enc, dec *funcx.Fn) *CustomCoder {
+	return &CustomCoder{
+		Name: id,
+		Type: t,
+		Enc:  enc,
+		Dec:  dec,
+	}
+}
+
 // Kind represents the type of coder used.
 type Kind string
 
@@ -169,6 +199,7 @@ const (
 	VarInt             Kind = "varint"
 	Double             Kind = "double"
 	Row                Kind = "R"
+	Nullable           Kind = "N"
 	Timer              Kind = "T"
 	PaneInfo           Kind = "PI"
 	WindowedValue      Kind = "W"
@@ -176,6 +207,11 @@ const (
 	Iterable           Kind = "I"
 	KV                 Kind = "KV"
 	LP                 Kind = "LP" // Explicitly length prefixed, likely at the runner's direction.
+
+	// IW stands for IntervalWindow and uses the short name to avoid a collision with the
+	// WindowCoder kind. This Kind is used when the window is provided as a value instead
+	// of a window for the value.
+	IW Kind = "IW"
 
 	Window Kind = "window" // A debug wrapper around a window coder.
 
@@ -187,8 +223,19 @@ const (
 	// It requires special handling in translation to the model pipeline in the latter case
 	// to add the incoming index for each input.
 	//
-	// TODO(BEAM-490): once this JIRA is done, this coder should become the new thing.
+	// TODO(https://github.com/apache/beam/issues/18032): once this JIRA is done, this coder should become the new thing.
 	CoGBK Kind = "CoGBK"
+
+	// ShardedKey encodes a user key wrapped with an opaque shard identifier,
+	// used by GroupIntoBatchesWithShardedKey to distribute a single logical
+	// key's processing across workers. Wire format
+	// (beam:coder:sharded_key:v1):
+	//
+	//     ByteArrayCoder.encode(shardId) ++ keyCoder.encode(key)
+	//
+	// matching sdks/java/core ShardedKey and the Python sharded_key
+	// encoding for cross-SDK interoperability.
+	ShardedKey Kind = "SK"
 )
 
 // Coder is a description of how to encode and decode values of a given type.
@@ -198,7 +245,7 @@ type Coder struct {
 	Kind Kind
 	T    typex.FullType
 
-	Components []*Coder     // WindowedValue, KV, CoGBK
+	Components []*Coder     // WindowedValue, KV, CoGBK, Nullable
 	Custom     *CustomCoder // Custom
 	Window     *WindowCoder // WindowedValue
 
@@ -260,11 +307,67 @@ func (c *Coder) String() string {
 	switch c.Kind {
 	case WindowedValue, ParamWindowedValue, Window, Timer:
 		ret += fmt.Sprintf("!%v", c.Window)
-	case KV, CoGBK, Bytes, Bool, VarInt, Double, String, LP: // No additional info.
+	case KV, CoGBK, Bytes, Bool, VarInt, Double, String, LP, Nullable: // No additional info.
 	default:
 		ret += fmt.Sprintf("[%v]", c.T)
 	}
 	return ret
+}
+
+// IsDeterministic reports whether this Coder produces a deterministic
+// byte encoding — i.e. encoding two equal values always yields identical
+// byte sequences.
+//
+// Determinism is a prerequisite for any Coder used as a state key in a
+// stateful DoFn, as the key component of a KV consumed by GroupByKey, or as
+// a grouping key in a CoGroupByKey. A non-deterministic key coder causes
+// state-keyed operations to silently corrupt: two encodings of the same
+// logical key map to distinct physical keys, splintering state across
+// apparently-distinct keys.
+//
+// Built-in coders for primitive types (bytes, bool, varint, double,
+// string) are deterministic. Composite coders (KV, Iterable, Nullable)
+// are deterministic iff every component is. The Map coder is
+// non-deterministic because Go map iteration order is unspecified.
+// Custom user-registered coders are non-deterministic by default; users
+// opt in by registering with RegisterDeterministicCoder.
+func (c *Coder) IsDeterministic() bool {
+	if c == nil {
+		return false
+	}
+	switch c.Kind {
+	case Bytes, Bool, VarInt, Double, String:
+		return true
+	case Custom:
+		return c.Custom.IsDeterministic()
+	case KV, CoGBK, Nullable, Iterable, LP, ShardedKey:
+		for _, comp := range c.Components {
+			if !comp.IsDeterministic() {
+				return false
+			}
+		}
+		return true
+	case WindowedValue, ParamWindowedValue, Window, Timer, PaneInfo, IW:
+		// These coders are structural: they wrap runner/window bookkeeping that is
+		// not used as a state key. Recurse into the data component when present so
+		// that a non-deterministic inner coder is still reported.
+		for _, comp := range c.Components {
+			if !comp.IsDeterministic() {
+				return false
+			}
+		}
+		return true
+	case Row:
+		// Schema (row) coding encodes fields in a fixed field-id order and
+		// produces a stable byte layout; however, row coders may contain fields
+		// backed by custom coders we cannot introspect here. Conservative
+		// default: return false and allow users to opt in via schema-level
+		// determinism guarantees once they're exposed. Structs wanting
+		// deterministic behavior can register a deterministic custom coder
+		// instead.
+		return false
+	}
+	return false
 }
 
 // NewBytes returns a new []byte coder using the built-in scheme. It
@@ -291,6 +394,11 @@ func NewDouble() *Coder {
 // NewString returns a new string coder using the built-in scheme.
 func NewString() *Coder {
 	return &Coder{Kind: String, T: typex.New(reflectx.String)}
+}
+
+// NewIntervalWindowCoder returns a new IntervalWindow coder using the built-in scheme.
+func NewIntervalWindowCoder() *Coder {
+	return &Coder{Kind: IW, T: typex.New(reflect.TypeOf((*struct{ Start, End int64 })(nil)).Elem())}
 }
 
 // IsW returns true iff the coder is for a WindowedValue.
@@ -346,17 +454,9 @@ func NewT(c *Coder, w *WindowCoder) *Coder {
 		panic("window must not be nil")
 	}
 
-	// TODO(BEAM-10660): Implement proper timer support.
 	return &Coder{
-		Kind: Timer,
-		T: typex.New(reflect.TypeOf((*struct {
-			Key                          []byte // elm type.
-			Tag                          string
-			Windows                      []byte // []typex.Window
-			Clear                        bool
-			FireTimestamp, HoldTimestamp int64
-			Span                         int
-		})(nil)).Elem()),
+		Kind:       Timer,
+		T:          typex.New(typex.TimersType),
 		Window:     w,
 		Components: []*Coder{c},
 	}
@@ -394,6 +494,22 @@ func NewKV(components []*Coder) *Coder {
 	}
 }
 
+// NewN returns a coder for Nullable.
+func NewN(component *Coder) *Coder {
+	coders := []*Coder{component}
+	checkCodersNotNil(coders)
+	return &Coder{
+		Kind:       Nullable,
+		T:          typex.New(typex.NullableType, component.T),
+		Components: coders,
+	}
+}
+
+// IsNullable returns true iff the coder is for Nullable.
+func IsNullable(c *Coder) bool {
+	return c.Kind == Nullable
+}
+
 // IsCoGBK returns true iff the coder is for a CoGBK type.
 func IsCoGBK(c *Coder) bool {
 	return c.Kind == CoGBK
@@ -407,6 +523,29 @@ func NewCoGBK(components []*Coder) *Coder {
 		T:          typex.New(typex.CoGBKType, Types(components)...),
 		Components: components,
 	}
+}
+
+// NewSK returns a coder for ShardedKey-typed values. The component
+// keyCoder encodes the user key; the ShardID is encoded as a
+// length-prefixed byte string preceding it (beam:coder:sharded_key:v1).
+//
+// The resulting FullType root is typex.ShardedKeyType with the key's
+// FullType as the single component, following the same Composite
+// pattern as KV.
+func NewSK(keyCoder *Coder) *Coder {
+	if keyCoder == nil {
+		panic("NewSK: keyCoder must not be nil")
+	}
+	return &Coder{
+		Kind:       ShardedKey,
+		T:          typex.New(typex.ShardedKeyType, keyCoder.T),
+		Components: []*Coder{keyCoder},
+	}
+}
+
+// IsSK returns true iff the coder is for a ShardedKey.
+func IsSK(c *Coder) bool {
+	return c != nil && c.Kind == ShardedKey
 }
 
 // SkipW returns the data coder used by a WindowedValue, or returns the coder. This

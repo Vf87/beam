@@ -23,7 +23,6 @@ import (
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/metrics"
 	_ "github.com/apache/beam/sdks/v2/go/pkg/beam/runners/dataflow"
 	_ "github.com/apache/beam/sdks/v2/go/pkg/beam/runners/flink"
-	_ "github.com/apache/beam/sdks/v2/go/pkg/beam/runners/samza"
 	_ "github.com/apache/beam/sdks/v2/go/pkg/beam/runners/spark"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/testing/ptest"
 	"github.com/apache/beam/sdks/v2/go/test/integration"
@@ -36,6 +35,8 @@ func TestWordCount(t *testing.T) {
 		hash            string
 		smallWordsCount int64
 		lineLen         metrics.DistributionValue
+		transform       string
+		transformCount  int
 	}{
 		{
 			[]string{
@@ -45,6 +46,8 @@ func TestWordCount(t *testing.T) {
 			"6zZtmVTet7aIhR3wmPE8BA==",
 			1,
 			metrics.DistributionValue{Count: 1, Sum: 3, Min: 3, Max: 3},
+			"wordcount.extractFn",
+			1,
 		},
 		{
 			[]string{
@@ -56,6 +59,8 @@ func TestWordCount(t *testing.T) {
 			"jAk8+k4BOH7vQDUiUZdfWg==",
 			6,
 			metrics.DistributionValue{Count: 3, Sum: 21, Min: 3, Max: 11},
+			"extractFn",
+			1,
 		},
 		{
 			[]string{
@@ -65,6 +70,8 @@ func TestWordCount(t *testing.T) {
 			"Nz70m/sn3Ep9o484r7MalQ==",
 			6,
 			metrics.DistributionValue{Count: 1, Sum: 23, Min: 23, Max: 23},
+			"CountFn",
+			1,
 		},
 		{
 			[]string{
@@ -74,6 +81,8 @@ func TestWordCount(t *testing.T) {
 			"Nz70m/sn3Ep9o484r7MalQ==", // ordering doesn't matter: same hash as above
 			6,
 			metrics.DistributionValue{Count: 1, Sum: 23, Min: 23, Max: 23},
+			"extract",
+			1,
 		},
 		{
 			[]string{
@@ -88,6 +97,8 @@ func TestWordCount(t *testing.T) {
 			"Nz70m/sn3Ep9o484r7MalQ==", // whitespace doesn't matter: same hash as above
 			6,
 			metrics.DistributionValue{Count: 6, Sum: 37, Min: 0, Max: 11},
+			"CreateFn",
+			0,
 		},
 	}
 
@@ -101,8 +112,8 @@ func TestWordCount(t *testing.T) {
 			t.Errorf("WordCount(\"%v\") failed: %v", strings.Join(test.lines, "|"), err)
 		}
 
-		qr := pr.Metrics().Query(func(sr metrics.SingleResult) bool {
-			return sr.Name() == "smallWords"
+		qr := pr.Metrics().Query(func(mr beam.MetricResult) bool {
+			return mr.Name() == "smallWords"
 		})
 		counter := metrics.CounterResult{}
 		if len(qr.Counters()) != 0 {
@@ -112,8 +123,8 @@ func TestWordCount(t *testing.T) {
 			t.Errorf("Metrics().Query(by Name) failed. Got %d counters, Want %d counters", counter.Result(), test.smallWordsCount)
 		}
 
-		qr = pr.Metrics().Query(func(sr metrics.SingleResult) bool {
-			return sr.Name() == "lineLenDistro"
+		qr = pr.Metrics().Query(func(mr beam.MetricResult) bool {
+			return mr.Name() == "lineLenDistro"
 		})
 		distribution := metrics.DistributionResult{}
 		if len(qr.Distributions()) != 0 {

@@ -17,6 +17,8 @@
  */
 package org.apache.beam.runners.direct;
 
+import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.util.Collection;
@@ -27,10 +29,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.logging.Logger;
 import org.apache.beam.runners.core.SplittableParDoViaKeyedWorkItems;
-import org.apache.beam.runners.core.construction.PTransformMatchers;
-import org.apache.beam.runners.core.construction.PTransformTranslation;
-import org.apache.beam.runners.core.construction.SplittableParDo;
 import org.apache.beam.runners.direct.DirectRunner.DirectPipelineResult;
 import org.apache.beam.runners.direct.TestStreamEvaluatorFactory.DirectTestStreamFactory;
 import org.apache.beam.sdk.Pipeline;
@@ -40,18 +40,22 @@ import org.apache.beam.sdk.PipelineRunner;
 import org.apache.beam.sdk.metrics.MetricResults;
 import org.apache.beam.sdk.metrics.MetricsEnvironment;
 import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.options.SdkHarnessOptions;
 import org.apache.beam.sdk.runners.PTransformOverride;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.util.UserCodeException;
 import org.apache.beam.sdk.util.common.ReflectHelpers;
+import org.apache.beam.sdk.util.construction.PTransformMatchers;
+import org.apache.beam.sdk.util.construction.PTransformTranslation;
+import org.apache.beam.sdk.util.construction.SplittableParDo;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Supplier;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.MoreExecutors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Supplier;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.MoreExecutors;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.joda.time.Duration;
 
 /**
@@ -64,9 +68,6 @@ import org.joda.time.Duration;
  * contained within a {@link Pipeline} does not break assumptions within the Beam model, to improve
  * the ability to execute a {@link Pipeline} at scale on a distributed backend.
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class DirectRunner extends PipelineRunner<DirectPipelineResult> {
 
   enum Enforcement {
@@ -184,7 +185,10 @@ public class DirectRunner extends PipelineRunner<DirectPipelineResult> {
 
       DisplayDataValidator.validatePipeline(pipeline);
       DisplayDataValidator.validateOptions(options);
-
+      // Ensure a reference is held on the configured loggers as otherwise they are eligible for
+      // garbage collection as they are internally weak references.
+      List<Logger> loggers =
+          SdkHarnessOptions.getConfiguredLoggerFromOptions(options.as(SdkHarnessOptions.class));
       ExecutorService metricsPool =
           Executors.newCachedThreadPool(
               new ThreadFactoryBuilder()
@@ -217,14 +221,14 @@ public class DirectRunner extends PipelineRunner<DirectPipelineResult> {
         try {
           result.waitUntilFinish();
         } catch (UserCodeException userException) {
-          throw new PipelineExecutionException(userException.getCause());
+          throw new PipelineExecutionException(checkStateNotNull(userException.getCause()));
+        } catch (RuntimeException | OutOfMemoryError e) {
+          throw e;
         } catch (Throwable t) {
-          if (t instanceof RuntimeException) {
-            throw (RuntimeException) t;
-          }
           throw new RuntimeException(t);
         }
       }
+      loggers.clear();
       return result;
     } finally {
       MetricsEnvironment.setMetricsSupported(false);
@@ -253,7 +257,8 @@ public class DirectRunner extends PipelineRunner<DirectPipelineResult> {
     // The last set of overrides includes GBK overrides used in WriteView
     pipeline.replaceAll(groupByKeyOverrides());
 
-    // TODO(BEAM-10670): Use SDF read as default when we address performance issue.
+    // TODO(https://github.com/apache/beam/issues/20530): Use SDF read as default when we address
+    // performance issue.
     SplittableParDo.convertReadBasedSplittableDoFnsToPrimitiveReadsIfNecessary(pipeline);
   }
 
@@ -321,6 +326,9 @@ public class DirectRunner extends PipelineRunner<DirectPipelineResult> {
 
     @Override
     public State getState() {
+      if (this.state == State.RUNNING) {
+        this.state = executor.getPipelineState();
+      }
       return state;
     }
 
@@ -359,6 +367,10 @@ public class DirectRunner extends PipelineRunner<DirectPipelineResult> {
      * org.apache.beam.sdk.PipelineResult.State#FAILED}.
      */
     @Override
+    // PipelineResult.waitUntilFinish(Duration) is documented to return null on timeout, but its
+    // interface return type is not annotated @Nullable; annotating it would ripple across every
+    // runner's override, so the timeout null is suppressed here rather than in the sdk-core API.
+    @SuppressWarnings("nullness")
     public State waitUntilFinish(Duration duration) {
       if (this.state.isTerminal()) {
         return this.state;
@@ -370,7 +382,7 @@ public class DirectRunner extends PipelineRunner<DirectPipelineResult> {
         // Emulates the behavior of Pipeline#run(), where a stack trace caused by a
         // UserCodeException is truncated and replaced with the stack starting at the call to
         // waitToFinish
-        throw new Pipeline.PipelineExecutionException(uce.getCause());
+        throw new Pipeline.PipelineExecutionException(checkStateNotNull(uce.getCause()));
       } catch (Exception e) {
         if (e instanceof InterruptedException) {
           Thread.currentThread().interrupt();

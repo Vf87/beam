@@ -52,7 +52,7 @@ import org.apache.beam.sdk.io.gcp.firestore.FirestoreV1WriteFn.BaseBatchWriteFn;
 import org.apache.beam.sdk.io.gcp.firestore.FirestoreV1WriteFn.BatchWriteFnWithSummary;
 import org.apache.beam.sdk.io.gcp.firestore.FirestoreV1WriteFn.WriteElement;
 import org.apache.beam.sdk.io.gcp.firestore.RpcQos.RpcWriteAttempt.Element;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.joda.time.Instant;
 import org.junit.After;
 import org.junit.Test;
@@ -60,7 +60,7 @@ import org.mockito.ArgumentCaptor;
 
 @SuppressWarnings({
   "initialization.fields.uninitialized", // mockito fields are initialized via the Mockito Runner
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public final class FirestoreV1FnBatchWriteWithSummaryTest
     extends BaseFirestoreV1WriteFnTest<WriteSuccessSummary, BatchWriteFnWithSummary> {
@@ -76,7 +76,7 @@ public final class FirestoreV1FnBatchWriteWithSummaryTest
     int maxBytes = 50;
     RpcQosOptions options = rpcQosOptions.toBuilder().withBatchMaxBytes(maxBytes).build();
 
-    when(ff.getFirestoreStub(any())).thenReturn(stub);
+    when(ff.getFirestoreStub(any(), any(), any())).thenReturn(stub);
     when(ff.getRpcQos(any()))
         .thenReturn(FirestoreStatefulComponentFactory.INSTANCE.getRpcQos(options));
 
@@ -158,8 +158,7 @@ public final class FirestoreV1FnBatchWriteWithSummaryTest
   public void nonRetryableWriteResultStopsAttempts() throws Exception {
     Write write0 = FirestoreProtoHelpers.newWrite(0);
     Write write1 =
-        FirestoreProtoHelpers.newWrite(1)
-            .toBuilder()
+        FirestoreProtoHelpers.newWrite(1).toBuilder()
             .setCurrentDocument(Precondition.newBuilder().setExists(false).build())
             .build();
 
@@ -190,7 +189,7 @@ public final class FirestoreV1FnBatchWriteWithSummaryTest
 
     when(rpcQos.newWriteAttempt(any())).thenReturn(attempt);
     when(attempt.awaitSafeToProceed(any())).thenReturn(true);
-    when(attempt.<Write, Element<Write>>newFlushBuffer(any()))
+    when(attempt.<Element<Write>>newFlushBuffer(any()))
         .thenReturn(newFlushBuffer(options))
         .thenReturn(newFlushBuffer(options))
         .thenThrow(new IllegalStateException("too many attempt#newFlushBuffer calls"));
@@ -201,7 +200,8 @@ public final class FirestoreV1FnBatchWriteWithSummaryTest
     when(callable.call(requestCaptor1.capture())).thenReturn(response1);
 
     BaseBatchWriteFn<WriteSuccessSummary> fn =
-        new BatchWriteFnWithSummary(clock, ff, options, CounterFactory.DEFAULT);
+        new BatchWriteFnWithSummary(
+            clock, ff, options, CounterFactory.DEFAULT, "testing-project", "(default)");
     fn.setup();
     fn.startBundle(startBundleContext);
     fn.processElement(processContext, window); // write0
@@ -238,6 +238,15 @@ public final class FirestoreV1FnBatchWriteWithSummaryTest
     verifyNoMoreInteractions(callable);
   }
 
+  @Test
+  public void testWithProjectId_thenWithDatabaseId() {
+    FirestoreV1.Write beamWrite =
+        FirestoreIO.v1().write().withProjectId("my-project").withDatabaseId("(default)");
+
+    assertEquals("my-project", beamWrite.batchWrite().getProjectId());
+    assertEquals("(default)", beamWrite.batchWrite().getDatabaseId());
+  }
+
   @Override
   protected BatchWriteFnWithSummary getFn(
       JodaClock clock,
@@ -245,6 +254,6 @@ public final class FirestoreV1FnBatchWriteWithSummaryTest
       RpcQosOptions rpcQosOptions,
       CounterFactory counterFactory,
       DistributionFactory distributionFactory) {
-    return new BatchWriteFnWithSummary(clock, ff, rpcQosOptions, counterFactory);
+    return new BatchWriteFnWithSummary(clock, ff, rpcQosOptions, counterFactory, null, null);
   }
 }

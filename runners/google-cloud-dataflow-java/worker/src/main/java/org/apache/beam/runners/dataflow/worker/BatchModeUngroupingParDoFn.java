@@ -19,8 +19,10 @@ package org.apache.beam.runners.dataflow.worker;
 
 import org.apache.beam.runners.dataflow.worker.util.common.worker.ParDoFn;
 import org.apache.beam.runners.dataflow.worker.util.common.worker.Receiver;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.DoFnInfo;
 import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
 /**
@@ -31,7 +33,7 @@ import org.joda.time.Instant;
  * WindowedValues}.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 class BatchModeUngroupingParDoFn<K, V> implements ParDoFn {
 
@@ -74,6 +76,9 @@ class BatchModeUngroupingParDoFn<K, V> implements ParDoFn {
   }
 
   @Override
+  public void finishKey(Object key) throws Exception {}
+
+  @Override
   public void finishBundle() throws Exception {
     underlyingParDoFn.finishBundle();
   }
@@ -81,5 +86,10 @@ class BatchModeUngroupingParDoFn<K, V> implements ParDoFn {
   @Override
   public void abort() throws Exception {
     underlyingParDoFn.abort();
+  }
+
+  @Override
+  public @Nullable DoFnInfo<?, ?> getDoFnInfo() throws Exception {
+    return underlyingParDoFn.getDoFnInfo();
   }
 }

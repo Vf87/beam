@@ -1,0 +1,246 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.beam.sdk.fn.splittabledofn;
+
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
+import javax.annotation.concurrent.ThreadSafe;
+import org.apache.beam.sdk.transforms.splittabledofn.RestrictionTracker;
+import org.apache.beam.sdk.transforms.splittabledofn.RestrictionTracker.HasProgress;
+import org.apache.beam.sdk.transforms.splittabledofn.SplitResult;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+
+/** Support utilities for interacting with {@link RestrictionTracker RestrictionTrackers}. */
+@SuppressWarnings({
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
+})
+public class RestrictionTrackers {
+
+  /** Interface allowing a runner to observe the calls to {@link RestrictionTracker#tryClaim}. */
+  public interface ClaimObserver<PositionT> {
+    /** Called when {@link RestrictionTracker#tryClaim} returns true. */
+    void onClaimed(PositionT position);
+
+    /** Called when {@link RestrictionTracker#tryClaim} returns false. */
+    void onClaimFailed(PositionT position);
+  }
+
+  /**
+   * A {@link RestrictionTracker} which forwards all calls to the delegate {@link
+   * RestrictionTracker}.
+   */
+  @ThreadSafe
+  static class RestrictionTrackerObserver<RestrictionT, PositionT>
+      extends RestrictionTracker<RestrictionT, PositionT> {
+    private static final int SPLIT_TIMEOUT_SEC = 300;
+    protected final RestrictionTracker<RestrictionT, PositionT> delegate;
+    protected ReentrantLock lock = new ReentrantLock();
+    protected volatile Progress lastProgress = Progress.NONE;
+    protected volatile boolean needsProgressUpdate = false;
+    private final ClaimObserver<PositionT> claimObserver;
+
+    protected RestrictionTrackerObserver(
+        RestrictionTracker<RestrictionT, PositionT> delegate,
+        ClaimObserver<PositionT> claimObserver) {
+      this.delegate = delegate;
+      this.claimObserver = claimObserver;
+    }
+
+    protected void updateProgressAndUnlock() {
+      try {
+        if (needsProgressUpdate) {
+          updateProgressBlocking();
+        }
+      } finally {
+        lock.unlock();
+      }
+    }
+
+    @Override
+    public boolean tryClaim(PositionT position) {
+      lock.lock();
+      try {
+        if (delegate.tryClaim(position)) {
+          claimObserver.onClaimed(position);
+          return true;
+        } else {
+          claimObserver.onClaimFailed(position);
+          return false;
+        }
+      } finally {
+        updateProgressAndUnlock();
+      }
+    }
+
+    @Override
+    public RestrictionT currentRestriction() {
+      lock.lock();
+      try {
+        return delegate.currentRestriction();
+      } finally {
+        updateProgressAndUnlock();
+      }
+    }
+
+    @Override
+    public SplitResult<RestrictionT> trySplit(double fractionOfRemainder) {
+      return trySplit(fractionOfRemainder, SPLIT_TIMEOUT_SEC);
+    }
+
+    @VisibleForTesting
+    SplitResult<RestrictionT> trySplit(double fractionOfRemainder, int timeOutSec) {
+      // When fractionOfRemainder == 0 (a checkpoint), returning null has a special meaning in the
+      // RestrictionTracker contract: it MUST imply that the restriction tracker is done and there
+      // is no more work left to do. Therefore, we cannot time out and return null when
+      // fractionOfRemainder == 0, and must block until the lock is acquired.
+      if (fractionOfRemainder == 0) {
+        lock.lock();
+        try {
+          SplitResult<RestrictionT> result = delegate.trySplit(fractionOfRemainder);
+          needsProgressUpdate = true;
+          return result;
+        } finally {
+          updateProgressAndUnlock();
+        }
+      }
+      try {
+        // For dynamic splits (fractionOfRemainder > 0), lock can be held long by a long-running
+        // tryClaim. We tolerate this scenario by returning null (declining to split) when lock
+        // timeout occurs.
+        if (lock.tryLock(timeOutSec, TimeUnit.SECONDS)) {
+          try {
+            SplitResult<RestrictionT> result = delegate.trySplit(fractionOfRemainder);
+            needsProgressUpdate = true;
+            return result;
+          } finally {
+            updateProgressAndUnlock();
+          }
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      return null;
+    }
+
+    @Override
+    public void checkDone() throws IllegalStateException {
+      lock.lock();
+      try {
+        delegate.checkDone();
+      } finally {
+        updateProgressAndUnlock();
+      }
+    }
+
+    @Override
+    public IsBounded isBounded() {
+      return delegate.isBounded();
+    }
+
+    /** Evaluate progress if requested. */
+    protected void updateProgressBlocking() {
+      lock.lock();
+      try {
+        needsProgressUpdate = false;
+        if (delegate instanceof HasProgress) {
+          lastProgress = ((HasProgress) delegate).getProgress();
+        }
+      } finally {
+        lock.unlock();
+      }
+    }
+  }
+
+  /**
+   * A {@link RestrictionTracker} which forwards all calls to the delegate progress reporting {@link
+   * RestrictionTracker}.
+   */
+  @ThreadSafe
+  static class RestrictionTrackerObserverWithProgress<RestrictionT, PositionT>
+      extends RestrictionTrackerObserver<RestrictionT, PositionT> implements HasProgress {
+    private static final int PROGRESS_TIMEOUT_SEC = 60;
+
+    protected RestrictionTrackerObserverWithProgress(
+        RestrictionTracker<RestrictionT, PositionT> delegate,
+        ClaimObserver<PositionT> claimObserver) {
+      super(delegate, claimObserver);
+    }
+
+    @Override
+    public Progress getProgress() {
+      return getProgress(PROGRESS_TIMEOUT_SEC);
+    }
+
+    @VisibleForTesting
+    Progress getProgress(int timeOutSec) {
+      try {
+        // lock can be held long by long-running tryClaim/trySplit. We tolerate this scenario
+        // by returning the last evaluated progress (or zero progress if never evaluated before)
+        // when lock timeout occurs.
+        if (lock.tryLock(timeOutSec, TimeUnit.SECONDS)) {
+          try {
+            updateProgressBlocking();
+          } finally {
+            lock.unlock();
+          }
+        } else {
+          needsProgressUpdate = true;
+        }
+      } catch (InterruptedException e) {
+        needsProgressUpdate = true;
+        Thread.currentThread().interrupt();
+      }
+      return lastProgress;
+    }
+  }
+
+  /**
+   * Returns a thread safe {@link RestrictionTracker} which reports all claim attempts to the
+   * specified {@link ClaimObserver}.
+   */
+  public static <RestrictionT, PositionT> RestrictionTracker<RestrictionT, PositionT> observe(
+      RestrictionTracker<RestrictionT, PositionT> restrictionTracker,
+      ClaimObserver<PositionT> claimObserver) {
+    if (restrictionTracker instanceof RestrictionTracker.HasProgress) {
+      return new RestrictionTrackerObserverWithProgress<>(restrictionTracker, claimObserver);
+    } else {
+      return new RestrictionTrackerObserver<>(restrictionTracker, claimObserver);
+    }
+  }
+
+  public static <RestrictionT, PositionT> RestrictionTracker<RestrictionT, PositionT> synchronize(
+      RestrictionTracker<RestrictionT, PositionT> restrictionTracker) {
+    if (restrictionTracker instanceof RestrictionTracker.HasProgress) {
+      return new RestrictionTrackerObserverWithProgress<>(
+          restrictionTracker, (ClaimObserver<PositionT>) NOOP_CLAIM_OBSERVER);
+    } else {
+      return new RestrictionTrackerObserver<>(
+          restrictionTracker, (ClaimObserver<PositionT>) NOOP_CLAIM_OBSERVER);
+    }
+  }
+
+  static class NoopClaimObserver<PositionT> implements ClaimObserver<PositionT> {
+    @Override
+    public void onClaimed(PositionT position) {}
+
+    @Override
+    public void onClaimFailed(PositionT position) {}
+  }
+
+  private static final NoopClaimObserver<Object> NOOP_CLAIM_OBSERVER = new NoopClaimObserver<>();
+}

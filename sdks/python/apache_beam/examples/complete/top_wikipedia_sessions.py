@@ -61,14 +61,13 @@ THIRTY_DAYS_IN_SECONDS = 30 * 24 * ONE_HOUR_IN_SECONDS
 MAX_TIMESTAMP = 0x7fffffffffffffff
 
 
-class ExtractUserAndTimestampDoFn(beam.DoFn):
+def extract_user_and_timestamp(element):
   """Extracts user and timestamp representing a Wikipedia edit."""
-  def process(self, element):
-    table_row = json.loads(element)
-    if 'contributor_username' in table_row:
-      user_name = table_row['contributor_username']
-      timestamp = table_row['timestamp']
-      yield TimestampedValue(user_name, timestamp)
+  table_row = json.loads(element)
+  if 'contributor_username' in table_row:
+    user_name = table_row['contributor_username']
+    timestamp = table_row['timestamp']
+    return TimestampedValue(user_name, timestamp)
 
 
 class ComputeSessions(beam.PTransform):
@@ -98,40 +97,34 @@ class TopPerMonth(beam.PTransform):
         without_defaults())
 
 
-class SessionsToStringsDoFn(beam.DoFn):
+def sessions_to_strings(element, window=beam.DoFn.WindowParam):
   """Adds the session information to be part of the key."""
-  def process(self, element, window=beam.DoFn.WindowParam):
-    yield (element[0] + ' : ' + str(window), element[1])
+  return (element[0] + ' : ' + str(window), element[1])
 
 
-class FormatOutputDoFn(beam.DoFn):
+def format_output(element, window=beam.DoFn.WindowParam):
   """Formats a string containing the user, count, and session."""
-  def process(self, element, window=beam.DoFn.WindowParam):
-    for kv in element:
-      session = kv[0]
-      count = kv[1]
-      yield session + ' : ' + str(count) + ' : ' + str(window)
+  for session, count in element:
+    yield session + ' : ' + str(count) + ' : ' + str(window)
 
 
 class ComputeTopSessions(beam.PTransform):
   """Computes the top user sessions for each month."""
   def __init__(self, sampling_threshold):
-    # TODO(BEAM-6158): Revert the workaround once we can pickle super() on py3.
-    # super().__init__()
-    beam.PTransform.__init__(self)
+    super().__init__()
+
     self.sampling_threshold = sampling_threshold
 
   def expand(self, pcoll):
     return (
         pcoll
-        |
-        'ExtractUserAndTimestamp' >> beam.ParDo(ExtractUserAndTimestampDoFn())
+        | 'ExtractUserAndTimestamp' >> beam.Map(extract_user_and_timestamp)
         | beam.Filter(
             lambda x: (abs(hash(x)) <= MAX_TIMESTAMP * self.sampling_threshold))
         | ComputeSessions()
-        | 'SessionsToStrings' >> beam.ParDo(SessionsToStringsDoFn())
+        | 'SessionsToStrings' >> beam.Map(sessions_to_strings)
         | TopPerMonth()
-        | 'FormatOutput' >> beam.ParDo(FormatOutputDoFn()))
+        | 'FormatOutput' >> beam.FlatMap(format_output))
 
 
 def run(argv=None):

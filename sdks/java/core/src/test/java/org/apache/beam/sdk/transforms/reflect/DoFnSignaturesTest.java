@@ -51,13 +51,18 @@ import org.apache.beam.sdk.state.TimerSpec;
 import org.apache.beam.sdk.state.TimerSpecs;
 import org.apache.beam.sdk.state.ValueState;
 import org.apache.beam.sdk.state.WatermarkHoldState;
+import org.apache.beam.sdk.testing.ExpectedLogs;
 import org.apache.beam.sdk.testing.SerializableMatchers;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Sum;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter.BundleFinalizerParameter;
+import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter.CausedByDrainParameter;
+import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter.CurrentRecordIdParameter;
+import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter.CurrentRecordOffsetParameter;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter.ElementParameter;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter.FinishBundleContextParameter;
+import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter.FireTimestampParameter;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter.OutputReceiverParameter;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter.PaneInfoParameter;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter.PipelineOptionsParameter;
@@ -78,11 +83,12 @@ import org.apache.beam.sdk.transforms.splittabledofn.RestrictionTracker;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.transforms.windowing.TimestampCombiner;
+import org.apache.beam.sdk.values.CausedByDrain;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.hamcrest.Matcher;
 import org.hamcrest.Matchers;
 import org.joda.time.Instant;
@@ -94,9 +100,45 @@ import org.junit.runners.JUnit4;
 
 /** Tests for {@link DoFnSignatures}. */
 @RunWith(JUnit4.class)
+// TODO(https://github.com/apache/beam/issues/21230): Remove when new version of errorprone is
+// released (2.11.0)
+@SuppressWarnings("unused")
 public class DoFnSignaturesTest {
 
+  @Test
+  public void testRecordIdOnTimerError() throws Exception {
+    final String timerId = "some-timer-id";
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("Illegal parameter type");
+    thrown.expectMessage("CurrentRecordIdParameter");
+    DoFnSignatures.getSignature(
+        new DoFn<String, String>() {
+          @TimerId(timerId)
+          private final TimerSpec myfield1 = TimerSpecs.timer(TimeDomain.EVENT_TIME);
+
+          @ProcessElement
+          public void process(ProcessContext c) {}
+
+          @OnTimer(timerId)
+          public void onTimer(@DoFn.CurrentRecordId String id) {}
+        }.getClass());
+  }
+
+  @Test
+  public void testFireTimestampOnProcessElementError() throws Exception {
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("Illegal parameter type");
+    thrown.expectMessage("FireTimestampParameter");
+    DoFnSignatures.getSignature(
+        new DoFn<String, String>() {
+          @ProcessElement
+          public void process(@FireTimestamp Instant ts) {}
+        }.getClass());
+  }
+
   @Rule public ExpectedException thrown = ExpectedException.none();
+
+  @Rule public ExpectedLogs expectedLogs = ExpectedLogs.none(DoFnSignatures.class);
 
   @Test
   public void testBasicDoFnProcessContext() throws Exception {
@@ -127,10 +169,11 @@ public class DoFnSignaturesTest {
                   PipelineOptions options,
                   @SideInput("tag1") String input1,
                   @SideInput("tag2") Integer input2,
-                  BundleFinalizer bundleFinalizer) {}
+                  BundleFinalizer bundleFinalizer,
+                  CausedByDrain causedByDrain) {}
             }.getClass());
 
-    assertThat(sig.processElement().extraParameters().size(), equalTo(9));
+    assertThat(sig.processElement().extraParameters().size(), equalTo(10));
     assertThat(sig.processElement().extraParameters().get(0), instanceOf(ElementParameter.class));
     assertThat(sig.processElement().extraParameters().get(1), instanceOf(TimestampParameter.class));
     assertThat(sig.processElement().extraParameters().get(2), instanceOf(WindowParameter.class));
@@ -143,6 +186,26 @@ public class DoFnSignaturesTest {
     assertThat(sig.processElement().extraParameters().get(7), instanceOf(SideInputParameter.class));
     assertThat(
         sig.processElement().extraParameters().get(8), instanceOf(BundleFinalizerParameter.class));
+    assertThat(
+        sig.processElement().extraParameters().get(9), instanceOf(CausedByDrainParameter.class));
+  }
+
+  @Test
+  public void testProcessElementRecordIdAndOffset() throws Exception {
+    DoFnSignature sig =
+        DoFnSignatures.getSignature(
+            new DoFn<String, String>() {
+              @ProcessElement
+              public void process(
+                  @DoFn.CurrentRecordId String id, @DoFn.CurrentRecordOffset Long offset) {}
+            }.getClass());
+
+    assertThat(sig.processElement().extraParameters().size(), equalTo(2));
+    assertThat(
+        sig.processElement().extraParameters().get(0), instanceOf(CurrentRecordIdParameter.class));
+    assertThat(
+        sig.processElement().extraParameters().get(1),
+        instanceOf(CurrentRecordOffsetParameter.class));
   }
 
   @Test
@@ -177,24 +240,22 @@ public class DoFnSignaturesTest {
   public void testWrongTimestampType() throws Exception {
     thrown.expect(IllegalArgumentException.class);
     thrown.expectMessage("@Timestamp argument must have type org.joda.time.Instant");
-    DoFnSignature sig =
-        DoFnSignatures.getSignature(
-            new DoFn<String, String>() {
-              @ProcessElement
-              public void process(@Timestamp String timestamp) {}
-            }.getClass());
+    DoFnSignatures.getSignature(
+        new DoFn<String, String>() {
+          @ProcessElement
+          public void process(@Timestamp String timestamp) {}
+        }.getClass());
   }
 
   @Test
   public void testWrongOutputReceiverType() throws Exception {
     thrown.expect(IllegalArgumentException.class);
     thrown.expectMessage("OutputReceiver should be parameterized by java.lang.String");
-    DoFnSignature sig =
-        DoFnSignatures.getSignature(
-            new DoFn<String, String>() {
-              @ProcessElement
-              public void process(OutputReceiver<Integer> receiver) {}
-            }.getClass());
+    DoFnSignatures.getSignature(
+        new DoFn<String, String>() {
+          @ProcessElement
+          public void process(OutputReceiver<Integer> receiver) {}
+        }.getClass());
   }
 
   @Test
@@ -425,6 +486,7 @@ public class DoFnSignaturesTest {
     thrown.expectMessage(not(mentionsState()));
     DoFnSignatures.getSignature(
         new DoFn<String, String>() {
+
           @TimerId("foo")
           private final String bizzle = "bazzle";
 
@@ -442,6 +504,7 @@ public class DoFnSignaturesTest {
     thrown.expectMessage(mentionsTimers());
     DoFnSignatures.getSignature(
         new DoFn<KV<String, Integer>, Long>() {
+
           @TimerId("my-id")
           private final TimerSpec myfield1 = TimerSpecs.timer(TimeDomain.EVENT_TIME);
 
@@ -524,6 +587,7 @@ public class DoFnSignaturesTest {
     thrown.expectMessage(not(mentionsState()));
     DoFnSignatures.getSignature(
         new DoFn<KV<String, Integer>, Long>() {
+
           @TimerId("my-id")
           private final TimerSpec myfield = TimerSpecs.timer(TimeDomain.PROCESSING_TIME);
 
@@ -546,6 +610,7 @@ public class DoFnSignaturesTest {
     thrown.expectMessage(mentionsTimers());
     DoFnSignatures.getSignature(
         new DoFnWithOnlyCallback() {
+
           @TimerId(DoFnWithOnlyCallback.TIMER_ID)
           private final TimerSpec myfield1 = TimerSpecs.timer(TimeDomain.EVENT_TIME);
 
@@ -563,6 +628,7 @@ public class DoFnSignaturesTest {
     DoFnSignature sig =
         DoFnSignatures.getSignature(
             new DoFn<String, String>() {
+
               @TimerId(timerId)
               private final TimerSpec myfield1 = TimerSpecs.timer(TimeDomain.EVENT_TIME);
 
@@ -580,6 +646,31 @@ public class DoFnSignaturesTest {
   }
 
   @Test
+  public void testCausedByDrainOnTimer() throws Exception {
+    final String timerId = "some-timer-id";
+    final String timerDeclarationId = TimerDeclaration.PREFIX + timerId;
+
+    DoFnSignature sig =
+        DoFnSignatures.getSignature(
+            new DoFn<String, String>() {
+
+              @TimerId(timerId)
+              private final TimerSpec myfield1 = TimerSpecs.timer(TimeDomain.EVENT_TIME);
+
+              @ProcessElement
+              public void process(ProcessContext c) {}
+
+              @OnTimer(timerId)
+              public void onTimer(CausedByDrain causedByDrain) {}
+            }.getClass());
+
+    assertThat(sig.onTimerMethods().get(timerDeclarationId).extraParameters().size(), equalTo(1));
+    assertThat(
+        sig.onTimerMethods().get(timerDeclarationId).extraParameters().get(0),
+        instanceOf(CausedByDrainParameter.class));
+  }
+
+  @Test
   public void testAllParamsOnTimer() throws Exception {
     final String timerId = "some-timer-id";
     final String timerDeclarationId = TimerDeclaration.PREFIX + timerId;
@@ -587,6 +678,7 @@ public class DoFnSignaturesTest {
     DoFnSignature sig =
         DoFnSignatures.getSignature(
             new DoFn<String, String>() {
+
               @TimerId(timerId)
               private final TimerSpec myfield1 = TimerSpecs.timer(TimeDomain.EVENT_TIME);
 
@@ -608,6 +700,30 @@ public class DoFnSignaturesTest {
     assertThat(
         sig.onTimerMethods().get(timerDeclarationId).extraParameters().get(2),
         instanceOf(WindowParameter.class));
+  }
+
+  @Test
+  public void testFireTimestampOnTimer() throws Exception {
+    final String timerId = "some-timer-id";
+    final String timerDeclarationId = TimerDeclaration.PREFIX + timerId;
+
+    DoFnSignature sig =
+        DoFnSignatures.getSignature(
+            new DoFn<String, String>() {
+              @TimerId(timerId)
+              private final TimerSpec myfield1 = TimerSpecs.timer(TimeDomain.EVENT_TIME);
+
+              @ProcessElement
+              public void process(ProcessContext c) {}
+
+              @OnTimer(timerId)
+              public void onTimer(@FireTimestamp Instant fireTimestamp) {}
+            }.getClass());
+
+    assertThat(sig.onTimerMethods().get(timerDeclarationId).extraParameters().size(), equalTo(1));
+    assertThat(
+        sig.onTimerMethods().get(timerDeclarationId).extraParameters().get(0),
+        instanceOf(FireTimestampParameter.class));
   }
 
   @Test
@@ -688,6 +804,7 @@ public class DoFnSignaturesTest {
     thrown.expectMessage(mentionsTimers());
     DoFnSignatures.getSignature(
         new DoFn<KV<String, Integer>, Long>() {
+
           @TimerId("my-id")
           private final TimerSpec myfield1 = TimerSpecs.timer(TimeDomain.EVENT_TIME);
 
@@ -709,6 +826,7 @@ public class DoFnSignaturesTest {
     thrown.expectMessage(mentionsTimers());
     DoFnSignatures.getSignature(
         new DoFn<KV<String, Integer>, Long>() {
+
           @TimerId("my-timer-id")
           private TimerSpec myfield = TimerSpecs.timer(TimeDomain.PROCESSING_TIME);
 
@@ -722,6 +840,7 @@ public class DoFnSignaturesTest {
     DoFnSignature sig =
         DoFnSignatures.getSignature(
             new DoFn<KV<String, Integer>, Long>() {
+
               @TimerId("foo")
               private final TimerSpec bizzle = TimerSpecs.timer(TimeDomain.EVENT_TIME);
 
@@ -745,6 +864,7 @@ public class DoFnSignaturesTest {
     DoFnSignature sig =
         DoFnSignatures.getSignature(
             new DoFn<KV<String, Integer>, Long>() {
+
               @TimerId("foo")
               private final TimerSpec bizzle = TimerSpecs.timer(TimeDomain.EVENT_TIME);
 
@@ -776,6 +896,7 @@ public class DoFnSignaturesTest {
 
     DoFnSignatures.getSignature(
         new DoFn<KV<String, Integer>, Long>() {
+
           @TimerId("foo")
           private final TimerSpec bizzle = TimerSpecs.timer(TimeDomain.EVENT_TIME);
 
@@ -790,6 +911,7 @@ public class DoFnSignaturesTest {
   @Test
   public void testSimpleTimerIdNamedDoFn() throws Exception {
     class DoFnForTestSimpleTimerIdNamedDoFn extends DoFn<KV<String, Integer>, Long> {
+
       @TimerId("foo")
       private final TimerSpec bizzle = TimerSpecs.timer(TimeDomain.EVENT_TIME);
 
@@ -821,6 +943,7 @@ public class DoFnSignaturesTest {
     thrown.expectMessage(not(mentionsTimers()));
     DoFnSignatures.getSignature(
         new DoFn<String, String>() {
+
           @StateId("foo")
           private final String bizzle = "bazzle";
 
@@ -838,20 +961,19 @@ public class DoFnSignaturesTest {
     thrown.expectMessage("myfield1");
     thrown.expectMessage("myfield2");
     thrown.expectMessage(not(mentionsTimers()));
-    DoFnSignature sig =
-        DoFnSignatures.getSignature(
-            new DoFn<KV<String, Integer>, Long>() {
-              @StateId("my-id")
-              private final StateSpec<ValueState<Integer>> myfield1 =
-                  StateSpecs.value(VarIntCoder.of());
+    DoFnSignatures.getSignature(
+        new DoFn<KV<String, Integer>, Long>() {
 
-              @StateId("my-id")
-              private final StateSpec<ValueState<Long>> myfield2 =
-                  StateSpecs.value(VarLongCoder.of());
+          @StateId("my-id")
+          private final StateSpec<ValueState<Integer>> myfield1 =
+              StateSpecs.value(VarIntCoder.of());
 
-              @ProcessElement
-              public void foo(ProcessContext context) {}
-            }.getClass());
+          @StateId("my-id")
+          private final StateSpec<ValueState<Long>> myfield2 = StateSpecs.value(VarLongCoder.of());
+
+          @ProcessElement
+          public void foo(ProcessContext context) {}
+        }.getClass());
   }
 
   @Test
@@ -863,6 +985,7 @@ public class DoFnSignaturesTest {
     thrown.expectMessage(not(mentionsTimers()));
     DoFnSignatures.getSignature(
         new DoFn<KV<String, Integer>, Long>() {
+
           @StateId("my-id")
           private StateSpec<ValueState<Integer>> myfield = StateSpecs.value(VarIntCoder.of());
 
@@ -908,6 +1031,7 @@ public class DoFnSignaturesTest {
     DoFnSignature sig =
         DoFnSignatures.getSignature(
             new DoFn<KV<String, Integer>, Long>() {
+
               @StateId("my-id")
               private final StateSpec<MapState<Integer, Integer>> myfield =
                   StateSpecs.map(VarIntCoder.of(), VarIntCoder.of());
@@ -927,6 +1051,7 @@ public class DoFnSignaturesTest {
     thrown.expectMessage("ReadableStates");
     DoFnSignatures.getSignature(
         new DoFn<KV<String, Integer>, Long>() {
+
           @StateId("my-id")
           private final StateSpec<MapState<Integer, Integer>> myfield =
               StateSpecs.map(VarIntCoder.of(), VarIntCoder.of());
@@ -948,6 +1073,7 @@ public class DoFnSignaturesTest {
     thrown.expectMessage(not(mentionsTimers()));
     DoFnSignatures.getSignature(
         new DoFn<KV<String, Integer>, Long>() {
+
           @StateId("my-id")
           private final StateSpec<ValueState<Integer>> myfield = StateSpecs.value(VarIntCoder.of());
 
@@ -972,6 +1098,7 @@ public class DoFnSignaturesTest {
     thrown.expectMessage(not(mentionsTimers()));
     DoFnSignatures.getSignature(
         new DoFn<KV<String, Integer>, Long>() {
+
           @StateId("my-id")
           private final StateSpec<ValueState<Integer>> myfield = StateSpecs.value(VarIntCoder.of());
 
@@ -994,6 +1121,7 @@ public class DoFnSignaturesTest {
     thrown.expectMessage(not(mentionsTimers()));
     DoFnSignatures.getSignature(
         new DoFn<KV<String, Integer>, Long>() {
+
           @StateId("my-id")
           private final StateSpec<ValueState<Integer>> myfield = StateSpecs.value(VarIntCoder.of());
 
@@ -1007,6 +1135,7 @@ public class DoFnSignaturesTest {
   public void testGoodStateParameterSuperclassStateType() throws Exception {
     DoFnSignatures.getSignature(
         new DoFn<KV<String, Integer>, Long>() {
+
           @StateId("my-id")
           private final StateSpec<CombiningState<Integer, int[], Integer>> state =
               StateSpecs.combining(Sum.ofIntegers());
@@ -1023,6 +1152,7 @@ public class DoFnSignaturesTest {
     DoFnSignature sig =
         DoFnSignatures.getSignature(
             new DoFn<KV<String, Integer>, Long>() {
+
               @StateId("foo")
               private final StateSpec<ValueState<Integer>> bizzle =
                   StateSpecs.value(VarIntCoder.of());
@@ -1067,6 +1197,7 @@ public class DoFnSignaturesTest {
     thrown.expectMessage(DoFnUsingState.STATE_ID);
     DoFnSignatures.getSignature(
         new DoFnUsingState() {
+
           @StateId(DoFnUsingState.STATE_ID)
           private final StateSpec<ValueState<Integer>> spec = StateSpecs.value(VarIntCoder.of());
         }.getClass());
@@ -1108,6 +1239,7 @@ public class DoFnSignaturesTest {
     DoFnSignature sig =
         DoFnSignatures.getSignature(
             new DoFn<KV<String, Integer>, Long>() {
+
               @StateId("foo")
               private final StateSpec<ValueState<Integer>> bizzleDecl =
                   StateSpecs.value(VarIntCoder.of());
@@ -1146,6 +1278,7 @@ public class DoFnSignaturesTest {
   @Test
   public void testSimpleStateIdNamedDoFn() throws Exception {
     class DoFnForTestSimpleStateIdNamedDoFn extends DoFn<KV<String, Integer>, Long> {
+
       @StateId("foo")
       private final StateSpec<ValueState<Integer>> bizzle = StateSpecs.value(VarIntCoder.of());
 
@@ -1172,6 +1305,7 @@ public class DoFnSignaturesTest {
     class DoFnForTestGenericStatefulDoFn<T> extends DoFn<KV<String, T>, Long> {
       // Note that in order to have a coder for T it will require initialization in the constructor,
       // but that isn't important for this test
+
       @StateId("foo")
       private final StateSpec<ValueState<T>> bizzle = null;
 
@@ -1241,6 +1375,7 @@ public class DoFnSignaturesTest {
     thrown.expectMessage("myTimer");
     DoFnSignatures.getSignature(
         new DoFn<String, String>() {
+
           @TimerId("foo")
           private final TimerSpec myTimer = TimerSpecs.timer(TimeDomain.EVENT_TIME);
 
@@ -1276,6 +1411,7 @@ public class DoFnSignaturesTest {
     DoFnSignature sig =
         DoFnSignatures.getSignature(
             new DoFn<String, String>() {
+
               @StateId("foo")
               private final StateSpec<ValueState<Integer>> bizzle =
                   StateSpecs.value(VarIntCoder.of());
@@ -1289,16 +1425,20 @@ public class DoFnSignaturesTest {
                   @StateId("foo") ValueState<Integer> s,
                   PipelineOptions p,
                   OutputReceiver<String> o,
-                  MultiOutputReceiver m) {}
+                  MultiOutputReceiver m,
+                  OnWindowExpirationContext c) {}
             }.getClass());
 
     List<Parameter> params = sig.onWindowExpiration().extraParameters();
-    assertThat(params.size(), equalTo(5));
+    assertThat(params.size(), equalTo(6));
     assertThat(params.get(0), instanceOf(WindowParameter.class));
     assertThat(params.get(1), instanceOf(StateParameter.class));
     assertThat(params.get(2), instanceOf(PipelineOptionsParameter.class));
     assertThat(params.get(3), instanceOf(OutputReceiverParameter.class));
     assertThat(params.get(4), instanceOf(TaggedOutputReceiverParameter.class));
+    assertThat(
+        params.get(5),
+        instanceOf(DoFnSignature.Parameter.OnWindowExpirationContextParameter.class));
   }
 
   private interface FeatureTest {
@@ -1326,6 +1466,7 @@ public class DoFnSignaturesTest {
 
   private static class StatefulWithValueState extends DoFn<KV<String, String>, String>
       implements FeatureTest {
+
     @StateId("state")
     private final StateSpec<ValueState<String>> state = StateSpecs.value();
 
@@ -1347,8 +1488,37 @@ public class DoFnSignaturesTest {
     }
   }
 
+  /**
+   * It is important that we don't add any state/timers to this class to ensure that statefulness is
+   * detected from {@link DoFn.OnWindowExpiration @OnWindowExpiration} only.
+   */
+  private static class StatefulWithOnWindowExpiration extends DoFn<KV<String, String>, String>
+      implements FeatureTest {
+
+    @ProcessElement
+    public void process(@Element KV<String, String> input) {}
+
+    @OnWindowExpiration
+    public void onWindowExpiration() {}
+
+    @Override
+    public void test() {
+      assertThat(DoFnSignatures.isSplittable(this), SerializableMatchers.equalTo(false));
+      assertThat(DoFnSignatures.isStateful(this), SerializableMatchers.equalTo(true));
+      assertThat(DoFnSignatures.usesTimers(this), SerializableMatchers.equalTo(true));
+      assertThat(DoFnSignatures.usesState(this), SerializableMatchers.equalTo(false));
+      assertThat(DoFnSignatures.usesBagState(this), SerializableMatchers.equalTo(false));
+      assertThat(DoFnSignatures.usesMapState(this), SerializableMatchers.equalTo(false));
+      assertThat(DoFnSignatures.usesSetState(this), SerializableMatchers.equalTo(false));
+      assertThat(DoFnSignatures.usesValueState(this), SerializableMatchers.equalTo(false));
+      assertThat(DoFnSignatures.usesWatermarkHold(this), SerializableMatchers.equalTo(false));
+      assertThat(DoFnSignatures.requiresTimeSortedInput(this), SerializableMatchers.equalTo(false));
+    }
+  }
+
   private static class StatefulWithTimers extends DoFn<KV<String, String>, String>
       implements FeatureTest {
+
     @TimerId("timer")
     private final TimerSpec spec = TimerSpecs.timer(TimeDomain.EVENT_TIME);
 
@@ -1375,6 +1545,7 @@ public class DoFnSignaturesTest {
 
   private static class StatefulWithTimersAndValueState extends DoFn<KV<String, String>, String>
       implements FeatureTest {
+
     @TimerId("timer")
     private final TimerSpec timer = TimerSpecs.timer(TimeDomain.EVENT_TIME);
 
@@ -1404,6 +1575,7 @@ public class DoFnSignaturesTest {
 
   private static class StatefulWithSetState extends DoFn<KV<String, String>, String>
       implements FeatureTest {
+
     @StateId("state")
     private final StateSpec<SetState<String>> spec = StateSpecs.set();
 
@@ -1427,6 +1599,7 @@ public class DoFnSignaturesTest {
 
   private static class StatefulWithMapState extends DoFn<KV<String, String>, String>
       implements FeatureTest {
+
     @StateId("state")
     private final StateSpec<MapState<String, String>> spec = StateSpecs.map();
 
@@ -1450,6 +1623,7 @@ public class DoFnSignaturesTest {
 
   private static class StatefulWithWatermarkHoldState extends DoFn<KV<String, String>, String>
       implements FeatureTest {
+
     @StateId("state")
     private final StateSpec<WatermarkHoldState> spec =
         StateSpecs.watermarkStateInternal(TimestampCombiner.LATEST);
@@ -1475,7 +1649,7 @@ public class DoFnSignaturesTest {
   private static class RequiresTimeSortedInput extends DoFn<KV<String, String>, String>
       implements FeatureTest {
     @ProcessElement
-    @RequiresTimeSortedInput
+    @DoFn.RequiresTimeSortedInput
     public void process(@Element KV<String, String> input) {}
 
     @Override
@@ -1521,12 +1695,13 @@ public class DoFnSignaturesTest {
       Lists.newArrayList(
           new StatelessDoFn(),
           new StatefulWithValueState(),
+          new StatefulWithOnWindowExpiration(),
           new StatefulWithTimers(),
           new StatefulWithTimersAndValueState(),
           new StatefulWithSetState(),
           new StatefulWithMapState(),
           new StatefulWithWatermarkHoldState(),
-          new RequiresTimeSortedInput(),
+          new DoFnSignaturesTest.RequiresTimeSortedInput(),
           new Splittable());
 
   @Test
@@ -1568,14 +1743,6 @@ public class DoFnSignaturesTest {
     @ProcessElement
     public abstract void processWithState(
         ProcessContext context, @StateId(STATE_ID) ValueState<String> state);
-  }
-
-  private abstract static class DoFnDeclaringMyTimerId extends DoFn<KV<String, Integer>, Long> {
-    @TimerId("my-timer-id")
-    private final TimerSpec bizzle = TimerSpecs.timer(TimeDomain.EVENT_TIME);
-
-    @ProcessElement
-    public void foo(ProcessContext context) {}
   }
 
   private abstract static class DoFnDeclaringTimerAndCallback
@@ -1645,5 +1812,119 @@ public class DoFnSignaturesTest {
 
     @Override
     public void processWithTimer(ProcessContext context, Timer timer) {}
+  }
+
+  // Test DoFns for ValueState collection warning tests
+  private static class DoFnWithMapValueState extends DoFn<String, String> {
+    @StateId("mapState")
+    private final StateSpec<ValueState<java.util.Map<String, String>>> mapState =
+        StateSpecs.value();
+
+    @ProcessElement
+    public void process() {}
+  }
+
+  private static class DoFnWithListValueState extends DoFn<String, String> {
+    @StateId("listState")
+    private final StateSpec<ValueState<java.util.List<String>>> listState = StateSpecs.value();
+
+    @ProcessElement
+    public void process() {}
+  }
+
+  private static class DoFnWithSetValueState extends DoFn<String, String> {
+    @StateId("setState")
+    private final StateSpec<ValueState<java.util.Set<String>>> setState = StateSpecs.value();
+
+    @ProcessElement
+    public void process() {}
+  }
+
+  private static class DoFnWithSimpleValueState extends DoFn<String, String> {
+    @StateId("simpleState")
+    private final StateSpec<ValueState<String>> simpleState = StateSpecs.value();
+
+    @ProcessElement
+    public void process() {}
+  }
+
+  private static class DoFnWithParameterizedSetValueState<T> extends DoFn<String, String> {
+    @StateId("parameterizedSetState")
+    private final StateSpec<ValueState<java.util.Set<T>>> parameterizedSetState =
+        StateSpecs.value();
+
+    @ProcessElement
+    public void process() {}
+  }
+
+  private static class DoFnWithParameterizedListValueState<T> extends DoFn<String, String> {
+    @StateId("parameterizedListState")
+    private final StateSpec<ValueState<java.util.List<T>>> parameterizedListState =
+        StateSpecs.value();
+
+    @ProcessElement
+    public void process() {}
+  }
+
+  private static class DoFnWithTypeVariableValueState<T> extends DoFn<String, String> {
+    @StateId("typeVariableState")
+    private final StateSpec<ValueState<T>> typeVariableState = StateSpecs.value();
+
+    @ProcessElement
+    public void process() {}
+  }
+
+  @Test
+  public void testValueStateWithMapLogsWarning() {
+    // This test verifies that the signature can be parsed for DoFns with collection ValueState.
+    // The warning is logged but doesn't prevent the signature from being created.
+    DoFnSignature signature = DoFnSignatures.getSignature(DoFnWithMapValueState.class);
+    assertThat(signature.stateDeclarations().get("mapState"), notNullValue());
+  }
+
+  @Test
+  public void testValueStateWithListLogsWarning() {
+    DoFnSignature signature = DoFnSignatures.getSignature(DoFnWithListValueState.class);
+    assertThat(signature.stateDeclarations().get("listState"), notNullValue());
+  }
+
+  @Test
+  public void testValueStateWithSetLogsWarning() {
+    DoFnSignature signature = DoFnSignatures.getSignature(DoFnWithSetValueState.class);
+    assertThat(signature.stateDeclarations().get("setState"), notNullValue());
+  }
+
+  @Test
+  public void testValueStateWithSimpleTypeNoWarning() {
+    // Simple types should not trigger any warning
+    DoFnSignature signature = DoFnSignatures.getSignature(DoFnWithSimpleValueState.class);
+    assertThat(signature.stateDeclarations().get("simpleState"), notNullValue());
+    expectedLogs.verifyNotLogged("with collection type");
+  }
+
+  @Test
+  public void testValueStateWithParameterizedSetLogsWarning() {
+    // A parameterized collection such as ValueState<Set<T>> still has a known raw collection type
+    // (Set) even though the element type is a type variable, so it should still recommend SetState.
+    DoFnSignature signature = DoFnSignatures.getSignature(DoFnWithParameterizedSetValueState.class);
+    assertThat(signature.stateDeclarations().get("parameterizedSetState"), notNullValue());
+    expectedLogs.verifyWarn("SetState");
+  }
+
+  @Test
+  public void testValueStateWithParameterizedListLogsWarning() {
+    DoFnSignature signature =
+        DoFnSignatures.getSignature(DoFnWithParameterizedListValueState.class);
+    assertThat(signature.stateDeclarations().get("parameterizedListState"), notNullValue());
+    expectedLogs.verifyWarn("BagState or OrderedListState");
+  }
+
+  @Test
+  public void testValueStateWithBareTypeVariableNoWarning() {
+    // A bare type variable payload (ValueState<T>) has no raw collection type to inspect and must
+    // not produce a collection recommendation.
+    DoFnSignature signature = DoFnSignatures.getSignature(DoFnWithTypeVariableValueState.class);
+    assertThat(signature.stateDeclarations().get("typeVariableState"), notNullValue());
+    expectedLogs.verifyNotLogged("with collection type");
   }
 }

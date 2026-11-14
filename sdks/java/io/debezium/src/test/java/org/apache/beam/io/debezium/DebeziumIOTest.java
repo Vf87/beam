@@ -17,6 +17,10 @@
  */
 package org.apache.beam.io.debezium;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -24,19 +28,22 @@ import io.debezium.config.Configuration;
 import io.debezium.connector.mysql.MySqlConnector;
 import io.debezium.connector.mysql.MySqlConnectorConfig;
 import java.io.Serializable;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.Map;
 import org.apache.beam.io.debezium.DebeziumIO.ConnectorConfiguration;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.apache.kafka.common.config.ConfigValue;
+import org.apache.kafka.connect.source.SourceRecord;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /** Test on the DebeziumIO. */
 @RunWith(JUnit4.class)
 public class DebeziumIOTest implements Serializable {
-  private static final Logger LOG = LoggerFactory.getLogger(DebeziumIOTest.class);
+
   private static final ConnectorConfiguration MYSQL_CONNECTOR_CONFIGURATION =
       ConnectorConfiguration.create()
           .withUsername("debezium")
@@ -46,9 +53,9 @@ public class DebeziumIOTest implements Serializable {
           .withConnectorClass(MySqlConnector.class)
           .withConnectionProperty("database.server.id", "184054")
           .withConnectionProperty("database.server.name", "dbserver1")
-          .withConnectionProperty("database.include.list", "inventory")
           .withConnectionProperty(
-              "database.history", KafkaSourceConsumerFn.DebeziumSDFDatabaseHistory.class.getName())
+              "schema.history.internal",
+              KafkaSourceConsumerFn.DebeziumSDFDatabaseHistory.class.getName())
           .withConnectionProperty("include.schema.changes", "false");
 
   @Test
@@ -97,5 +104,195 @@ public class DebeziumIOTest implements Serializable {
     assertThrows(
         IllegalArgumentException.class,
         () -> MYSQL_CONNECTOR_CONFIGURATION.withUsername(username).withPassword(password));
+  }
+
+  @Test
+  public void testReadWithStartOffsetStoresOffset() {
+    Map<String, Object> offset = ImmutableMap.of("file", "mysql-bin.000003", "pos", 156L);
+    DebeziumIO.Read<String> read =
+        DebeziumIO.<String>read()
+            .withConnectorConfiguration(MYSQL_CONNECTOR_CONFIGURATION)
+            .withStartOffset(offset);
+    assertEquals(offset, read.getStartOffset());
+  }
+
+  @Test
+  public void testReadWithoutStartOffsetIsNull() {
+    DebeziumIO.Read<String> read =
+        DebeziumIO.<String>read().withConnectorConfiguration(MYSQL_CONNECTOR_CONFIGURATION);
+    assertNull(read.getStartOffset());
+  }
+
+  @Test
+  public void testReadWithNullStartOffsetThrows() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            DebeziumIO.<String>read()
+                .withConnectorConfiguration(MYSQL_CONNECTOR_CONFIGURATION)
+                .withStartOffset(null));
+  }
+
+  @Test
+  public void testGetInitialRestrictionUsesStartOffset() throws Exception {
+    Map<String, Object> offset = ImmutableMap.of("file", "mysql-bin.000003", "pos", 156L);
+    DebeziumIO.Read<String> spec =
+        DebeziumIO.<String>read()
+            .withConnectorConfiguration(MYSQL_CONNECTOR_CONFIGURATION)
+            .withStartOffset(offset);
+    KafkaSourceConsumerFn<String> fn = new KafkaSourceConsumerFn<>(MySqlConnector.class, spec);
+    KafkaSourceConsumerFn.OffsetHolder restriction = fn.getInitialRestriction(null);
+    assertEquals(offset, restriction.offset);
+  }
+
+  @Test
+  public void testGetInitialRestrictionWithoutStartOffsetIsNull() throws Exception {
+    DebeziumIO.Read<String> spec =
+        DebeziumIO.<String>read().withConnectorConfiguration(MYSQL_CONNECTOR_CONFIGURATION);
+    KafkaSourceConsumerFn<String> fn = new KafkaSourceConsumerFn<>(MySqlConnector.class, spec);
+    KafkaSourceConsumerFn.OffsetHolder restriction = fn.getInitialRestriction(null);
+    assertNull(restriction.offset);
+  }
+
+  // ---- OffsetRetainer tests -----------------------------------------------
+
+  /** Minimal in-memory retainer used only in tests. */
+  @SuppressWarnings("unused")
+  private static class InMemoryOffsetRetainer implements OffsetRetainer {
+    private final @Nullable Map<String, Object> loadResult;
+    private @Nullable Map<String, Object> lastSaved;
+
+    InMemoryOffsetRetainer(@Nullable Map<String, Object> loadResult) {
+      this.loadResult = loadResult;
+    }
+
+    @Override
+    public @Nullable Map<String, Object> loadOffset() {
+      return loadResult;
+    }
+
+    @Override
+    public void saveOffset(Map<String, Object> offset) {
+      lastSaved = new HashMap<>(offset);
+    }
+  }
+
+  @Test
+  public void testWithOffsetRetainerStoresRetainer() {
+    InMemoryOffsetRetainer retainer = new InMemoryOffsetRetainer(null);
+    DebeziumIO.Read<String> read =
+        DebeziumIO.<String>read()
+            .withConnectorConfiguration(MYSQL_CONNECTOR_CONFIGURATION)
+            .withOffsetRetainer(retainer);
+    assertNotNull(read.getOffsetRetainer());
+  }
+
+  @Test
+  public void testWithNullOffsetRetainerThrows() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            DebeziumIO.<String>read()
+                .withConnectorConfiguration(MYSQL_CONNECTOR_CONFIGURATION)
+                .withOffsetRetainer(null));
+  }
+
+  @Test
+  public void testGetInitialRestrictionUsesRetainerOffset() throws Exception {
+    Map<String, Object> savedOffset = ImmutableMap.of("lsn", 28160840L);
+    DebeziumIO.Read<String> spec =
+        DebeziumIO.<String>read()
+            .withConnectorConfiguration(MYSQL_CONNECTOR_CONFIGURATION)
+            .withOffsetRetainer(new InMemoryOffsetRetainer(savedOffset));
+    KafkaSourceConsumerFn<String> fn = new KafkaSourceConsumerFn<>(MySqlConnector.class, spec);
+    KafkaSourceConsumerFn.OffsetHolder restriction = fn.getInitialRestriction(null);
+    assertEquals(savedOffset, restriction.offset);
+  }
+
+  @Test
+  public void testRetainerTakesPriorityOverWithStartOffset() throws Exception {
+    Map<String, Object> retainerOffset = ImmutableMap.of("lsn", 99L);
+    Map<String, Object> explicitOffset = ImmutableMap.of("lsn", 1L);
+    DebeziumIO.Read<String> spec =
+        DebeziumIO.<String>read()
+            .withConnectorConfiguration(MYSQL_CONNECTOR_CONFIGURATION)
+            .withStartOffset(explicitOffset)
+            .withOffsetRetainer(new InMemoryOffsetRetainer(retainerOffset));
+    KafkaSourceConsumerFn<String> fn = new KafkaSourceConsumerFn<>(MySqlConnector.class, spec);
+    KafkaSourceConsumerFn.OffsetHolder restriction = fn.getInitialRestriction(null);
+    assertEquals(retainerOffset, restriction.offset);
+  }
+
+  @Test
+  public void testRetainerFallsBackToWithStartOffsetWhenLoadReturnsNull() throws Exception {
+    Map<String, Object> explicitOffset = ImmutableMap.of("lsn", 1L);
+    DebeziumIO.Read<String> spec =
+        DebeziumIO.<String>read()
+            .withConnectorConfiguration(MYSQL_CONNECTOR_CONFIGURATION)
+            .withStartOffset(explicitOffset)
+            // Retainer has no saved offset yet (returns null).
+            .withOffsetRetainer(new InMemoryOffsetRetainer(null));
+    KafkaSourceConsumerFn<String> fn = new KafkaSourceConsumerFn<>(MySqlConnector.class, spec);
+    KafkaSourceConsumerFn.OffsetHolder restriction = fn.getInitialRestriction(null);
+    assertEquals(explicitOffset, restriction.offset);
+  }
+
+  @Test
+  public void testReadAsJsonWithFullMetadata() throws Exception {
+    SourceRecord record =
+        SourceRecordJsonTest.buildEnvelopeRecord(SourceRecordJsonTest.postgresSource(), "u");
+    SourceRecordMapper<String> fn =
+        DebeziumIO.readAsJson().withFullMetadata(true).resolveFormatFunction();
+    assertEquals(new SourceRecordJson(record, true).toJson(), fn.mapSourceRecord(record));
+  }
+
+  @Test
+  public void testReadAsJsonWithoutFullMetadata() {
+    DebeziumIO.Read<String> read = DebeziumIO.readAsJson();
+    assertSame(read.getFormatFunction(), read.resolveFormatFunction());
+  }
+
+  @Test
+  public void testFullMetadataWithCustomFormatFunctionThrows() {
+    DebeziumIO.Read<String> read =
+        DebeziumIO.<String>read()
+            .withFormatFunction(sourceRecord -> sourceRecord.toString())
+            .withFullMetadata(true);
+    assertThrows(IllegalArgumentException.class, read::resolveFormatFunction);
+  }
+
+  @Test
+  public void testBuildExternalWithFullMetadata() throws Exception {
+    DebeziumTransformRegistrar.ReadBuilder.Configuration config =
+        new DebeziumTransformRegistrar.ReadBuilder.Configuration();
+    config.setUsername("user");
+    config.setPassword("pass");
+    config.setHost("localhost");
+    config.setPort("3306");
+    config.setConnectorClass("MySQL");
+    config.setFullMetadata(true);
+    DebeziumIO.Read<String> read =
+        (DebeziumIO.Read<String>)
+            new DebeziumTransformRegistrar.ReadBuilder().buildExternal(config);
+    SourceRecord record =
+        SourceRecordJsonTest.buildEnvelopeRecord(SourceRecordJsonTest.postgresSource(), "u");
+    assertEquals(
+        new SourceRecordJson(record, true).toJson(),
+        read.resolveFormatFunction().mapSourceRecord(record));
+  }
+
+  @Test
+  public void testBuildExternalThrowsOnMalformedStartOffsetEntry() {
+    DebeziumTransformRegistrar.ReadBuilder.Configuration config =
+        new DebeziumTransformRegistrar.ReadBuilder.Configuration();
+    config.setUsername("user");
+    config.setPassword("pass");
+    config.setHost("localhost");
+    config.setPort("3306");
+    config.setConnectorClass("MySQL");
+    config.setStartOffset(Arrays.asList("lsn=100", "no-equals-sign"));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new DebeziumTransformRegistrar.ReadBuilder().buildExternal(config));
   }
 }

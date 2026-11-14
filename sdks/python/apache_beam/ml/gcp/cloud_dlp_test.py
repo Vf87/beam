@@ -33,6 +33,8 @@ try:
 except ImportError:
   dlp_v2 = None
 else:
+  from google.cloud.dlp_v2.types import dlp
+
   from apache_beam.ml.gcp.cloud_dlp import InspectForDetails
   from apache_beam.ml.gcp.cloud_dlp import MaskDetectedDetails
   from apache_beam.ml.gcp.cloud_dlp import _DeidentifyFn
@@ -56,6 +58,9 @@ class TestDeidentifyFn(unittest.TestCase):
   def test_deidentify_called(self):
     class ClientMock(object):
       def deidentify_content(self, *args, **kwargs):
+        # Check that we can marshal a valid request.
+        dlp.DeidentifyContentRequest(kwargs['request'])
+
         called = Metrics.counter('test_deidentify_text', 'called')
         called.inc()
         operation = mock.Mock()
@@ -64,27 +69,33 @@ class TestDeidentifyFn(unittest.TestCase):
         operation.item = item
         return operation
 
-      def project_path(self, *args):
+      def common_project_path(self, *args):
         return 'test'
 
     with mock.patch('google.cloud.dlp_v2.DlpServiceClient', ClientMock):
-      p = TestPipeline()
-      deidentify_config = {
-          "info_type_transformations": {
-              "transformations": [{
-                  "primitive_transformation": {
-                      "character_mask_config": {
-                          "masking_character": '#'
+      # TODO(https://github.com/apache/beam/issues/34549): This test relies on
+      # metrics filtering which doesn't work on Prism yet because Prism renames
+      # steps (e.g. "Do" becomes "ref_AppliedPTransform_Do_7").
+      # https://github.com/apache/beam/blob/5f9cd73b7c9a2f37f83971ace3a399d633201dd1/sdks/python/apache_beam/runners/portability/fn_api_runner/fn_runner.py#L1590
+      p = TestPipeline('FnApiRunner')
+      config = {
+          "deidentify_config": {
+              "info_type_transformations": {
+                  "transformations": [{
+                      "primitive_transformation": {
+                          "character_mask_config": {
+                              "masking_character": '#'
+                          }
                       }
-                  }
-              }]
+                  }]
+              }
           }
       }
       # pylint: disable=expression-not-assigned
       (
           p
           | beam.Create(['mary.sue@example.com', 'john.doe@example.com'])
-          | beam.ParDo(_DeidentifyFn(config=deidentify_config)))
+          | beam.ParDo(_DeidentifyFn(config=config)))
       result = p.run()
       result.wait_until_finish()
     called = result.metrics().query()['counters'][0]
@@ -101,10 +112,13 @@ class TestInspectText(unittest.TestCase):
 
 
 @unittest.skipIf(dlp_v2 is None, 'GCP dependencies are not installed')
-class TestDeidentifyFn(unittest.TestCase):
+class TestInspectFn(unittest.TestCase):
   def test_inspect_called(self):
     class ClientMock(object):
       def inspect_content(self, *args, **kwargs):
+        # Check that we can marshal a valid request.
+        dlp.InspectContentRequest(kwargs['request'])
+
         called = Metrics.counter('test_inspect_text', 'called')
         called.inc()
         operation = mock.Mock()
@@ -112,17 +126,21 @@ class TestDeidentifyFn(unittest.TestCase):
         operation.result.findings = [None]
         return operation
 
-      def project_path(self, *args):
+      def common_project_path(self, *args):
         return 'test'
 
     with mock.patch('google.cloud.dlp_v2.DlpServiceClient', ClientMock):
-      p = TestPipeline()
-      inspect_config = {"info_types": [{"name": "EMAIL_ADDRESS"}]}
+      # TODO(https://github.com/apache/beam/issues/34549): This test relies on
+      # metrics filtering which doesn't work on Prism yet because Prism renames
+      # steps (e.g. "Do" becomes "ref_AppliedPTransform_Do_7").
+      # https://github.com/apache/beam/blob/5f9cd73b7c9a2f37f83971ace3a399d633201dd1/sdks/python/apache_beam/runners/portability/fn_api_runner/fn_runner.py#L1590
+      p = TestPipeline('FnApiRunner')
+      config = {"inspect_config": {"info_types": [{"name": "EMAIL_ADDRESS"}]}}
       # pylint: disable=expression-not-assigned
       (
           p
           | beam.Create(['mary.sue@example.com', 'john.doe@example.com'])
-          | beam.ParDo(_InspectFn(config=inspect_config)))
+          | beam.ParDo(_InspectFn(config=config)))
       result = p.run()
       result.wait_until_finish()
       called = result.metrics().query()['counters'][0]

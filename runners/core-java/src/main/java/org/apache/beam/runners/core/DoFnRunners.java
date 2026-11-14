@@ -29,24 +29,19 @@ import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.DoFnSchemaInformation;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignatures;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.WindowedValueMultiReceiver;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowedValue;
 import org.apache.beam.sdk.values.WindowingStrategy;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Static utility methods that provide {@link DoFnRunner} implementations. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class DoFnRunners {
-  /** Information about how to create output receivers and output to them. */
-  public interface OutputManager {
-    /** Outputs a single element to the receiver indicated by the given {@link TupleTag}. */
-    <T> void output(TupleTag<T> tag, WindowedValue<T> output);
-  }
-
   /**
    * Returns an implementation of {@link DoFnRunner} that for a {@link DoFn}.
    *
@@ -58,7 +53,7 @@ public class DoFnRunners {
       PipelineOptions options,
       DoFn<InputT, OutputT> fn,
       SideInputReader sideInputReader,
-      OutputManager outputManager,
+      WindowedValueMultiReceiver outputManager,
       TupleTag<OutputT> mainOutputTag,
       List<TupleTag<?>> additionalOutputTags,
       StepContext stepContext,
@@ -90,9 +85,9 @@ public class DoFnRunners {
   public static <K, InputT, OutputT, W extends BoundedWindow>
       DoFnRunner<KeyedWorkItem<K, InputT>, KV<K, OutputT>> lateDataDroppingRunner(
           DoFnRunner<KeyedWorkItem<K, InputT>, KV<K, OutputT>> wrappedRunner,
-          TimerInternals timerInternals,
+          StepContext stepContext,
           WindowingStrategy<?, W> windowingStrategy) {
-    return new LateDataDroppingDoFnRunner<>(wrappedRunner, windowingStrategy, timerInternals);
+    return new LateDataDroppingDoFnRunner<>(wrappedRunner, windowingStrategy, stepContext);
   }
 
   /**
@@ -112,7 +107,6 @@ public class DoFnRunners {
           WindowingStrategy<?, ?> windowingStrategy,
           CleanupTimer<InputT> cleanupTimer,
           StateCleaner<W> stateCleaner) {
-
     return defaultStatefulDoFnRunner(
         fn,
         inputCoder,
@@ -144,7 +138,6 @@ public class DoFnRunners {
           CleanupTimer<InputT> cleanupTimer,
           StateCleaner<W> stateCleaner,
           boolean requiresTimeSortedInputSupported) {
-
     boolean doFnRequiresTimeSortedInput =
         DoFnSignatures.signatureForDoFn(doFnRunner.getFn())
             .processElement()
@@ -170,7 +163,7 @@ public class DoFnRunners {
           PipelineOptions options,
           Collection<PCollectionView<?>> views,
           ReadyCheckingSideInputReader sideInputReader,
-          OutputManager outputManager,
+          WindowedValueMultiReceiver outputManager,
           TupleTag<OutputT> mainOutputTag,
           List<TupleTag<?>> additionalOutputTags,
           StepContext stepContext,

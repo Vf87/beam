@@ -17,7 +17,7 @@
  */
 package org.apache.beam.runners.direct;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
@@ -40,11 +40,17 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Level;
+import java.util.logging.LogManager;
 import org.apache.beam.runners.direct.DirectRunner.DirectPipelineResult;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
@@ -71,6 +77,7 @@ import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Flatten;
+import org.apache.beam.sdk.transforms.Impulse;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -91,8 +98,8 @@ import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.hamcrest.Matchers;
 import org.joda.time.Duration;
@@ -107,7 +114,7 @@ import org.junit.runners.JUnit4;
 /** Tests for basic {@link DirectRunner} functionality. */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class DirectRunnerTest implements Serializable {
   @Rule public transient ExpectedException thrown = ExpectedException.none();
@@ -334,6 +341,36 @@ public class DirectRunnerTest implements Serializable {
     assertEquals(null, result.waitUntilFinish(Duration.millis(1L)));
     // Ensure multiple calls complete
     assertEquals(null, result.waitUntilFinish(Duration.millis(1L)));
+  }
+
+  @Test
+  public void testNoBlockOnRunState() {
+
+    ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+    final Future handler =
+        executor.submit(
+            () -> {
+              PipelineOptions options =
+                  PipelineOptionsFactory.fromArgs("--blockOnRun=false").create();
+              Pipeline pipeline = Pipeline.create(options);
+              pipeline.apply(GenerateSequence.from(0).to(100));
+
+              PipelineResult result = pipeline.run();
+              while (true) {
+                if (result.getState() == State.DONE) {
+                  return result;
+                }
+                Thread.sleep(100);
+              }
+            });
+    try {
+      handler.get(10, TimeUnit.SECONDS);
+    } catch (ExecutionException | InterruptedException | TimeoutException e) {
+      // timeout means it never reaches DONE state
+      throw new RuntimeException(e);
+    } finally {
+      executor.shutdownNow();
+    }
   }
 
   private static final AtomicLong TEARDOWN_CALL = new AtomicLong(-1);
@@ -710,6 +747,50 @@ public class DirectRunnerTest implements Serializable {
     void setIgnoredField(String value);
   }
 
+  @Test
+  public void testLogLevel() {
+    PipelineOptions options =
+        PipelineOptionsFactory.fromArgs(
+                new String[] {
+                  "--runner=DirectRunner",
+                  "--defaultSdkHarnessLogLevel=ERROR",
+                  "--sdkHarnessLogLevelOverrides={\"org.apache.beam.runners.direct.DirectRunnerTest\":\"INFO\"}"
+                })
+            .create();
+    Pipeline pipeline = Pipeline.create(options);
+
+    LogManager logManager = LogManager.getLogManager();
+    // use full name to avoid conflicts with org.slf4j.Logger
+    java.util.logging.Logger rootLogger = logManager.getLogger("");
+    Level originalLevel = rootLogger.getLevel();
+
+    try {
+      pipeline
+          .apply(Impulse.create())
+          .apply(
+              ParDo.of(
+                  new DoFn<byte[], byte[]>() {
+                    @ProcessElement
+                    public void process(@Element byte[] element, OutputReceiver<byte[]> o) {
+                      LogManager logManager = LogManager.getLogManager();
+                      java.util.logging.Logger rootLogger = logManager.getLogger("");
+                      // check loglevel here. Whether actual logs are rendered depends on slf4j impl
+                      // and upstream configs.
+                      assertEquals(Level.SEVERE, rootLogger.getLevel());
+                      assertEquals(
+                          Level.INFO,
+                          java.util.logging.Logger.getLogger(
+                                  "org.apache.beam.runners.direct.DirectRunnerTest")
+                              .getLevel());
+                    }
+                  }));
+      pipeline.run();
+    } finally {
+      // resume original log level
+      rootLogger.setLevel(originalLevel);
+    }
+  }
+
   private static class LongNoDecodeCoder extends AtomicCoder<Long> {
     @Override
     public void encode(Long value, OutputStream outStream) throws IOException {}
@@ -763,11 +844,13 @@ public class DirectRunnerTest implements Serializable {
     }
   }
 
+  @SuppressWarnings(
+      "NullableOptional") // null value used to indicates no elements put to the queue yet
   private static class StaticQueue<T> implements Serializable {
 
     static class StaticQueueSource<T> extends UnboundedSource<T, StaticQueueSource.Checkpoint<T>> {
 
-      static class Checkpoint<T> implements CheckpointMark, Serializable {
+      static class Checkpoint<T> implements UnboundedSource.CheckpointMark, Serializable {
 
         final T read;
 
@@ -889,8 +972,7 @@ public class DirectRunnerTest implements Serializable {
       return this;
     }
 
-    @Nullable
-    Optional<T> take() throws InterruptedException {
+    @Nullable Optional<T> take() throws InterruptedException {
       return queue.take();
     }
 

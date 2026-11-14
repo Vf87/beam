@@ -200,11 +200,10 @@ interface RpcQos {
      * provided {@code instant}.
      *
      * @param instant The intended start time of the next rpc
-     * @param <T> The type which will be sent in the request
      * @param <ElementT> The {@link Element} type which the returned buffer will contain
      * @return a new {@link FlushBuffer} which queued messages can be staged to before final flush
      */
-    <T, ElementT extends Element<T>> FlushBuffer<ElementT> newFlushBuffer(Instant instant);
+    <ElementT extends Element<?>> FlushBuffer<ElementT> newFlushBuffer(Instant instant);
 
     /** Record the start time of sending the rpc. */
     void recordRequestStart(Instant start, int numWrites);
@@ -226,15 +225,15 @@ interface RpcQos {
        */
       boolean offer(ElementT newElement);
 
-      /** @return the number of elements that are currently buffered in this instance */
+      /** Returns the number of elements that are currently buffered in this instance. */
       int getBufferedElementsCount();
 
-      /** @return the number of bytes that are currently buffered in this instance */
+      /** Returns the number of bytes that are currently buffered in this instance. */
       long getBufferedElementsBytes();
 
       /**
-       * @return true if the buffer contains enough {@link Element}s such that a flush should
-       *     happen, false otherwise
+       * Returns true if the buffer contains enough {@link Element}s such that a flush should
+       * happen, false otherwise.
        */
       boolean isFull();
 
@@ -254,7 +253,7 @@ interface RpcQos {
      */
     interface Element<T> {
 
-      /** @return the value that will be sent in a request */
+      /** Returns the value that will be sent in a request. */
       T getValue();
 
       /**

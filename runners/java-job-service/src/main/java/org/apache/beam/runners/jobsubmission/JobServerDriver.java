@@ -19,13 +19,14 @@ package org.apache.beam.runners.jobsubmission;
 
 import java.io.IOException;
 import java.nio.file.Paths;
+import javax.annotation.Nullable;
 import org.apache.beam.model.pipeline.v1.Endpoints;
 import org.apache.beam.runners.fnexecution.artifact.ArtifactStagingService;
 import org.apache.beam.sdk.expansion.service.ExpansionServer;
 import org.apache.beam.sdk.expansion.service.ExpansionService;
 import org.apache.beam.sdk.fn.server.GrpcFnServer;
 import org.apache.beam.sdk.fn.server.ServerFactory;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.kohsuke.args4j.Option;
 import org.kohsuke.args4j.spi.ExplicitBooleanOptionHandler;
 import org.slf4j.Logger;
@@ -33,7 +34,7 @@ import org.slf4j.LoggerFactory;
 
 /** Shared code for starting and serving an {@link InMemoryJobService}. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public abstract class JobServerDriver implements Runnable {
 
@@ -87,7 +88,9 @@ public abstract class JobServerDriver implements Runnable {
 
     @Option(
         name = "--expansion-port",
-        usage = "The Java expansion service port. 0 to use a dynamic port. (Default: 8097)")
+        usage =
+            "The Java expansion service port. 0 to use a dynamic port, "
+                + "negative number to disable expansion service creation (Default: 8097)")
     private int expansionPort = 8097;
 
     @Option(
@@ -116,12 +119,24 @@ public abstract class JobServerDriver implements Runnable {
       return port;
     }
 
+    public void setPort(int port) {
+      this.port = port;
+    }
+
     public int getArtifactPort() {
       return artifactPort;
     }
 
+    public void setArtifactPort(int artifactPort) {
+      this.artifactPort = artifactPort;
+    }
+
     public int getExpansionPort() {
       return expansionPort;
+    }
+
+    public void setExpansionPort(int expansionPort) {
+      this.expansionPort = expansionPort;
     }
 
     public String getArtifactStagingPath() {
@@ -257,7 +272,13 @@ public abstract class JobServerDriver implements Runnable {
     return server;
   }
 
+  @Nullable
   private ExpansionServer createExpansionService() throws IOException {
+    // Skip creating expansion server if configured port is negative.
+    if (configuration.expansionPort < 0) {
+      return null;
+    }
+
     ExpansionServer expansionServer =
         ExpansionServer.create(
             new ExpansionService(), configuration.host, configuration.expansionPort);

@@ -70,6 +70,8 @@ tableElement: columnName fieldType [ NOT NULL ]
     *   `bigtable`
     *   `pubsub`
     *   `kafka`
+    *   `parquet`
+    *   `avro`
     *   `text`
 *   `location`: The I/O specific location of the underlying table, specified as
     a [String
@@ -113,7 +115,7 @@ When reading using `EXPORT` method the following pipeline options should be set:
 When reading using `DIRECT_READ` method, an optimizer will attempt to perform
 project and predicate push-down, potentially reducing the time requited to read the data from BigQuery.
 
-More information about the BigQuery Storage API can be found [here](https://beam.apache.org/documentation/io/built-in/google-bigquery/#storage-api).
+More information about the BigQuery Storage API can be found [here](/documentation/io/built-in/google-bigquery/#storage-api).
 
 ### Write Mode
 
@@ -428,58 +430,6 @@ TYPE pubsub
 LOCATION 'projects/testing-integration/topics/user-location'
 ```
 
-## Pub/Sub Lite
-
-### Syntax
-```
-CREATE EXTERNAL TABLE [ IF NOT EXISTS ] tableName(
-    publish_timestamp DATETIME,
-    event_timestamp DATETIME,
-    message_key BYTES,
-    attributes ARRAY<ROW<key VARCHAR, `values` ARRAY<VARBINARY>>>,
-    payload [BYTES, ROW<tableElement [, tableElement ]*>]
-)
-TYPE pubsublite
-// For writing
-LOCATION 'projects/[PROJECT]/locations/[GCP-LOCATION]/topics/[TOPIC]'
-// For reading
-LOCATION 'projects/[PROJECT]/locations/[GCP-LOCATION]/subscriptions/[SUBSCRIPTION]'
-```
-
-*   `LOCATION`:
-    *   `PROJECT`: ID of the Google Cloud Project
-    *   `TOPIC`: The Pub/Sub Lite topic name.
-    *   `SUBSCRIPTION`: The Pub/Sub Lite subscription name.
-    *   `GCP-LOCATION`: The location for this Pub/Sub Lite topic os subscription.
-*   `TBLPROPERTIES`:
-    *   `timestampAttributeKey`: Optional. The key which contains the event
-        timestamp associated with the Pub/Sub message. If not specified, the
-        message publish timestamp is used as an event timestamp for
-        windowing/watermarking.
-    *   `deadLetterQueue`: Optional, supports
-        [Generic DLQ Handling](#generic-dlq-handling)
-    *   `format`: Optional. Allows you to specify the payload format.
-
-### Read Mode
-
-PubsubLiteIO supports reading from subscriptions.
-
-### Write Mode
-
-PubsubLiteIO supports writing to topics.
-
-### Supported Payload
-
-*   Pub/Sub Lite supports [Generic Payload Handling](#generic-payload-handling).
-
-### Example
-
-```
-CREATE EXTERNAL TABLE locations (event_timestamp TIMESTAMP, attributes ARRAY<ROW<key VARCHAR, `values` ARRAY<VARBINARY>>>, payload ROW<id INTEGER, location VARCHAR>)
-TYPE pubsublite
-LOCATION 'projects/testing-integration/locations/us-central1-a/topics/user-location'
-```
-
 ## Kafka
 
 KafkaIO is experimental in Beam SQL.
@@ -528,6 +478,11 @@ The presence of the `headers` field triggers nested mode usage.
         {`csv`, `avro`, `json`, `proto`, `thrift`}. Defaults to `csv` in
         flattened mode or `json` in nested mode. `csv` does not support nested
         mode.
+    * `watermark.type`: Optional. Defines the strategy for watermark generation. Defaults to `ProcessingTime`. Supported values are:
+      * `ProcessingTime`: Generates watermarks based on the time messages are processed within the Beam pipeline.
+      * `LogAppendTime`: Generates watermarks based on the timestamps that Kafka brokers append to messages.
+      * `CreateTime`: Generates watermarks based on the timestamps embedded in Kafka records by producers.
+    * `watermark.delay`: Optional. Used only with the `CreateTime` watermark type. It specifies the allowed lateness for records as a human-readable string (e.g., `"10 seconds"`, `"2 minutes"`).
 
 ### Read Mode
 
@@ -548,6 +503,157 @@ Write Mode supports writing to a topic.
 ### Schema
 
 For CSV only simple types are supported.
+
+## Parquet
+
+### Syntax
+
+```
+CREATE EXTERNAL TABLE [ IF NOT EXISTS ] tableName (tableElement [, tableElement ]*)
+TYPE parquet
+LOCATION '/path/to/files/'
+```
+
+* `LOCATION`: The path to the Parquet file(s). The interpretation of the path is based on a convention:
+    * **Directory:** A path ending with a forward slash (`/`) is treated as a directory. Beam reads all files within that directory. Example: `'gs://my-bucket/orders/'`.
+    * **Glob Pattern:** A path containing wildcard characters (`*`, `?`, `[]`) is treated as a glob pattern that the underlying file system expands. Example: `'gs://my-bucket/orders/date=2025-*-??/*.parquet'`.
+    * **Single File:** A full path that does not end in a slash and contains no wildcards is treated as a path to a single file. Example: `'gs://my-bucket/orders/data.parquet'`.
+
+### Read Mode
+
+Supports reading from Parquet files specified by the `LOCATION`. Predicate and projection push-down are supported to improve performance.
+
+### Write Mode
+
+Supports writing to a set of sharded Parquet files in a specified directory.
+
+### Schema
+
+The specified schema is used to read and write Parquet files. The schema is converted to an Avro schema internally for `ParquetIO`. Beam SQL types map to Avro types as follows:
+
+<table>
+  <tr>
+   <td><b>Beam SQL Type</b>
+   </td>
+   <td><b>Avro Type</b>
+   </td>
+  </tr>
+  <tr>
+   <td>TINYINT, SMALLINT, INTEGER, BIGINT &nbsp;
+   </td>
+   <td>long
+   </td>
+  </tr>
+  <tr>
+   <td>FLOAT, DOUBLE
+   </td>
+   <td>double
+   </td>
+  </tr>
+  <tr>
+   <td>DECIMAL
+   </td>
+   <td>bytes (with logical type)
+   </td>
+  </tr>
+  <tr>
+   <td>BOOLEAN
+   </td>
+   <td>boolean
+   </td>
+  </tr>
+  <tr>
+   <td>DATE, TIME, TIMESTAMP
+   </td>
+   <td>long (with logical type)
+   </td>
+  </tr>
+  <tr>
+   <td>CHAR, VARCHAR
+   </td>
+   <td>string
+   </td>
+  </tr>
+  <tr>
+   <td>ARRAY
+   </td>
+   <td>array
+   </td>
+  </tr>
+  <tr>
+   <td>ROW
+   </td>
+   <td>record
+   </td>
+  </tr>
+</table>
+
+### Example
+
+```
+CREATE EXTERNAL TABLE daily_orders (
+  order_id BIGINT,
+  product_name VARCHAR,
+  purchase_ts TIMESTAMP
+)
+TYPE parquet
+LOCATION '/gcs/my-data/orders/2025-07-14/*';
+```
+
+---
+
+## Avro
+
+### Syntax
+
+```
+CREATE EXTERNAL TABLE [ IF NOT EXISTS ] tableName (tableElement [, tableElement ]*)
+TYPE avro
+LOCATION '/path/to/file.avro'
+[TBLPROPERTIES '{"writeWindowSizeSeconds": 60}']
+```
+
+*   `LOCATION`: For Read Mode, the Avro file or file pattern to read, for example
+    `'gs://my-bucket/people/*.avro'`. For Write Mode, the file to write, or the
+    filename prefix when writing windowed files (see Write Mode).
+*   `TBLPROPERTIES`:
+    *   `writeWindowSizeSeconds`: Optional. The size, in seconds, of the fixed
+        windows used for windowed writes. Setting it turns on windowed writes
+        for bounded input too. For unbounded input, the default is 60 seconds.
+
+### Read Mode
+
+Read Mode reads every Avro file that matches `LOCATION`.
+
+### Write Mode
+
+For bounded input, Write Mode writes a single file at `LOCATION`.
+
+For unbounded input, or when `writeWindowSizeSeconds` is set, Write Mode
+assigns rows to fixed windows and writes one file per window, using `LOCATION`
+as the filename prefix. To read those files back, use a pattern such as
+`'/path/to/prefix*'` as the `LOCATION` of the table you read from.
+
+### Schema
+
+Beam SQL converts the table schema to an Avro record schema. It writes files
+with that schema, and reads files with it as the reader schema, so files
+written by other tools can be read as long as their schema is compatible
+under Avro's schema resolution rules, which match fields by name.
+
+### Example
+
+```
+CREATE EXTERNAL TABLE person_info (
+  name VARCHAR,
+  age BIGINT,
+  country VARCHAR
+)
+TYPE avro
+LOCATION '/tmp/person-info.avro';
+```
+
+---
 
 ## MongoDB
 
@@ -603,9 +709,10 @@ TBLPROPERTIES '{"format: "Excel"}'
 *   `LOCATION`: The path to the file for Read Mode. The prefix for Write Mode.
 *   `TBLPROPERTIES`:
     *   `format`: Optional. Allows you to specify the CSV Format, which controls
-        the field delimeter, quote character, record separator, and other properties.
+        the field delimiter, quote character, record separator, and other properties.
         See the following table:
 
+<div class="table-container-wrapper">
 {{< table class="table-bordered" >}}
 | Value for `format` | Field delimiter | Quote | Record separator | Ignore empty lines? | Allow missing column names? |
 |--------------------|-----------------|-------|------------------|---------------------|-----------------------------|
@@ -615,6 +722,7 @@ TBLPROPERTIES '{"format: "Excel"}'
 | `tdf`              | `\t`            | `"`   | `\r\n`           | Yes                 | No                          |
 | `mysql`            | `\t`            | none  | `\n`             | No                  | No                          |
 {{< /table >}}
+</div>
 
 ### Read Mode
 
@@ -640,6 +748,151 @@ Only simple types are supported.
 CREATE EXTERNAL TABLE orders (id INTEGER, price INTEGER)
 TYPE text
 LOCATION '/home/admin/orders'
+```
+
+## DataGen
+
+The **DataGen** connector allows for creating tables based on in-memory data generation. This is useful for developing and testing queries locally without requiring access to external systems. The DataGen connector is built-in; no additional dependencies are required.It is available for Beam 2.67.0+
+
+Tables can be either **bounded** (generating a fixed number of rows) or **unbounded** (generating a stream of rows at a specific rate). The connector provides fine-grained controls to customize the generated values for each field, including support for event-time windowing.
+
+### Syntax
+
+```sql
+CREATE EXTERNAL TABLE [ IF NOT EXISTS ] tableName (tableElement [, tableElement ]*)
+TYPE datagen
+[TBLPROPERTIES tblProperties]
+```
+
+### Table Properties (`TBLPROPERTIES`)
+
+The `TBLPROPERTIES` JSON object is used to configure the generator's behavior.
+
+
+#### General Options
+
+| Key | Required | Description |
+| :--- | :--- | :--- |
+| `number-of-rows` | **Yes** (or `rows-per-second`) | Creates a **bounded** table with a specified total number of rows. |
+| `rows-per-second`| **Yes** (or `number-of-rows`) | Creates an **unbounded** table that generates rows at the specified rate. |
+
+#### Event-Time and Watermark Configuration
+
+| Key                               | Required                                         | Description                                                                                                                                                   |
+|:----------------------------------|:-------------------------------------------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `timestamp.behavior`              | No                                               | Specifies the time handling. Can be `'processing-time'` (default) or `'event-time'`.                                                                          |
+| `event-time.timestamp-column`     | **Yes**, if `timestamp.behavior` is `event-time` | The name of the column that will be used to drive the event-time watermark for the stream.                                                                    |
+| `event-time.max-out-of-orderness` | No                                               | When using `event-time`, this sets the maximum out-of-orderness in **milliseconds** for generated timestamps (e.g., `'5000'` for 5 seconds). Defaults to `0`. |
+
+#### Field-Specific Options
+
+You can customize the generation logic for each column by providing properties with the prefix **`fields.<columnName>.*`**.
+
+| Key | Description                                                                                                                                                                            |
+| :--- |:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `kind` | The type of generator to use. Can be `'random'` (default) or `'sequence'`.                                                                                                             |
+| `null-rate`| A `double` between `0.0` and `1.0` indicating the probability that the generated value for this field will be `NULL`. Defaults to `0.0`.                                               |
+| `length` | For `VARCHAR` fields with `kind: 'random'`, specifies the exact length of the generated string. Defaults to `10`.                                                                      |
+| `min`, `max` | For numeric types (`BIGINT`, `INTEGER`, `DOUBLE`, etc.) with `kind: 'random'`, specifies the inclusive minimum and maximum values for the generated number.                            |
+| `start`, `end`| For `BIGINT` fields with `kind: 'sequence'`, specifies the inclusive start and end values of the sequence. The sequence will cycle from `start` to `end`.                              |
+| `max-past` | For `TIMESTAMP` fields, specifies the maximum duration in **milliseconds** in the past to generate a random timestamp from. If not set, timestamps are generated for the current time. |
+
+### Data Type Behavior
+
+* **`TINYINT | SMALLINT | INTEGER | BIGINT`**: Generates random numbers within a range or from a sequence.
+* **`FLOAT | DOUBLE | DECIMAL`**: Generates random floating-point numbers within a specified range.
+* **`CHAR | VARCHAR`**: Generates random alphanumeric strings.
+* **`BOOLEAN`**: Generates random `true` or `false` values.
+* **`TIMESTAMP`**: Generates timestamps based on the current system time unless `max-past` is configured.
+* **`ROW`**: Generates nested data by recursively applying these rules to its sub-fields.
+* **`BINARY`, `VARBINARY`, `DATE`, `TIME`,`TIMESTAMP_WITH_LOCAL_TIME_ZONE`,`ARRAY` and `MAP` types are not currently supported.**
+
+### Examples
+
+#### Bounded Table with Random Data
+
+This example creates a bounded table with 1000 rows. The `id` will be a random `BIGINT` and `product_name` will be a random `VARCHAR` of length 10.
+
+```sql
+CREATE EXTERNAL TABLE Orders (
+    id BIGINT,
+    product_name VARCHAR
+)
+TYPE datagen
+TBLPROPERTIES '{
+  "number-of-rows": "1000"
+}'
+```
+
+#### Unbounded Streaming Table
+
+This example creates a streaming table that generates 10 rows per second.
+
+```sql
+CREATE EXTERNAL TABLE user_impressions (
+    user_id VARCHAR,
+    impression_time TIMESTAMP
+)
+TYPE datagen
+TBLPROPERTIES '{
+  "rows-per-second": "10"
+}'
+```
+
+-----
+
+#### Bounded Table with Custom Field Generation
+
+This is a comprehensive example demonstrating various field-level customizations. The table is bounded because a sequence generator is used.
+
+```sql
+CREATE EXTERNAL TABLE user_clicks (
+    event_id BIGINT,
+    user_id VARCHAR,
+    click_timestamp TIMESTAMP,
+    score DOUBLE
+)
+TYPE 'datagen'
+TBLPROPERTIES '{
+  "number-of-rows": "1000000",
+  "fields.event_id.kind": "sequence",
+  "fields.event_id.start": "1",
+  "fields.event_id.end": "1000000",
+  "fields.user_id.kind": "random",
+  "fields.user_id.length": "12",
+  "fields.click_timestamp.kind": "random",
+  "fields.click_timestamp.max-past": "60000",
+  "fields.score.kind": "random",
+  "fields.score.min": "0.0",
+  "fields.score.max": "1.0",
+  "fields.score.null-rate": "0.1"
+}'
+```
+
+#### Unbounded Streaming Table with Event Time
+
+This example creates a streaming table that generates 10 rows per second. It uses the `click_timestamp` column to drive the event-time watermark, allowing for up to 5 seconds of out-of-order data. The `ingestion_timestamp` column is populated separately with the processing time.
+
+```sql
+CREATE EXTERNAL TABLE user_clicks (
+    event_id BIGINT,
+    user_id VARCHAR,
+    click_timestamp TIMESTAMP,
+    ingestion_timestamp TIMESTAMP
+)
+TYPE 'datagen'
+TBLPROPERTIES '{
+  "rows-per-second": "10",
+  "timestamp.behavior": "event-time",
+  "event-time.timestamp-column": "click_timestamp",
+  "event-time.max-out-of-orderness": "5000",
+  "fields.event_id.kind": "sequence",
+  "fields.event_id.start": "1",
+  "fields.event_id.end": "1000000",
+  "fields.user_id.kind": "random",
+  "fields.user_id.length": "12",
+  "fields.ingestion_timestamp.kind": "timestamp"
+}'
 ```
 
 ## Generic Payload Handling

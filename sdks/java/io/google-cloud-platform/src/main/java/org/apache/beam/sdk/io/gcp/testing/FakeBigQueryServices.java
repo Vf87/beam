@@ -25,6 +25,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import org.apache.beam.sdk.annotations.Internal;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.ListCoder;
@@ -34,16 +35,16 @@ import org.apache.beam.sdk.io.gcp.bigquery.BigQueryOptions;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryServices;
 import org.apache.beam.sdk.io.gcp.bigquery.TableRowJsonCoder;
 import org.apache.beam.sdk.values.KV;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 
 /** A fake implementation of BigQuery's query service.. */
 @Internal
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class FakeBigQueryServices implements BigQueryServices {
   private JobService jobService;
-  private DatasetService datasetService;
+  private FakeDatasetService datasetService;
   private StorageClient storageClient;
 
   public FakeBigQueryServices withJobService(JobService jobService) {
@@ -68,6 +69,11 @@ public class FakeBigQueryServices implements BigQueryServices {
 
   @Override
   public DatasetService getDatasetService(BigQueryOptions bqOptions) {
+    return datasetService;
+  }
+
+  @Override
+  public WriteStreamService getWriteStreamService(BigQueryOptions bqOptions) {
     return datasetService;
   }
 
@@ -123,7 +129,7 @@ public class FakeBigQueryServices implements BigQueryServices {
 
   // Longs tend to get converted back to Integers due to JSON serialization. Convert them back.
   public static TableRow convertNumbers(TableRow tableRow) {
-    for (TableRow.Entry<?, Object> entry : tableRow.entrySet()) {
+    for (Map.Entry<?, Object> entry : tableRow.entrySet()) {
       if (entry.getValue() instanceof Integer) {
         entry.setValue(Long.valueOf((Integer) entry.getValue()));
       }

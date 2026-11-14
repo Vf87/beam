@@ -19,6 +19,11 @@ package org.apache.beam.sdk.schemas;
 
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import org.apache.beam.sdk.values.TypeDescriptor;
+import org.checkerframework.checker.initialization.qual.NotOnlyInitialized;
+import org.checkerframework.checker.initialization.qual.UnknownInitialization;
+import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
+import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -31,30 +36,38 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * significant for larger schemas) on each lookup. This wrapper caches the value returned by the
  * inner factory, so the schema comparison only need happen on the first lookup.
  */
-@SuppressWarnings({
-  "nullness", // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-  "rawtypes"
-})
-public class CachingFactory<CreatedT> implements Factory<CreatedT> {
-  private transient @Nullable ConcurrentHashMap<Class, CreatedT> cache = null;
+public class CachingFactory<CreatedT extends @NonNull Object> implements Factory<CreatedT> {
+  private transient volatile @MonotonicNonNull ConcurrentHashMap<TypeDescriptor<?>, CreatedT>
+      cache = null;
 
-  private final Factory<CreatedT> innerFactory;
+  private final @NotOnlyInitialized Factory<CreatedT> innerFactory;
 
-  public CachingFactory(Factory<CreatedT> innerFactory) {
+  public CachingFactory(@UnknownInitialization Factory<CreatedT> innerFactory) {
     this.innerFactory = innerFactory;
   }
 
-  @Override
-  public CreatedT create(Class<?> clazz, Schema schema) {
-    if (cache == null) {
-      cache = new ConcurrentHashMap<>();
+  private ConcurrentHashMap<TypeDescriptor<?>, CreatedT> getCache() {
+    ConcurrentHashMap<TypeDescriptor<?>, CreatedT> value = cache;
+    if (value == null) {
+      synchronized (this) {
+        value = cache;
+        if (value == null) {
+          cache = value = new ConcurrentHashMap<>();
+        }
+      }
     }
-    CreatedT cached = cache.get(clazz);
+    return value;
+  }
+
+  @Override
+  public CreatedT create(TypeDescriptor<?> typeDescriptor, Schema schema) {
+    ConcurrentHashMap<TypeDescriptor<?>, CreatedT> cache = getCache();
+    CreatedT cached = cache.get(typeDescriptor);
     if (cached != null) {
       return cached;
     }
-    cached = innerFactory.create(clazz, schema);
-    cache.put(clazz, cached);
+    cached = innerFactory.create(typeDescriptor, schema);
+    cache.put(typeDescriptor, cached);
     return cached;
   }
 
@@ -63,7 +76,7 @@ public class CachingFactory<CreatedT> implements Factory<CreatedT> {
     if (this == o) {
       return true;
     }
-    if (o == null || getClass() != o.getClass()) {
+    if (!(o instanceof CachingFactory)) {
       return false;
     }
     CachingFactory<?> that = (CachingFactory<?>) o;

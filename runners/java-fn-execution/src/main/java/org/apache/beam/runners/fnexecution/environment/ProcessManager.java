@@ -17,7 +17,8 @@
  */
 package org.apache.beam.runners.fnexecution.environment;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.commons.lang3.SystemUtils.IS_OS_WINDOWS;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.File;
@@ -28,15 +29,15 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import javax.annotation.concurrent.ThreadSafe;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** A simple process manager which forks processes and kills them if necessary. */
 @ThreadSafe
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class ProcessManager {
   private static final Logger LOG = LoggerFactory.getLogger(ProcessManager.class);
@@ -113,7 +114,7 @@ public class ProcessManager {
     } else {
       // Pipe stdout and stderr to /dev/null to avoid blocking the process due to filled PIPE
       // buffer
-      if (System.getProperty("os.name", "").startsWith("Windows")) {
+      if (IS_OS_WINDOWS) {
         outputFile = new File("nul");
       } else {
         outputFile = new File("/dev/null");
@@ -169,7 +170,7 @@ public class ProcessManager {
   public void stopProcess(String id) {
     checkNotNull(id, "Process id must not be null");
     try {
-      Process process = checkNotNull(processes.remove(id), "Process for id does not exist: " + id);
+      Process process = checkNotNull(processes.remove(id), "Process for id does not exist: %s", id);
       stopProcess(id, process);
     } finally {
       synchronized (ALL_PROCESS_MANAGERS) {
@@ -202,6 +203,14 @@ public class ProcessManager {
           process.destroyForcibly();
         }
       }
+    }
+    // Reap the child process to prevent zombie accumulation. destroy()/destroyForcibly() send
+    // signals but do not call waitpid(), so the terminated process remains in the kernel process
+    // table as a zombie until waitFor() collects its exit status.
+    try {
+      process.waitFor();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
     }
   }
 
@@ -249,8 +258,16 @@ public class ProcessManager {
     processes.forEach((id, process) -> process.destroy());
   }
 
-  /** Kill all remaining processes forcibly, i.e. upon JVM shutdown */
+  /** Kill all remaining processes forcibly and reap them, i.e. upon JVM shutdown. */
   private void killAllProcesses() {
-    processes.forEach((id, process) -> process.destroyForcibly());
+    processes.forEach(
+        (id, process) -> {
+          process.destroyForcibly();
+          try {
+            process.waitFor();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        });
   }
 }

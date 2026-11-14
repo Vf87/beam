@@ -18,10 +18,14 @@
 package org.apache.beam.sdk.io.gcp.bigquery;
 
 import java.io.Serializable;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryServices.DatasetService;
 import org.apache.beam.sdk.io.gcp.bigquery.StorageApiDynamicDestinations.MessageConverter;
+import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.util.ShardedKey;
 import org.apache.beam.sdk.values.KV;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.Cache;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.CacheBuilder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.Cache;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheBuilder;
+import org.checkerframework.checker.nullness.qual.NonNull;
 
 /**
  * A cache for {@link MessageConverter} objects.
@@ -30,7 +34,8 @@ import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.CacheBuild
  * name. However since this object is stored in DoFns and many DoFns share the same
  * MessageConverters, we also store a static cache keyed by operation name.
  */
-class TwoLevelMessageConverterCache<DestinationT, ElementT> implements Serializable {
+class TwoLevelMessageConverterCache<DestinationT extends @NonNull Object, ElementT>
+    implements Serializable {
   final String operationName;
 
   TwoLevelMessageConverterCache(String operationName) {
@@ -39,7 +44,6 @@ class TwoLevelMessageConverterCache<DestinationT, ElementT> implements Serializa
 
   // Cache MessageConverters since creating them can be expensive. Cache is keyed by transform name
   // and the destination.
-  @SuppressWarnings({"nullness"})
   private static final Cache<KV<String, ?>, MessageConverter<?>> CACHED_MESSAGE_CONVERTERS =
       CacheBuilder.newBuilder().expireAfterAccess(java.time.Duration.ofMinutes(15)).build();
 
@@ -48,13 +52,19 @@ class TwoLevelMessageConverterCache<DestinationT, ElementT> implements Serializa
   // on every element. Since there will be multiple DoFn instances (and they may periodically be
   // recreated), we
   // still need the static cache to allow reuse.
-  @SuppressWarnings({"nullness"})
   private final Cache<DestinationT, MessageConverter<ElementT>> localMessageConverters =
       CacheBuilder.newBuilder().expireAfterAccess(java.time.Duration.ofMinutes(15)).build();
 
+  static void clear() {
+    CACHED_MESSAGE_CONVERTERS.invalidateAll();
+  }
+
   public MessageConverter<ElementT> get(
       DestinationT destination,
-      StorageApiDynamicDestinations<ElementT, DestinationT> dynamicDestinations)
+      StorageApiDynamicDestinations<ElementT, DestinationT> dynamicDestinations,
+      PipelineOptions pipelineOptions,
+      DatasetService datasetService,
+      BigQueryServices.WriteStreamService writeStreamService)
       throws Exception {
     // Lookup first in the local cache, and fall back to the static cache if necessary.
     return localMessageConverters.get(
@@ -63,6 +73,12 @@ class TwoLevelMessageConverterCache<DestinationT, ElementT> implements Serializa
             (MessageConverter<ElementT>)
                 CACHED_MESSAGE_CONVERTERS.get(
                     KV.of(operationName, destination),
-                    () -> dynamicDestinations.getMessageConverter(destination)));
+                    () ->
+                        dynamicDestinations.getMessageConverter(
+                            destination, pipelineOptions, datasetService, writeStreamService)));
+  }
+
+  public KV<String, ShardedKey<?>> getAppendClientKey(ShardedKey<DestinationT> shardedKey) {
+    return KV.of(operationName, shardedKey);
   }
 }

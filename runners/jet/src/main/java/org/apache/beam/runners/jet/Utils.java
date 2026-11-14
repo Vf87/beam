@@ -34,8 +34,6 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import javax.annotation.Nonnull;
-import org.apache.beam.runners.core.construction.ParDoTranslation;
-import org.apache.beam.runners.core.construction.TransformInputs;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
@@ -47,21 +45,24 @@ import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignatures;
 import org.apache.beam.sdk.util.CoderUtils;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.construction.ParDoTranslation;
+import org.apache.beam.sdk.util.construction.TransformInputs;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.PValue;
 import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Various common methods used by the Jet based runner. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
   "nullness",
   "keyfor"
-}) // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+}) // TODO(https://github.com/apache/beam/issues/20497)
 public class Utils {
 
   public static String getTupleTagId(PValue value) {
@@ -109,17 +110,15 @@ public class Utils {
     return Iterables.getOnlyElement(getOutputs(appliedTransform).entrySet());
   }
 
-  static <T> boolean isBounded(AppliedPTransform<?, ?, ?> appliedTransform) {
-    return ((PCollection) getOutput(appliedTransform).getValue())
-        .isBounded()
-        .equals(PCollection.IsBounded.BOUNDED);
+  static boolean isBounded(AppliedPTransform<?, ?, ?> appliedTransform) {
+    return getOutput(appliedTransform).getValue().isBounded().equals(PCollection.IsBounded.BOUNDED);
   }
 
   static boolean isKeyedValueCoder(Coder coder) {
     if (coder instanceof KvCoder) {
       return true;
-    } else if (coder instanceof WindowedValue.WindowedValueCoder) {
-      return ((WindowedValue.WindowedValueCoder) coder).getValueCoder() instanceof KvCoder;
+    } else if (coder instanceof WindowedValues.WindowedValueCoder) {
+      return ((WindowedValues.WindowedValueCoder) coder).getValueCoder() instanceof KvCoder;
     }
     return false;
   }
@@ -132,8 +131,9 @@ public class Utils {
     }
   }
 
-  static <T> WindowedValue.WindowedValueCoder<T> getWindowedValueCoder(PCollection<T> pCollection) {
-    return WindowedValue.FullWindowedValueCoder.of(
+  static <T> WindowedValues.WindowedValueCoder<T> getWindowedValueCoder(
+      PCollection<T> pCollection) {
+    return WindowedValues.FullWindowedValueCoder.of(
         pCollection.getCoder(), pCollection.getWindowingStrategy().getWindowFn().windowCoder());
   }
 
@@ -147,7 +147,7 @@ public class Utils {
   static Map<TupleTag<?>, Coder<?>> getOutputValueCoders(
       AppliedPTransform<?, ?, ?> appliedTransform) {
     return appliedTransform.getOutputs().entrySet().stream()
-        .filter(e -> e.getValue() instanceof PCollection)
+        .filter(e -> e.getValue() != null)
         .collect(Collectors.toMap(Map.Entry::getKey, e -> ((PCollection) e.getValue()).getCoder()));
   }
 
@@ -260,9 +260,9 @@ public class Utils {
     }
   }
 
-  public static WindowedValue.FullWindowedValueCoder deriveIterableValueCoder(
-      WindowedValue.FullWindowedValueCoder elementCoder) {
-    return WindowedValue.FullWindowedValueCoder.of(
+  public static WindowedValues.FullWindowedValueCoder deriveIterableValueCoder(
+      WindowedValues.FullWindowedValueCoder elementCoder) {
+    return WindowedValues.FullWindowedValueCoder.of(
         ListCoder.of(elementCoder.getValueCoder()), elementCoder.getWindowCoder());
   }
 
@@ -280,7 +280,7 @@ public class Utils {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof ByteArrayKey)) {
         return false;
       }
       ByteArrayKey that = (ByteArrayKey) o;

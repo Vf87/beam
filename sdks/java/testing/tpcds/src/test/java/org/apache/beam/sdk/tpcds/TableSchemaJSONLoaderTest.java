@@ -17,10 +17,11 @@
  */
 package org.apache.beam.sdk.tpcds;
 
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.Assert.assertEquals;
 
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import org.junit.Test;
@@ -41,15 +42,15 @@ public class TableSchemaJSONLoaderTest {
             + "sr_reason_sk bigint,"
             + "sr_ticket_number bigint,"
             + "sr_return_quantity bigint,"
-            + "sr_return_amt double,"
-            + "sr_return_tax double,"
-            + "sr_return_amt_inc_tax double,"
-            + "sr_fee double,"
-            + "sr_return_ship_cost double,"
-            + "sr_refunded_cash double,"
-            + "sr_reversed_charge double,"
-            + "sr_store_credit double,"
-            + "sr_net_loss double";
+            + "sr_return_amt decimal,"
+            + "sr_return_tax decimal,"
+            + "sr_return_amt_inc_tax decimal,"
+            + "sr_fee decimal,"
+            + "sr_return_ship_cost decimal,"
+            + "sr_refunded_cash decimal,"
+            + "sr_reversed_charge decimal,"
+            + "sr_store_credit decimal,"
+            + "sr_net_loss decimal";
     assertEquals(expected, storeReturnsSchemaString);
   }
 
@@ -62,8 +63,8 @@ public class TableSchemaJSONLoaderTest {
             + "i_rec_start_date varchar,"
             + "i_rec_end_date varchar,"
             + "i_item_desc varchar,"
-            + "i_current_price double,"
-            + "i_wholesale_cost double,"
+            + "i_current_price decimal,"
+            + "i_wholesale_cost decimal,"
             + "i_brand_id bigint,"
             + "i_brand varchar,"
             + "i_class_id bigint,"
@@ -134,7 +135,7 @@ public class TableSchemaJSONLoaderTest {
             + "w_state varchar,"
             + "w_zip varchar,"
             + "w_country varchar,"
-            + "w_gmt_offset double";
+            + "w_gmt_offset decimal";
     assertEquals(expected, warehouseSchemaString);
   }
 
@@ -142,8 +143,10 @@ public class TableSchemaJSONLoaderTest {
   public void testGetAllTableNames() throws IOException {
     List<String> tableNames = TableSchemaJSONLoader.getAllTableNames();
     Collections.sort(tableNames);
-    List<String> expectedTableNames =
-        Arrays.asList(
+
+    assertThat(
+        tableNames,
+        containsInAnyOrder(
             "call_center",
             "catalog_page",
             "catalog_returns",
@@ -167,12 +170,6 @@ public class TableSchemaJSONLoaderTest {
             "web_page",
             "web_returns",
             "web_sales",
-            "web_site");
-
-    assertEquals(expectedTableNames.size(), tableNames.size());
-
-    for (int i = 0; i < tableNames.size(); i++) {
-      assertEquals(expectedTableNames.get(i), tableNames.get(i));
-    }
+            "web_site"));
   }
 }

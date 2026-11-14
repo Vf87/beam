@@ -19,16 +19,16 @@ package org.apache.beam.runners.jet;
 
 import com.hazelcast.jet.core.DAG;
 import java.util.function.Function;
-import org.apache.beam.runners.core.construction.PTransformTranslation;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.runners.AppliedPTransform;
 import org.apache.beam.sdk.runners.TransformHierarchy;
 import org.apache.beam.sdk.transforms.PTransform;
+import org.apache.beam.sdk.util.construction.PTransformTranslation;
 import org.apache.beam.sdk.values.PValue;
 
 /** Logic that specifies how to apply translations when traversing the nodes of a Beam pipeline. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 class JetGraphVisitor extends Pipeline.PipelineVisitor.Defaults {
 

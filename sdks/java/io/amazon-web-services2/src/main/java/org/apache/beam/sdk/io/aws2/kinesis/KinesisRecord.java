@@ -30,7 +30,7 @@ import software.amazon.kinesis.retrieval.kpl.ExtendedSequenceNumber;
 
 /** {@link KinesisClientRecord} enhanced with utility methods. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class KinesisRecord {
 
@@ -91,7 +91,7 @@ public class KinesisRecord {
     return new ExtendedSequenceNumber(getSequenceNumber(), getSubSequenceNumber());
   }
 
-  /** @return The unique identifier of the record based on its position in the stream. */
+  /** Returns the unique identifier of the record based on its position in the stream. */
   public byte[] getUniqueId() {
     return getExtendedSequenceNumber().toString().getBytes(StandardCharsets.UTF_8);
   }
@@ -131,17 +131,17 @@ public class KinesisRecord {
     return subSequenceNumber;
   }
 
-  /** @return The unique identifier of the record within its shard. */
+  /** Returns the unique identifier of the record within its shard. */
   public String getSequenceNumber() {
     return sequenceNumber;
   }
 
-  /** @return The approximate time that the record was inserted into the stream. */
+  /** Returns the approximate time that the record was inserted into the stream. */
   public Instant getApproximateArrivalTimestamp() {
     return approximateArrivalTimestamp;
   }
 
-  /** @return The data blob. */
+  /** Returns the data blob. */
   public ByteBuffer getData() {
     return data;
   }

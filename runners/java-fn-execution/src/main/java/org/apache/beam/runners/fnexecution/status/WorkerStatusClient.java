@@ -29,7 +29,7 @@ import org.apache.beam.model.fnexecution.v1.BeamFnApi.WorkerStatusResponse;
 import org.apache.beam.sdk.fn.IdGenerator;
 import org.apache.beam.sdk.fn.IdGenerators;
 import org.apache.beam.sdk.fn.stream.SynchronizedStreamObserver;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.StreamObserver;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -141,9 +141,9 @@ class WorkerStatusClient implements Closeable {
         future.complete(response);
       } else {
         LOG.warn(
-            String.format(
-                "Received response for status with unknown response id %s and status %s",
-                response.getId(), response.getStatusInfo()));
+            "Received response for status with unknown response id {} and status {}",
+            response.getId(),
+            response.getStatusInfo());
       }
     }
 

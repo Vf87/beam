@@ -17,11 +17,14 @@
  */
 package org.apache.beam.sdk.extensions.sql.meta;
 
-import com.alibaba.fastjson.JSONObject;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.auto.value.AutoValue;
 import java.io.Serializable;
+import java.util.List;
+import org.apache.beam.sdk.extensions.sql.TableUtils;
 import org.apache.beam.sdk.schemas.Schema;
 import org.checkerframework.checker.nullness.qual.Nullable;
+import org.checkerframework.dataflow.qual.Pure;
 
 /** Represents the metadata of a {@code BeamSqlTable}. */
 @AutoValue
@@ -33,16 +36,21 @@ public abstract class Table implements Serializable {
 
   public abstract Schema getSchema();
 
+  public abstract @Nullable List<String> getPartitionFields();
+
+  /** The columns of the table's primary key, or null if it has none. */
+  public abstract @Nullable List<String> getPrimaryKey();
+
   public abstract @Nullable String getComment();
 
-  public abstract @Nullable String getLocation();
+  public abstract @Pure @Nullable String getLocation();
 
-  public abstract JSONObject getProperties();
+  public abstract ObjectNode getProperties();
 
   public abstract Builder toBuilder();
 
   public static Builder builder() {
-    return new AutoValue_Table.Builder().properties(new JSONObject());
+    return new AutoValue_Table.Builder().properties(TableUtils.emptyProperties());
   }
 
   /** Builder class for {@link Table}. */
@@ -54,11 +62,15 @@ public abstract class Table implements Serializable {
 
     public abstract Builder schema(Schema getSchema);
 
+    public abstract Builder partitionFields(List<String> fields);
+
+    public abstract Builder primaryKey(@Nullable List<String> columns);
+
     public abstract Builder comment(String name);
 
     public abstract Builder location(String location);
 
-    public abstract Builder properties(JSONObject properties);
+    public abstract Builder properties(ObjectNode properties);
 
     public abstract Table build();
   }

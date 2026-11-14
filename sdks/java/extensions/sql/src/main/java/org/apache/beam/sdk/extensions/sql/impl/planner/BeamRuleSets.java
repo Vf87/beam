@@ -21,12 +21,12 @@ import java.util.Collection;
 import java.util.List;
 import org.apache.beam.sdk.annotations.Internal;
 import org.apache.beam.sdk.extensions.sql.impl.rel.BeamRelNode;
-import org.apache.beam.sdk.extensions.sql.impl.rule.BeamAggregateProjectMergeRule;
 import org.apache.beam.sdk.extensions.sql.impl.rule.BeamAggregationRule;
 import org.apache.beam.sdk.extensions.sql.impl.rule.BeamBasicAggregationRule;
 import org.apache.beam.sdk.extensions.sql.impl.rule.BeamCalcMergeRule;
 import org.apache.beam.sdk.extensions.sql.impl.rule.BeamCalcRule;
 import org.apache.beam.sdk.extensions.sql.impl.rule.BeamCoGBKJoinRule;
+import org.apache.beam.sdk.extensions.sql.impl.rule.BeamCrossJoinRule;
 import org.apache.beam.sdk.extensions.sql.impl.rule.BeamEnumerableConverterRule;
 import org.apache.beam.sdk.extensions.sql.impl.rule.BeamIOPushDownRule;
 import org.apache.beam.sdk.extensions.sql.impl.rule.BeamIntersectRule;
@@ -43,14 +43,13 @@ import org.apache.beam.sdk.extensions.sql.impl.rule.BeamUnionRule;
 import org.apache.beam.sdk.extensions.sql.impl.rule.BeamUnnestRule;
 import org.apache.beam.sdk.extensions.sql.impl.rule.BeamValuesRule;
 import org.apache.beam.sdk.extensions.sql.impl.rule.BeamWindowRule;
-import org.apache.beam.sdk.extensions.sql.impl.rule.LogicalCalcMergeRule;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelOptRule;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.RelNode;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.rules.CoreRules;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.rules.PruneEmptyRules;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.tools.RuleSet;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.tools.RuleSets;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptRule;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.rules.CoreRules;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.rules.PruneEmptyRules;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.tools.RuleSet;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.tools.RuleSets;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 
 /**
  * {@link RuleSet} used in {@code BeamQueryPlanner}. It translates a standard Calcite {@link
@@ -62,9 +61,8 @@ public class BeamRuleSets {
       ImmutableList.of(
           // Rules for window functions
           CoreRules.PROJECT_TO_LOGICAL_PROJECT_AND_WINDOW,
+          CoreRules.CALC_TO_WINDOW,
           // Rules so we only have to implement Calc
-          CoreRules.FILTER_CALC_MERGE,
-          CoreRules.PROJECT_CALC_MERGE,
           CoreRules.FILTER_TO_CALC,
           CoreRules.PROJECT_TO_CALC,
           BeamIOPushDownRule.INSTANCE,
@@ -72,11 +70,11 @@ public class BeamRuleSets {
           // CoreRules.CALC_REMOVE,
 
           // Rules to merge matching Calcs together.
-          LogicalCalcMergeRule.INSTANCE,
           BeamCalcMergeRule.INSTANCE,
 
           // push a filter into a join
           CoreRules.FILTER_INTO_JOIN,
+          CoreRules.FILTER_SUB_QUERY_TO_CORRELATE,
           // push filter into the children of a join
           CoreRules.JOIN_CONDITION_PUSH,
           // push filter through an aggregation
@@ -87,7 +85,7 @@ public class BeamRuleSets {
           CoreRules.PROJECT_SET_OP_TRANSPOSE,
 
           // aggregation and projection rules
-          BeamAggregateProjectMergeRule.INSTANCE,
+          // BeamAggregateProjectMergeRule.INSTANCE,
           // push a projection past a filter or vice versa
           CoreRules.PROJECT_FILTER_TRANSPOSE,
           CoreRules.FILTER_PROJECT_TRANSPOSE,
@@ -121,7 +119,7 @@ public class BeamRuleSets {
           // CoreRules.AGGREGATE_REDUCE_FUNCTIONS,
 
           // remove unnecessary sort rule
-          // https://issues.apache.org/jira/browse/BEAM-5073
+          // https://github.com/apache/beam/issues/19006
           // CoreRules.SORT_REMOVE,,
           BeamTableFunctionScanRule.INSTANCE,
           // prune empty results rules
@@ -148,6 +146,7 @@ public class BeamRuleSets {
           BeamUnnestRule.INSTANCE,
           BeamSideInputJoinRule.INSTANCE,
           BeamCoGBKJoinRule.INSTANCE,
+          BeamCrossJoinRule.INSTANCE,
           BeamSideInputLookupJoinRule.INSTANCE,
           BeamMatchRule.INSTANCE);
 

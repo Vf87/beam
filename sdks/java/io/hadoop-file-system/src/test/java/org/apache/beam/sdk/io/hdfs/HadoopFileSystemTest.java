@@ -24,6 +24,9 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 import java.io.FileNotFoundException;
 import java.io.InputStream;
@@ -37,20 +40,22 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import org.apache.beam.sdk.io.FileSystem;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.io.fs.CreateOptions.StandardCreateOptions;
 import org.apache.beam.sdk.io.fs.MatchResult;
 import org.apache.beam.sdk.io.fs.MatchResult.Metadata;
 import org.apache.beam.sdk.io.fs.MatchResult.Status;
+import org.apache.beam.sdk.metrics.Lineage;
 import org.apache.beam.sdk.testing.ExpectedLogs;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.util.MimeTypes;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.ByteStreams;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.ByteStreams;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
@@ -63,6 +68,7 @@ import org.junit.rules.ExpectedException;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
+import org.slf4j.helpers.MessageFormatter;
 
 /** Tests for {@link HadoopFileSystem}. */
 @RunWith(JUnit4.class)
@@ -405,9 +411,11 @@ public class HadoopFileSystemTest {
         ImmutableList.of(testPath("pathB/testFileA"), testPath("pathB/pathC/pathD/testFileB")));
 
     // ensure the directories were created and the files can be read
-    expectedLogs.verifyDebug(String.format(HadoopFileSystem.LOG_CREATE_DIRECTORY, "/pathB"));
     expectedLogs.verifyDebug(
-        String.format(HadoopFileSystem.LOG_CREATE_DIRECTORY, "/pathB/pathC/pathD"));
+        MessageFormatter.format(HadoopFileSystem.LOG_CREATE_DIRECTORY, "/pathB").getMessage());
+    expectedLogs.verifyDebug(
+        MessageFormatter.format(HadoopFileSystem.LOG_CREATE_DIRECTORY, "/pathB/pathC/pathD")
+            .getMessage());
     assertArrayEquals("testDataA".getBytes(StandardCharsets.UTF_8), read("pathB/testFileA", 0));
     assertArrayEquals(
         "testDataB".getBytes(StandardCharsets.UTF_8), read("pathB/pathC/pathD/testFileB", 0));
@@ -433,7 +441,8 @@ public class HadoopFileSystemTest {
         ImmutableList.of(testPath("testFileA")), ImmutableList.of(testPath("testFileB")));
 
     expectedLogs.verifyDebug(
-        String.format(HadoopFileSystem.LOG_DELETING_EXISTING_FILE, "/testFileB"));
+        MessageFormatter.format(HadoopFileSystem.LOG_DELETING_EXISTING_FILE, "/testFileB")
+            .getMessage());
     assertArrayEquals("testDataA".getBytes(StandardCharsets.UTF_8), read("testFileB", 0));
   }
 
@@ -475,6 +484,21 @@ public class HadoopFileSystemTest {
     PCollection<String> pc = p.apply(TextIO.read().from(testPath("testFile*").toString()));
     PAssert.that(pc).containsInAnyOrder("testDataA", "testDataB", "testDataC");
     p.run();
+  }
+
+  @Test
+  public void testReportLineage() {
+    verifyLineage(
+        "hdfs://namenode/path/to/file.txt", ImmutableList.of("namenode", "/path/to/file.txt"));
+    verifyLineage("hdfs://namenode/", ImmutableList.of("namenode"));
+    verifyLineage("hdfs://namenode", ImmutableList.of("namenode"));
+  }
+
+  private void verifyLineage(String uri, List<String> expected) {
+    HadoopResourceId resourceId = new HadoopResourceId(URI.create(uri));
+    Lineage mockLineage = mock(Lineage.class);
+    fileSystem.reportLineage(resourceId, mockLineage, FileSystem.LineageLevel.FILE);
+    verify(mockLineage, times(1)).add("hdfs", expected, "/");
   }
 
   private void create(String relativePath, byte[] contents) throws Exception {

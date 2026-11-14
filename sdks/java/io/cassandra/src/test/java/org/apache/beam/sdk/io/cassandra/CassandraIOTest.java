@@ -19,6 +19,9 @@ package org.apache.beam.sdk.io.cassandra;
 
 import static junit.framework.TestCase.assertTrue;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 
 import com.datastax.driver.core.Cluster;
@@ -61,6 +64,7 @@ import javax.management.remote.JMXConnectorFactory;
 import javax.management.remote.JMXServiceURL;
 import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.io.common.NetworkTestHelper;
+import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Count;
@@ -70,9 +74,9 @@ import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Objects;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.ListeningExecutorService;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.MoreExecutors;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Objects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ListeningExecutorService;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.MoreExecutors;
 import org.apache.cassandra.service.StorageServiceMBean;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.junit.AfterClass;
@@ -89,16 +93,16 @@ import org.slf4j.LoggerFactory;
 /** Tests of {@link CassandraIO}. */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class CassandraIOTest implements Serializable {
   private static final long NUM_ROWS = 22L;
   private static final String CASSANDRA_KEYSPACE = "beam_ks";
   private static final String CASSANDRA_HOST = "127.0.0.1";
   private static final String CASSANDRA_TABLE = "scientist";
+  private static final String CASSANDRA_TABLE_SIMPLEDATA = "simpledata";
   private static final Logger LOG = LoggerFactory.getLogger(CassandraIOTest.class);
   private static final String STORAGE_SERVICE_MBEAN = "org.apache.cassandra.db:type=StorageService";
-  private static final float ACCEPTABLE_EMPTY_SPLITS_PERCENTAGE = 0.5f;
   private static final int FLUSH_TIMEOUT = 30000;
   private static final int JMX_CONF_TIMEOUT = 1000;
   private static int jmxPort;
@@ -191,6 +195,10 @@ public class CassandraIOTest implements Serializable {
             "CREATE TABLE IF NOT EXISTS %s.%s(person_department text, person_id int, person_name text, PRIMARY KEY"
                 + "((person_department), person_id));",
             CASSANDRA_KEYSPACE, CASSANDRA_TABLE_WRITE));
+    session.execute(
+        String.format(
+            "CREATE TABLE IF NOT EXISTS %s.%s(id int, data text, PRIMARY KEY (id))",
+            CASSANDRA_KEYSPACE, CASSANDRA_TABLE_SIMPLEDATA));
 
     LOG.info("Insert records");
     String[][] scientists = {
@@ -222,6 +230,15 @@ public class CassandraIOTest implements Serializable {
               CASSANDRA_TABLE);
       session.execute(insertStr);
     }
+    for (int i = 0; i < 100; i++) {
+      String insertStr =
+          String.format(
+              "INSERT INTO %s.%s(id, data) VALUES(" + i + ",' data_" + i + "');",
+              CASSANDRA_KEYSPACE,
+              CASSANDRA_TABLE_SIMPLEDATA);
+      session.execute(insertStr);
+    }
+
     flushMemTablesAndRefreshSizeEstimates();
   }
 
@@ -272,6 +289,35 @@ public class CassandraIOTest implements Serializable {
     mBeanProxy.disableAutoCompaction(CASSANDRA_KEYSPACE, CASSANDRA_TABLE);
     jmxConnector.close();
     Thread.sleep(JMX_CONF_TIMEOUT);
+  }
+
+  /*
+   Since we have enough data we will be able to detect if any get put in the ring range that wraps around
+  */
+  @Test
+  public void testWrapAroundRingRanges() throws Exception {
+    PCollection<SimpleData> simpledataPCollection =
+        pipeline.apply(
+            CassandraIO.<SimpleData>read()
+                .withHosts(Collections.singletonList(CASSANDRA_HOST))
+                .withPort(cassandraPort)
+                .withKeyspace(CASSANDRA_KEYSPACE)
+                .withTable(CASSANDRA_TABLE_SIMPLEDATA)
+                .withMinNumberOfSplits(50)
+                .withCoder(SerializableCoder.of(SimpleData.class))
+                .withEntity(SimpleData.class));
+    PCollection<Long> countPCollection = simpledataPCollection.apply("counting", Count.globally());
+    PAssert.that(countPCollection)
+        .satisfies(
+            i -> {
+              long total = 0;
+              for (Long aLong : i) {
+                total = total + aLong;
+              }
+              assertEquals(100, total);
+              return null;
+            });
+    pipeline.run();
   }
 
   @Test
@@ -405,9 +451,9 @@ public class CassandraIOTest implements Serializable {
                 map.put(element.getKey(), element.getValue());
               }
               assertEquals(3, map.size()); // do we have all three departments
-              assertEquals(map.get("phys"), 10L, 0L);
-              assertEquals(map.get("math"), 4L, 0L);
-              assertEquals(map.get("logic"), 2L, 0L);
+              assertEquals(10L, (long) map.get("phys"));
+              assertEquals(4L, (long) map.get("math"));
+              assertEquals(2L, (long) map.get("logic"));
               return null;
             });
 
@@ -416,6 +462,11 @@ public class CassandraIOTest implements Serializable {
 
   @Test
   public void testReadWithQuery() throws Exception {
+    String query =
+        String.format(
+            "select person_id, writetime(person_name) from %s.%s where person_id=10 AND person_department='logic'",
+            CASSANDRA_KEYSPACE, CASSANDRA_TABLE);
+
     PCollection<Scientist> output =
         pipeline.apply(
             CassandraIO.<Scientist>read()
@@ -424,12 +475,132 @@ public class CassandraIOTest implements Serializable {
                 .withKeyspace(CASSANDRA_KEYSPACE)
                 .withTable(CASSANDRA_TABLE)
                 .withMinNumberOfSplits(20)
-                .withQuery(
-                    "select person_id, writetime(person_name) from beam_ks.scientist where person_id=10 AND person_department='logic'")
+                .withQuery(query)
                 .withCoder(SerializableCoder.of(Scientist.class))
                 .withEntity(Scientist.class));
 
     PAssert.thatSingleton(output.apply("Count", Count.globally())).isEqualTo(1L);
+    PAssert.that(output)
+        .satisfies(
+            input -> {
+              for (Scientist sci : input) {
+                assertNull(sci.name);
+                assertTrue(sci.nameTs != null && sci.nameTs > 0);
+              }
+              return null;
+            });
+
+    pipeline.run();
+  }
+
+  /**
+   * Create a mock value provider class that tests how the query gets expanded in
+   * CassandraIO.ReadFn.
+   */
+  static class MockQueryProvider implements ValueProvider<String> {
+    private volatile String query;
+
+    MockQueryProvider(String query) {
+      this.query = query;
+    }
+
+    @Override
+    public String get() {
+      return query;
+    }
+
+    @Override
+    public boolean isAccessible() {
+      return !query.isEmpty();
+    }
+  }
+
+  @Test
+  public void testReadWithQueryProvider() throws Exception {
+    String query =
+        String.format(
+            "select person_id, writetime(person_name) from %s.%s",
+            CASSANDRA_KEYSPACE, CASSANDRA_TABLE);
+
+    PCollection<Scientist> output =
+        pipeline.apply(
+            CassandraIO.<Scientist>read()
+                .withHosts(Collections.singletonList(CASSANDRA_HOST))
+                .withPort(cassandraPort)
+                .withKeyspace(CASSANDRA_KEYSPACE)
+                .withTable(CASSANDRA_TABLE)
+                .withMinNumberOfSplits(20)
+                .withQuery(new MockQueryProvider(query))
+                .withCoder(SerializableCoder.of(Scientist.class))
+                .withEntity(Scientist.class));
+
+    PAssert.thatSingleton(output.apply("Count", Count.globally())).isEqualTo(NUM_ROWS);
+    PAssert.that(output)
+        .satisfies(
+            input -> {
+              for (Scientist sci : input) {
+                assertNull(sci.name);
+                assertTrue(sci.nameTs != null && sci.nameTs > 0);
+              }
+              return null;
+            });
+
+    pipeline.run();
+  }
+
+  @Test
+  public void testReadWithQueryProviderWithWhereQuery() throws Exception {
+    String query =
+        String.format(
+            "select person_id, writetime(person_name) from %s.%s where person_id=10 AND person_department='logic'",
+            CASSANDRA_KEYSPACE, CASSANDRA_TABLE);
+
+    PCollection<Scientist> output =
+        pipeline.apply(
+            CassandraIO.<Scientist>read()
+                .withHosts(Collections.singletonList(CASSANDRA_HOST))
+                .withPort(cassandraPort)
+                .withKeyspace(CASSANDRA_KEYSPACE)
+                .withTable(CASSANDRA_TABLE)
+                .withMinNumberOfSplits(20)
+                .withQuery(new MockQueryProvider(query))
+                .withCoder(SerializableCoder.of(Scientist.class))
+                .withEntity(Scientist.class));
+
+    PAssert.thatSingleton(output.apply("Count", Count.globally())).isEqualTo(1L);
+    PAssert.that(output)
+        .satisfies(
+            input -> {
+              for (Scientist sci : input) {
+                assertNull(sci.name);
+                assertTrue(sci.nameTs != null && sci.nameTs > 0);
+              }
+              return null;
+            });
+
+    pipeline.run();
+  }
+
+  @Test
+  public void testReadWithUnfilteredQuery() throws Exception {
+    String query =
+        String.format(
+            "select person_id, writetime(person_name) from %s.%s",
+            CASSANDRA_KEYSPACE, CASSANDRA_TABLE);
+
+    PCollection<Scientist> output =
+        pipeline.apply(
+            CassandraIO.<Scientist>read()
+                .withHosts(Collections.singletonList(CASSANDRA_HOST))
+                .withPort(cassandraPort)
+                .withKeyspace(CASSANDRA_KEYSPACE)
+                .withTable(CASSANDRA_TABLE)
+                .withMinNumberOfSplits(20)
+                .withQuery(query)
+                .withCoder(SerializableCoder.of(Scientist.class))
+                .withEntity(Scientist.class));
+
+    PAssert.thatSingleton(output.apply("Count", Count.globally())).isEqualTo(NUM_ROWS);
     PAssert.that(output)
         .satisfies(
             input -> {
@@ -488,7 +659,7 @@ public class CassandraIOTest implements Serializable {
     private final ListeningExecutorService executor =
         MoreExecutors.listeningDecorator(Executors.newFixedThreadPool(10));
 
-    final Callable<Void> asyncTask = () -> (null);
+    final Callable<Void> asyncTask = () -> null;
 
     @Override
     public Iterator map(ResultSet resultSet) {
@@ -640,7 +811,7 @@ public class CassandraIOTest implements Serializable {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof Scientist)) {
         return false;
       }
       Scientist scientist = (Scientist) o;
@@ -655,13 +826,427 @@ public class CassandraIOTest implements Serializable {
     }
   }
 
+  @Table(name = CASSANDRA_TABLE_SIMPLEDATA, keyspace = CASSANDRA_KEYSPACE)
+  static class SimpleData implements Serializable {
+    @PartitionKey int id;
+
+    @Column String data;
+
+    @Override
+    public String toString() {
+      return id + ", " + data;
+    }
+  }
+
   private static RingRange fromEncodedKey(Metadata metadata, ByteBuffer... bb) {
     BigInteger bi = BigInteger.valueOf((long) metadata.newToken(bb).getValue());
     return RingRange.of(bi, bi.add(BigInteger.valueOf(1L)));
   }
 
   private static final String CASSANDRA_TABLE_WRITE = "scientist_write";
+
   /** Simple Cassandra entity used in write tests. */
   @Table(name = CASSANDRA_TABLE_WRITE, keyspace = CASSANDRA_KEYSPACE)
   static class ScientistWrite extends Scientist {}
+
+  /** Test the quoteIdentifier utility method with various inputs. */
+  @Test
+  public void testQuoteIdentifier() {
+    // Test normal identifiers
+    assertEquals("\"normal_column\"", ReadFn.quoteIdentifier("normal_column"));
+    assertEquals("\"myTable\"", ReadFn.quoteIdentifier("myTable"));
+    assertEquals("\"column123\"", ReadFn.quoteIdentifier("column123"));
+
+    // Test reserved keywords
+    assertEquals("\"true\"", ReadFn.quoteIdentifier("true"));
+    assertEquals("\"key\"", ReadFn.quoteIdentifier("key"));
+    assertEquals("\"select\"", ReadFn.quoteIdentifier("select"));
+    assertEquals("\"from\"", ReadFn.quoteIdentifier("from"));
+    assertEquals("\"where\"", ReadFn.quoteIdentifier("where"));
+    assertEquals("\"table\"", ReadFn.quoteIdentifier("table"));
+    assertEquals("\"keyspace\"", ReadFn.quoteIdentifier("keyspace"));
+
+    // Test identifiers with existing quotes (should be escaped by doubling)
+    assertEquals("\"column\"\"with\"\"quotes\"", ReadFn.quoteIdentifier("column\"with\"quotes"));
+    assertEquals("\"single\"\"quote\"", ReadFn.quoteIdentifier("single\"quote"));
+    assertEquals("\"\"\"starts_with_quote\"", ReadFn.quoteIdentifier("\"starts_with_quote"));
+    assertEquals("\"ends_with_quote\"\"\"", ReadFn.quoteIdentifier("ends_with_quote\""));
+
+    // Test edge cases
+    assertEquals("\"\"", ReadFn.quoteIdentifier(""));
+    assertNull(ReadFn.quoteIdentifier(null));
+
+    // Test special characters that might be in identifiers
+    assertEquals("\"column with spaces\"", ReadFn.quoteIdentifier("column with spaces"));
+    assertEquals("\"column-with-dashes\"", ReadFn.quoteIdentifier("column-with-dashes"));
+    assertEquals("\"column.with.dots\"", ReadFn.quoteIdentifier("column.with.dots"));
+  }
+
+  /**
+   * Test reading from a table with reserved keyword column names. This integration test verifies
+   * the complete fix works end-to-end.
+   */
+  @Test
+  public void testReadWithReservedKeywordColumns() throws Exception {
+    String reservedTableName = "reserved_keywords_table";
+
+    // Create table with reserved keyword column names
+    String createTableQuery =
+        String.format(
+            "CREATE TABLE IF NOT EXISTS %s.%s("
+                + "\"true\" text, \"key\" text, \"select\" text, normal_column text, "
+                + "PRIMARY KEY (\"true\", \"key\")"
+                + ");",
+            CASSANDRA_KEYSPACE, reservedTableName);
+
+    session.execute(createTableQuery);
+
+    // Insert test data with reserved keyword column names
+    String insertQuery1 =
+        String.format(
+            "INSERT INTO %s.%s(\"true\", \"key\", \"select\", normal_column) "
+                + "VALUES ('true_value_1', 'key_value_1', 'select_value_1', 'normal_value_1');",
+            CASSANDRA_KEYSPACE, reservedTableName);
+    session.execute(insertQuery1);
+
+    String insertQuery2 =
+        String.format(
+            "INSERT INTO %s.%s(\"true\", \"key\", \"select\", normal_column) "
+                + "VALUES ('true_value_2', 'key_value_2', 'select_value_2', 'normal_value_2');",
+            CASSANDRA_KEYSPACE, reservedTableName);
+    session.execute(insertQuery2);
+
+    // Flush to ensure data is written
+    flushMemTablesAndRefreshSizeEstimates();
+
+    // Test reading with CassandraIO - this should work with the fix
+    PCollection<ReservedKeywordEntity> output =
+        pipeline.apply(
+            CassandraIO.<ReservedKeywordEntity>read()
+                .withHosts(Collections.singletonList(CASSANDRA_HOST))
+                .withPort(cassandraPort)
+                .withKeyspace(CASSANDRA_KEYSPACE)
+                .withTable(reservedTableName)
+                .withCoder(SerializableCoder.of(ReservedKeywordEntity.class))
+                .withEntity(ReservedKeywordEntity.class));
+
+    // Verify we can read the data successfully
+    PAssert.thatSingleton(output.apply("Count", Count.globally())).isEqualTo(2L);
+
+    PAssert.that(output)
+        .satisfies(
+            input -> {
+              List<ReservedKeywordEntity> entities = new ArrayList<>();
+              input.forEach(entities::add);
+
+              assertEquals(2, entities.size());
+
+              // Check that data was read correctly
+              boolean foundFirst = false, foundSecond = false;
+              for (ReservedKeywordEntity entity : entities) {
+                if ("true_value_1".equals(entity.trueColumn)) {
+                  assertEquals("key_value_1", entity.keyColumn);
+                  assertEquals("select_value_1", entity.selectColumn);
+                  assertEquals("normal_value_1", entity.normalColumn);
+                  foundFirst = true;
+                } else if ("true_value_2".equals(entity.trueColumn)) {
+                  assertEquals("key_value_2", entity.keyColumn);
+                  assertEquals("select_value_2", entity.selectColumn);
+                  assertEquals("normal_value_2", entity.normalColumn);
+                  foundSecond = true;
+                }
+              }
+
+              assertTrue("Should find first test record", foundFirst);
+              assertTrue("Should find second test record", foundSecond);
+              return null;
+            });
+
+    pipeline.run();
+
+    // Clean up test table
+    session.execute(
+        String.format("DROP TABLE IF EXISTS %s.%s", CASSANDRA_KEYSPACE, reservedTableName));
+  }
+
+  /** Test reading with a custom query that includes reserved keyword column names. */
+  @Test
+  public void testReadWithCustomQueryAndReservedKeywords() throws Exception {
+    String customQueryTableName = "custom_query_test";
+
+    // Create table with reserved keyword column names
+    String createTableQuery =
+        String.format(
+            "CREATE TABLE IF NOT EXISTS %s.%s("
+                + "\"from\" text, \"where\" text, data text, "
+                + "PRIMARY KEY (\"from\", \"where\")"
+                + ");",
+            CASSANDRA_KEYSPACE, customQueryTableName);
+
+    session.execute(createTableQuery);
+
+    // Insert test data
+    String insertQuery =
+        String.format(
+            "INSERT INTO %s.%s(\"from\", \"where\", data) "
+                + "VALUES ('source1', 'condition1', 'test_data');",
+            CASSANDRA_KEYSPACE, customQueryTableName);
+    session.execute(insertQuery);
+
+    // Test with custom query that has WHERE clause - this tests the query building logic
+    String customQuery =
+        String.format(
+            "SELECT \"from\", \"where\", data FROM %s.%s WHERE \"from\"='source1'",
+            CASSANDRA_KEYSPACE, customQueryTableName);
+
+    PCollection<CustomQueryEntity> output =
+        pipeline.apply(
+            CassandraIO.<CustomQueryEntity>read()
+                .withHosts(Collections.singletonList(CASSANDRA_HOST))
+                .withPort(cassandraPort)
+                .withKeyspace(CASSANDRA_KEYSPACE)
+                .withTable(customQueryTableName)
+                .withQuery(customQuery)
+                .withCoder(SerializableCoder.of(CustomQueryEntity.class))
+                .withEntity(CustomQueryEntity.class));
+
+    PAssert.thatSingleton(output.apply("Count", Count.globally())).isEqualTo(1L);
+
+    PAssert.that(output)
+        .satisfies(
+            input -> {
+              CustomQueryEntity entity = input.iterator().next();
+              assertEquals("source1", entity.fromColumn);
+              assertEquals("condition1", entity.whereColumn);
+              assertEquals("test_data", entity.data);
+              return null;
+            });
+
+    pipeline.run();
+
+    // Clean up
+    session.execute(
+        String.format("DROP TABLE IF EXISTS %s.%s", CASSANDRA_KEYSPACE, customQueryTableName));
+  }
+
+  /** Test that the fix handles multiple partition key columns with reserved keywords. */
+  @Test
+  public void testMultiplePartitionKeyReservedWords() throws Exception {
+    String multiPartitionTableName = "multi_partition_test";
+
+    // Create table with multiple partition key columns that are reserved keywords
+    String createTableQuery =
+        String.format(
+            "CREATE TABLE IF NOT EXISTS %s.%s("
+                + "\"table\" text, \"index\" text, \"value\" text, data text, "
+                + "PRIMARY KEY ((\"table\", \"index\"), \"value\")"
+                + ");",
+            CASSANDRA_KEYSPACE, multiPartitionTableName);
+
+    session.execute(createTableQuery);
+
+    // Insert test data
+    String insertQuery =
+        String.format(
+            "INSERT INTO %s.%s(\"table\", \"index\", \"value\", data) "
+                + "VALUES ('table1', 'index1', 'value1', 'test_data');",
+            CASSANDRA_KEYSPACE, multiPartitionTableName);
+    session.execute(insertQuery);
+
+    PCollection<MultiPartitionEntity> output =
+        pipeline.apply(
+            CassandraIO.<MultiPartitionEntity>read()
+                .withHosts(Collections.singletonList(CASSANDRA_HOST))
+                .withPort(cassandraPort)
+                .withKeyspace(CASSANDRA_KEYSPACE)
+                .withTable(multiPartitionTableName)
+                .withCoder(SerializableCoder.of(MultiPartitionEntity.class))
+                .withEntity(MultiPartitionEntity.class));
+
+    PAssert.thatSingleton(output.apply("Count", Count.globally())).isEqualTo(1L);
+
+    PAssert.that(output)
+        .satisfies(
+            input -> {
+              MultiPartitionEntity entity = input.iterator().next();
+              assertEquals("table1", entity.tableColumn);
+              assertEquals("index1", entity.indexColumn);
+              assertEquals("value1", entity.valueColumn);
+              assertEquals("test_data", entity.data);
+              return null;
+            });
+
+    pipeline.run();
+
+    // Clean up
+    session.execute(
+        String.format("DROP TABLE IF EXISTS %s.%s", CASSANDRA_KEYSPACE, multiPartitionTableName));
+  }
+
+  /** Test that normal (non-reserved) identifiers still work correctly after the fix. */
+  @Test
+  public void testNormalIdentifiersStillWork() throws Exception {
+    // This test uses the existing CASSANDRA_TABLE which has normal column names
+    // to ensure our changes don't break existing functionality
+
+    PCollection<Scientist> output =
+        pipeline.apply(
+            CassandraIO.<Scientist>read()
+                .withHosts(Collections.singletonList(CASSANDRA_HOST))
+                .withPort(cassandraPort)
+                .withKeyspace(CASSANDRA_KEYSPACE)
+                .withTable(CASSANDRA_TABLE)
+                .withCoder(SerializableCoder.of(Scientist.class))
+                .withEntity(Scientist.class));
+
+    PAssert.thatSingleton(output.apply("Count", Count.globally())).isEqualTo(NUM_ROWS);
+
+    pipeline.run();
+  }
+
+  // Add these entity classes after the existing entity classes at the end of the file
+
+  /** Test entity class for reserved keyword column names to verify identifier quoting. */
+  @Table(name = "reserved_keywords_table", keyspace = CASSANDRA_KEYSPACE)
+  static class ReservedKeywordEntity implements Serializable {
+
+    @PartitionKey
+    @Column(name = "true") // Reserved keyword as column name
+    String trueColumn;
+
+    @ClusteringColumn
+    @Column(name = "key") // Reserved keyword as column name
+    String keyColumn;
+
+    @Column(name = "select") // Reserved keyword as column name
+    String selectColumn;
+
+    @Column(name = "normal_column") // Normal column name
+    String normalColumn;
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof ReservedKeywordEntity)) {
+        return false;
+      }
+      ReservedKeywordEntity that = (ReservedKeywordEntity) o;
+      return Objects.equal(trueColumn, that.trueColumn)
+          && Objects.equal(keyColumn, that.keyColumn)
+          && Objects.equal(selectColumn, that.selectColumn)
+          && Objects.equal(normalColumn, that.normalColumn);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hashCode(trueColumn, keyColumn, selectColumn, normalColumn);
+    }
+
+    @Override
+    public String toString() {
+      return String.format(
+          "ReservedKeywordEntity{true='%s', key='%s', select='%s', normal='%s'}",
+          trueColumn, keyColumn, selectColumn, normalColumn);
+    }
+  }
+
+  /** Test entity for custom query test with reserved keyword column names. */
+  @Table(name = "custom_query_test", keyspace = CASSANDRA_KEYSPACE)
+  static class CustomQueryEntity implements Serializable {
+    @PartitionKey
+    @Column(name = "from")
+    String fromColumn;
+
+    @ClusteringColumn
+    @Column(name = "where")
+    String whereColumn;
+
+    @Column String data;
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof CustomQueryEntity)) {
+        return false;
+      }
+      CustomQueryEntity that = (CustomQueryEntity) o;
+      return Objects.equal(fromColumn, that.fromColumn)
+          && Objects.equal(whereColumn, that.whereColumn)
+          && Objects.equal(data, that.data);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hashCode(fromColumn, whereColumn, data);
+    }
+  }
+
+  /** Test entity for multiple partition key test with reserved keywords. */
+  @Table(name = "multi_partition_test", keyspace = CASSANDRA_KEYSPACE)
+  static class MultiPartitionEntity implements Serializable {
+    @PartitionKey(0)
+    @Column(name = "table")
+    String tableColumn;
+
+    @PartitionKey(1)
+    @Column(name = "index")
+    String indexColumn;
+
+    @ClusteringColumn
+    @Column(name = "value")
+    String valueColumn;
+
+    @Column String data;
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof MultiPartitionEntity)) {
+        return false;
+      }
+      MultiPartitionEntity that = (MultiPartitionEntity) o;
+      return Objects.equal(tableColumn, that.tableColumn)
+          && Objects.equal(indexColumn, that.indexColumn)
+          && Objects.equal(valueColumn, that.valueColumn)
+          && Objects.equal(data, that.data);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hashCode(tableColumn, indexColumn, valueColumn, data);
+    }
+  }
+
+  @Test
+  public void testSessionEvictionOnClosedCluster() {
+    CassandraIO.Read<String> readConfig =
+        CassandraIO.<String>read()
+            .withHosts(Collections.singletonList(CASSANDRA_HOST))
+            .withPort(cassandraPort)
+            .withKeyspace(CASSANDRA_KEYSPACE)
+            .withTable(CASSANDRA_TABLE);
+
+    Session initialSession = ConnectionManager.getSession(readConfig);
+    Cluster initialCluster = initialSession.getCluster();
+
+    initialCluster.close();
+    assertTrue("Cluster should be closed", initialCluster.isClosed());
+
+    Session newSession = ConnectionManager.getSession(readConfig);
+    Cluster newCluster = newSession.getCluster();
+
+    assertNotNull("New session should not be null", newSession);
+    assertFalse("New cluster should be open", newCluster.isClosed());
+
+    assertNotSame(
+        "ConnectionManager should create a new Session instance", initialSession, newSession);
+    assertNotSame(
+        "ConnectionManager should create a new Cluster instance", initialCluster, newCluster);
+  }
 }

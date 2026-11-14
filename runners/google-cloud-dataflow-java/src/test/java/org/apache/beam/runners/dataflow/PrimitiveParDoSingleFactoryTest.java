@@ -39,7 +39,7 @@ import org.apache.beam.sdk.transforms.resourcehints.ResourceHints;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.PValues;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.junit.Rule;
 import org.junit.Test;
@@ -156,7 +156,7 @@ public class PrimitiveParDoSingleFactoryTest implements Serializable {
 
     @Override
     public boolean equals(@Nullable Object other) {
-      return other != null && other.getClass().equals(getClass());
+      return other instanceof ToLongFn;
     }
 
     @Override

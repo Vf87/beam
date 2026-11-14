@@ -44,12 +44,12 @@ import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.schemas.Schema.LogicalType;
 import org.apache.beam.sdk.schemas.Schema.TypeName;
 import org.apache.beam.sdk.util.common.ElementByteSizeObserver;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.joda.time.ReadableInstant;
 
 @SuppressWarnings({
-  "nullness", // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness", // TODO(https://github.com/apache/beam/issues/20497)
   "rawtypes"
 })
 class SchemaCoderHelpers {
@@ -163,7 +163,7 @@ class SchemaCoderHelpers {
       default:
         coder = (Coder<T>) CODER_MAP.get(fieldType.getTypeName());
     }
-    Preconditions.checkNotNull(coder, "Unexpected field type " + fieldType.getTypeName());
+    Preconditions.checkNotNull(coder, "Unexpected field type %s", fieldType.getTypeName());
     if (fieldType.getNullable()) {
       coder = NullableCoder.of(coder);
     }

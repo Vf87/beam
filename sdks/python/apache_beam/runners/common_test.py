@@ -20,6 +20,7 @@
 import unittest
 
 import hamcrest as hc
+from parameterized import parameterized
 
 import apache_beam as beam
 from apache_beam.io.restriction_trackers import OffsetRange
@@ -32,6 +33,8 @@ from apache_beam.runners.sdf_utils import SplitResultPrimary
 from apache_beam.runners.sdf_utils import SplitResultResidual
 from apache_beam.testing.test_pipeline import TestPipeline
 from apache_beam.testing.test_stream import TestStream
+from apache_beam.testing.util import assert_that
+from apache_beam.testing.util import equal_to
 from apache_beam.transforms import trigger
 from apache_beam.transforms import window
 from apache_beam.transforms.core import DoFn
@@ -49,6 +52,25 @@ class DoFnSignatureTest(unittest.TestCase):
 
     with self.assertRaises(ValueError):
       DoFnSignature(MyDoFn())
+
+  def test_dofn_get_defaults(self):
+    class MyDoFn(DoFn):
+      def process(self, element, w=DoFn.WindowParam):
+        pass
+
+    signature = DoFnSignature(MyDoFn())
+
+    self.assertEqual(signature.process_method.defaults, [DoFn.WindowParam])
+
+  @unittest.skip('BEAM-5878')
+  def test_dofn_get_defaults_kwonly(self):
+    class MyDoFn(DoFn):
+      def process(self, element, *, w=DoFn.WindowParam):
+        pass
+
+    signature = DoFnSignature(MyDoFn())
+
+    self.assertEqual(signature.process_method.defaults, [DoFn.WindowParam])
 
   def test_dofn_validate_start_bundle_error(self):
     class MyDoFn(DoFn):
@@ -102,6 +124,40 @@ class DoFnProcessTest(unittest.TestCase):
 
     return RecordDoFn()
 
+  @parameterized.expand([
+      ('implicit_default', 1, 'default'),
+      ('implicit_positional', 1, 'positional'),
+      ('implicit_keyword', 1, 'keyword'),
+      ('implicit_side_input', 1, 'side_input'),
+      ('explicit_default', DoFn.ElementParam, 'default'),
+      ('explicit_positional', DoFn.ElementParam, 'positional'),
+      ('explicit_keyword', DoFn.ElementParam, 'keyword'),
+      ('explicit_side_input', DoFn.ElementParam, 'side_input'),
+  ])
+  def test_dofn_process_default_element(self, name, element_default, side_mode):
+    class ProcessDefaults(DoFn):
+      def process(
+          self,
+          element=element_default,
+          timestamp=DoFn.TimestampParam,
+          side_input=3):
+        yield element, timestamp, side_input
+
+    with TestPipeline() as p:
+      args, kwargs = [], {}
+      if side_mode == 'positional':
+        args = [2]
+      elif side_mode == 'keyword':
+        kwargs = {'side_input': 2}
+      elif side_mode == 'side_input':
+        args = [beam.pvalue.AsSingleton(p | 'SideInput' >> beam.Create([2]))]
+      result = (
+          p
+          | 'Input' >> beam.Create([window.TimestampedValue(5, 123)])
+          | beam.ParDo(ProcessDefaults(), *args, **kwargs))
+      expected_side = 3 if side_mode == 'default' else 2
+      assert_that(result, equal_to([(5, Timestamp(123), expected_side)]))
+
   def test_dofn_process_keyparam(self):
     class DoFnProcessWithKeyparam(DoFn):
       def process(self, element, mykey=DoFn.KeyParam):
@@ -134,6 +190,82 @@ class DoFnProcessTest(unittest.TestCase):
          TestPipeline(options=pipeline_options) as p:
       test_stream = (TestStream().advance_watermark_to(10).add_elements([1, 2]))
       (p | test_stream | beam.ParDo(DoFnProcessWithKeyparam()))
+
+  def test_dofn_returning_str_raises_clear_error(self):
+    """Regression test for https://github.com/apache/beam/issues/18712.
+
+    A DoFn returning a str instead of an iterable wrapping one used to
+    silently iterate per-character. It should now raise a clear TypeError.
+    """
+    class BadDoFn(DoFn):
+      def process(self, element):
+        return 'hello'
+
+    # Use base Exception (matching existing convention in
+    # typecheck_test.py::test_do_fn_returning_non_iterable_throws_error)
+    # because the runner's _reraise_augmented wraps the TypeError before
+    # it surfaces to the test framework.
+    with self.assertRaisesRegex(
+        Exception, 'Returning a str from a ParDo or FlatMap is not allowed'):
+      with TestPipeline() as p:
+        _ = p | beam.Create([0]) | beam.ParDo(BadDoFn())
+
+  def test_dofn_returning_bytes_raises_clear_error(self):
+    """Regression test for https://github.com/apache/beam/issues/18712."""
+    class BadDoFn(DoFn):
+      def process(self, element):
+        return b'hello'
+
+    with self.assertRaisesRegex(
+        Exception, 'Returning a bytes from a ParDo or FlatMap is not allowed'):
+      with TestPipeline() as p:
+        _ = p | beam.Create([0]) | beam.ParDo(BadDoFn())
+
+  def test_dofn_returning_dict_raises_clear_error(self):
+    """Regression test for https://github.com/apache/beam/issues/18712."""
+    class BadDoFn(DoFn):
+      def process(self, element):
+        return {'k': 'v'}
+
+    with self.assertRaisesRegex(
+        Exception, 'Returning a dict from a ParDo or FlatMap is not allowed'):
+      with TestPipeline() as p:
+        _ = p | beam.Create([0]) | beam.ParDo(BadDoFn())
+
+  def test_dofn_yielding_str_is_not_flagged(self):
+    """A generator (yield) process() can't hit the #18712 bug.
+
+    Yielding a str emits the whole str as one element and must not be
+    treated as the "returned a str" error case.
+    """
+    class YieldDoFn(DoFn):
+      def process(self, element):
+        yield 'hello'
+
+    with TestPipeline() as p:
+      (
+          p | beam.Create([0]) | beam.ParDo(YieldDoFn())
+          | beam.ParDo(self.record_dofn()))
+
+    self.assertEqual(['hello'], DoFnProcessTest.all_records)
+
+  def test_pardo_with_unbounded_per_element_dofn(self):
+    class UnboundedDoFn(beam.DoFn):
+      @beam.DoFn.unbounded_per_element()
+      def process(self, element):
+        pass
+
+    class BoundedDoFn(beam.DoFn):
+      def process(self, element):
+        pass
+
+    with TestPipeline() as p:
+      source = p | beam.Impulse()
+      unbounded_pcoll = source | beam.ParDo(UnboundedDoFn())
+      bounded_pcoll = source | beam.ParDo(BoundedDoFn())
+
+      self.assertEqual(unbounded_pcoll.is_bounded, False)
+      self.assertEqual(bounded_pcoll.is_bounded, True)
 
 
 class TestOffsetRestrictionProvider(RestrictionProvider):
@@ -384,7 +516,10 @@ class PerWindowInvokerSplitTest(unittest.TestCase):
             expected_primary_split,
             expected_primary_windows,
         ))
-    hc.assert_that(residuals, hc.contains_inanyorder(expected_residual_split, ))
+    hc.assert_that(
+        residuals, hc.contains_inanyorder(
+            expected_residual_split,
+        ))
     self.assertEqual(stop_index, 3)
 
   def test_window_observing_split_on_first_window_fallback(self):

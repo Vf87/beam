@@ -18,34 +18,38 @@
 package org.apache.beam.runners.direct;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.io.Closeable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Queue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
+import org.apache.beam.runners.core.metrics.MetricsContainerImpl;
 import org.apache.beam.runners.local.ExecutionDriver;
 import org.apache.beam.runners.local.ExecutionDriver.DriverState;
 import org.apache.beam.runners.local.PipelineMessageReceiver;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult.State;
+import org.apache.beam.sdk.metrics.MetricsEnvironment;
 import org.apache.beam.sdk.runners.AppliedPTransform;
 import org.apache.beam.sdk.util.UserCodeException;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PValue;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.CacheBuilder;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.CacheLoader;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.LoadingCache;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.RemovalListener;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.MoreExecutors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheBuilder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheLoader;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.LoadingCache;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.RemovalListener;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Queues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.MoreExecutors;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -56,9 +60,6 @@ import org.slf4j.LoggerFactory;
  * An {@link PipelineExecutor} that uses an underlying {@link ExecutorService} and {@link
  * EvaluationContext} to execute a {@link Pipeline}.
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 final class ExecutorServiceParallelExecutor
     implements PipelineExecutor,
         BundleProcessor<PCollection<?>, CommittedBundle<?>, AppliedPTransform<?, ?, ?>> {
@@ -118,7 +119,7 @@ final class ExecutorServiceParallelExecutor
         CacheBuilder.newBuilder()
             .weakValues()
             .removalListener(shutdownExecutorServiceListener())
-            .build(serialTransformExecutorServiceCacheLoader());
+            .build(serialTransformExecutorServiceCacheLoader(executorService));
 
     this.visibleUpdates = new QueueMessageReceiver();
 
@@ -126,8 +127,8 @@ final class ExecutorServiceParallelExecutor
     executorFactory = new DirectTransformExecutor.Factory(context, registry, transformEnforcements);
   }
 
-  private CacheLoader<StepAndKey, TransformExecutorService>
-      serialTransformExecutorServiceCacheLoader() {
+  private static CacheLoader<StepAndKey, TransformExecutorService>
+      serialTransformExecutorServiceCacheLoader(ExecutorService executorService) {
     return new CacheLoader<StepAndKey, TransformExecutorService>() {
       @Override
       public TransformExecutorService load(StepAndKey stepAndKey) throws Exception {
@@ -136,7 +137,8 @@ final class ExecutorServiceParallelExecutor
     };
   }
 
-  private RemovalListener<StepAndKey, TransformExecutorService> shutdownExecutorServiceListener() {
+  private static RemovalListener<StepAndKey, TransformExecutorService>
+      shutdownExecutorServiceListener() {
     return notification -> {
       TransformExecutorService service = notification.getValue();
       if (service != null) {
@@ -146,20 +148,30 @@ final class ExecutorServiceParallelExecutor
   }
 
   @Override
-  // TODO: [BEAM-4563] Pass Future back to consumer to check for async errors
+  // TODO: [https://github.com/apache/beam/issues/18968] Pass Future back to consumer to check for
+  // async errors
   @SuppressWarnings("FutureReturnValueIgnored")
   public void start(DirectGraph graph, RootProviderRegistry rootProviderRegistry) {
     int numTargetSplits = Math.max(3, targetParallelism);
-    ImmutableMap.Builder<AppliedPTransform<?, ?, ?>, ConcurrentLinkedQueue<CommittedBundle<?>>>
-        pendingRootBundles = ImmutableMap.builder();
+    ImmutableMap.Builder<AppliedPTransform<?, ?, ?>, Queue<CommittedBundle<?>>> pendingRootBundles =
+        ImmutableMap.builder();
     for (AppliedPTransform<?, ?, ?> root : graph.getRootTransforms()) {
-      ConcurrentLinkedQueue<CommittedBundle<?>> pending = new ConcurrentLinkedQueue<>();
-      try {
+      MetricsContainerImpl metricsContainer = new MetricsContainerImpl(root.getFullName());
+      Queue<CommittedBundle<?>> pending = Queues.newArrayDeque();
+      try (Closeable metricsScope = MetricsEnvironment.scopedMetricsContainer(metricsContainer)) {
         Collection<CommittedBundle<?>> initialInputs =
             rootProviderRegistry.getInitialInputs(root, numTargetSplits);
         pending.addAll(initialInputs);
       } catch (Exception e) {
         throw UserCodeException.wrap(e);
+      } finally {
+        //  Metrics emitted initial split are reported along with the first bundle
+        CommittedBundle<?> firstPending = pending.peek();
+        if (firstPending != null) {
+          evaluationContext
+              .getMetrics()
+              .commitPhysical(firstPending, metricsContainer.getCumulative());
+        }
       }
       pendingRootBundles.put(root, pending);
     }
@@ -172,7 +184,7 @@ final class ExecutorServiceParallelExecutor
           @Override
           public void run() {
             DriverState drive = executionDriver.drive();
-            if (drive.isTermainal()) {
+            if (drive.isTerminal()) {
               State newPipelineState = State.UNKNOWN;
               switch (drive) {
                 case FAILED:
@@ -211,7 +223,8 @@ final class ExecutorServiceParallelExecutor
       final CompletionCallback onComplete) {
     TransformExecutorService transformExecutor;
 
-    if (isKeyed(bundle.getPCollection())) {
+    @Nullable PCollection<T> pcollection = bundle.getPCollection();
+    if (pcollection != null && isKeyed(pcollection)) {
       final StepAndKey stepAndKey = StepAndKey.of(transform, bundle.getKey());
       // This executor will remain reachable until it has executed all scheduled transforms.
       // The TransformExecutors keep a strong reference to the Executor, the ExecutorService keeps
@@ -235,7 +248,7 @@ final class ExecutorServiceParallelExecutor
   }
 
   @Override
-  public State waitUntilFinish(Duration duration) throws Exception {
+  public @Nullable State waitUntilFinish(Duration duration) throws Exception {
     Instant completionTime;
     if (duration.equals(Duration.ZERO)) {
       completionTime = new Instant(Long.MAX_VALUE);
@@ -246,7 +259,7 @@ final class ExecutorServiceParallelExecutor
     while (Instant.now().isBefore(completionTime)) {
       // Get an update; don't block forever if another thread has handled it. The call to poll will
       // wait the entire timeout; this call primarily exists to relinquish any core.
-      VisibleExecutorUpdate update = visibleUpdates.tryNext(Duration.millis(25L));
+      @Nullable VisibleExecutorUpdate update = visibleUpdates.tryNext(Duration.millis(25L));
 
       if (update == null && pipelineState.get().isTerminal()) {
         // state and updates have seperate locks so it is possible for an update
@@ -287,7 +300,8 @@ final class ExecutorServiceParallelExecutor
   }
 
   private boolean isTerminalStateUpdate(VisibleExecutorUpdate update) {
-    return update.getNewState() != null && update.getNewState().isTerminal();
+    State newState = update.getNewState();
+    return newState != null && newState.isTerminal();
   }
 
   @Override
@@ -335,17 +349,23 @@ final class ExecutorServiceParallelExecutor
     } catch (final Exception e) {
       errors.add(e);
     }
-    pipelineState.compareAndSet(State.RUNNING, newState); // ensure we hit a terminal node
-    if (!errors.isEmpty()) {
-      final IllegalStateException exception =
-          new IllegalStateException(
-              "Error"
-                  + (errors.size() == 1 ? "" : "s")
-                  + " during executor shutdown:\n"
-                  + errors.stream()
-                      .map(Exception::getMessage)
-                      .collect(Collectors.joining("\n- ", "- ", "")));
-      visibleUpdates.failed(exception);
+    @Nullable IllegalStateException exception = null;
+    try {
+      if (!errors.isEmpty()) {
+        exception =
+            new IllegalStateException(
+                "Error"
+                    + (errors.size() == 1 ? "" : "s")
+                    + " occurred during executor shutdown:\n"
+                    + errors.stream()
+                        .map(e -> e.getMessage() == null ? e.getClass().getName() : e.getMessage())
+                        .collect(Collectors.joining("\n- ", "- ", "")));
+        visibleUpdates.failed(exception);
+      }
+    } finally {
+      pipelineState.compareAndSet(State.RUNNING, newState); // ensure we hit a terminal node
+    }
+    if (exception != null) {
       throw exception;
     }
   }
@@ -374,12 +394,12 @@ final class ExecutorServiceParallelExecutor
       return new VisibleExecutorUpdate(State.CANCELLED, null);
     }
 
-    private VisibleExecutorUpdate(State newState, @Nullable Throwable exception) {
+    private VisibleExecutorUpdate(@Nullable State newState, @Nullable Throwable exception) {
       this.thrown = Optional.ofNullable(exception);
       this.newState = newState;
     }
 
-    State getNewState() {
+    @Nullable State getNewState() {
       return newState;
     }
   }

@@ -17,13 +17,20 @@
  */
 package org.apache.beam.sdk.schemas;
 
+import java.util.Arrays;
+import java.util.Map;
+import java.util.Objects;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
+import org.apache.beam.sdk.schemas.Schema.LogicalType;
+import org.apache.beam.sdk.values.Row;
 
 /** A set of utility functions for schemas. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class SchemaUtils {
+  private static final String INDENT = "  ";
+
   /**
    * Given two schema that have matching types, return a nullable-widened schema.
    *
@@ -100,5 +107,307 @@ public class SchemaUtils {
         result = fieldType1;
     }
     return result.withNullable(fieldType1.getNullable() || fieldType2.getNullable());
+  }
+
+  /**
+   * Returns the base type given a logical type and the input type.
+   *
+   * <p>This function can be used to handle logical types without knowing InputT or BaseT.
+   */
+  public static <InputT, BaseT> BaseT toLogicalBaseType(
+      LogicalType<InputT, BaseT> logicalType, InputT inputType) {
+    return logicalType.toBaseType(inputType);
+  }
+
+  /**
+   * Returns the input type given a logical type and the base type.
+   *
+   * <p>This function can be used to handle logical types without knowing InputT or BaseT.
+   */
+  public static <BaseT, InputT> InputT toLogicalInputType(
+      LogicalType<InputT, BaseT> logicalType, BaseT baseType) {
+    return logicalType.toInputType(baseType);
+  }
+
+  public static String toPrettyString(Row row) {
+    return toPrettyRowString(row, "");
+  }
+
+  public static String toPrettyString(Schema schema) {
+    return toPrettySchemaString(schema, "");
+  }
+
+  static String toFieldTypeNameString(FieldType fieldType) {
+    return fieldType.getTypeName()
+        + (Boolean.TRUE.equals(fieldType.getNullable()) ? "" : " NOT NULL");
+  }
+
+  static String toPrettyFieldTypeString(Schema.FieldType fieldType, String prefix) {
+    String nextPrefix = prefix + INDENT;
+    switch (fieldType.getTypeName()) {
+      case BYTE:
+      case INT16:
+      case INT32:
+      case INT64:
+      case DECIMAL:
+      case FLOAT:
+      case DOUBLE:
+      case STRING:
+      case DATETIME:
+      case BOOLEAN:
+      case BYTES:
+        return "<" + toFieldTypeNameString(fieldType) + ">";
+      case ARRAY:
+      case ITERABLE:
+        {
+          StringBuilder sb = new StringBuilder();
+          sb.append("<").append(toFieldTypeNameString(fieldType)).append("> {\n");
+          sb.append(nextPrefix)
+              .append("<element>: ")
+              .append(
+                  toPrettyFieldTypeString(
+                      Objects.requireNonNull(fieldType.getCollectionElementType()), nextPrefix))
+              .append("\n");
+          sb.append(prefix).append("}");
+          return sb.toString();
+        }
+      case MAP:
+        {
+          StringBuilder sb = new StringBuilder();
+          sb.append("<").append(toFieldTypeNameString(fieldType)).append("> {\n");
+          sb.append(nextPrefix)
+              .append("<key>: ")
+              .append(
+                  toPrettyFieldTypeString(
+                      Objects.requireNonNull(fieldType.getMapKeyType()), nextPrefix))
+              .append(",\n");
+          sb.append(nextPrefix)
+              .append("<value>: ")
+              .append(
+                  toPrettyFieldTypeString(
+                      Objects.requireNonNull(fieldType.getMapValueType()), nextPrefix))
+              .append("\n");
+          sb.append(prefix).append("}");
+          return sb.toString();
+        }
+      case ROW:
+        {
+          return "<"
+              + toFieldTypeNameString(fieldType)
+              + "> "
+              + toPrettySchemaString(Objects.requireNonNull(fieldType.getRowSchema()), prefix);
+        }
+      case LOGICAL_TYPE:
+        {
+          Schema.FieldType baseType =
+              Objects.requireNonNull(fieldType.getLogicalType()).getBaseType();
+          StringBuilder sb = new StringBuilder();
+          sb.append("<")
+              .append(toFieldTypeNameString(fieldType))
+              .append("(")
+              .append(fieldType.getLogicalType().getIdentifier())
+              .append(")> {\n");
+          sb.append(nextPrefix)
+              .append("<base>: ")
+              .append(toPrettyFieldTypeString(baseType, nextPrefix))
+              .append("\n");
+          sb.append(prefix).append("}");
+          return sb.toString();
+        }
+      default:
+        throw new UnsupportedOperationException(fieldType.getTypeName() + " is not supported");
+    }
+  }
+
+  static String toPrettyOptionsString(Schema.Options options, String prefix) {
+    String nextPrefix = prefix + INDENT;
+    StringBuilder sb = new StringBuilder();
+    sb.append("{\n");
+    for (String optionName : options.getOptionNames()) {
+      sb.append(nextPrefix)
+          .append(optionName)
+          .append(" = ")
+          .append(
+              toPrettyFieldValueString(
+                  options.getType(optionName), options.getValue(optionName), nextPrefix))
+          .append("\n");
+    }
+    sb.append(prefix).append("}");
+    return sb.toString();
+  }
+
+  static String toPrettyFieldValueString(Schema.FieldType fieldType, Object value, String prefix) {
+    if (value == null) {
+      // toPrettyRowString drops a row's own null fields, but a null nested inside an array, an
+      // iterable, a map or a row has a position and has to be rendered. The numeric and boolean
+      // branches below already render one as "null" via Objects.toString, so do the same for the
+      // remaining types rather than dereferencing the value.
+      return "null";
+    }
+    String nextPrefix = prefix + INDENT;
+    switch (fieldType.getTypeName()) {
+      case BYTE:
+      case INT16:
+      case INT32:
+      case INT64:
+      case DECIMAL:
+      case FLOAT:
+      case DOUBLE:
+      case DATETIME:
+      case BOOLEAN:
+        return Objects.toString(value);
+      case STRING:
+        {
+          String string = (String) value;
+          return "\"" + string.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+        }
+      case BYTES:
+        {
+          byte[] bytes = (byte[]) value;
+          return Arrays.toString(bytes);
+        }
+      case ARRAY:
+      case ITERABLE:
+        {
+          // An ITERABLE field declares an Iterable, and an ARRAY value need not be a List
+          // either, so require only what is actually iterated below. This is reached from
+          // Row#toString, where refusing to render one field takes out logging and debugger
+          // output for the entire row.
+          if (!(value instanceof Iterable)) {
+            throw new IllegalArgumentException(
+                String.format(
+                    "value type is '%s' for field type '%s'",
+                    value.getClass(), fieldType.getTypeName()));
+          }
+          FieldType elementType = Objects.requireNonNull(fieldType.getCollectionElementType());
+
+          @SuppressWarnings("unchecked")
+          Iterable<Object> elements = (Iterable<Object>) value;
+
+          StringBuilder sb = new StringBuilder();
+          sb.append("[\n");
+          boolean empty = true;
+          for (Object element : elements) {
+            if (!empty) {
+              sb.append(",\n");
+            }
+            sb.append(nextPrefix)
+                .append(toPrettyFieldValueString(elementType, element, nextPrefix));
+            empty = false;
+          }
+          if (empty) {
+            return "[]";
+          }
+          sb.append("\n").append(prefix).append("]");
+          return sb.toString();
+        }
+      case MAP:
+        {
+          if (!(value instanceof Map)) {
+            throw new IllegalArgumentException(
+                String.format(
+                    "value type is '%s' for field type '%s'",
+                    value.getClass(), fieldType.getTypeName()));
+          }
+
+          FieldType keyType = Objects.requireNonNull(fieldType.getMapKeyType());
+          FieldType valueType = Objects.requireNonNull(fieldType.getMapValueType());
+
+          @SuppressWarnings("unchecked")
+          Map<Object, Object> map = (Map<Object, Object>) value;
+          if (map.isEmpty()) {
+            return "{}";
+          }
+
+          StringBuilder sb = new StringBuilder();
+          sb.append("{\n");
+          int size = map.size();
+          int index = 0;
+          for (Map.Entry<Object, Object> entry : map.entrySet()) {
+            sb.append(nextPrefix)
+                .append(toPrettyFieldValueString(keyType, entry.getKey(), nextPrefix))
+                .append(": ")
+                .append(toPrettyFieldValueString(valueType, entry.getValue(), nextPrefix));
+            if (index++ < size - 1) {
+              sb.append(",\n");
+            } else {
+              sb.append("\n");
+            }
+          }
+          sb.append(prefix).append("}");
+          return sb.toString();
+        }
+      case ROW:
+        {
+          return toPrettyRowString((Row) value, prefix);
+        }
+      case LOGICAL_TYPE:
+        {
+          @SuppressWarnings("unchecked")
+          Schema.LogicalType<Object, Object> logicalType =
+              (Schema.LogicalType<Object, Object>)
+                  Objects.requireNonNull(fieldType.getLogicalType());
+          Schema.FieldType baseType = logicalType.getBaseType();
+          Object baseValue = logicalType.toBaseType(value);
+          return toPrettyFieldValueString(baseType, baseValue, prefix);
+        }
+      default:
+        throw new UnsupportedOperationException(fieldType.getTypeName() + " is not supported");
+    }
+  }
+
+  static String toPrettySchemaString(Schema schema, String prefix) {
+    String nextPrefix = prefix + INDENT;
+    StringBuilder sb = new StringBuilder();
+    sb.append("{\n");
+    for (Schema.Field field : schema.getFields()) {
+      sb.append(nextPrefix)
+          .append(field.getName())
+          .append(": ")
+          .append(toPrettyFieldTypeString(field.getType(), nextPrefix));
+      if (field.getOptions().hasOptions()) {
+        sb.append(", fieldOptions = ")
+            .append(toPrettyOptionsString(field.getOptions(), nextPrefix));
+      }
+      sb.append("\n");
+    }
+    sb.append(prefix).append("}");
+    if (schema.getOptions().hasOptions()) {
+      sb.append(", schemaOptions = ").append(toPrettyOptionsString(schema.getOptions(), prefix));
+    }
+    if (schema.getUUID() != null) {
+      sb.append(", schemaUUID = ").append(schema.getUUID());
+    }
+    return sb.toString();
+  }
+
+  static String toPrettyRowString(Row row, String prefix) {
+    long nonNullFieldCount = row.getValues().stream().filter(Objects::nonNull).count();
+    if (nonNullFieldCount == 0) {
+      return "{}";
+    }
+
+    String nextPrefix = prefix + INDENT;
+    StringBuilder sb = new StringBuilder();
+    sb.append("{\n");
+    long nonNullFieldIndex = 0;
+    for (Schema.Field field : row.getSchema().getFields()) {
+      String fieldName = field.getName();
+      Object fieldValue = row.getValue(fieldName);
+      if (fieldValue == null) {
+        continue;
+      }
+      sb.append(nextPrefix)
+          .append(fieldName)
+          .append(": ")
+          .append(toPrettyFieldValueString(field.getType(), fieldValue, nextPrefix));
+      if (nonNullFieldIndex++ < nonNullFieldCount - 1) {
+        sb.append(",\n");
+      } else {
+        sb.append("\n");
+      }
+    }
+    sb.append(prefix).append("}");
+    return sb.toString();
   }
 }

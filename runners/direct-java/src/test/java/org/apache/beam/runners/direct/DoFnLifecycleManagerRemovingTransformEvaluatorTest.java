@@ -21,7 +21,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -33,7 +33,9 @@ import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.CausedByDrain;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.hamcrest.Matchers;
 import org.joda.time.Instant;
 import org.junit.Before;
@@ -54,11 +56,10 @@ public class DoFnLifecycleManagerRemovingTransformEvaluatorTest {
   @Test
   public void delegatesToUnderlying() throws Exception {
     ParDoEvaluator<Object> underlying = mock(ParDoEvaluator.class);
-    DoFn<?, ?> original = lifecycleManager.get();
     TransformEvaluator<Object> evaluator =
         DoFnLifecycleManagerRemovingTransformEvaluator.wrapping(underlying, lifecycleManager);
-    WindowedValue<Object> first = WindowedValue.valueInGlobalWindow(new Object());
-    WindowedValue<Object> second = WindowedValue.valueInGlobalWindow(new Object());
+    WindowedValue<Object> first = WindowedValues.valueInGlobalWindow(new Object());
+    WindowedValue<Object> second = WindowedValues.valueInGlobalWindow(new Object());
 
     evaluator.processElement(first);
     verify(underlying).processElement(first);
@@ -83,7 +84,7 @@ public class DoFnLifecycleManagerRemovingTransformEvaluatorTest {
         DoFnLifecycleManagerRemovingTransformEvaluator.wrapping(underlying, lifecycleManager);
 
     try {
-      evaluator.processElement(WindowedValue.valueInGlobalWindow(new Object()));
+      evaluator.processElement(WindowedValues.valueInGlobalWindow(new Object()));
     } catch (Exception e) {
       assertThat(lifecycleManager.get(), not(Matchers.theInstance(original)));
       return;
@@ -110,7 +111,8 @@ public class DoFnLifecycleManagerRemovingTransformEvaluatorTest {
               StateNamespaces.global(),
               new Instant(0),
               new Instant(0),
-              TimeDomain.EVENT_TIME),
+              TimeDomain.EVENT_TIME,
+              CausedByDrain.NORMAL),
           "",
           GlobalWindow.INSTANCE);
     } catch (Exception e) {
@@ -142,6 +144,6 @@ public class DoFnLifecycleManagerRemovingTransformEvaluatorTest {
 
   private static class TestFn extends DoFn<Object, Object> {
     @ProcessElement
-    public void processElement(ProcessContext c) throws Exception {}
+    public void processElement(@SuppressWarnings("unused") ProcessContext c) throws Exception {}
   }
 }

@@ -19,13 +19,19 @@
 
 # pytype: skip-file
 
+import hashlib
+import io
+import itertools
 import json
 import logging
+import os
 import sys
+import time
 import unittest
 
 import mock
 
+from apache_beam.io.filesystems import FileSystems
 from apache_beam.metrics.cells import DistributionData
 from apache_beam.options.pipeline_options import GoogleCloudOptions
 from apache_beam.options.pipeline_options import PipelineOptions
@@ -33,19 +39,23 @@ from apache_beam.pipeline import Pipeline
 from apache_beam.portability import common_urns
 from apache_beam.portability.api import beam_runner_api_pb2
 from apache_beam.runners.dataflow.internal import names
-from apache_beam.runners.dataflow.internal.clients import dataflow
 from apache_beam.transforms import Create
 from apache_beam.transforms import DataflowDistributionCounter
 from apache_beam.transforms import DoFn
 from apache_beam.transforms import ParDo
 from apache_beam.transforms.environments import DockerEnvironment
+from apache_beam.utils import retry
 
 # Protect against environments where apitools library is not available.
 # pylint: disable=wrong-import-order, wrong-import-position, ungrouped-imports
 try:
+  import google.auth
+  from google.cloud import dataflow
+
   from apache_beam.runners.dataflow.internal import apiclient
 except ImportError:
   apiclient = None  # type: ignore
+  dataflow = None  # type: ignore
 # pylint: enable=wrong-import-order, wrong-import-position
 
 FAKE_PIPELINE_URL = "gs://invalid-bucket/anywhere"
@@ -54,6 +64,18 @@ _LOGGER = logging.getLogger(__name__)
 
 @unittest.skipIf(apiclient is None, 'GCP dependencies are not installed')
 class UtilTest(unittest.TestCase):
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    cls.patcher = mock.patch(
+        'google.auth.default', return_value=(None, 'test_project'))
+    cls.patcher.start()
+
+  @classmethod
+  def tearDownClass(cls):
+    super().tearDownClass()
+    cls.patcher.stop()
+
   @unittest.skip("Enable once BEAM-1080 is fixed.")
   def test_create_application_client(self):
     pipeline_options = PipelineOptions()
@@ -73,23 +95,76 @@ class UtilTest(unittest.TestCase):
         FAKE_PIPELINE_URL)
 
     recovered_options = None
-    for additionalProperty in env.proto.sdkPipelineOptions.additionalProperties:
-      if additionalProperty.key == 'options':
-        recovered_options = additionalProperty.value
+    for key in env.proto.sdk_pipeline_options.keys():
+      if key == 'options':
+        recovered_options = env.proto.sdk_pipeline_options[key]
         break
     else:
       self.fail(
-          'No pipeline options found in %s' % env.proto.sdkPipelineOptions)
+          'No pipeline options found in %s' % env.proto.sdk_pipeline_options)
 
     pipeline_url = None
-    for property in recovered_options.object_value.properties:
-      if property.key == 'pipelineUrl':
-        pipeline_url = property.value
+    for key in recovered_options.keys():
+      if key == 'pipelineUrl':
+        pipeline_url = recovered_options[key]
         break
     else:
-      self.fail('No pipeline_url found in %s' % recovered_options)
+      self.fail('No pipelineUrl found in %s' % recovered_options)
 
-    self.assertEqual(pipeline_url.string_value, FAKE_PIPELINE_URL)
+    self.assertEqual(pipeline_url, FAKE_PIPELINE_URL)
+
+  def test_value_provider_options_serialization(self):
+    class UserOptions(PipelineOptions):
+      @classmethod
+      def _add_argparse_args(cls, parser):
+        parser.add_value_provider_argument('--at_vp_arg1')
+        parser.add_value_provider_argument('--at_vp_arg2')
+
+    pipeline_options = UserOptions([
+        '--at_vp_arg2', 'provided', '--temp_location', 'gs://any-location/temp'
+    ])
+    env = apiclient.Environment([],
+                                pipeline_options,
+                                '2.0.0',
+                                FAKE_PIPELINE_URL)
+
+    recovered_options = env.proto.sdk_pipeline_options['options']
+    self.assertIsNone(recovered_options['at_vp_arg1'])
+    self.assertEqual(recovered_options['at_vp_arg2'], 'provided')
+
+  def test_pipeline_proto_hash(self):
+    pipeline_options = PipelineOptions(
+        ['--temp_location', 'gs://any-location/temp'])
+    proto_pipeline = beam_runner_api_pb2.Pipeline()
+    proto_pipeline.components.transforms['dummy'].unique_name = 'dummy'
+
+    expected_hash = hashlib.sha256(
+        proto_pipeline.SerializeToString()).hexdigest()
+
+    env = apiclient.Environment([],
+                                pipeline_options,
+                                '2.0.0',
+                                FAKE_PIPELINE_URL,
+                                proto_pipeline,
+                                pipeline_proto_hash=expected_hash)
+
+    recovered_options = None
+    for key in env.proto.sdk_pipeline_options.keys():
+      if key == 'options':
+        recovered_options = env.proto.sdk_pipeline_options[key]
+        break
+    else:
+      self.fail('No pipeline options found')
+
+    pipeline_proto_hash = None
+    for key in recovered_options.keys():
+      if key == 'pipelineProtoHash':
+        pipeline_proto_hash = recovered_options[key]
+        break
+    else:
+      self.fail('No pipelineProtoHash found')
+
+    self.assertEqual(pipeline_proto_hash, expected_hash)
 
   def test_set_network(self):
     pipeline_options = PipelineOptions([
@@ -103,7 +178,7 @@ class UtilTest(unittest.TestCase):
         pipeline_options,
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
-    self.assertEqual(env.proto.workerPools[0].network, 'anetworkname')
+    self.assertEqual(env.proto.worker_pools[0].network, 'anetworkname')
 
   def test_set_subnetwork(self):
     pipeline_options = PipelineOptions([
@@ -119,7 +194,7 @@ class UtilTest(unittest.TestCase):
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
     self.assertEqual(
-        env.proto.workerPools[0].subnetwork,
+        env.proto.worker_pools[0].subnetwork,
         '/regions/MY/subnetworks/SUBNETWORK')
 
   def test_flexrs_blank(self):
@@ -131,7 +206,9 @@ class UtilTest(unittest.TestCase):
         pipeline_options,
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
-    self.assertEqual(env.proto.flexResourceSchedulingGoal, None)
+    self.assertEqual(
+        env.proto.flex_resource_scheduling_goal,
+        dataflow.FlexResourceSchedulingGoal.FLEXRS_UNSPECIFIED)
 
   def test_flexrs_cost(self):
     pipeline_options = PipelineOptions([
@@ -147,10 +224,8 @@ class UtilTest(unittest.TestCase):
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
     self.assertEqual(
-        env.proto.flexResourceSchedulingGoal,
-        (
-            dataflow.Environment.FlexResourceSchedulingGoalValueValuesEnum.
-            FLEXRS_COST_OPTIMIZED))
+        env.proto.flex_resource_scheduling_goal,
+        (dataflow.FlexResourceSchedulingGoal.FLEXRS_COST_OPTIMIZED))
 
   def test_flexrs_speed(self):
     pipeline_options = PipelineOptions([
@@ -166,20 +241,10 @@ class UtilTest(unittest.TestCase):
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
     self.assertEqual(
-        env.proto.flexResourceSchedulingGoal,
-        (
-            dataflow.Environment.FlexResourceSchedulingGoalValueValuesEnum.
-            FLEXRS_SPEED_OPTIMIZED))
+        env.proto.flex_resource_scheduling_goal,
+        (dataflow.FlexResourceSchedulingGoal.FLEXRS_SPEED_OPTIMIZED))
 
-  def test_default_environment_get_set(self):
-
-    pipeline_options = PipelineOptions([
-        '--experiments=beam_fn_api',
-        '--experiments=use_unified_worker',
-        '--temp_location',
-        'gs://any-location/temp'
-    ])
-
+  def _verify_sdk_harness_container_images_get_set(self, pipeline_options):
     pipeline = Pipeline(options=pipeline_options)
     pipeline | Create([1, 2, 3]) | ParDo(DoFn())  # pylint:disable=expression-not-assigned
 
@@ -192,6 +257,8 @@ class UtilTest(unittest.TestCase):
         payload=(
             beam_runner_api_pb2.DockerPayload(
                 container_image='dummy_image')).SerializeToString())
+    dummy_env.capabilities.append(
+        common_urns.protocols.MULTI_CORE_BUNDLE_PROCESSING.urn)
     proto_pipeline.components.environments['dummy_env_id'].CopyFrom(dummy_env)
 
     dummy_transform = beam_runner_api_pb2.PTransform(
@@ -204,32 +271,45 @@ class UtilTest(unittest.TestCase):
         pipeline_options,
         '2.0.0',  # any environment version
         FAKE_PIPELINE_URL,
-        proto_pipeline,
-        _sdk_image_overrides={
-            '.*dummy.*': 'dummy_image', '.*test.*': 'test_default_image'
-        })
-    worker_pool = env.proto.workerPools[0]
+        proto_pipeline)
+    worker_pool = env.proto.worker_pools[0]
 
-    self.assertEqual(2, len(worker_pool.sdkHarnessContainerImages))
+    self.assertEqual(2, len(worker_pool.sdk_harness_container_images))
+    # Only one of the environments is missing MULTI_CORE_BUNDLE_PROCESSING.
+    self.assertEqual(
+        1,
+        sum(
+            c.use_single_core_per_container
+            for c in worker_pool.sdk_harness_container_images))
 
-    images_from_proto = [
-        sdk_info.containerImage
-        for sdk_info in worker_pool.sdkHarnessContainerImages
-    ]
-    self.assertIn('test_default_image', images_from_proto)
+    env_and_image = [(item.environment_id, item.container_image)
+                     for item in worker_pool.sdk_harness_container_images]
+    self.assertIn(('dummy_env_id', 'dummy_image'), env_and_image)
+    self.assertIn((mock.ANY, 'test_default_image'), env_and_image)
 
-  def test_sdk_harness_container_image_overrides(self):
+  def test_sdk_harness_container_images_get_set_runner_v2(self):
+    pipeline_options = PipelineOptions([
+        '--experiments=use_runner_v2',
+        '--temp_location',
+        'gs://any-location/temp'
+    ])
+
+    self._verify_sdk_harness_container_images_get_set(pipeline_options)
+
+  def test_sdk_harness_container_images_get_set_prime(self):
+    pipeline_options = PipelineOptions([
+        '--dataflow_service_options=enable_prime',
+        '--temp_location',
+        'gs://any-location/temp'
+    ])
+
+    self._verify_sdk_harness_container_images_get_set(pipeline_options)
+
+  def _verify_sdk_harness_container_image_overrides(self, pipeline_options):
     test_environment = DockerEnvironment(
         container_image='dummy_container_image')
     proto_pipeline, _ = Pipeline().to_runner_api(
       return_context=True, default_environment=test_environment)
-
-    pipeline_options = PipelineOptions([
-        '--experiments=beam_fn_api',
-        '--experiments=use_unified_worker',
-        '--temp_location',
-        'gs://any-location/temp'
-    ])
 
     # Accessing non-public method for testing.
     apiclient.DataflowApplicationClient._apply_sdk_environment_overrides(
@@ -247,18 +327,29 @@ class UtilTest(unittest.TestCase):
     docker_payload = proto_utils.parse_Bytes(
         env.payload, beam_runner_api_pb2.DockerPayload)
 
-    # Container image should be overridden by a the given override.
+    # Container image should be overridden by the given override.
     self.assertEqual(
         docker_payload.container_image, 'new_dummy_container_image')
 
-  def test_dataflow_container_image_override(self):
+  def test_sdk_harness_container_image_overrides_runner_v2(self):
     pipeline_options = PipelineOptions([
-        '--experiments=beam_fn_api',
-        '--experiments=use_unified_worker',
+        '--experiments=use_runner_v2',
         '--temp_location',
         'gs://any-location/temp'
     ])
 
+    self._verify_sdk_harness_container_image_overrides(pipeline_options)
+
+  def test_sdk_harness_container_image_overrides_prime(self):
+    pipeline_options = PipelineOptions([
+        '--dataflow_service_options=enable_prime',
+        '--temp_location',
+        'gs://any-location/temp'
+    ])
+
+    self._verify_sdk_harness_container_image_overrides(pipeline_options)
+
+  def _verify_dataflow_container_image_override(self, pipeline_options):
     pipeline = Pipeline(options=pipeline_options)
     pipeline | Create([1, 2, 3]) | ParDo(DoFn())  # pylint:disable=expression-not-assigned
 
@@ -282,14 +373,62 @@ class UtilTest(unittest.TestCase):
 
     self.assertTrue(found_override)
 
-  def test_non_apache_container_not_overridden(self):
+  def test_dataflow_container_image_override_runner_v2(self):
     pipeline_options = PipelineOptions([
-        '--experiments=beam_fn_api',
-        '--experiments=use_unified_worker',
+        '--experiments=use_runner_v2',
         '--temp_location',
         'gs://any-location/temp'
     ])
 
+    self._verify_dataflow_container_image_override(pipeline_options)
+
+  def test_dataflow_container_image_override_prime(self):
+    pipeline_options = PipelineOptions([
+        '--dataflow_service_options=enable_prime',
+        '--temp_location',
+        'gs://any-location/temp'
+    ])
+
+    self._verify_dataflow_container_image_override(pipeline_options)
+
+  def _verify_dataflow_container_image_override_rc(self, pipeline_options):
+    pipeline = Pipeline(options=pipeline_options)
+    pipeline | Create([1, 2, 3]) | ParDo(DoFn())  # pylint:disable=expression-not-assigned
+
+    dummy_env = DockerEnvironment(
+        container_image='apache/beam_dummy_name:2.00.0RC10')
+    proto_pipeline, _ = pipeline.to_runner_api(
+        return_context=True, default_environment=dummy_env)
+
+    # Accessing non-public method for testing.
+    apiclient.DataflowApplicationClient._apply_sdk_environment_overrides(
+        proto_pipeline, {}, pipeline_options)
+
+    from apache_beam.utils import proto_utils
+    found_override = False
+    trimed_rc = True
+    for env in proto_pipeline.components.environments.values():
+      docker_payload = proto_utils.parse_Bytes(
+          env.payload, beam_runner_api_pb2.DockerPayload)
+      if docker_payload.container_image.startswith(
+          names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY):
+        found_override = True
+        if docker_payload.container_image.split(':')[-1] != '2.00.0':
+          trimed_rc = False
+
+    self.assertTrue(found_override)
+    self.assertTrue(trimed_rc)
+
+  def test_dataflow_container_image_override_rc(self):
+    pipeline_options = PipelineOptions([
+        '--experiments=use_runner_v2',
+        '--temp_location',
+        'gs://any-location/temp'
+    ])
+
+    self._verify_dataflow_container_image_override_rc(pipeline_options)
+
+  def _verify_non_apache_container_not_overridden(self, pipeline_options):
     pipeline = Pipeline(options=pipeline_options)
     pipeline | Create([1, 2, 3]) | ParDo(DoFn())  # pylint:disable=expression-not-assigned
 
@@ -315,15 +454,25 @@ class UtilTest(unittest.TestCase):
 
     self.assertFalse(found_override)
 
-  def test_pipeline_sdk_not_overridden(self):
+  def test_non_apache_container_not_overridden_runner_v2(self):
     pipeline_options = PipelineOptions([
-        '--experiments=beam_fn_api',
-        '--experiments=use_unified_worker',
+        '--experiments=use_runner_v2',
         '--temp_location',
-        'gs://any-location/temp',
-        '--sdk_container_image=dummy_prefix/dummy_name:dummy_tag'
+        'gs://any-location/temp'
     ])
 
+    self._verify_non_apache_container_not_overridden(pipeline_options)
+
+  def test_non_apache_container_not_overridden_prime(self):
+    pipeline_options = PipelineOptions([
+        '--dataflow_service_options=enable_prime',
+        '--temp_location',
+        'gs://any-location/temp'
+    ])
+
+    self._verify_non_apache_container_not_overridden(pipeline_options)
+
+  def _verify_pipeline_sdk_not_overridden(self, pipeline_options):
     pipeline = Pipeline(options=pipeline_options)
     pipeline | Create([1, 2, 3]) | ParDo(DoFn())  # pylint:disable=expression-not-assigned
 
@@ -351,6 +500,101 @@ class UtilTest(unittest.TestCase):
 
     self.assertFalse(found_override)
 
+  def test_pipeline_sdk_not_overridden_runner_v2(self):
+    pipeline_options = PipelineOptions([
+        '--experiments=use_runner_v2',
+        '--temp_location',
+        'gs://any-location/temp',
+        '--sdk_container_image=dummy_prefix/dummy_name:dummy_tag'
+    ])
+
+    self._verify_pipeline_sdk_not_overridden(pipeline_options)
+
+  def test_pipeline_sdk_not_overridden_prime(self):
+    pipeline_options = PipelineOptions([
+        '--dataflow_service_options=enable_prime',
+        '--temp_location',
+        'gs://any-location/temp',
+        '--sdk_container_image=dummy_prefix/dummy_name:dummy_tag'
+    ])
+
+    self._verify_pipeline_sdk_not_overridden(pipeline_options)
+
+  def test_default_container_base_repository(self):
+    pipeline_options = PipelineOptions(['--temp_location', 'gs://any/temp'])
+    self.assertEqual(
+        apiclient.get_container_base_repository_from_options(pipeline_options),
+        names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY)
+    self.assertEqual(
+        apiclient.get_container_base_repository_from_options(None),
+        names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY)
+    self.assertTrue(
+        apiclient.get_container_image_from_options(pipeline_options).startswith(
+            names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY + '/beam_python'))
+
+  def test_custom_container_base_repository(self):
+    base = 'docker.example.com/my-prefix/cloud-dataflow/v1beta3'
+    for value in [base, base + '/']:
+      pipeline_options = PipelineOptions([
+          '--temp_location',
+          'gs://any/temp',
+          '--dataflow_container_base_repository=' + value
+      ])
+      self.assertEqual(
+          apiclient.get_container_base_repository_from_options(
+              pipeline_options),
+          base)
+      self.assertEqual(
+          apiclient.get_container_image_from_options(pipeline_options),
+          '%s/beam_python%d.%d_sdk:%s' % (
+              base,
+              sys.version_info[0],
+              sys.version_info[1],
+              apiclient._get_required_container_version()))
+
+  def test_sdk_container_image_takes_precedence_over_base_repository(self):
+    pipeline_options = PipelineOptions([
+        '--temp_location',
+        'gs://any/temp',
+        '--dataflow_container_base_repository=docker.example.com/prefix',
+        '--sdk_container_image=dummy_prefix/dummy_name:dummy_tag'
+    ])
+    self.assertEqual(
+        apiclient.get_container_image_from_options(pipeline_options),
+        'dummy_prefix/dummy_name:dummy_tag')
+
+  def test_custom_container_base_repository_for_xlang_environments(self):
+    base = 'docker.example.com/my-prefix/cloud-dataflow/v1beta3'
+    pipeline_options = PipelineOptions([
+        '--experiments=use_runner_v2',
+        '--temp_location',
+        'gs://any-location/temp',
+        '--dataflow_container_base_repository=' + base
+    ])
+    pipeline = Pipeline(options=pipeline_options)
+    pipeline | Create([1, 2, 3]) | ParDo(DoFn())  # pylint:disable=expression-not-assigned
+
+    dummy_env = DockerEnvironment(
+        container_image='apache/beam_java11_sdk:2.00.0rc1')
+    proto_pipeline, _ = pipeline.to_runner_api(
+        return_context=True, default_environment=dummy_env)
+
+    # Accessing non-public method for testing.
+    apiclient.DataflowApplicationClient._apply_sdk_environment_overrides(
+        proto_pipeline, {}, pipeline_options)
+
+    from apache_beam.utils import proto_utils
+    images = [
+        proto_utils.parse_Bytes(
+            env.payload, beam_runner_api_pb2.DockerPayload).container_image
+        for env in proto_pipeline.components.environments.values()
+    ]
+    self.assertIn(base + '/beam_java11_sdk:2.00.0', images)
+    self.assertFalse(
+        any(
+            image.startswith(names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY)
+            for image in images))
+
   def test_invalid_default_job_name(self):
     # Regexp for job names in dataflow.
     regexp = '^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$'
@@ -364,87 +608,72 @@ class UtilTest(unittest.TestCase):
 
   def test_default_job_name(self):
     job_name = apiclient.Job.default_job_name(None)
-    regexp = 'beamapp-.*-[0-9]{10}-[0-9]{6}'
+    regexp = 'beamapp-.*-[0-9]{10}-[0-9]{6}-[a-z0-9]{8}$'
     self.assertRegex(job_name, regexp)
 
-  def test_split_int(self):
-    number = 12345
-    split_number = apiclient.to_split_int(number)
-    self.assertEqual((split_number.lowBits, split_number.highBits), (number, 0))
-    shift_number = number << 32
-    split_number = apiclient.to_split_int(shift_number)
-    self.assertEqual((split_number.lowBits, split_number.highBits), (0, number))
-
   def test_translate_distribution_using_accumulator(self):
-    metric_update = dataflow.CounterUpdate()
+    metric_update = dataflow.MetricUpdate()
     accumulator = mock.Mock()
     accumulator.min = 1
     accumulator.max = 15
     accumulator.sum = 16
     accumulator.count = 2
     apiclient.translate_distribution(accumulator, metric_update)
-    self.assertEqual(metric_update.distribution.min.lowBits, accumulator.min)
-    self.assertEqual(metric_update.distribution.max.lowBits, accumulator.max)
-    self.assertEqual(metric_update.distribution.sum.lowBits, accumulator.sum)
-    self.assertEqual(
-        metric_update.distribution.count.lowBits, accumulator.count)
+    self.assertEqual(metric_update.distribution['min'], accumulator.min)
+    self.assertEqual(metric_update.distribution['max'], accumulator.max)
+    self.assertEqual(metric_update.distribution['sum'], accumulator.sum)
+    self.assertEqual(metric_update.distribution['count'], accumulator.count)
 
   def test_translate_distribution_using_distribution_data(self):
-    metric_update = dataflow.CounterUpdate()
+    metric_update = dataflow.MetricUpdate()
     distribution_update = DistributionData(16, 2, 1, 15)
     apiclient.translate_distribution(distribution_update, metric_update)
+    self.assertEqual(metric_update.distribution['min'], distribution_update.min)
+    self.assertEqual(metric_update.distribution['max'], distribution_update.max)
+    self.assertEqual(metric_update.distribution['sum'], distribution_update.sum)
     self.assertEqual(
-        metric_update.distribution.min.lowBits, distribution_update.min)
-    self.assertEqual(
-        metric_update.distribution.max.lowBits, distribution_update.max)
-    self.assertEqual(
-        metric_update.distribution.sum.lowBits, distribution_update.sum)
-    self.assertEqual(
-        metric_update.distribution.count.lowBits, distribution_update.count)
+        metric_update.distribution['count'], distribution_update.count)
 
   def test_translate_distribution_using_dataflow_distribution_counter(self):
     counter_update = DataflowDistributionCounter()
     counter_update.add_input(1)
     counter_update.add_input(3)
-    metric_proto = dataflow.CounterUpdate()
+    metric_proto = dataflow.MetricUpdate()
     apiclient.translate_distribution(counter_update, metric_proto)
     histogram = mock.Mock(firstBucketOffset=None, bucketCounts=None)
     counter_update.translate_to_histogram(histogram)
-    self.assertEqual(metric_proto.distribution.min.lowBits, counter_update.min)
-    self.assertEqual(metric_proto.distribution.max.lowBits, counter_update.max)
-    self.assertEqual(metric_proto.distribution.sum.lowBits, counter_update.sum)
+    self.assertEqual(metric_proto.distribution['min'], counter_update.min)
+    self.assertEqual(metric_proto.distribution['max'], counter_update.max)
+    self.assertEqual(metric_proto.distribution['sum'], counter_update.sum)
+    self.assertEqual(metric_proto.distribution['count'], counter_update.count)
     self.assertEqual(
-        metric_proto.distribution.count.lowBits, counter_update.count)
-    self.assertEqual(
-        metric_proto.distribution.histogram.bucketCounts,
-        histogram.bucketCounts)
-    self.assertEqual(
-        metric_proto.distribution.histogram.firstBucketOffset,
+        metric_proto.distribution['firstBucketOffset'],
         histogram.firstBucketOffset)
+    self.assertEqual(
+        metric_proto.distribution['bucketCounts'], histogram.bucketCounts)
 
   def test_translate_means(self):
-    metric_update = dataflow.CounterUpdate()
+    metric_update = dataflow.MetricUpdate()
     accumulator = mock.Mock()
     accumulator.sum = 16
     accumulator.count = 2
     apiclient.MetricUpdateTranslators.translate_scalar_mean_int(
         accumulator, metric_update)
-    self.assertEqual(metric_update.integerMean.sum.lowBits, accumulator.sum)
-    self.assertEqual(metric_update.integerMean.count.lowBits, accumulator.count)
+    self.assertEqual(metric_update.mean_sum, accumulator.sum)
+    self.assertEqual(metric_update.mean_count, accumulator.count)
 
     accumulator.sum = 16.0
     accumulator.count = 2
     apiclient.MetricUpdateTranslators.translate_scalar_mean_float(
         accumulator, metric_update)
-    self.assertEqual(metric_update.floatingPointMean.sum, accumulator.sum)
-    self.assertEqual(
-        metric_update.floatingPointMean.count.lowBits, accumulator.count)
+    self.assertEqual(metric_update.mean_sum, accumulator.sum)
+    self.assertEqual(metric_update.mean_count, accumulator.count)
 
   def test_translate_means_using_distribution_accumulator(self):
     # This is the special case for MeanByteCount.
     # Which is reported over the FnAPI as a beam distribution,
     # and to the service as a MetricUpdate IntegerMean.
-    metric_update = dataflow.CounterUpdate()
+    metric_update = dataflow.MetricUpdate()
     accumulator = mock.Mock()
     accumulator.min = 7
     accumulator.max = 9
@@ -452,16 +681,15 @@ class UtilTest(unittest.TestCase):
     accumulator.count = 2
     apiclient.MetricUpdateTranslators.translate_scalar_mean_int(
         accumulator, metric_update)
-    self.assertEqual(metric_update.integerMean.sum.lowBits, accumulator.sum)
-    self.assertEqual(metric_update.integerMean.count.lowBits, accumulator.count)
+    self.assertEqual(metric_update.mean_sum, accumulator.sum)
+    self.assertEqual(metric_update.mean_count, accumulator.count)
 
     accumulator.sum = 16.0
     accumulator.count = 2
     apiclient.MetricUpdateTranslators.translate_scalar_mean_float(
         accumulator, metric_update)
-    self.assertEqual(metric_update.floatingPointMean.sum, accumulator.sum)
-    self.assertEqual(
-        metric_update.floatingPointMean.count.lowBits, accumulator.count)
+    self.assertEqual(metric_update.mean_sum, accumulator.sum)
+    self.assertEqual(metric_update.mean_count, accumulator.count)
 
   def test_default_ip_configuration(self):
     pipeline_options = PipelineOptions(
@@ -470,7 +698,9 @@ class UtilTest(unittest.TestCase):
                                 pipeline_options,
                                 '2.0.0',
                                 FAKE_PIPELINE_URL)
-    self.assertEqual(env.proto.workerPools[0].ipConfiguration, None)
+    self.assertEqual(
+        env.proto.worker_pools[0].ip_configuration,
+        dataflow.WorkerIPAddressConfiguration.WORKER_IP_UNSPECIFIED)
 
   def test_public_ip_configuration(self):
     pipeline_options = PipelineOptions(
@@ -480,8 +710,8 @@ class UtilTest(unittest.TestCase):
                                 '2.0.0',
                                 FAKE_PIPELINE_URL)
     self.assertEqual(
-        env.proto.workerPools[0].ipConfiguration,
-        dataflow.WorkerPool.IpConfigurationValueValuesEnum.WORKER_IP_PUBLIC)
+        env.proto.worker_pools[0].ip_configuration,
+        dataflow.WorkerIPAddressConfiguration.WORKER_IP_PUBLIC)
 
   def test_private_ip_configuration(self):
     pipeline_options = PipelineOptions(
@@ -491,8 +721,8 @@ class UtilTest(unittest.TestCase):
                                 '2.0.0',
                                 FAKE_PIPELINE_URL)
     self.assertEqual(
-        env.proto.workerPools[0].ipConfiguration,
-        dataflow.WorkerPool.IpConfigurationValueValuesEnum.WORKER_IP_PRIVATE)
+        env.proto.worker_pools[0].ip_configuration,
+        dataflow.WorkerIPAddressConfiguration.WORKER_IP_PRIVATE)
 
   def test_number_of_worker_harness_threads(self):
     pipeline_options = PipelineOptions([
@@ -505,32 +735,30 @@ class UtilTest(unittest.TestCase):
                                 pipeline_options,
                                 '2.0.0',
                                 FAKE_PIPELINE_URL)
-    self.assertEqual(env.proto.workerPools[0].numThreadsPerWorker, 2)
+    self.assertEqual(env.proto.worker_pools[0].num_threads_per_worker, 2)
 
-  @mock.patch(
-      'apache_beam.runners.dataflow.internal.apiclient.'
-      'beam_version.__version__',
-      '2.2.0')
-  def test_harness_override_default_in_released_sdks(self):
-    pipeline_options = PipelineOptions(
-        ['--temp_location', 'gs://any-location/temp', '--streaming'])
-    override = ''.join([
-        'runner_harness_container_image=',
-        names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY,
-        '/harness:2.2.0'
+  def test_disk_provisioning_options(self):
+    pipeline_options = PipelineOptions([
+        '--temp_location',
+        'gs://any-location/temp',
+        '--disk_provisioned_iops',
+        '4000',
+        '--disk_provisioned_throughput_mibps',
+        '200'
     ])
-    env = apiclient.Environment(
-        [],  #packages
-        pipeline_options,
-        '2.0.0',  #any environment version
-        FAKE_PIPELINE_URL)
-    self.assertIn(override, env.proto.experiments)
+    env = apiclient.Environment([],
+                                pipeline_options,
+                                '2.0.0',
+                                FAKE_PIPELINE_URL)
+    self.assertEqual(env.proto.worker_pools[0].disk_provisioned_iops, 4000)
+    self.assertEqual(
+        env.proto.worker_pools[0].disk_provisioned_throughput_mibps, 200)
 
   @mock.patch(
       'apache_beam.runners.dataflow.internal.apiclient.'
       'beam_version.__version__',
       '2.2.0')
-  def test_harness_override_absent_in_released_sdks_with_runner_v2(self):
+  def test_harness_override_absent_with_runner_v2(self):
     pipeline_options = PipelineOptions([
         '--temp_location',
         'gs://any-location/temp',
@@ -550,32 +778,7 @@ class UtilTest(unittest.TestCase):
       'apache_beam.runners.dataflow.internal.apiclient.'
       'beam_version.__version__',
       '2.2.0')
-  def test_harness_override_custom_in_released_sdks(self):
-    pipeline_options = PipelineOptions([
-        '--temp_location',
-        'gs://any-location/temp',
-        '--streaming',
-        '--experiments=runner_harness_container_image=fake_image'
-    ])
-    env = apiclient.Environment(
-        [],  #packages
-        pipeline_options,
-        '2.0.0',  #any environment version
-        FAKE_PIPELINE_URL)
-    self.assertEqual(
-        1,
-        len([
-            x for x in env.proto.experiments
-            if x.startswith('runner_harness_container_image=')
-        ]))
-    self.assertIn(
-        'runner_harness_container_image=fake_image', env.proto.experiments)
-
-  @mock.patch(
-      'apache_beam.runners.dataflow.internal.apiclient.'
-      'beam_version.__version__',
-      '2.2.0')
-  def test_harness_override_custom_in_released_sdks_with_runner_v2(self):
+  def test_custom_harness_override_present_with_runner_v2(self):
     pipeline_options = PipelineOptions([
         '--temp_location',
         'gs://any-location/temp',
@@ -600,41 +803,6 @@ class UtilTest(unittest.TestCase):
   @mock.patch(
       'apache_beam.runners.dataflow.internal.apiclient.'
       'beam_version.__version__',
-      '2.2.0.rc1')
-  def test_harness_override_uses_base_version_in_rc_releases(self):
-    pipeline_options = PipelineOptions(
-        ['--temp_location', 'gs://any-location/temp', '--streaming'])
-    override = ''.join([
-        'runner_harness_container_image=',
-        names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY,
-        '/harness:2.2.0'
-    ])
-    env = apiclient.Environment(
-        [],  #packages
-        pipeline_options,
-        '2.0.0',  #any environment version
-        FAKE_PIPELINE_URL)
-    self.assertIn(override, env.proto.experiments)
-
-  @mock.patch(
-      'apache_beam.runners.dataflow.internal.apiclient.'
-      'beam_version.__version__',
-      '2.2.0.dev')
-  def test_harness_override_absent_in_unreleased_sdk(self):
-    pipeline_options = PipelineOptions(
-        ['--temp_location', 'gs://any-location/temp', '--streaming'])
-    env = apiclient.Environment(
-        [],  #packages
-        pipeline_options,
-        '2.0.0',  #any environment version
-        FAKE_PIPELINE_URL)
-    if env.proto.experiments:
-      for experiment in env.proto.experiments:
-        self.assertNotIn('runner_harness_container_image=', experiment)
-
-  @mock.patch(
-      'apache_beam.runners.dataflow.internal.apiclient.'
-      'beam_version.__version__',
       '2.2.0.dev')
   def test_pinned_worker_harness_image_tag_used_in_dev_sdk(self):
     # streaming, fnapi pipeline.
@@ -646,15 +814,14 @@ class UtilTest(unittest.TestCase):
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
     self.assertEqual(
-        env.proto.workerPools[0].workerHarnessContainerImage,
+        env.proto.worker_pools[0].worker_harness_container_image,
         (
-            names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY + '/python%d%d-fnapi:%s' %
-            (
+            names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY +
+            '/beam_python%d.%d_sdk:%s' % (
                 sys.version_info[0],
                 sys.version_info[1],
-                names.BEAM_FNAPI_CONTAINER_VERSION)))
+                names.BEAM_DEV_SDK_CONTAINER_TAG)))
 
-    # batch, legacy pipeline.
     pipeline_options = PipelineOptions(
         ['--temp_location', 'gs://any-location/temp'])
     env = apiclient.Environment(
@@ -663,12 +830,13 @@ class UtilTest(unittest.TestCase):
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
     self.assertEqual(
-        env.proto.workerPools[0].workerHarnessContainerImage,
+        env.proto.worker_pools[0].worker_harness_container_image,
         (
-            names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY + '/python%d%d:%s' % (
+            names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY +
+            '/beam_python%d.%d_sdk:%s' % (
                 sys.version_info[0],
                 sys.version_info[1],
-                names.BEAM_CONTAINER_VERSION)))
+                names.BEAM_DEV_SDK_CONTAINER_TAG)))
 
   @mock.patch(
       'apache_beam.runners.dataflow.internal.apiclient.'
@@ -684,13 +852,12 @@ class UtilTest(unittest.TestCase):
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
     self.assertEqual(
-        env.proto.workerPools[0].workerHarnessContainerImage,
+        env.proto.worker_pools[0].worker_harness_container_image,
         (
             names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY +
-            '/python%d%d-fnapi:2.2.0' %
+            '/beam_python%d.%d_sdk:2.2.0' %
             (sys.version_info[0], sys.version_info[1])))
 
-    # batch, legacy pipeline.
     pipeline_options = PipelineOptions(
         ['--temp_location', 'gs://any-location/temp'])
     env = apiclient.Environment(
@@ -699,9 +866,10 @@ class UtilTest(unittest.TestCase):
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
     self.assertEqual(
-        env.proto.workerPools[0].workerHarnessContainerImage,
+        env.proto.worker_pools[0].worker_harness_container_image,
         (
-            names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY + '/python%d%d:2.2.0' %
+            names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY +
+            '/beam_python%d.%d_sdk:2.2.0' %
             (sys.version_info[0], sys.version_info[1])))
 
   @mock.patch(
@@ -718,13 +886,12 @@ class UtilTest(unittest.TestCase):
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
     self.assertEqual(
-        env.proto.workerPools[0].workerHarnessContainerImage,
+        env.proto.worker_pools[0].worker_harness_container_image,
         (
             names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY +
-            '/python%d%d-fnapi:2.2.0' %
+            '/beam_python%d.%d_sdk:2.2.0' %
             (sys.version_info[0], sys.version_info[1])))
 
-    # batch, legacy pipeline.
     pipeline_options = PipelineOptions(
         ['--temp_location', 'gs://any-location/temp'])
     env = apiclient.Environment(
@@ -733,9 +900,10 @@ class UtilTest(unittest.TestCase):
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
     self.assertEqual(
-        env.proto.workerPools[0].workerHarnessContainerImage,
+        env.proto.worker_pools[0].worker_harness_container_image,
         (
-            names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY + '/python%d%d:2.2.0' %
+            names.DATAFLOW_CONTAINER_IMAGE_REPOSITORY +
+            '/beam_python%d.%d_sdk:2.2.0' %
             (sys.version_info[0], sys.version_info[1])))
 
   def test_worker_harness_override_takes_precedence_over_sdk_defaults(self):
@@ -752,7 +920,7 @@ class UtilTest(unittest.TestCase):
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
     self.assertEqual(
-        env.proto.workerPools[0].workerHarnessContainerImage, 'some:image')
+        env.proto.worker_pools[0].worker_harness_container_image, 'some:image')
     # batch, legacy pipeline.
     pipeline_options = PipelineOptions([
         '--temp_location',
@@ -765,7 +933,7 @@ class UtilTest(unittest.TestCase):
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
     self.assertEqual(
-        env.proto.workerPools[0].workerHarnessContainerImage, 'some:image')
+        env.proto.worker_pools[0].worker_harness_container_image, 'some:image')
 
   @mock.patch(
       'apache_beam.runners.dataflow.internal.apiclient.Job.'
@@ -783,8 +951,8 @@ class UtilTest(unittest.TestCase):
         '--transform_name_mapping',
         '{\"from\":\"to\"}'
     ])
-    job = apiclient.Job(pipeline_options, FAKE_PIPELINE_URL)
-    self.assertIsNotNone(job.proto.transformNameMapping)
+    job = apiclient.Job(pipeline_options, beam_runner_api_pb2.Pipeline())
+    self.assertIsNotNone(job.proto.transform_name_mapping)
 
   def test_created_from_snapshot_id(self):
     pipeline_options = PipelineOptions([
@@ -797,8 +965,8 @@ class UtilTest(unittest.TestCase):
         '--create_from_snapshot',
         'test_snapshot_id'
     ])
-    job = apiclient.Job(pipeline_options, FAKE_PIPELINE_URL)
-    self.assertEqual('test_snapshot_id', job.proto.createdFromSnapshotId)
+    job = apiclient.Job(pipeline_options, beam_runner_api_pb2.Pipeline())
+    self.assertEqual('test_snapshot_id', job.proto.created_from_snapshot_id)
 
   def test_labels(self):
     pipeline_options = PipelineOptions([
@@ -809,8 +977,8 @@ class UtilTest(unittest.TestCase):
         '--temp_location',
         'gs://test-location/temp'
     ])
-    job = apiclient.Job(pipeline_options, FAKE_PIPELINE_URL)
-    self.assertIsNone(job.proto.labels)
+    job = apiclient.Job(pipeline_options, beam_runner_api_pb2.Pipeline())
+    self.assertEqual(job.proto.labels, {})
 
     pipeline_options = PipelineOptions([
         '--project',
@@ -830,18 +998,77 @@ class UtilTest(unittest.TestCase):
         '--labels',
         'key5'
     ])
-    job = apiclient.Job(pipeline_options, FAKE_PIPELINE_URL)
-    self.assertEqual(5, len(job.proto.labels.additionalProperties))
-    self.assertEqual('key1', job.proto.labels.additionalProperties[0].key)
-    self.assertEqual('value1', job.proto.labels.additionalProperties[0].value)
-    self.assertEqual('key2', job.proto.labels.additionalProperties[1].key)
-    self.assertEqual('', job.proto.labels.additionalProperties[1].value)
-    self.assertEqual('key3', job.proto.labels.additionalProperties[2].key)
-    self.assertEqual('value3', job.proto.labels.additionalProperties[2].value)
-    self.assertEqual('key4', job.proto.labels.additionalProperties[3].key)
-    self.assertEqual('value4', job.proto.labels.additionalProperties[3].value)
-    self.assertEqual('key5', job.proto.labels.additionalProperties[4].key)
-    self.assertEqual('', job.proto.labels.additionalProperties[4].value)
+    job = apiclient.Job(pipeline_options, beam_runner_api_pb2.Pipeline())
+    self.assertEqual(5, len(job.proto.labels))
+    self.assertTrue('key1' in job.proto.labels.keys())
+    self.assertEqual('value1', job.proto.labels['key1'])
+    self.assertTrue('key2' in job.proto.labels.keys())
+    self.assertEqual('', job.proto.labels['key2'])
+    self.assertTrue('key3' in job.proto.labels.keys())
+    self.assertEqual('value3', job.proto.labels['key3'])
+    self.assertTrue('key4' in job.proto.labels.keys())
+    self.assertEqual('value4', job.proto.labels['key4'])
+    self.assertTrue('key5' in job.proto.labels.keys())
+    self.assertEqual('', job.proto.labels['key5'])
+
+    pipeline_options = PipelineOptions([
+        '--project',
+        'test_project',
+        '--job_name',
+        'test_job_name',
+        '--temp_location',
+        'gs://test-location/temp',
+        '--labels',
+        '{ "name": "wrench", "mass": "1_3kg", "count": "3" }'
+    ])
+    job = apiclient.Job(pipeline_options, beam_runner_api_pb2.Pipeline())
+    self.assertEqual(3, len(job.proto.labels))
+    self.assertTrue('name' in job.proto.labels.keys())
+    self.assertEqual('wrench', job.proto.labels['name'])
+    self.assertTrue('mass' in job.proto.labels.keys())
+    self.assertEqual('1_3kg', job.proto.labels['mass'])
+    self.assertTrue('count' in job.proto.labels.keys())
+    self.assertEqual('3', job.proto.labels['count'])
+
+    pipeline_options = PipelineOptions([
+        '--project',
+        'test_project',
+        '--job_name',
+        'test_job_name',
+        '--temp_location',
+        'gs://test-location/temp'
+    ])
+    pipeline_options.view_as(GoogleCloudOptions).labels = {
+        "name": "wrench", "mass": "1_3kg", "count": "3"
+    }
+    job = apiclient.Job(pipeline_options, beam_runner_api_pb2.Pipeline())
+    self.assertEqual(3, len(job.proto.labels))
+    self.assertTrue('name' in job.proto.labels.keys())
+    self.assertEqual('wrench', job.proto.labels['name'])
+    self.assertTrue('mass' in job.proto.labels.keys())
+    self.assertEqual('1_3kg', job.proto.labels['mass'])
+    self.assertTrue('count' in job.proto.labels.keys())
+    self.assertEqual('3', job.proto.labels['count'])
+
+    pipeline_options = PipelineOptions([
+        '--project',
+        'test_project',
+        '--job_name',
+        'test_job_name',
+        '--temp_location',
+        'gs://test-location/temp'
+    ])
+    pipeline_options.view_as(
+        GoogleCloudOptions
+    ).labels = '{ "name": "wrench", "mass": "1_3kg", "count": "3" }'
+    job = apiclient.Job(pipeline_options, beam_runner_api_pb2.Pipeline())
+    self.assertEqual(3, len(job.proto.labels))
+    self.assertTrue('name' in job.proto.labels.keys())
+    self.assertEqual('wrench', job.proto.labels['name'])
+    self.assertTrue('mass' in job.proto.labels.keys())
+    self.assertEqual('1_3kg', job.proto.labels['mass'])
+    self.assertTrue('count' in job.proto.labels.keys())
+    self.assertEqual('3', job.proto.labels['count'])
 
   def test_experiment_use_multiple_sdk_containers(self):
     pipeline_options = PipelineOptions([
@@ -856,7 +1083,7 @@ class UtilTest(unittest.TestCase):
     ])
     environment = apiclient.Environment([],
                                         pipeline_options,
-                                        1,
+                                        '1',
                                         FAKE_PIPELINE_URL)
     self.assertIn('use_multiple_sdk_containers', environment.proto.experiments)
 
@@ -874,7 +1101,7 @@ class UtilTest(unittest.TestCase):
     ])
     environment = apiclient.Environment([],
                                         pipeline_options,
-                                        1,
+                                        '1',
                                         FAKE_PIPELINE_URL)
     self.assertIn('use_multiple_sdk_containers', environment.proto.experiments)
 
@@ -892,14 +1119,17 @@ class UtilTest(unittest.TestCase):
     ])
     environment = apiclient.Environment([],
                                         pipeline_options,
-                                        1,
+                                        '1',
                                         FAKE_PIPELINE_URL)
     self.assertNotIn(
         'use_multiple_sdk_containers', environment.proto.experiments)
 
+  # Note: We mock Python to 3.11 here. Keep this mocked version aligned with a
+  # version in _PYTHON_VERSIONS_SUPPORTED_BY_DATAFLOW to prevent test failures
+  # on release (non-dev) builds.
   @mock.patch(
       'apache_beam.runners.dataflow.internal.apiclient.sys.version_info',
-      (3, 8))
+      (3, 11))
   def test_get_python_sdk_name(self):
     pipeline_options = PipelineOptions([
         '--project',
@@ -915,10 +1145,10 @@ class UtilTest(unittest.TestCase):
     ])
     environment = apiclient.Environment([],
                                         pipeline_options,
-                                        1,
+                                        '1',
                                         FAKE_PIPELINE_URL)
     self.assertEqual(
-        'Apache Beam Python 3.8 SDK', environment._get_python_sdk_name())
+        'Apache Beam Python 3.11 SDK', environment._get_python_sdk_name())
 
   @mock.patch(
       'apache_beam.runners.dataflow.internal.apiclient.sys.version_info',
@@ -959,18 +1189,32 @@ class UtilTest(unittest.TestCase):
 
   @mock.patch(
       'apache_beam.runners.dataflow.internal.apiclient.sys.version_info',
-      (3, 8, 2))
+      (3, 10, 0))
   @mock.patch(
       'apache_beam.runners.dataflow.internal.apiclient.'
       'beam_version.__version__',
       '2.2.0')
-  def test_interpreter_version_check_passes_py38(self):
+  def test_interpreter_version_check_fails_py310(self):
+    pipeline_options = PipelineOptions([])
+    self.assertRaises(
+        Exception,
+        apiclient._verify_interpreter_version_is_supported,
+        pipeline_options)
+
+  @mock.patch(
+      'apache_beam.runners.dataflow.internal.apiclient.sys.version_info',
+      (3, 11, 4))
+  @mock.patch(
+      'apache_beam.runners.dataflow.internal.apiclient.'
+      'beam_version.__version__',
+      '2.2.0')
+  def test_interpreter_version_check_passes_py311(self):
     pipeline_options = PipelineOptions([])
     apiclient._verify_interpreter_version_is_supported(pipeline_options)
 
   @mock.patch(
       'apache_beam.runners.dataflow.internal.apiclient.sys.version_info',
-      (3, 9, 0))
+      (3, 15, 0))
   @mock.patch(
       'apache_beam.runners.dataflow.internal.apiclient.'
       'beam_version.__version__',
@@ -981,31 +1225,6 @@ class UtilTest(unittest.TestCase):
         Exception,
         apiclient._verify_interpreter_version_is_supported,
         pipeline_options)
-
-  def test_use_unified_worker(self):
-    pipeline_options = PipelineOptions([])
-    self.assertFalse(apiclient._use_unified_worker(pipeline_options))
-
-    pipeline_options = PipelineOptions(['--experiments=beam_fn_api'])
-    self.assertFalse(apiclient._use_unified_worker(pipeline_options))
-
-    pipeline_options = PipelineOptions(['--experiments=use_unified_worker'])
-    self.assertTrue(apiclient._use_unified_worker(pipeline_options))
-
-    pipeline_options = PipelineOptions(
-        ['--experiments=use_unified_worker', '--experiments=beam_fn_api'])
-    self.assertTrue(apiclient._use_unified_worker(pipeline_options))
-
-    pipeline_options = PipelineOptions(
-        ['--experiments=use_runner_v2', '--experiments=beam_fn_api'])
-    self.assertTrue(apiclient._use_unified_worker(pipeline_options))
-
-    pipeline_options = PipelineOptions([
-        '--experiments=use_unified_worker',
-        '--experiments=use_runner_v2',
-        '--experiments=beam_fn_api'
-    ])
-    self.assertTrue(apiclient._use_unified_worker(pipeline_options))
 
   def test_get_response_encoding(self):
     encoding = apiclient.get_response_encoding()
@@ -1025,7 +1244,7 @@ class UtilTest(unittest.TestCase):
         '--experiments',
         'upload_graph'
     ])
-    job = apiclient.Job(pipeline_options, FAKE_PIPELINE_URL)
+    job = apiclient.Job(pipeline_options, beam_runner_api_pb2.Pipeline())
     pipeline_options.view_as(GoogleCloudOptions).no_auth = True
     client = apiclient.DataflowApplicationClient(pipeline_options)
     with mock.patch.object(client, 'stage_file', side_effect=None):
@@ -1036,7 +1255,11 @@ class UtilTest(unittest.TestCase):
                                side_effect=None):
           client.create_job(job)
           client.stage_file.assert_called_once_with(
-              mock.ANY, "dataflow_graph.json", mock.ANY)
+              mock.ANY,
+              "dataflow_graph.json",
+              mock.ANY,
+              'application/octet-stream',
+              None)
           client.create_job_description.assert_called_once()
 
   def test_create_job_returns_existing_job(self):
@@ -1048,19 +1271,19 @@ class UtilTest(unittest.TestCase):
         '--temp_location',
         'gs://test-location/temp',
     ])
-    job = apiclient.Job(pipeline_options, FAKE_PIPELINE_URL)
-    self.assertTrue(job.proto.clientRequestId)  # asserts non-empty string
+    job = apiclient.Job(pipeline_options, beam_runner_api_pb2.Pipeline())
+    self.assertTrue(job.proto.client_request_id)  # asserts non-empty string
     pipeline_options.view_as(GoogleCloudOptions).no_auth = True
     client = apiclient.DataflowApplicationClient(pipeline_options)
 
     response = dataflow.Job()
-    # different clientRequestId from `job`
-    response.clientRequestId = "20210821081910123456-1234"
+    # different client_id_request from `job`
+    response.client_request_id = "20210821081910123456-1234"
     response.name = 'test_job_name'
     response.id = '2021-08-19_21_18_43-9756917246311111021'
 
-    with mock.patch.object(client._client.projects_locations_jobs,
-                           'Create',
+    with mock.patch.object(client._jobs_client,
+                           'create_job',
                            side_effect=[response]):
       with mock.patch.object(client, 'create_job_description',
                              side_effect=None):
@@ -1090,23 +1313,23 @@ class UtilTest(unittest.TestCase):
     with mock.patch('apache_beam.runners.dataflow.internal.apiclient.Job.'
                     'job_id_for_name',
                     return_value=replace_job_id) as job_id_for_name_mock:
-      job = apiclient.Job(pipeline_options, FAKE_PIPELINE_URL)
+      job = apiclient.Job(pipeline_options, beam_runner_api_pb2.Pipeline())
     job_id_for_name_mock.assert_called_once()
 
-    self.assertTrue(job.proto.clientRequestId)  # asserts non-empty string
+    self.assertTrue(job.proto.client_request_id)  # asserts non-empty string
 
     pipeline_options.view_as(GoogleCloudOptions).no_auth = True
     client = apiclient.DataflowApplicationClient(pipeline_options)
 
     response = dataflow.Job()
     # different clientRequestId from `job`
-    response.clientRequestId = "20210821083254123456-1234"
+    response.client_request_id = "20210821083254123456-1234"
     response.name = 'test_job_name'
     response.id = '2021-08-19_21_29_07-5725551945600207770'
 
     with mock.patch.object(client, 'create_job_description', side_effect=None):
-      with mock.patch.object(client._client.projects_locations_jobs,
-                             'Create',
+      with mock.patch.object(client._jobs_client,
+                             'create_job',
                              side_effect=[response]):
 
         with self.assertRaises(
@@ -1132,7 +1355,7 @@ class UtilTest(unittest.TestCase):
         '--template_location',
         'gs://test-location/template'
     ])
-    job = apiclient.Job(pipeline_options, FAKE_PIPELINE_URL)
+    job = apiclient.Job(pipeline_options, beam_runner_api_pb2.Pipeline())
     job.proto.steps.append(dataflow.Step(name='test_step_name'))
 
     pipeline_options.view_as(GoogleCloudOptions).no_auth = True
@@ -1146,8 +1369,18 @@ class UtilTest(unittest.TestCase):
           client.create_job(job)
 
           client.stage_file.assert_has_calls([
-              mock.call(mock.ANY, 'dataflow_graph.json', mock.ANY),
-              mock.call(mock.ANY, 'template', mock.ANY)
+              mock.call(
+                  mock.ANY,
+                  'dataflow_graph.json',
+                  mock.ANY,
+                  'application/octet-stream',
+                  None),
+              mock.call(
+                  mock.ANY,
+                  'template',
+                  mock.ANY,
+                  'application/octet-stream',
+                  None)
           ])
           client.create_job_description.assert_called_once()
           # template is generated, but job should not be submitted to the
@@ -1161,6 +1394,84 @@ class UtilTest(unittest.TestCase):
           template_obj = json.loads(template_content)
           self.assertFalse(template_obj.get('steps'))
           self.assertTrue(template_obj['stepsLocation'])
+
+  @mock.patch.dict(
+      os.environ, {'GOOGLE_CLOUD_UNIVERSE_DOMAIN': 'custom-universe.com'})
+  def test_dataflow_endpoint_clean(self):
+    # An explicit endpoint is cleaned and passed as an api_endpoint override to
+    # every Dataflow client, regardless of GOOGLE_CLOUD_UNIVERSE_DOMAIN.
+    endpoints_and_expectations = [
+        # (input_endpoint, expected_endpoint, expected_transport)
+        ('https://dataflow.googleapis.com/', 'dataflow.googleapis.com', None),
+        ('https://dataflow.googleapis.com   ', 'dataflow.googleapis.com', None),
+        ('dataflow.googleapis.com/', 'dataflow.googleapis.com', None),
+        ('https://dataflow.example.com/', 'dataflow.example.com', None),
+        ('https://dataflow.example.com   ', 'dataflow.example.com', None),
+        ('dataflow.example.com/', 'dataflow.example.com', None),
+        ('http://localhost:8080/', 'http://localhost:8080', 'rest'),
+        ('localhost:8080/', 'localhost:8080', 'rest'),
+    ]
+
+    for input_ep, expected_ep, expected_transport in endpoints_and_expectations:
+      pipeline_options = PipelineOptions([
+          '--project',
+          'test-project',
+          '--temp_location',
+          'gs://test-location/temp',
+          '--dataflow_endpoint',
+          input_ep,
+          '--no_auth',
+      ])
+      with mock.patch('apache_beam.runners.dataflow.internal.apiclient.dataflow'
+                      '.JobsV1Beta3Client') as mock_jobs, \
+          mock.patch('apache_beam.runners.dataflow.internal.apiclient.dataflow'
+                     '.MessagesV1Beta3Client') as mock_messages, \
+          mock.patch('apache_beam.runners.dataflow.internal.apiclient.dataflow'
+                     '.MetricsV1Beta3Client') as mock_metrics:
+        apiclient.DataflowApplicationClient(pipeline_options)
+        for mock_client in (mock_jobs, mock_messages, mock_metrics):
+          mock_client.assert_called_once()
+          called_kwargs = mock_client.call_args.kwargs
+          client_opts = called_kwargs.get('client_options')
+          self.assertIsNotNone(client_opts)
+          self.assertEqual(client_opts.api_endpoint, expected_ep)
+          self.assertEqual(called_kwargs.get('transport'), expected_transport)
+
+  @mock.patch.dict(
+      os.environ,
+      {
+          # Pin mTLS off so endpoint resolution doesn't depend on the host.
+          'GOOGLE_API_USE_CLIENT_CERTIFICATE': 'false',
+          'GOOGLE_API_USE_MTLS_ENDPOINT': 'never',
+      })
+  def test_dataflow_endpoint_unset_uses_client_library_default(self):
+    # Without an explicit endpoint, no api_endpoint override is passed, so the
+    # client library resolves the endpoint and honors
+    # GOOGLE_CLOUD_UNIVERSE_DOMAIN.
+    pipeline_options = PipelineOptions([
+        '--project',
+        'test-project',
+        '--temp_location',
+        'gs://test-location/temp',
+        '--no_auth',
+    ])
+    self.assertEqual(
+        pipeline_options.view_as(GoogleCloudOptions).dataflow_endpoint, '')
+
+    def resolved_endpoints():
+      client = apiclient.DataflowApplicationClient(pipeline_options)
+      return {
+          c.api_endpoint
+          for c in (
+              client._jobs_client, client._messages_client,
+              client._metrics_client)
+      }
+
+    os.environ.pop('GOOGLE_CLOUD_UNIVERSE_DOMAIN', None)
+    self.assertEqual(resolved_endpoints(), {'dataflow.googleapis.com'})
+
+    os.environ['GOOGLE_CLOUD_UNIVERSE_DOMAIN'] = 'custom-universe.com'
+    self.assertEqual(resolved_endpoints(), {'dataflow.custom-universe.com'})
 
   def test_stage_resources(self):
     pipeline_options = PipelineOptions([
@@ -1192,7 +1503,26 @@ class UtilTest(unittest.TestCase):
                             role_urn=common_urns.artifact_roles.STAGING_TO.urn,
                             role_payload=beam_runner_api_pb2.
                             ArtifactStagingToRolePayload(
-                                staged_name='bar1').SerializeToString())
+                                staged_name='bar1').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.FILE.urn,
+                            type_payload=beam_runner_api_pb2.
+                            ArtifactFilePayload(
+                                path='/tmp/baz').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='baz1').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.FILE.urn,
+                            type_payload=beam_runner_api_pb2.
+                            ArtifactFilePayload(
+                                path='/tmp/renamed1',
+                                sha256='abcdefg').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='renamed1').SerializeToString())
                     ]),
                 'env2': beam_runner_api_pb2.Environment(
                     dependencies=[
@@ -1213,16 +1543,42 @@ class UtilTest(unittest.TestCase):
                             role_urn=common_urns.artifact_roles.STAGING_TO.urn,
                             role_payload=beam_runner_api_pb2.
                             ArtifactStagingToRolePayload(
-                                staged_name='bar2').SerializeToString())
+                                staged_name='bar2').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.FILE.urn,
+                            type_payload=beam_runner_api_pb2.
+                            ArtifactFilePayload(
+                                path='/tmp/baz').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='baz2').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.FILE.urn,
+                            type_payload=beam_runner_api_pb2.
+                            ArtifactFilePayload(
+                                path='/tmp/renamed2',
+                                sha256='abcdefg').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='renamed2').SerializeToString())
                     ])
             }))
     client = apiclient.DataflowApplicationClient(pipeline_options)
-    with mock.patch.object(apiclient._LegacyDataflowStager,
-                           'stage_job_resources') as mock_stager:
-      client._stage_resources(pipeline, pipeline_options)
+    with mock.patch.object(apiclient.DataflowApplicationClient,
+                           '_compute_sha256',
+                           side_effect=lambda path: 'hash' + path):
+      with mock.patch.object(apiclient._LegacyDataflowStager,
+                             'stage_job_resources') as mock_stager:
+        client._stage_resources(pipeline, pipeline_options)
     mock_stager.assert_called_once_with(
-        [('/tmp/foo1', 'foo1'), ('/tmp/bar1', 'bar1'), ('/tmp/foo2', 'foo2'),
-         ('/tmp/bar2', 'bar2')],
+        [('/tmp/foo1', 'foo1', 'hash/tmp/foo1'),
+         ('/tmp/bar1', 'bar1', 'hash/tmp/bar1'),
+         ('/tmp/baz', 'baz1', 'hash/tmp/baz'),
+         ('/tmp/renamed1', 'renamed1', 'abcdefg'),
+         ('/tmp/foo2', 'foo2', 'hash/tmp/foo2'),
+         ('/tmp/bar2', 'bar2', 'hash/tmp/bar2')],
         staging_location='gs://test-location/staging')
 
     pipeline_expected = beam_runner_api_pb2.Pipeline(
@@ -1233,8 +1589,8 @@ class UtilTest(unittest.TestCase):
                         beam_runner_api_pb2.ArtifactInformation(
                             type_urn=common_urns.artifact_types.URL.urn,
                             type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
-                                url='gs://test-location/staging/foo1'
-                            ).SerializeToString(),
+                                url='gs://test-location/staging/foo1',
+                                sha256='hash/tmp/foo1').SerializeToString(),
                             role_urn=common_urns.artifact_roles.STAGING_TO.urn,
                             role_payload=beam_runner_api_pb2.
                             ArtifactStagingToRolePayload(
@@ -1242,20 +1598,38 @@ class UtilTest(unittest.TestCase):
                         beam_runner_api_pb2.ArtifactInformation(
                             type_urn=common_urns.artifact_types.URL.urn,
                             type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
-                                url='gs://test-location/staging/bar1').
-                            SerializeToString(),
+                                url='gs://test-location/staging/bar1',
+                                sha256='hash/tmp/bar1').SerializeToString(),
                             role_urn=common_urns.artifact_roles.STAGING_TO.urn,
                             role_payload=beam_runner_api_pb2.
                             ArtifactStagingToRolePayload(
-                                staged_name='bar1').SerializeToString())
+                                staged_name='bar1').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.URL.urn,
+                            type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
+                                url='gs://test-location/staging/baz1',
+                                sha256='hash/tmp/baz').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='baz1').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.URL.urn,
+                            type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
+                                url='gs://test-location/staging/renamed1',
+                                sha256='abcdefg').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='renamed1').SerializeToString())
                     ]),
                 'env2': beam_runner_api_pb2.Environment(
                     dependencies=[
                         beam_runner_api_pb2.ArtifactInformation(
                             type_urn=common_urns.artifact_types.URL.urn,
                             type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
-                                url='gs://test-location/staging/foo2').
-                            SerializeToString(),
+                                url='gs://test-location/staging/foo2',
+                                sha256='hash/tmp/foo2').SerializeToString(),
                             role_urn=common_urns.artifact_roles.STAGING_TO.urn,
                             role_payload=beam_runner_api_pb2.
                             ArtifactStagingToRolePayload(
@@ -1263,12 +1637,30 @@ class UtilTest(unittest.TestCase):
                         beam_runner_api_pb2.ArtifactInformation(
                             type_urn=common_urns.artifact_types.URL.urn,
                             type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
-                                url='gs://test-location/staging/bar2').
-                            SerializeToString(),
+                                url='gs://test-location/staging/bar2',
+                                sha256='hash/tmp/bar2').SerializeToString(),
                             role_urn=common_urns.artifact_roles.STAGING_TO.urn,
                             role_payload=beam_runner_api_pb2.
                             ArtifactStagingToRolePayload(
-                                staged_name='bar2').SerializeToString())
+                                staged_name='bar2').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.URL.urn,
+                            type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
+                                url='gs://test-location/staging/baz1',
+                                sha256='hash/tmp/baz').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='baz1').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.URL.urn,
+                            type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
+                                url='gs://test-location/staging/renamed1',
+                                sha256='abcdefg').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='renamed1').SerializeToString())
                     ])
             }))
     self.assertEqual(pipeline, pipeline_expected)
@@ -1285,7 +1677,7 @@ class UtilTest(unittest.TestCase):
         pipeline_options,
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
-    self.assertEqual(env.proto.serviceOptions, ['whizz=bang'])
+    self.assertEqual(env.proto.service_options, ['whizz=bang'])
 
   def test_enable_hot_key_logging(self):
     # Tests that the enable_hot_key_logging is not set by default.
@@ -1296,7 +1688,9 @@ class UtilTest(unittest.TestCase):
         pipeline_options,
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
-    self.assertIsNone(env.proto.debugOptions)
+    self.assertEqual(
+        env.proto.debug_options,
+        dataflow.DebugOptions(enable_hot_key_logging=False))
 
     # Now test that it is set when given.
     pipeline_options = PipelineOptions([
@@ -1308,7 +1702,335 @@ class UtilTest(unittest.TestCase):
         '2.0.0',  #any environment version
         FAKE_PIPELINE_URL)
     self.assertEqual(
-        env.proto.debugOptions, dataflow.DebugOptions(enableHotKeyLogging=True))
+        env.proto.debug_options,
+        dataflow.DebugOptions(enable_hot_key_logging=True))
+
+  def _mock_uncached_copy(self, staging_root, src, sha256, dst_name=None):
+    sha_prefix = sha256[0:2]
+    gcs_cache_path = FileSystems.join(
+        staging_root,
+        apiclient.DataflowApplicationClient._GCS_CACHE_PREFIX,
+        sha_prefix,
+        sha256)
+
+    if not dst_name:
+      _, dst_name = os.path.split(src)
+    return [
+        mock.call.gcs_exists(gcs_cache_path),
+        mock.call.gcs_upload(src, gcs_cache_path),
+        mock.call.gcs_gcs_copy(
+            source_file_names=[gcs_cache_path],
+            destination_file_names=[f'gs://test-location/staging/{dst_name}'])
+    ]
+
+  def _mock_cached_copy(self, staging_root, src, sha256, dst_name=None):
+    uncached = self._mock_uncached_copy(staging_root, src, sha256, dst_name)
+    uncached.pop(1)
+    return uncached
+
+  def test_stage_artifacts_with_caching(self):
+    pipeline_options = PipelineOptions([
+        '--temp_location',
+        'gs://test-location/temp',
+        '--staging_location',
+        'gs://test-location/staging',
+        '--no_auth',
+        '--enable_artifact_caching'
+    ])
+    pipeline = beam_runner_api_pb2.Pipeline(
+        components=beam_runner_api_pb2.Components(
+            environments={
+                'env1': beam_runner_api_pb2.Environment(
+                    dependencies=[
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.FILE.urn,
+                            type_payload=beam_runner_api_pb2.
+                            ArtifactFilePayload(
+                                path='/tmp/foo1',
+                                sha256='abcd').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='foo1').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.FILE.urn,
+                            type_payload=beam_runner_api_pb2.
+                            ArtifactFilePayload(
+                                path='/tmp/bar1',
+                                sha256='defg').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='bar1').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.FILE.urn,
+                            type_payload=beam_runner_api_pb2.
+                            ArtifactFilePayload(path='/tmp/baz', sha256='hijk'
+                                                ).SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='baz1').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.FILE.urn,
+                            type_payload=beam_runner_api_pb2.
+                            ArtifactFilePayload(
+                                path='/tmp/renamed1',
+                                sha256='abcdefg').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='renamed1').SerializeToString())
+                    ]),
+                'env2': beam_runner_api_pb2.Environment(
+                    dependencies=[
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.FILE.urn,
+                            type_payload=beam_runner_api_pb2.
+                            ArtifactFilePayload(
+                                path='/tmp/foo2',
+                                sha256='lmno').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='foo2').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.FILE.urn,
+                            type_payload=beam_runner_api_pb2.
+                            ArtifactFilePayload(
+                                path='/tmp/bar2',
+                                sha256='pqrs').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='bar2').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.FILE.urn,
+                            type_payload=beam_runner_api_pb2.
+                            ArtifactFilePayload(path='/tmp/baz', sha256='tuv'
+                                                ).SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='baz2').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.FILE.urn,
+                            type_payload=beam_runner_api_pb2.
+                            ArtifactFilePayload(
+                                path='/tmp/renamed2',
+                                sha256='abcdefg').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='renamed2').SerializeToString())
+                    ])
+            }))
+    client = apiclient.DataflowApplicationClient(pipeline_options)
+    staging_root = 'gs://test-location/staging'
+
+    # every other artifact already exists
+    n = [0]
+
+    def exists_return_value(*args):
+      n[0] += 1
+      return n[0] % 2 == 0
+
+    with mock.patch.object(FileSystems,
+                           'exists',
+                           side_effect=exists_return_value) as mock_gcs_exists:
+      with mock.patch.object(apiclient.DataflowApplicationClient,
+                             '_uncached_gcs_file_copy') as mock_gcs_copy:
+        with mock.patch.object(FileSystems, 'copy') as mock_gcs_gcs_copy:
+
+          manager = mock.Mock()
+          manager.attach_mock(mock_gcs_exists, 'gcs_exists')
+          manager.attach_mock(mock_gcs_copy, 'gcs_upload')
+          manager.attach_mock(mock_gcs_gcs_copy, 'gcs_gcs_copy')
+
+          client._stage_resources(pipeline, pipeline_options)
+          expected_calls = list(
+              itertools.chain.from_iterable([
+                  self._mock_uncached_copy(staging_root, '/tmp/foo1', 'abcd'),
+                  self._mock_cached_copy(staging_root, '/tmp/bar1', 'defg'),
+                  self._mock_uncached_copy(
+                      staging_root, '/tmp/baz', 'hijk', 'baz1'),
+                  self._mock_cached_copy(
+                      staging_root, '/tmp/renamed1', 'abcdefg'),
+                  self._mock_uncached_copy(staging_root, '/tmp/foo2', 'lmno'),
+                  self._mock_cached_copy(staging_root, '/tmp/bar2', 'pqrs'),
+              ]))
+          assert manager.mock_calls == expected_calls
+
+    pipeline_expected = beam_runner_api_pb2.Pipeline(
+        components=beam_runner_api_pb2.Components(
+            environments={
+                'env1': beam_runner_api_pb2.Environment(
+                    dependencies=[
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.URL.urn,
+                            type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
+                                url='gs://test-location/staging/foo1',
+                                sha256='abcd').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='foo1').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.URL.urn,
+                            type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
+                                url='gs://test-location/staging/bar1',
+                                sha256='defg').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='bar1').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.URL.urn,
+                            type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
+                                url='gs://test-location/staging/baz1',
+                                sha256='hijk').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='baz1').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.URL.urn,
+                            type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
+                                url='gs://test-location/staging/renamed1',
+                                sha256='abcdefg').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='renamed1').SerializeToString())
+                    ]),
+                'env2': beam_runner_api_pb2.Environment(
+                    dependencies=[
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.URL.urn,
+                            type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
+                                url='gs://test-location/staging/foo2',
+                                sha256='lmno').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='foo2').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.URL.urn,
+                            type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
+                                url='gs://test-location/staging/bar2',
+                                sha256='pqrs').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='bar2').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.URL.urn,
+                            type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
+                                url='gs://test-location/staging/baz1',
+                                sha256='tuv').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='baz1').SerializeToString()),
+                        beam_runner_api_pb2.ArtifactInformation(
+                            type_urn=common_urns.artifact_types.URL.urn,
+                            type_payload=beam_runner_api_pb2.ArtifactUrlPayload(
+                                url='gs://test-location/staging/renamed1',
+                                sha256='abcdefg').SerializeToString(),
+                            role_urn=common_urns.artifact_roles.STAGING_TO.urn,
+                            role_payload=beam_runner_api_pb2.
+                            ArtifactStagingToRolePayload(
+                                staged_name='renamed1').SerializeToString())
+                    ])
+            }))
+    self.assertEqual(pipeline, pipeline_expected)
+
+  def test_stage_file_with_retry(self):
+    def effect(self, *args, **kwargs):
+      nonlocal count
+      count += 1
+      # Fail the first two calls and succeed afterward
+      if count <= 2:
+        raise Exception("This exception is raised for testing purpose.")
+
+    class Unseekable(io.IOBase):
+      def seekable(self):
+        return False
+
+    pipeline_options = PipelineOptions([
+        '--project',
+        'test_project',
+        '--job_name',
+        'test_job_name',
+        '--temp_location',
+        'gs://test-location/temp',
+    ])
+    pipeline_options.view_as(GoogleCloudOptions).no_auth = True
+    client = apiclient.DataflowApplicationClient(pipeline_options)
+
+    with mock.patch.object(client, 'stage_file') as mock_stage_file:
+      mock_stage_file.side_effect = effect
+
+      with mock.patch.object(time, 'sleep') as mock_sleep:
+        with mock.patch("builtins.open",
+                        mock.mock_open(read_data="data")) as mock_file_open:
+          count = 0
+          # calling with a file name
+          client.stage_file_with_retry(
+              "/to", "new_name", "/from/old_name", total_size=4)
+          self.assertEqual(mock_stage_file.call_count, 3)
+          self.assertEqual(mock_sleep.call_count, 2)
+          self.assertEqual(mock_file_open.call_count, 3)
+
+          count = 0
+          mock_stage_file.reset_mock()
+          mock_sleep.reset_mock()
+          mock_file_open.reset_mock()
+
+          # calling with a seekable stream
+          client.stage_file_with_retry(
+              "/to", "new_name", io.BytesIO(b'test'), total_size=4)
+          self.assertEqual(mock_stage_file.call_count, 3)
+          self.assertEqual(mock_sleep.call_count, 2)
+          # no open() is called if a stream is provided
+          mock_file_open.assert_not_called()
+
+          count = 0
+          mock_sleep.reset_mock()
+          mock_file_open.reset_mock()
+          mock_stage_file.reset_mock()
+
+          # calling with an unseekable stream
+          self.assertRaises(
+              retry.PermanentException,
+              client.stage_file_with_retry,
+              "/to",
+              "new_name",
+              Unseekable(),
+              total_size=4)
+          # Unseekable streams are staged once. If staging fails, no retries are
+          # attempted.
+          self.assertEqual(mock_stage_file.call_count, 1)
+          mock_sleep.assert_not_called()
+          mock_file_open.assert_not_called()
+
+          count = 0
+          mock_sleep.reset_mock()
+          mock_file_open.reset_mock()
+          mock_stage_file.reset_mock()
+
+          # calling with something else
+          self.assertRaises(
+              retry.PermanentException,
+              client.stage_file_with_retry,
+              "/to",
+              "new_name",
+              object(),
+              total_size=4)
+          # No staging will be called for wrong arg type
+          mock_stage_file.assert_not_called()
+          mock_sleep.assert_not_called()
+          mock_file_open.assert_not_called()
 
 
 if __name__ == '__main__':

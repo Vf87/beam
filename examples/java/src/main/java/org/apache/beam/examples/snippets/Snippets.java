@@ -45,10 +45,10 @@ import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.Pipeline;
-import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.DefaultCoder;
 import org.apache.beam.sdk.coders.DoubleCoder;
+import org.apache.beam.sdk.extensions.avro.coders.AvroCoder;
 import org.apache.beam.sdk.extensions.ml.AnnotateText;
 import org.apache.beam.sdk.io.Compression;
 import org.apache.beam.sdk.io.FileIO;
@@ -76,6 +76,11 @@ import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.DoFn.BoundedPerElement;
+import org.apache.beam.sdk.transforms.DoFn.Element;
+import org.apache.beam.sdk.transforms.DoFn.OutputReceiver;
+import org.apache.beam.sdk.transforms.DoFn.SideInput;
+import org.apache.beam.sdk.transforms.DoFn.Timestamp;
+import org.apache.beam.sdk.transforms.Latest;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.PeriodicImpulse;
@@ -107,18 +112,20 @@ import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
 import org.apache.beam.sdk.values.ValueInSingleWindow;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.joda.time.format.DateTimeFormat;
-import org.joda.time.format.DateTimeFormatter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** Code snippets used in webdocs. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness", // TODO(https://github.com/apache/beam/issues/20497)
+  // TODO(https://github.com/apache/beam/issues/21230): Remove when new version of
+  // errorprone is released (2.11.0)
+  "unused"
 })
 public class Snippets {
 
@@ -169,7 +176,7 @@ public class Snippets {
       Pipeline p, String writeProject, String writeDataset, String writeTable) {
     {
       // [START BigQueryTableSpec]
-      String tableSpec = "clouddataflow-readonly:samples.weather_stations";
+      String tableSpec = "apache-beam-testing.samples.weather_stations";
       // [END BigQueryTableSpec]
     }
 
@@ -190,6 +197,7 @@ public class Snippets {
     }
 
     {
+      @SuppressWarnings("ModifiedButNotUsed")
       // [START BigQueryDataTypes]
       TableRow row = new TableRow();
       row.set("string", "abc");
@@ -208,7 +216,7 @@ public class Snippets {
     }
 
     {
-      String tableSpec = "clouddataflow-readonly:samples.weather_stations";
+      String tableSpec = "apache-beam-testing.samples.weather_stations";
       // [START BigQueryReadTable]
       PCollection<Double> maxTemperatures =
           p.apply(BigQueryIO.readTableRows().from(tableSpec))
@@ -220,7 +228,7 @@ public class Snippets {
     }
 
     {
-      String tableSpec = "clouddataflow-readonly:samples.weather_stations";
+      String tableSpec = "apache-beam-testing.samples.weather_stations";
       // [START BigQueryReadFunction]
       PCollection<Double> maxTemperatures =
           p.apply(
@@ -238,7 +246,7 @@ public class Snippets {
               BigQueryIO.read(
                       (SchemaAndRecord elem) -> (Double) elem.getRecord().get("max_temperature"))
                   .fromQuery(
-                      "SELECT max_temperature FROM [clouddataflow-readonly:samples.weather_stations]")
+                      "SELECT max_temperature FROM [apache-beam-testing.samples.weather_stations]")
                   .withCoder(DoubleCoder.of()));
       // [END BigQueryReadQuery]
     }
@@ -276,7 +284,7 @@ public class Snippets {
     // [END BigQuerySchemaJson]
 
     {
-      String tableSpec = "clouddataflow-readonly:samples.weather_stations";
+      String tableSpec = "apache-beam-testing.samples.weather_stations";
       if (!writeProject.isEmpty() && !writeDataset.isEmpty() && !writeTable.isEmpty()) {
         tableSpec = writeProject + ":" + writeDataset + "." + writeTable;
       }
@@ -399,7 +407,7 @@ public class Snippets {
                       })
                   .fromQuery(
                       "SELECT year, month, day, max_temperature "
-                          + "FROM [clouddataflow-readonly:samples.weather_stations] "
+                          + "FROM [apache-beam-testing.samples.weather_stations] "
                           + "WHERE year BETWEEN 2007 AND 2009")
                   .withCoder(AvroCoder.of(WeatherData.class)));
 
@@ -457,7 +465,7 @@ public class Snippets {
               .withWriteDisposition(WriteDisposition.WRITE_TRUNCATE));
       // [END BigQueryWriteDynamicDestinations]
 
-      String tableSpec = "clouddataflow-readonly:samples.weather_stations";
+      String tableSpec = "apache-beam-testing.samples.weather_stations";
       if (!writeProject.isEmpty() && !writeDataset.isEmpty() && !writeTable.isEmpty()) {
         tableSpec = writeProject + ":" + writeDataset + "." + writeTable + "_partitioning";
       }
@@ -536,14 +544,14 @@ public class Snippets {
             ParDo.of(
                 new DoFn<KV<String, CoGbkResult>, String>() {
                   @ProcessElement
-                  public void processElement(ProcessContext c) {
-                    KV<String, CoGbkResult> e = c.element();
+                  public void processElement(
+                      @Element KV<String, CoGbkResult> e, OutputReceiver<String> receiver) {
                     String name = e.getKey();
                     Iterable<String> emailsIter = e.getValue().getAll(emailsTag);
                     Iterable<String> phonesIter = e.getValue().getAll(phonesTag);
                     String formattedResult =
                         Snippets.formatCoGbkResults(name, emailsIter, phonesIter);
-                    c.output(formattedResult);
+                    receiver.output(formattedResult);
                   }
                 }));
     // [END CoGroupByKeyTuple]
@@ -596,31 +604,37 @@ public class Snippets {
   private static final Logger LOG = LoggerFactory.getLogger(Snippets.class);
 
   // [START SideInputPatternSlowUpdateGlobalWindowSnip1]
+
   public static void sideInputPatterns() {
     // This pipeline uses View.asSingleton for a placeholder external service.
     // Run in debug mode to see the output.
     Pipeline p = Pipeline.create();
 
-    // Create a side input that updates each second.
-    PCollectionView<Map<String, String>> map =
+    // Create a side input that updates every 5 seconds.
+    // View as an iterable, not singleton, so that if we happen to trigger more
+    // than once before Latest.globally is computed we can handle both elements.
+    PCollectionView<Iterable<Map<String, String>>> mapIterable =
         p.apply(GenerateSequence.from(0).withRate(1, Duration.standardSeconds(5L)))
-            .apply(
-                Window.<Long>into(new GlobalWindows())
-                    .triggering(Repeatedly.forever(AfterProcessingTime.pastFirstElementInPane()))
-                    .discardingFiredPanes())
             .apply(
                 ParDo.of(
                     new DoFn<Long, Map<String, String>>() {
 
                       @ProcessElement
                       public void process(
-                          @Element Long input, OutputReceiver<Map<String, String>> o) {
+                          @Element Long input,
+                          @Timestamp Instant timestamp,
+                          OutputReceiver<Map<String, String>> o) {
                         // Replace map with test data from the placeholder external service.
                         // Add external reads here.
-                        o.output(PlaceholderExternalService.readTestData());
+                        o.output(PlaceholderExternalService.readTestData(timestamp));
                       }
                     }))
-            .apply(View.asSingleton());
+            .apply(
+                Window.<Map<String, String>>into(new GlobalWindows())
+                    .triggering(Repeatedly.forever(AfterProcessingTime.pastFirstElementInPane()))
+                    .discardingFiredPanes())
+            .apply(Latest.globally())
+            .apply(View.asIterable());
 
     // Consume side input. GenerateSequence generates test data.
     // Use a real source (like PubSubIO or KafkaIO) in production.
@@ -632,32 +646,35 @@ public class Snippets {
                     new DoFn<Long, KV<Long, Long>>() {
 
                       @ProcessElement
-                      public void process(ProcessContext c) {
-                        Map<String, String> keyMap = c.sideInput(map);
-                        c.outputWithTimestamp(KV.of(1L, c.element()), Instant.now());
+                      public void process(
+                          @Timestamp Instant timestamp,
+                          @Element Long element,
+                          @SideInput("mapIterable") Iterable<Map<String, String>> si,
+                          OutputReceiver<KV<Long, Long>> receiver) {
+                        // Take an element from the side input iterable (likely length 1)
+                        Map<String, String> keyMap = si.iterator().next();
+                        receiver.outputWithTimestamp(KV.of(1L, element), Instant.now());
 
-                        LOG.debug(
-                            "Value is {}, key A is {}, and key B is {}.",
-                            c.element(),
-                            keyMap.get("Key_A"),
-                            keyMap.get("Key_B"));
+                        LOG.info(
+                            "Value is {} with timestamp {}, using key A from side input with time {}.",
+                            element,
+                            timestamp.toString(DateTimeFormat.forPattern("HH:mm:ss")),
+                            keyMap.get("Key_A"));
                       }
                     })
-                .withSideInputs(map));
+                .withSideInput("mapIterable", mapIterable));
+
+    p.run();
   }
 
   /** Placeholder class that represents an external service generating test data. */
   public static class PlaceholderExternalService {
 
-    public static Map<String, String> readTestData() {
+    public static Map<String, String> readTestData(Instant timestamp) {
 
       Map<String, String> map = new HashMap<>();
-      Instant now = Instant.now();
 
-      DateTimeFormatter dtf = DateTimeFormat.forPattern("HH:MM:SS");
-
-      map.put("Key_A", now.minus(Duration.standardSeconds(30)).toString(dtf));
-      map.put("Key_B", now.minus(Duration.standardSeconds(30)).toString());
+      map.put("Key_A", timestamp.toString(DateTimeFormat.forPattern("HH:mm:ss")));
 
       return map;
     }
@@ -691,9 +708,9 @@ public class Snippets {
 
                   // Define the DoFn that logs the ValueProvider value.
                   @ProcessElement
-                  public void process(ProcessContext c) {
+                  public void process(PipelineOptions options) {
 
-                    MyOptions ops = c.getPipelineOptions().as(MyOptions.class);
+                    MyOptions ops = options.as(MyOptions.class);
                     // This example logs the ValueProvider value, but you could store it by
                     // pushing it to an external database.
 
@@ -720,6 +737,7 @@ public class Snippets {
     // each other) will be merged.
     return Arrays.asList(new IntervalWindow(c.timestamp(), gapDuration));
   }
+
   // [END CustomSessionWindow1]
 
   // [START CustomSessionWindow2]
@@ -750,6 +768,7 @@ public class Snippets {
       }
       return Arrays.asList(new IntervalWindow(c.timestamp(), dataDrivenGap));
     }
+
     // [END CustomSessionWindow3]
 
     // [START CustomSessionWindow4]
@@ -797,16 +816,16 @@ public class Snippets {
                           new TableRow().set("user", "desktop").set("score", 4), new Instant()),
                       TimestampedValue.of(
                           new TableRow().set("user", "mobile").set("score", -3).set("gap", 5),
-                          new Instant().plus(2000)),
+                          new Instant().plus(Duration.millis(2000))),
                       TimestampedValue.of(
                           new TableRow().set("user", "mobile").set("score", 2).set("gap", 5),
-                          new Instant().plus(9000)),
+                          new Instant().plus(Duration.millis(9000))),
                       TimestampedValue.of(
                           new TableRow().set("user", "mobile").set("score", 7).set("gap", 5),
-                          new Instant().plus(12000)),
+                          new Instant().plus(Duration.millis(12000))),
                       TimestampedValue.of(
                           new TableRow().set("user", "desktop").set("score", 10),
-                          new Instant().plus(12000))));
+                          new Instant().plus(Duration.millis(12000)))));
       // [END CustomSessionWindow5]
 
       // [START CustomSessionWindow6]
@@ -933,11 +952,13 @@ public class Snippets {
               ParDo.of(
                       new DoFn<Instant, Long>() {
                         @ProcessElement
-                        public void process(ProcessContext c) {
-                          c.output((long) c.sideInput(sideInput).size());
+                        public void process(
+                            @SideInput("sideInput") List<Long> sideInputValue,
+                            OutputReceiver<Long> receiver) {
+                          receiver.output((long) sideInputValue.size());
                         }
                       })
-                  .withSideInputs(sideInput));
+                  .withSideInput("sideInput", sideInput));
       // [END PeriodicallyUpdatingSideInputs]
       return result;
     }
@@ -1173,11 +1194,15 @@ public class Snippets {
     }
   }
 
+  @SuppressWarnings("unused")
   private static class BundleFinalization {
     private static class BundleFinalizationDoFn extends DoFn<String, Integer> {
       // [START BundleFinalize]
       @ProcessElement
-      public void processElement(ProcessContext c, BundleFinalizer bundleFinalizer) {
+      public void processElement(
+          @Element String element,
+          OutputReceiver<Integer> receiver,
+          BundleFinalizer bundleFinalizer) {
         // ... produce output ...
 
         bundleFinalizer.afterBundleCommit(
@@ -1190,6 +1215,7 @@ public class Snippets {
     }
   }
 
+  @SuppressWarnings("unused")
   private static class SplittableDoFn {
 
     private static void seekToNextRecordBoundaryInFile(
@@ -1227,8 +1253,10 @@ public class Snippets {
         return OffsetRange.Coder.of();
       }
     }
+
     // [END SDF_BasicExample]
 
+    @SuppressWarnings("unused")
     private static class BasicExampleWithInitialSplitting extends FileToWordsFn {
       // [START SDF_BasicExampleWithSplitting]
       void splitRestriction(
@@ -1247,6 +1275,7 @@ public class Snippets {
       // [END SDF_BasicExampleWithSplitting]
     }
 
+    @SuppressWarnings("unused")
     private static class BasicExampleWithBadTryClaimLoop extends DoFn<String, Integer> {
       // [START SDF_BadTryClaimLoop]
       @ProcessElement
@@ -1270,6 +1299,7 @@ public class Snippets {
       // [END SDF_BadTryClaimLoop]
     }
 
+    @SuppressWarnings("unused")
     private static class CustomWatermarkEstimatorExample extends DoFn<String, Integer> {
       private static Instant currentWatermark = Instant.now();
 
@@ -1333,8 +1363,10 @@ public class Snippets {
         return new MyCustomWatermarkEstimator(oldState);
       }
     }
+
     // [END SDF_CustomWatermarkEstimator]
 
+    @SuppressWarnings("unused")
     private static class UserInitiatedCheckpointExample extends DoFn<String, Integer> {
       public static class ThrottlingException extends Exception {}
 
@@ -1345,27 +1377,28 @@ public class Snippets {
       }
 
       public interface Service {
-        List<Record> readNextRecords(long position) throws ThrottlingException;
+        List<RecordPosition> readNextRecords(long position) throws ThrottlingException;
       }
 
-      public interface Record {
+      public interface RecordPosition {
         long getPosition();
       }
 
       // [START SDF_UserInitiatedCheckpoint]
       @ProcessElement
       public ProcessContinuation processElement(
-          RestrictionTracker<OffsetRange, Long> tracker, OutputReceiver<Record> outputReceiver) {
+          RestrictionTracker<OffsetRange, Long> tracker,
+          OutputReceiver<RecordPosition> outputReceiver) {
         long currentPosition = tracker.currentRestriction().getFrom();
         Service service = initializeService();
         try {
           while (true) {
-            List<Record> records = service.readNextRecords(currentPosition);
+            List<RecordPosition> records = service.readNextRecords(currentPosition);
             if (records.isEmpty()) {
               // Return a short delay if there is no data to process at the moment.
               return ProcessContinuation.resume().withResumeDelay(Duration.standardSeconds(10));
             }
-            for (Record record : records) {
+            for (RecordPosition record : records) {
               if (!tracker.tryClaim(record.getPosition())) {
                 return ProcessContinuation.stop();
               }
@@ -1397,6 +1430,7 @@ public class Snippets {
       // [END SDF_Truncate]
     }
 
+    @SuppressWarnings("unused")
     private static class GetSizeExample extends DoFn<String, Integer> {
       // [START SDF_GetSize]
       @GetSize

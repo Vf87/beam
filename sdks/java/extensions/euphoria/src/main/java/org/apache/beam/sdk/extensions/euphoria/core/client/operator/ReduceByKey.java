@@ -87,6 +87,7 @@ import org.joda.time.Duration;
  * @param <ValueT> Output type of #valueBy method
  * @param <AccT> type of accumulator (if CombineFn used)
  * @param <OutputT> Type of output value
+ * @deprecated Use Java SDK directly, Euphoria is scheduled for removal in a future release.
  */
 @Audience(Audience.Type.CLIENT)
 @Recommended(
@@ -97,9 +98,10 @@ import org.joda.time.Duration;
     state = StateComplexity.CONSTANT_IF_COMBINABLE,
     repartitions = 1)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
+@Deprecated
 public class ReduceByKey<InputT, KeyT, ValueT, AccT, OutputT>
     extends ShuffleOperator<InputT, KeyT, KV<KeyT, OutputT>> implements TypeAware.Value<ValueT> {
 
@@ -111,10 +113,10 @@ public class ReduceByKey<InputT, KeyT, ValueT, AccT, OutputT>
    */
   public interface CombineFunctionWithIdentity<T> extends CombinableBinaryFunction<T> {
 
-    /** @return identity value with respect to the combining function. */
+    /** Returns identity value with respect to the combining function. */
     T identity();
 
-    /** @return type descriptor of the value */
+    /** Returns type descriptor of the value. */
     default TypeDescriptor<T> valueDesc() {
       return null;
     }
@@ -238,7 +240,7 @@ public class ReduceByKey<InputT, KeyT, ValueT, AccT, OutputT>
      * Syntactic sugar to enable #combineBy to take only single argument and be used in helpers like
      * #combineBy(Sums.ofLongs()).
      *
-     * @deprecated Replaced by @{link #combineBy(CombineFunctionWithIdentity)}.
+     * @deprecated Replaced by {@link #combineBy(CombineFunctionWithIdentity)}.
      */
     @Deprecated
     default WindowByBuilder<KeyT, ValueT> combineBy(

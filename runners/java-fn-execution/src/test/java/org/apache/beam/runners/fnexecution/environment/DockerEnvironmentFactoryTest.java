@@ -33,23 +33,22 @@ import java.util.Collection;
 import java.util.List;
 import org.apache.beam.model.pipeline.v1.Endpoints.ApiServiceDescriptor;
 import org.apache.beam.model.pipeline.v1.RunnerApi.Environment;
-import org.apache.beam.runners.core.construction.Environments;
 import org.apache.beam.runners.fnexecution.artifact.ArtifactRetrievalService;
 import org.apache.beam.runners.fnexecution.control.ControlClientPool;
 import org.apache.beam.runners.fnexecution.control.FnApiControlClientPoolService;
 import org.apache.beam.runners.fnexecution.control.InstructionRequestHandler;
 import org.apache.beam.runners.fnexecution.logging.GrpcLoggingService;
 import org.apache.beam.runners.fnexecution.provisioning.StaticGrpcProvisionService;
-import org.apache.beam.sdk.fn.IdGenerator;
-import org.apache.beam.sdk.fn.IdGenerators;
 import org.apache.beam.sdk.fn.server.GrpcFnServer;
 import org.apache.beam.sdk.options.ManualDockerEnvironmentOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.RemoteEnvironmentOptions;
+import org.apache.beam.sdk.util.construction.Environments;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
+import org.junit.rules.Timeout;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameter;
@@ -60,15 +59,13 @@ import org.mockito.MockitoAnnotations;
 
 /** Tests for {@link DockerEnvironmentFactory}. */
 public class DockerEnvironmentFactoryTest {
-
+  @Rule public transient Timeout globalTimeout = Timeout.seconds(600);
   private static final ApiServiceDescriptor SERVICE_DESCRIPTOR =
       ApiServiceDescriptor.newBuilder().setUrl("service-url").build();
   private static final String IMAGE_NAME = "my-image";
   private static final Environment ENVIRONMENT = Environments.createDockerEnvironment(IMAGE_NAME);
   private static final String CONTAINER_ID =
       "e4485f0f2b813b63470feacba5fe9cb89699878c095df4124abd320fd5401385";
-
-  private static final IdGenerator ID_GENERATOR = IdGenerators.incrementingLongs();
 
   @Mock DockerCommand docker;
 
@@ -130,7 +127,6 @@ public class DockerEnvironmentFactoryTest {
               docker,
               provisioningServiceServer,
               throwsException ? exceptionClientSource : normalClientSource,
-              ID_GENERATOR,
               pipelineOptions);
       if (throwsException) {
         expectedException.expect(Exception.class);
@@ -209,7 +205,6 @@ public class DockerEnvironmentFactoryTest {
           docker,
           provisioningServiceServer,
           clientSource,
-          ID_GENERATOR,
           PipelineOptionsFactory.as(RemoteEnvironmentOptions.class));
     }
   }

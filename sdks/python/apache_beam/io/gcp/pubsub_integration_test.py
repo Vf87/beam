@@ -21,6 +21,7 @@ Integration test for Google Cloud Pub/Sub.
 # pytype: skip-file
 
 import logging
+import time
 import unittest
 import uuid
 
@@ -29,11 +30,13 @@ from hamcrest.core.core.allof import all_of
 
 from apache_beam.io.gcp import pubsub_it_pipeline
 from apache_beam.io.gcp.pubsub import PubsubMessage
+from apache_beam.io.gcp.pubsub import WriteToPubSub
 from apache_beam.io.gcp.tests.pubsub_matcher import PubSubMessageMatcher
 from apache_beam.runners.runner import PipelineState
 from apache_beam.testing import test_utils
 from apache_beam.testing.pipeline_verifiers import PipelineStateMatcher
 from apache_beam.testing.test_pipeline import TestPipeline
+from apache_beam.utils import retry
 
 INPUT_TOPIC = 'psit_topic_input'
 OUTPUT_TOPIC = 'psit_topic_output'
@@ -42,10 +45,10 @@ OUTPUT_SUB = 'psit_subscription_output'
 
 # How long TestXXXRunner will wait for pubsub_it_pipeline to run before
 # cancelling it.
-TEST_PIPELINE_DURATION_MS = 3 * 60 * 1000
+TEST_PIPELINE_DURATION_MS = 10 * 60 * 1000
 # How long PubSubMessageMatcher will wait for the correct set of messages to
 # appear.
-MESSAGE_MATCHER_TIMEOUT_S = 5 * 60
+MESSAGE_MATCHER_TIMEOUT_S = 10 * 60
 
 
 class PubSubIntegrationTest(unittest.TestCase):
@@ -53,9 +56,10 @@ class PubSubIntegrationTest(unittest.TestCase):
   ID_LABEL = 'id'
   TIMESTAMP_ATTRIBUTE = 'timestamp'
   INPUT_MESSAGES = {
-      # TODO(BEAM-4275): DirectRunner doesn't support reading or writing
-      # label_ids, nor writing timestamp attributes. Once these features exist,
-      # TestDirectRunner and TestDataflowRunner should behave identically.
+      # TODO(https://github.com/apache/beam/issues/18939): DirectRunner doesn't
+      # support reading or writing label_ids, nor writing timestamp attributes.
+      # Once these features exist, TestDirectRunner and TestDataflowRunner
+      # should behave identically.
       'TestDirectRunner': [
           PubsubMessage(b'data001', {}),
           # For those elements that have the TIMESTAMP_ATTRIBUTE attribute, the
@@ -135,21 +139,33 @@ class PubSubIntegrationTest(unittest.TestCase):
     self.project = self.test_pipeline.get_option('project')
     self.uuid = str(uuid.uuid4())
 
-    # Set up PubSub environment.
+    # Set up PubSub environment with retries for transient 504/403 API errors.
     from google.cloud import pubsub
     self.pub_client = pubsub.PublisherClient()
-    self.input_topic = self.pub_client.create_topic(
-        self.pub_client.topic_path(self.project, INPUT_TOPIC + self.uuid))
-    self.output_topic = self.pub_client.create_topic(
-        self.pub_client.topic_path(self.project, OUTPUT_TOPIC + self.uuid))
-
     self.sub_client = pubsub.SubscriberClient()
-    self.input_sub = self.sub_client.create_subscription(
-        self.sub_client.subscription_path(self.project, INPUT_SUB + self.uuid),
-        self.input_topic.name)
-    self.output_sub = self.sub_client.create_subscription(
-        self.sub_client.subscription_path(self.project, OUTPUT_SUB + self.uuid),
-        self.output_topic.name)
+
+    gcp_retry = retry.with_exponential_backoff(
+        num_retries=3,
+        initial_delay_secs=2,
+        retry_filter=retry.retry_on_server_errors_timeout_or_quota_issues_filter
+    )
+
+    self.input_topic = gcp_retry(self.pub_client.create_topic)(
+        name=self.pub_client.topic_path(self.project, INPUT_TOPIC + self.uuid))
+    self.output_topic = gcp_retry(self.pub_client.create_topic)(
+        name=self.pub_client.topic_path(self.project, OUTPUT_TOPIC + self.uuid))
+
+    self.input_sub = gcp_retry(self.sub_client.create_subscription)(
+        name=self.sub_client.subscription_path(
+            self.project, INPUT_SUB + self.uuid),
+        topic=self.input_topic.name)
+    self.output_sub = gcp_retry(self.sub_client.create_subscription)(
+        name=self.sub_client.subscription_path(
+            self.project, OUTPUT_SUB + self.uuid),
+        topic=self.output_topic.name)
+    # Add a 30 second sleep after resource creation to ensure subscriptions will
+    # receive messages.
+    time.sleep(30)
 
   def tearDown(self):
     test_utils.cleanup_subscriptions(
@@ -194,7 +210,8 @@ class PubSubIntegrationTest(unittest.TestCase):
 
     # Generate input data and inject to PubSub.
     for msg in self.INPUT_MESSAGES[self.runner_name]:
-      self.pub_client.publish(self.input_topic.name, msg.data, **msg.attributes)
+      self.pub_client.publish(
+          self.input_topic.name, msg.data, **msg.attributes).result()
 
     # Get pipeline options from command argument: --test-pipeline-options,
     # and start pipeline job by calling pipeline main function.
@@ -211,6 +228,190 @@ class PubSubIntegrationTest(unittest.TestCase):
   @pytest.mark.it_postcommit
   def test_streaming_with_attributes(self):
     self._test_streaming(with_attributes=True)
+
+  def _test_batch_write(self, with_attributes):
+    """Tests batch mode WriteToPubSub functionality.
+
+    Args:
+      with_attributes: False - Writes message data only.
+        True - Writes message data and attributes.
+    """
+    from apache_beam.options.pipeline_options import PipelineOptions
+    from apache_beam.options.pipeline_options import StandardOptions
+    from apache_beam.transforms import Create
+
+    # Create test messages for batch mode
+    test_messages = [
+        PubsubMessage(b'batch_data001', {'batch_attr': 'value1'}),
+        PubsubMessage(b'batch_data002', {'batch_attr': 'value2'}),
+        PubsubMessage(b'batch_data003', {'batch_attr': 'value3'})
+    ]
+
+    pipeline_options = PipelineOptions()
+    # Explicitly set streaming to False for batch mode
+    pipeline_options.view_as(StandardOptions).streaming = False
+
+    with TestPipeline(options=pipeline_options) as p:
+      if with_attributes:
+        messages = p | 'CreateMessages' >> Create(test_messages)
+        _ = messages | 'WriteToPubSub' >> WriteToPubSub(
+            self.output_topic.name, with_attributes=True)
+      else:
+        # For data-only mode, extract just the data
+        message_data = [msg.data for msg in test_messages]
+        messages = p | 'CreateData' >> Create(message_data)
+        _ = messages | 'WriteToPubSub' >> WriteToPubSub(
+            self.output_topic.name, with_attributes=False)
+
+    # Verify messages were published by reading from the subscription
+    time.sleep(10)  # Allow time for messages to be published and received
+
+    # Pull messages from the output subscription to verify they were written
+    response = self.sub_client.pull(
+        request={
+            "subscription": self.output_sub.name,
+            "max_messages": 10,
+        })
+
+    received_messages = []
+    for received_message in response.received_messages:
+      if with_attributes:
+        # Parse attributes
+        attrs = dict(received_message.message.attributes)
+        received_messages.append(
+            PubsubMessage(received_message.message.data, attrs))
+      else:
+        received_messages.append(received_message.message.data)
+
+      # Acknowledge the message
+      self.sub_client.acknowledge(
+          request={
+              "subscription": self.output_sub.name,
+              "ack_ids": [received_message.ack_id],
+          })
+
+    # Verify we received the expected number of messages
+    self.assertEqual(len(received_messages), len(test_messages))
+
+    if with_attributes:
+      # Verify message content and attributes
+      received_data = [msg.data for msg in received_messages]
+      expected_data = [msg.data for msg in test_messages]
+      self.assertEqual(sorted(received_data), sorted(expected_data))
+    else:
+      # Verify message data only
+      expected_data = [msg.data for msg in test_messages]
+      self.assertEqual(sorted(received_messages), sorted(expected_data))
+
+  @pytest.mark.it_postcommit
+  def test_batch_write_data_only(self):
+    """Test WriteToPubSub in batch mode with data only."""
+    self._test_batch_write(with_attributes=False)
+
+  @pytest.mark.it_postcommit
+  def test_batch_write_with_attributes(self):
+    """Test WriteToPubSub in batch mode with attributes."""
+    self._test_batch_write(with_attributes=True)
+
+  @pytest.mark.it_postcommit
+  def test_batch_write_with_ordering_key(self):
+    """Test WriteToPubSub in batch mode with ordering keys.
+
+    Dataflow's Native Pub/Sub Sink does not support ordering_key
+    (see https://github.com/apache/beam/issues/36201), so this test
+    only applies to runners using Beam's Python WriteToPubSub Sink.
+    Dataflow users should use the XLang WriteToPubSub path instead
+    (apache_beam.io.external.gcp.pubsub.WriteToPubSub with
+    publish_with_ordering_key=True).
+    """
+    if self.runner_name == 'TestDataflowRunner':
+      self.skipTest(
+          'Dataflow Native PubSub Sink does not support ordering_key '
+          '(see https://github.com/apache/beam/issues/36201).')
+    from google.pubsub_v1.types import Subscription
+
+    from apache_beam.options.pipeline_options import PipelineOptions
+    from apache_beam.options.pipeline_options import StandardOptions
+    from apache_beam.transforms import Create
+
+    ordering_topic = self.pub_client.create_topic(
+        name=self.pub_client.topic_path(
+            self.project, 'psit_topic_ordering' + self.uuid))
+    ordering_sub = self.sub_client.create_subscription(
+        request=Subscription(
+            name=self.sub_client.subscription_path(
+                self.project, 'psit_sub_ordering' + self.uuid),
+            topic=ordering_topic.name,
+            enable_message_ordering=True,
+        ))
+    time.sleep(10)
+
+    try:
+      test_messages = [
+          PubsubMessage(
+              b'order_data001', {'attr': 'value1'}, ordering_key='key1'),
+          PubsubMessage(
+              b'order_data002', {'attr': 'value2'}, ordering_key='key1'),
+          PubsubMessage(
+              b'order_data003', {'attr': 'value3'}, ordering_key='key2'),
+      ]
+
+      pipeline_options = PipelineOptions()
+      pipeline_options.view_as(StandardOptions).streaming = False
+
+      with TestPipeline(options=pipeline_options) as p:
+        messages = p | 'CreateMessages' >> Create(test_messages)
+        _ = messages | 'WriteToPubSub' >> WriteToPubSub(
+            ordering_topic.name,
+            with_attributes=True,
+            publish_with_ordering_key=True)
+
+      time.sleep(10)
+
+      # Retry pulling to handle PubSub delivery delays
+      received_messages = []
+      received_message_ids = set()
+      deadline = time.time() + 60  # wait up to 60 seconds
+      while time.time() < deadline:
+        response = self.sub_client.pull(
+            request={
+                'subscription': ordering_sub.name,
+                'max_messages': 10,
+            })
+        # Acknowledge received messages immediately. This is critical when message
+        # ordering is enabled because outstanding (unacknowledged) messages block
+        # the delivery of subsequent messages with the same ordering key.
+        ack_ids = [msg.ack_id for msg in response.received_messages]
+        if ack_ids:
+          self.sub_client.acknowledge(
+              request={
+                  'subscription': ordering_sub.name,
+                  'ack_ids': ack_ids,
+              })
+
+        for msg in response.received_messages:
+          # Pub/Sub guarantees at-least-once delivery, so we must deduplicate
+          # messages by message_id to handle potential duplicate deliveries.
+          if msg.message.message_id not in received_message_ids:
+            received_message_ids.add(msg.message.message_id)
+            received_messages.append(msg)
+        if len(received_messages) >= len(test_messages):
+          break
+        time.sleep(5)
+
+      self.assertEqual(len(received_messages), len(test_messages))
+
+      received_map = {
+          msg.message.data: msg.message
+          for msg in received_messages
+      }
+      self.assertEqual(received_map[b'order_data001'].ordering_key, 'key1')
+      self.assertEqual(received_map[b'order_data002'].ordering_key, 'key1')
+      self.assertEqual(received_map[b'order_data003'].ordering_key, 'key2')
+    finally:
+      self.sub_client.delete_subscription(
+          request={'subscription': ordering_sub.name})
+      self.pub_client.delete_topic(request={'topic': ordering_topic.name})
 
 
 if __name__ == '__main__':

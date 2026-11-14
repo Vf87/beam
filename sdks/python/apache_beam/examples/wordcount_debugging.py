@@ -42,6 +42,26 @@ and an output prefix on GCS::
 
 # pytype: skip-file
 
+# beam-playground:
+#   name: WordCountDebugging
+#   description: An example that counts words in Shakespeare's works.
+#     includes regex filter("Flourish|stomach").
+#   multifile: false
+#   pipeline_options: --output output.txt
+#   context_line: 152
+#   categories:
+#     - Flatten
+#     - Debugging
+#     - Options
+#     - Combiners
+#     - Filtering
+#     - Quickstart
+#   complexity: ADVANCED
+#   tags:
+#     - count
+#     - debug
+#     - strings
+
 import argparse
 import logging
 import re
@@ -59,9 +79,7 @@ from apache_beam.testing.util import equal_to
 class FilterTextFn(beam.DoFn):
   """A DoFn that filters for a specific key based on a regular expression."""
   def __init__(self, pattern):
-    # TODO(BEAM-6158): Revert the workaround once we can pickle super() on py3.
-    # super().__init__()
-    beam.DoFn.__init__(self)
+    super().__init__()
     self.pattern = pattern
     # A custom metric can track values in your pipeline as it runs. Those
     # values will be available in the monitoring system of the runner used

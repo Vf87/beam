@@ -18,7 +18,7 @@
 package org.apache.beam.sdk.io.gcp.firestore;
 
 import static org.apache.beam.sdk.io.gcp.firestore.FirestoreProtoHelpers.newWrite;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists.newArrayList;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists.newArrayList;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
@@ -36,7 +36,6 @@ import com.google.api.gax.rpc.ApiException;
 import com.google.api.gax.rpc.ApiExceptionFactory;
 import com.google.firestore.v1.Write;
 import com.google.rpc.Code;
-import edu.umd.cs.findbugs.annotations.Nullable;
 import io.grpc.Status;
 import java.io.IOException;
 import java.net.SocketTimeoutException;
@@ -65,7 +64,8 @@ import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Distribution;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.util.Sleeper;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Before;
@@ -152,8 +152,7 @@ public final class RpcQosTest {
 
     // init here after mocks have been initialized
     options =
-        RpcQosOptions.defaultOptions()
-            .toBuilder()
+        RpcQosOptions.defaultOptions().toBuilder()
             .withInitialBackoff(Duration.millis(1))
             .withSamplePeriod(Duration.millis(100))
             .withSamplePeriodBucketSize(Duration.millis(10))
@@ -455,7 +454,7 @@ public final class RpcQosTest {
 
   @Test
   public void flushBuffer_doesNotErrorWhenMaxIsOne() {
-    FlushBufferImpl<String, Element<String>> buffer = new FlushBufferImpl<>(1, 1000);
+    FlushBufferImpl<Element<String>> buffer = new FlushBufferImpl<>(1, 1000);
     assertTrue(buffer.offer(new FixedSerializationSize<>("a", 1)));
     assertFalse(buffer.offer(new FixedSerializationSize<>("b", 1)));
     assertEquals(1, buffer.getBufferedElementsCount());
@@ -463,7 +462,7 @@ public final class RpcQosTest {
 
   @Test
   public void flushBuffer_doesNotErrorWhenMaxIsZero() {
-    FlushBufferImpl<String, Element<String>> buffer = new FlushBufferImpl<>(0, 1000);
+    FlushBufferImpl<Element<String>> buffer = new FlushBufferImpl<>(0, 1000);
     assertFalse(buffer.offer(new FixedSerializationSize<>("a", 1)));
     assertEquals(0, buffer.getBufferedElementsCount());
     assertFalse(buffer.isFull());
@@ -561,6 +560,45 @@ public final class RpcQosTest {
   @Test
   public void initialBatchSizeRelativeToWorkerCount_1() {
     doTest_initialBatchSizeRelativeToWorkerCount(1, 500);
+  }
+
+  @Test
+  public void rampupThrottlingDisabled_initialBatchSizeIgnoresWorkerCount() {
+    RpcQosOptions options =
+        RpcQosOptions.newBuilder()
+            .withHintMaxNumWorkers(10000)
+            .withBatchInitialCount(500)
+            .withRampupThrottlingDisabled()
+            .build();
+    RpcQosImpl qos = new RpcQosImpl(options, random, sleeper, counterFactory, distributionFactory);
+    RpcWriteAttemptImpl attempt = qos.newWriteAttempt(RPC_ATTEMPT_CONTEXT);
+    FlushBufferImpl<Element<Object>> buffer = attempt.newFlushBuffer(Instant.EPOCH);
+    assertEquals(500, buffer.nextBatchMaxCount);
+  }
+
+  @Test
+  public void rampupThrottlingDisabled_writesDoNotWaitForRampUpBudget()
+      throws InterruptedException {
+    RpcQosOptions options =
+        RpcQosOptions.newBuilder()
+            .withHintMaxNumWorkers(10000)
+            .withRampupThrottlingDisabled()
+            .build();
+    RpcQos qos = new RpcQosImpl(options, random, sleeper, counterFactory, distributionFactory);
+
+    // with ramp-up throttling enabled, the budget of 1 write per second would be exhausted after
+    // the first successful request within the same second
+    Instant now = Instant.EPOCH;
+    for (int i = 0; i < 10; i++) {
+      RpcWriteAttempt attempt = qos.newWriteAttempt(RPC_ATTEMPT_CONTEXT);
+      assertTrue(attempt.awaitSafeToProceed(now));
+      attempt.recordRequestStart(now, 500);
+      attempt.recordWriteCounts(now, 500, 0);
+      attempt.recordRequestSuccessful(now);
+    }
+
+    verify(sleeper, times(0)).sleep(anyLong());
+    verify(counterThrottlingMs, times(0)).inc(anyLong());
   }
 
   @Test
@@ -703,7 +741,7 @@ public final class RpcQosTest {
             .build();
     RpcQosImpl qos = new RpcQosImpl(options, random, sleeper, counterFactory, distributionFactory);
     RpcWriteAttemptImpl attempt = qos.newWriteAttempt(RPC_ATTEMPT_CONTEXT);
-    FlushBufferImpl<Object, Element<Object>> buffer = attempt.newFlushBuffer(Instant.EPOCH);
+    FlushBufferImpl<Element<Object>> buffer = attempt.newFlushBuffer(Instant.EPOCH);
     assertEquals(expectedBatchMaxCount, buffer.nextBatchMaxCount);
   }
 

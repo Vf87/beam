@@ -17,25 +17,22 @@
  */
 package org.apache.beam.runners.direct;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import com.google.auto.value.AutoValue;
 import java.util.Iterator;
 import javax.annotation.Nonnull;
 import org.apache.beam.runners.local.StructuralKey;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
 /** A factory that produces bundles that perform no additional validation. */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 class ImmutableListBundleFactory implements BundleFactory {
   private static final ImmutableListBundleFactory FACTORY = new ImmutableListBundleFactory();
 
@@ -63,7 +60,7 @@ class ImmutableListBundleFactory implements BundleFactory {
 
   /** A {@link UncommittedBundle} that buffers elements in memory. */
   private static final class UncommittedImmutableListBundle<T> implements UncommittedBundle<T> {
-    private final PCollection<T> pcollection;
+    private final @Nullable PCollection<T> pcollection;
     private final StructuralKey<?> key;
     private boolean committed = false;
     private ImmutableList.Builder<WindowedValue<T>> elements;
@@ -73,18 +70,19 @@ class ImmutableListBundleFactory implements BundleFactory {
      * Create a new {@link UncommittedImmutableListBundle} for the specified {@link PCollection}.
      */
     public static <T> UncommittedImmutableListBundle<T> create(
-        PCollection<T> pcollection, StructuralKey<?> key) {
+        @Nullable PCollection<T> pcollection, StructuralKey<?> key) {
       return new UncommittedImmutableListBundle<>(pcollection, key);
     }
 
-    private UncommittedImmutableListBundle(PCollection<T> pcollection, StructuralKey<?> key) {
+    private UncommittedImmutableListBundle(
+        @Nullable PCollection<T> pcollection, StructuralKey<?> key) {
       this.pcollection = pcollection;
       this.key = key;
       this.elements = ImmutableList.builder();
     }
 
     @Override
-    public PCollection<T> getPCollection() {
+    public @Nullable PCollection<T> getPCollection() {
       return pcollection;
     }
 
@@ -155,12 +153,12 @@ class ImmutableListBundleFactory implements BundleFactory {
     }
 
     @Override
-    public int hashCode() {
+    public final int hashCode() {
       return System.identityHashCode(this);
     }
 
     @Override
-    public boolean equals(@Nullable Object obj) {
+    public final boolean equals(@Nullable Object obj) {
       return this == obj;
     }
   }

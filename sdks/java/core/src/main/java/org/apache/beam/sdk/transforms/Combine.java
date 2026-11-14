@@ -17,7 +17,8 @@
  */
 package org.apache.beam.sdk.transforms;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -29,6 +30,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
+import org.apache.beam.sdk.annotations.Internal;
 import org.apache.beam.sdk.coders.CannotProvideCoderException;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderException;
@@ -40,14 +42,16 @@ import org.apache.beam.sdk.coders.StructuredCoder;
 import org.apache.beam.sdk.coders.VarIntCoder;
 import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.transforms.Combine.AccumulatingCombineFn;
+import org.apache.beam.sdk.transforms.Combine.CombineFn;
+import org.apache.beam.sdk.transforms.Combine.Globally;
+import org.apache.beam.sdk.transforms.Combine.PerKey;
 import org.apache.beam.sdk.transforms.CombineFnBase.AbstractGlobalCombineFn;
 import org.apache.beam.sdk.transforms.CombineFnBase.GlobalCombineFn;
 import org.apache.beam.sdk.transforms.CombineWithContext.CombineFnWithContext;
-import org.apache.beam.sdk.transforms.CombineWithContext.Context;
 import org.apache.beam.sdk.transforms.CombineWithContext.RequiresContextInternal;
 import org.apache.beam.sdk.transforms.View.CreatePCollectionView;
 import org.apache.beam.sdk.transforms.display.DisplayData;
-import org.apache.beam.sdk.transforms.display.DisplayData.Builder;
 import org.apache.beam.sdk.transforms.display.HasDisplayData;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
@@ -68,8 +72,8 @@ import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -79,9 +83,6 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * href="https://beam.apache.org/documentation/programming-guide/#transforms-combine">documentation</a>
  * for how to use the operations in this class.
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class Combine {
   private Combine() {
     // do not instantiate
@@ -139,7 +140,7 @@ public class Combine {
     return globally(fn, displayDataForFn(fn));
   }
 
-  private static <T> DisplayData.ItemSpec<? extends Class<?>> displayDataForFn(T fn) {
+  private static DisplayData.ItemSpec<? extends Class<?>> displayDataForFn(Object fn) {
     return DisplayData.item("combineFn", fn.getClass()).withLabel("Combiner");
   }
 
@@ -202,6 +203,13 @@ public class Combine {
       GlobalCombineFn<? super InputT, ?, OutputT> fn,
       DisplayData.ItemSpec<? extends Class<?>> fnDisplayData) {
     return new PerKey<>(fn, fnDisplayData, false /*fewKeys*/);
+  }
+
+  /** Returns a {@link PerKey Combine.PerKey}, and set fewKeys in {@link GroupByKey}. */
+  @Internal
+  public static <K, InputT, OutputT> PerKey<K, InputT, OutputT> fewKeys(
+      GlobalCombineFn<? super InputT, ?, OutputT> fn) {
+    return new PerKey<>(fn, displayDataForFn(fn), true /*fewKeys*/);
   }
 
   /** Returns a {@link PerKey Combine.PerKey}, and set fewKeys in {@link GroupByKey}. */
@@ -523,7 +531,7 @@ public class Combine {
     @Override
     public Holder<V> addInput(Holder<V> accumulator, V input) {
       if (accumulator.present) {
-        accumulator.set(apply(accumulator.value, input));
+        accumulator.set(apply(accumulator.get(), input));
       } else {
         accumulator.set(input);
       }
@@ -541,9 +549,9 @@ public class Combine {
           Holder<V> accum = iter.next();
           if (accum.present) {
             if (running.present) {
-              running.set(apply(running.value, accum.value));
+              running.set(apply(running.get(), accum.get()));
             } else {
-              running.set(accum.value);
+              running.set(accum.get());
             }
           }
         }
@@ -552,9 +560,10 @@ public class Combine {
     }
 
     @Override
+    @SuppressWarnings("nullness") // identity() is nullable; combining an empty set may yield null
     public V extractOutput(Holder<V> accumulator) {
       if (accumulator.present) {
-        return accumulator.value;
+        return accumulator.get();
       } else {
         return identity();
       }
@@ -583,12 +592,22 @@ public class Combine {
     private Holder() {}
 
     private Holder(V value) {
-      set(value);
+      this.present = true;
+      this.value = value;
     }
 
     private void set(V value) {
       this.present = true;
       this.value = value;
+    }
+
+    /**
+     * Returns the held value, which is meaningful only when {@link #present}. The result may be
+     * null, because {@link BinaryCombineFn} supports null values.
+     */
+    @SuppressWarnings("nullness")
+    private V get() {
+      return value;
     }
 
     @Override
@@ -609,15 +628,15 @@ public class Combine {
     @Override
     public void encode(Holder<V> accumulator, OutputStream outStream)
         throws CoderException, IOException {
-      encode(accumulator, outStream, Context.NESTED);
+      encode(accumulator, outStream, Coder.Context.NESTED);
     }
 
     @Override
-    public void encode(Holder<V> accumulator, OutputStream outStream, Context context)
+    public void encode(Holder<V> accumulator, OutputStream outStream, Coder.Context context)
         throws CoderException, IOException {
       if (accumulator.present) {
         outStream.write(1);
-        valueCoder.encode(accumulator.value, outStream, context);
+        valueCoder.encode(accumulator.get(), outStream, context);
       } else {
         outStream.write(0);
       }
@@ -625,11 +644,11 @@ public class Combine {
 
     @Override
     public Holder<V> decode(InputStream inStream) throws CoderException, IOException {
-      return decode(inStream, Context.NESTED);
+      return decode(inStream, Coder.Context.NESTED);
     }
 
     @Override
-    public Holder<V> decode(InputStream inStream, Context context)
+    public Holder<V> decode(InputStream inStream, Coder.Context context)
         throws CoderException, IOException {
       if (inStream.read() == 1) {
         return new Holder<>(valueCoder.decode(inStream, context));
@@ -1214,7 +1233,9 @@ public class Combine {
       PCollection<OutputT> defaultIfEmpty =
           maybeEmpty
               .getPipeline()
-              .apply("CreateVoid", Create.of((Void) null).withCoder(VoidCoder.of()))
+              .apply(
+                  "CreateVoid",
+                  Create.<@Nullable Void>of((@Nullable Void) null).withCoder(VoidCoder.of()))
               .apply(
                   "ProduceDefault",
                   ParDo.of(
@@ -1314,8 +1335,7 @@ public class Combine {
       PCollectionView<OutputT> view =
           PCollectionViews.singletonView(
               combined,
-              (TypeDescriptorSupplier<OutputT>)
-                  () -> outputCoder != null ? outputCoder.getEncodedTypeDescriptor() : null,
+              (TypeDescriptorSupplier<OutputT>) () -> outputCoder.getEncodedTypeDescriptor(),
               input.getWindowingStrategy(),
               insertDefault,
               insertDefault ? fn.defaultValue() : null,
@@ -1493,6 +1513,7 @@ public class Combine {
     private final DisplayData.ItemSpec<? extends Class<?>> fnDisplayData;
     private final boolean fewKeys;
     private final List<PCollectionView<?>> sideInputs;
+    private boolean shouldSkipReplacement;
 
     private PerKey(
         GlobalCombineFn<? super InputT, ?, OutputT> fn,
@@ -1502,6 +1523,7 @@ public class Combine {
       this.fnDisplayData = fnDisplayData;
       this.fewKeys = fewKeys;
       this.sideInputs = ImmutableList.of();
+      this.shouldSkipReplacement = false;
     }
 
     private PerKey(
@@ -1513,6 +1535,7 @@ public class Combine {
       this.fnDisplayData = fnDisplayData;
       this.fewKeys = fewKeys;
       this.sideInputs = sideInputs;
+      this.shouldSkipReplacement = false;
     }
 
     @Override
@@ -1549,7 +1572,7 @@ public class Combine {
      */
     public PerKeyWithHotKeyFanout<K, InputT, OutputT> withHotKeyFanout(
         SerializableFunction<? super K, Integer> hotKeyFanout) {
-      return new PerKeyWithHotKeyFanout<>(fn, fnDisplayData, hotKeyFanout);
+      return new PerKeyWithHotKeyFanout<>(fn, fnDisplayData, hotKeyFanout, fewKeys, sideInputs);
     }
 
     /**
@@ -1562,7 +1585,7 @@ public class Combine {
           fnDisplayData,
           new SimpleFunction<K, Integer>() {
             @Override
-            public void populateDisplayData(Builder builder) {
+            public void populateDisplayData(DisplayData.Builder builder) {
               super.populateDisplayData(builder);
               builder.add(DisplayData.item("fanout", hotKeyFanout).withLabel("Key Fanout Size"));
             }
@@ -1571,7 +1594,9 @@ public class Combine {
             public Integer apply(K unused) {
               return hotKeyFanout;
             }
-          });
+          },
+          fewKeys,
+          sideInputs);
     }
 
     /** Returns the {@link GlobalCombineFn} used by this Combine operation. */
@@ -1582,6 +1607,11 @@ public class Combine {
     /** Returns the side inputs used by this Combine operation. */
     public List<PCollectionView<?>> getSideInputs() {
       return sideInputs;
+    }
+
+    /** Returns whether a runner should skip replacing this transform. For runner use only */
+    public boolean shouldSkipReplacement() {
+      return this.shouldSkipReplacement;
     }
 
     /**
@@ -1596,6 +1626,13 @@ public class Combine {
 
     @Override
     public PCollection<KV<K, OutputT>> expand(PCollection<KV<K, InputT>> input) {
+      PipelineOptions options = input.getPipeline().getOptions();
+      String gbekOveride = options.getGbek();
+      if (gbekOveride != null && !gbekOveride.trim().isEmpty()) {
+        // Don't replace this transform if we're using GBEK since the runner may insert
+        // its own GBK which doesn't perform encryption.
+        this.shouldSkipReplacement = true;
+      }
       return input
           .apply(fewKeys ? GroupByKey.createWithFewKeys() : GroupByKey.create())
           .apply(
@@ -1617,14 +1654,20 @@ public class Combine {
     private final GlobalCombineFn<? super InputT, ?, OutputT> fn;
     private final DisplayData.ItemSpec<? extends Class<?>> fnDisplayData;
     private final SerializableFunction<? super K, Integer> hotKeyFanout;
+    private final boolean fewKeys;
+    private final List<PCollectionView<?>> sideInputs;
 
     private PerKeyWithHotKeyFanout(
         GlobalCombineFn<? super InputT, ?, OutputT> fn,
         DisplayData.ItemSpec<? extends Class<?>> fnDisplayData,
-        SerializableFunction<? super K, Integer> hotKeyFanout) {
+        SerializableFunction<? super K, Integer> hotKeyFanout,
+        boolean fewKeys,
+        List<PCollectionView<?>> sideInputs) {
       this.fn = fn;
       this.fnDisplayData = fnDisplayData;
       this.hotKeyFanout = hotKeyFanout;
+      this.fewKeys = fewKeys;
+      this.sideInputs = sideInputs;
     }
 
     @Override
@@ -1723,7 +1766,7 @@ public class Combine {
               @Override
               public AccumT addInput(AccumT accumulator, InputOrAccum<InputT, AccumT> value) {
                 if (value.accum == null) {
-                  return fn.addInput(accumulator, value.input);
+                  return fn.addInput(accumulator, checkStateNotNull(value.input));
                 } else {
                   return fn.mergeAccumulators(ImmutableList.of(accumulator, value.accum));
                 }
@@ -1769,27 +1812,29 @@ public class Combine {
         hotPreCombine =
             new CombineFnWithContext<InputT, AccumT, AccumT>() {
               @Override
-              public AccumT createAccumulator(Context c) {
+              public AccumT createAccumulator(CombineWithContext.Context c) {
                 return fnWithContext.createAccumulator(c);
               }
 
               @Override
-              public AccumT addInput(AccumT accumulator, InputT value, Context c) {
+              public AccumT addInput(
+                  AccumT accumulator, InputT value, CombineWithContext.Context c) {
                 return fnWithContext.addInput(accumulator, value, c);
               }
 
               @Override
-              public AccumT mergeAccumulators(Iterable<AccumT> accumulators, Context c) {
+              public AccumT mergeAccumulators(
+                  Iterable<AccumT> accumulators, CombineWithContext.Context c) {
                 return fnWithContext.mergeAccumulators(accumulators, c);
               }
 
               @Override
-              public AccumT compact(AccumT accumulator, Context c) {
+              public AccumT compact(AccumT accumulator, CombineWithContext.Context c) {
                 return fnWithContext.compact(accumulator, c);
               }
 
               @Override
-              public AccumT extractOutput(AccumT accumulator, Context c) {
+              public AccumT extractOutput(AccumT accumulator, CombineWithContext.Context c) {
                 return accumulator;
               }
 
@@ -1809,15 +1854,17 @@ public class Combine {
         postCombine =
             new CombineFnWithContext<InputOrAccum<InputT, AccumT>, AccumT, OutputT>() {
               @Override
-              public AccumT createAccumulator(Context c) {
+              public AccumT createAccumulator(CombineWithContext.Context c) {
                 return fnWithContext.createAccumulator(c);
               }
 
               @Override
               public AccumT addInput(
-                  AccumT accumulator, InputOrAccum<InputT, AccumT> value, Context c) {
+                  AccumT accumulator,
+                  InputOrAccum<InputT, AccumT> value,
+                  CombineWithContext.Context c) {
                 if (value.accum == null) {
-                  return fnWithContext.addInput(accumulator, value.input, c);
+                  return fnWithContext.addInput(accumulator, checkStateNotNull(value.input), c);
                 } else {
                   return fnWithContext.mergeAccumulators(
                       ImmutableList.of(accumulator, value.accum), c);
@@ -1825,17 +1872,18 @@ public class Combine {
               }
 
               @Override
-              public AccumT mergeAccumulators(Iterable<AccumT> accumulators, Context c) {
+              public AccumT mergeAccumulators(
+                  Iterable<AccumT> accumulators, CombineWithContext.Context c) {
                 return fnWithContext.mergeAccumulators(accumulators, c);
               }
 
               @Override
-              public AccumT compact(AccumT accumulator, Context c) {
+              public AccumT compact(AccumT accumulator, CombineWithContext.Context c) {
                 return fnWithContext.compact(accumulator, c);
               }
 
               @Override
-              public OutputT extractOutput(AccumT accumulator, Context c) {
+              public OutputT extractOutput(AccumT accumulator, CombineWithContext.Context c) {
                 return fnWithContext.extractOutput(accumulator, c);
               }
 
@@ -1908,6 +1956,14 @@ public class Combine {
       }
 
       // Combine the hot and cold keys separately.
+      Combine.PerKey<KV<K, Integer>, InputT, AccumT> hotPreCombineTransform =
+          fewKeys
+              ? Combine.fewKeys(hotPreCombine, fnDisplayData)
+              : Combine.perKey(hotPreCombine, fnDisplayData);
+      if (!sideInputs.isEmpty()) {
+        hotPreCombineTransform = hotPreCombineTransform.withSideInputs(sideInputs);
+      }
+
       PCollection<KV<K, InputOrAccum<InputT, AccumT>>> precombinedHot =
           split
               .get(hot)
@@ -1916,7 +1972,7 @@ public class Combine {
                       KvCoder.of(inputCoder.getKeyCoder(), VarIntCoder.of()),
                       inputCoder.getValueCoder()))
               .setWindowingStrategyInternal(preCombineStrategy)
-              .apply("PreCombineHot", Combine.perKey(hotPreCombine, fnDisplayData))
+              .apply("PreCombineHot", hotPreCombineTransform)
               .apply(
                   "StripNonce",
                   MapElements.via(
@@ -1951,10 +2007,18 @@ public class Combine {
               .setCoder(KvCoder.of(inputCoder.getKeyCoder(), inputOrAccumCoder));
 
       // Combine the union of the pre-processed hot and cold key results.
+      Combine.PerKey<K, InputOrAccum<InputT, AccumT>, OutputT> postCombineTransform =
+          fewKeys
+              ? Combine.fewKeys(postCombine, fnDisplayData)
+              : Combine.perKey(postCombine, fnDisplayData);
+      if (!sideInputs.isEmpty()) {
+        postCombineTransform = postCombineTransform.withSideInputs(sideInputs);
+      }
+
       return PCollectionList.of(precombinedHot)
           .and(preprocessedCold)
           .apply(Flatten.pCollections())
-          .apply("PostCombine", Combine.perKey(postCombine, fnDisplayData));
+          .apply("PostCombine", postCombineTransform);
     }
 
     @Override
@@ -1967,6 +2031,11 @@ public class Combine {
       }
       builder.add(
           DisplayData.item("fanoutFn", hotKeyFanout.getClass()).withLabel("Fanout Function"));
+    }
+
+    /** Returns the side inputs used by this Combine operation. */
+    public List<PCollectionView<?>> getSideInputs() {
+      return sideInputs;
     }
 
     /**
@@ -2016,7 +2085,7 @@ public class Combine {
             inputCoder.encode(value.input, outStream, context);
           } else {
             outStream.write(1);
-            accumCoder.encode(value.accum, outStream, context);
+            accumCoder.encode(checkStateNotNull(value.accum), outStream, context);
           }
         }
 

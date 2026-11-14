@@ -28,7 +28,7 @@ See the [Python API reference](https://beam.apache.org/releases/pydoc/) for more
 ## Python streaming pipelines
 
 Python [streaming pipeline execution](/documentation/sdks/python-streaming)
-is experimentally available (with some [limitations](/documentation/sdks/python-streaming/#unsupported-features))
+is available (with some [limitations](/documentation/sdks/python-streaming/#unsupported-features))
 starting with Beam SDK version 2.5.0.
 
 ## Python type safety
@@ -46,6 +46,73 @@ new I/O connectors. See the [Developing I/O connectors overview](/documentation/
 for information about developing new I/O connectors and links to
 language-specific implementation guidance.
 
-## Using Beam Python SDK in your ML pipelines
+## Making machine learning inferences with Python
+
+To integrate machine learning models into your pipelines for making inferences, use the RunInference API for PyTorch and Scikit-learn models. If you are using TensorFlow models, you can make use of the
+[library from `tfx_bsl`](https://github.com/tensorflow/tfx-bsl/tree/master/tfx_bsl/beam).
+
+You can create multiple types of transforms using the RunInference API: the API takes multiple types of setup parameters from model handlers, and the parameter type determines the model implementation. For more information,
+see [About Beam ML](/documentation/ml/about-ml).
 
 [TensorFlow Extended (TFX)](https://www.tensorflow.org/tfx) is an end-to-end platform for deploying production ML pipelines. TFX is integrated with Beam. For more information, see [TFX user guide](https://www.tensorflow.org/tfx/guide).
+
+## Python multi-language pipelines quickstart
+
+Apache Beam lets you combine transforms written in any supported SDK language and use them in one multi-language pipeline. To learn how to create a multi-language pipeline using the Python SDK, see the [Python multi-language pipelines quickstart](/documentation/sdks/python-multi-language-pipelines).
+
+## Unrecoverable Errors in Beam Python
+
+Some common errors can occur during worker start-up and prevent jobs from starting. To learn about these errors and how to troubleshoot them in the Python SDK, see [Unrecoverable Errors in Beam Python](/documentation/sdks/python-unrecoverable-errors).
+
+## Python Version Compatibility
+
+<table class="table table-bordered">
+<tr>
+  <th>Python Version</th>
+  <th>Supported Beam Versions</th>
+</tr>
+<tr>
+  <td>3.14</td>
+  <td>&ge; 2.73.0</td>
+</tr>
+<tr>
+  <td>3.13</td>
+  <td>&ge; 2.69.0</td>
+</tr>
+<tr>
+  <td>3.12</td>
+  <td>&ge; 2.57.0</td>
+</tr>
+<tr>
+  <td>3.11</td>
+  <td>&ge; 2.47.0</td>
+</tr>
+<tr>
+  <td>3.10</td>
+  <td>2.43.0 - 2.77.0</td>
+</tr>
+<tr>
+  <td>3.9</td>
+  <td>2.37.0 - 2.69.0</td>
+</tr>
+<tr>
+  <td>3.8</td>
+  <td>2.23.0 - 2.60.0</td>
+</tr>
+<tr>
+  <td>3.7</td>
+  <td>2.12.0 - 2.48.0</td>
+</tr>
+<tr>
+  <td>3.6</td>
+  <td>2.12.0 - 2.38.0</td>
+</tr>
+<tr>
+  <td>3.5</td>
+  <td>2.11.0 - 2.24.0</td>
+</tr>
+<tr>
+  <td>2.7</td>
+  <td>&le 2.24.0</td>
+</tr>
+</table>

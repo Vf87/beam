@@ -17,7 +17,7 @@
  */
 package org.apache.beam.runners.direct;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
@@ -219,7 +219,7 @@ public class DoFnLifecycleManagerTest {
     }
 
     @ProcessElement
-    public void processElement(ProcessContext c) throws Exception {}
+    public void processElement(@SuppressWarnings("unused") ProcessContext c) throws Exception {}
 
     @Teardown
     public void teardown() {

@@ -57,7 +57,6 @@ def _get_match(proto, filter_fn):
 
 
 # V1b3 MetricStructuredName keys to accept and copy to the MetricKey labels.
-STEP_LABEL = 'step'
 STRUCTURED_NAME_LABELS = set(
     ['execution_step', 'original_name', 'output_user_name'])
 
@@ -90,6 +89,10 @@ class DataflowMetrics(MetricResults):
   def _is_distribution(metric_result):
     return isinstance(metric_result.attempted, DistributionResult)
 
+  @staticmethod
+  def _is_string_set(metric_result):
+    return isinstance(metric_result.attempted, set)
+
   def _translate_step_name(self, internal_name):
     """Translate between internal step names (e.g. "s1") and user step names."""
     if not self._job_graph:
@@ -97,9 +100,9 @@ class DataflowMetrics(MetricResults):
           'Could not translate the internal step name %r since job graph is '
           'not available.' % internal_name)
     user_step_name = None
-    if (self._job_graph and internal_name in
-        self._job_graph.proto_pipeline.components.transforms.keys()):
-      # Dataflow Runner v2 with portable job submission uses proto transform map
+    if (self._job_graph and internal_name
+        in self._job_graph.proto_pipeline.components.transforms.keys()):
+      # Dataflow Portable Runner with portable job submission uses proto transform map
       # IDs for step names. Also PTransform.unique_name maps to user step names.
       # Hence we lookup user step names based on the proto.
       user_step_name = self._job_graph.proto_pipeline.components.transforms[
@@ -108,9 +111,7 @@ class DataflowMetrics(MetricResults):
       try:
         step = _get_match(
             self._job_graph.proto.steps, lambda x: x.name == internal_name)
-        user_step_name = _get_match(
-            step.properties.additionalProperties,
-            lambda x: x.key == 'user_name').value.string_value
+        user_step_name = step.properties.get('user_name')
       except ValueError:
         pass  # Exception is handled below.
     if not user_step_name:
@@ -131,24 +132,17 @@ class DataflowMetrics(MetricResults):
       #   step name (only happens for unstructured-named metrics).
       # 2. Unable to unpack [step] or [namespace]; which should only happen
       #   for unstructured names.
-      step = _get_match(
-          metric.name.context.additionalProperties,
-          lambda x: x.key == STEP_LABEL).value
+      step = metric.name.context['step']
       step = self._translate_step_name(step)
-    except ValueError:
+    except (KeyError, ValueError):
       pass
 
     namespace = "dataflow/v1b3"  # Try to extract namespace or add a default.
-    try:
-      namespace = _get_match(
-          metric.name.context.additionalProperties,
-          lambda x: x.key == 'namespace').value
-    except ValueError:
-      pass
+    namespace = metric.name.context.get('namespace', 'dataflow/v1b3')
 
-    for kv in metric.name.context.additionalProperties:
-      if kv.key in STRUCTURED_NAME_LABELS:
-        labels[kv.key] = kv.value
+    for key in metric.name.context:
+      if key in STRUCTURED_NAME_LABELS:
+        labels[key] = metric.name.context[key]
     # Package everything besides namespace and name the labels as well,
     # including unmodified step names to assist in integration the exact
     # unmodified values which come from dataflow.
@@ -181,10 +175,7 @@ class DataflowMetrics(MetricResults):
         #  in the service.
         # The second way is only useful for the UI, and should be ignored.
         continue
-      is_tentative = [
-          prop for prop in metric.name.context.additionalProperties
-          if prop.key == 'tentative' and prop.value == 'true'
-      ]
+      is_tentative = metric.name.context.get('tentative') == 'true'
       tentative_or_committed = 'tentative' if is_tentative else 'committed'
 
       metric_key = self._get_metric_key(metric)
@@ -205,34 +196,20 @@ class DataflowMetrics(MetricResults):
       return None
 
     if metric.scalar is not None:
-      return metric.scalar.integer_value
+      # This will always be a single value if there is any data in the field.
+      val = metric.scalar
+      if isinstance(val, float) and val.is_integer():
+        return int(val)
+      return val
     elif metric.distribution is not None:
-      dist_count = _get_match(
-          metric.distribution.object_value.properties,
-          lambda x: x.key == 'count').value.integer_value
-      dist_min = _get_match(
-          metric.distribution.object_value.properties,
-          lambda x: x.key == 'min').value.integer_value
-      dist_max = _get_match(
-          metric.distribution.object_value.properties,
-          lambda x: x.key == 'max').value.integer_value
-      dist_sum = _get_match(
-          metric.distribution.object_value.properties,
-          lambda x: x.key == 'sum').value.integer_value
-      if not dist_sum:
-        # distribution metric is not meant to use on large values, but in case
-        # it is, the value can overflow and become double_value, the correctness
-        # of the value may not be guaranteed.
-        _LOGGER.info(
-            "Distribution metric sum value seems to have "
-            "overflowed integer_value range, the correctness of sum or mean "
-            "value may not be guaranteed: %s" % metric.distribution)
-        dist_sum = int(
-            _get_match(
-                metric.distribution.object_value.properties,
-                lambda x: x.key == 'sum').value.double_value)
+      dist_count = int(metric.distribution['count'])
+      dist_min = int(metric.distribution['min'])
+      dist_max = int(metric.distribution['max'])
+      dist_sum = int(metric.distribution['sum'])
       return DistributionResult(
           DistributionData(dist_sum, dist_count, dist_min, dist_max))
+      #TODO(https://github.com/apache/beam/issues/31788) support StringSet after
+      #  re-generate apiclient
     else:
       return None
 
@@ -277,20 +254,26 @@ class DataflowMetrics(MetricResults):
             elm for elm in metric_results if self.matches(filter, elm.key) and
             DataflowMetrics._is_distribution(elm)
         ],
-        self.GAUGES: []
-    }  # TODO(pabloem): Add Gauge support for dataflow.
+        # TODO(pabloem): Add Gauge support for dataflow.
+        self.GAUGES: [],
+        self.STRINGSETS: [
+            elm for elm in metric_results if self.matches(filter, elm.key) and
+            DataflowMetrics._is_string_set(elm)
+        ]
+    }
 
 
 def main(argv):
-  """Print the metric results for a the dataflow --job_id and --project.
+  """Print the metric results for the dataflow --job_id and --project.
 
   Instead of running an entire pipeline which takes several minutes, use this
   main method to display MetricResults for a specific --job_id and --project
   which takes only a few seconds.
   """
-  # TODO(BEAM-6833): The MetricResults do not show translated step names as the
-  # job_graph is not provided to DataflowMetrics.
-  # Import here to avoid adding the dependency for local running scenarios.
+  # TODO(https://github.com/apache/beam/issues/19452): The MetricResults do not
+  # show translated step names as the job_graph is not provided to
+  # DataflowMetrics. Import here to avoid adding the dependency for local
+  # running scenarios.
   try:
     # pylint: disable=wrong-import-order, wrong-import-position
     from apache_beam.runners.dataflow.internal import apiclient

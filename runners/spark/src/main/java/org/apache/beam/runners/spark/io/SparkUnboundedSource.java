@@ -41,8 +41,9 @@ import org.apache.beam.sdk.metrics.MetricsContainer;
 import org.apache.beam.sdk.metrics.MetricsEnvironment;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Splitter;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Splitter;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext$;
 import org.apache.spark.api.java.function.FlatMapFunction;
@@ -78,7 +79,7 @@ import scala.runtime.BoxedUnit;
  * </ul>
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class SparkUnboundedSource {
 
@@ -120,8 +121,8 @@ public class SparkUnboundedSource {
         .register();
 
     // output the actual (deserialized) stream.
-    WindowedValue.FullWindowedValueCoder<T> coder =
-        WindowedValue.FullWindowedValueCoder.of(
+    WindowedValues.FullWindowedValueCoder<T> coder =
+        WindowedValues.FullWindowedValueCoder.of(
             source.getOutputCoder(), GlobalWindow.Coder.INSTANCE);
     JavaDStream<WindowedValue<T>> readUnboundedStream =
         mapWithStateDStream
@@ -185,7 +186,7 @@ public class SparkUnboundedSource {
 
     @Override
     public scala.collection.immutable.List<DStream<?>> dependencies() {
-      return scala.collection.JavaConversions.asScalaBuffer(
+      return scala.collection.JavaConverters.asScalaBuffer(
               Collections.<DStream<?>>singletonList(parent))
           .toList();
     }

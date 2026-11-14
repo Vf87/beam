@@ -15,49 +15,65 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import java.util.Properties
+
+val parentProperties = Properties().apply {
+  val file = file("../gradle.properties")
+  if (file.exists()) {
+    file.inputStream().use { load(it) }
+  }
+}
+
+val mavenCentralMirrorUrl = parentProperties.getProperty("mavenCentralMirrorUrl")
+val isCi = System.getenv("GITHUB_ACTIONS") != null || System.getenv("JENKINS_HOME") != null
+val useMirror = isCi && !mavenCentralMirrorUrl.isNullOrBlank()
 
 // Plugins for configuring _this build_ of the module
 plugins {
   `java-gradle-plugin`
   groovy
-  id("com.diffplug.spotless") version "5.6.1"
+  id("com.diffplug.spotless") version "7.2.1"
 }
 
 // Define the set of repositories required to fetch and enable plugins.
 repositories {
-  jcenter()
+  if (useMirror) {
+    maven { url = uri(mavenCentralMirrorUrl!!) }
+  }
   maven { url = uri("https://plugins.gradle.org/m2/") }
   maven {
     url = uri("https://repo.spring.io/plugins-release/")
     content { includeGroup("io.spring.gradle") }
   }
+  // For obsolete Avro plugin
+  maven {
+    url = uri("https://jitpack.io")
+    content { includeGroup("com.github.davidmc24.gradle-avro-plugin") }
+  }
 }
 
 // Dependencies on other plugins used when this plugin is invoked
 dependencies {
-  compile(gradleApi())
-  compile(localGroovy())
-  compile("com.github.jengelman.gradle.plugins:shadow:6.1.0")
-  compile("gradle.plugin.com.github.spotbugs.snom:spotbugs-gradle-plugin:4.5.0")
+  implementation(gradleApi())
+  implementation(localGroovy())
+  implementation("com.gradleup.shadow:shadow-gradle-plugin:8.3.8") {                   // Enable shading Java dependencies
+    exclude(group="org.codehaus.plexus", module="plexus-xml") // plexus-xml 4.x requires Java17
+  }
+  runtimeOnly("org.codehaus.plexus:plexus-xml:3.0.2") // Do not bump to plexus-xml 4.x which requires Java17
+  implementation("com.github.spotbugs.snom:spotbugs-gradle-plugin:5.0.14")
 
-  runtime("net.ltgt.gradle:gradle-apt-plugin:0.21")                                                    // Enable a Java annotation processor
-  runtime("com.google.protobuf:protobuf-gradle-plugin:0.8.13")                                          // Enable proto code generation
-  runtime("io.spring.gradle:propdeps-plugin:0.0.9.RELEASE")                                            // Enable provided and optional configurations
-  runtime("com.commercehub.gradle.plugin:gradle-avro-plugin:0.11.0")                                   // Enable Avro code generation
-  runtime("com.diffplug.spotless:spotless-plugin-gradle:5.6.1")                                       // Enable a code formatting plugin
-  runtime("gradle.plugin.com.github.blindpirate:gogradle:0.11.4")                                      // Enable Go code compilation
-  runtime("gradle.plugin.com.palantir.gradle.docker:gradle-docker:0.22.0")                             // Enable building Docker containers
-  runtime("gradle.plugin.com.dorongold.plugins:task-tree:1.5")                                       // Adds a 'taskTree' task to print task dependency tree
-  runtime("com.github.jengelman.gradle.plugins:shadow:6.1.0")                                          // Enable shading Java dependencies
-  runtime("ca.coglinc:javacc-gradle-plugin:2.4.0")                                                     // Enable the JavaCC parser generator
-  runtime("net.linguica.gradle:maven-settings-plugin:0.5")
-  runtime("gradle.plugin.io.pry.gradle.offline_dependencies:gradle-offline-dependencies-plugin:0.5.0") // Enable creating an offline repository
-  runtime("net.ltgt.gradle:gradle-errorprone-plugin:1.2.1")                                           // Enable errorprone Java static analysis
-  runtime("org.ajoberstar.grgit:grgit-gradle:4.0.2")                                                   // Enable website git publish to asf-site branch
-  runtime("com.avast.gradle:gradle-docker-compose-plugin:0.13.2")                                       // Enable docker compose tasks
-  runtime("ca.cutterslade.gradle:gradle-dependency-analyze:1.4.3")                                     // Enable dep analysis
-  runtime("gradle.plugin.net.ossindex:ossindex-gradle-plugin:0.4.11")                                  // Enable dep vulnerability analysis
-  runtime("org.checkerframework:checkerframework-gradle-plugin:0.5.16")                                 // Enable enhanced static checking plugin
+  runtimeOnly("com.google.protobuf:protobuf-gradle-plugin:0.8.13")                                         // Enable proto code generation
+  runtimeOnly("com.github.davidmc24.gradle.plugin:gradle-avro-plugin:1.9.1")                               // Enable Avro code generation. Version 1.1.0 is the last supporting avro 1.10.2
+  runtimeOnly("com.diffplug.spotless:spotless-plugin-gradle:7.2.1")                                        // Enable a code formatting plugin
+  runtimeOnly("gradle.plugin.com.dorongold.plugins:task-tree:1.5")                                         // Adds a 'taskTree' task to print task dependency tree
+  runtimeOnly("net.linguica.gradle:maven-settings-plugin:0.5")
+  runtimeOnly("gradle.plugin.io.pry.gradle.offline_dependencies:gradle-offline-dependencies-plugin:0.5.0") // Enable creating an offline repository
+  runtimeOnly("net.ltgt.gradle:gradle-errorprone-plugin:4.2.0")                                            // Enable errorprone Java static analysis
+  runtimeOnly("org.ajoberstar.grgit:grgit-gradle:5.3.2")                                                   // Enable website git publish to asf-site branch
+  runtimeOnly("com.avast.gradle:gradle-docker-compose-plugin:0.16.12")                                     // Enable docker compose tasks
+  runtimeOnly("ca.cutterslade.gradle:gradle-dependency-analyze:1.8.3")                                     // Enable dep analysis
+  runtimeOnly("gradle.plugin.net.ossindex:ossindex-gradle-plugin:0.4.11")                                  // Enable dep vulnerability analysis
+  runtimeOnly("org.checkerframework:checkerframework-gradle-plugin:0.6.56")                                // Enable enhanced static checking plugin
 }
 
 // Because buildSrc is built and tested automatically _before_ gradle
@@ -74,10 +90,14 @@ spotless {
   isEnforceCheck = !isSpotlessCheckDisabled
   groovy {
     excludeJava()
-    greclipse().configFile("greclipse.properties")
+    leadingTabsToSpaces(2)
+    trimTrailingWhitespace()
+    endWithNewline()
   }
   groovyGradle {
-    greclipse().configFile("greclipse.properties")
+    leadingTabsToSpaces(2)
+    trimTrailingWhitespace()
+    endWithNewline()
   }
 }
 
@@ -90,10 +110,6 @@ gradlePlugin {
     create("vendorJava") {
       id = "org.apache.beam.vendor-java"
       implementationClass = "org.apache.beam.gradle.VendorJavaPlugin"
-    }
-    create("beamJenkins") {
-      id = "org.apache.beam.jenkins"
-      implementationClass = "org.apache.beam.gradle.BeamJenkinsPlugin"
     }
   }
 }

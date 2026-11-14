@@ -23,13 +23,13 @@ import com.google.cloud.vision.v1.BatchAnnotateImagesResponse;
 import com.google.cloud.vision.v1.Feature;
 import com.google.cloud.vision.v1.ImageAnnotatorClient;
 import com.google.cloud.vision.v1.ImageContext;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Random;
-import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.GroupIntoBatches;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -48,10 +48,15 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  *
  * @param <T> Type of input PCollection.
  */
-@Experimental
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
+@SuppressFBWarnings(
+    value = "CT_CONSTRUCTOR_THROW",
+    justification =
+        "Pre-existing finding, not triaged yet."
+            + " Making the class final or moving the throwing code"
+            + " into a static factory method may fix it.")
 abstract class AnnotateImages<T>
     extends PTransform<PCollection<T>, PCollection<List<AnnotateImageResponse>>> {
 
@@ -128,12 +133,13 @@ abstract class AnnotateImages<T>
     } else {
       inputToRequestMapper = ParDo.of(new MapInputToRequest(null));
     }
+    Random random = new Random();
     return input
         .apply(inputToRequestMapper)
         .apply(
             WithKeys.of(
                     (SerializableFunction<AnnotateImageRequest, Integer>)
-                        ignored -> new Random().nextInt(desiredRequestParallelism))
+                        ignored -> random.nextInt(desiredRequestParallelism))
                 .withKeyType(TypeDescriptors.integers()))
         .apply(GroupIntoBatches.ofSize(batchSize))
         .apply(ParDo.of(new PerformImageAnnotation()));

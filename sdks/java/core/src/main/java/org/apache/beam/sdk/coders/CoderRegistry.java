@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.coders;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
@@ -32,6 +32,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.ServiceLoader;
 import java.util.Set;
 import org.apache.beam.sdk.annotations.Internal;
@@ -51,15 +52,16 @@ import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.HashMultimap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSetMultimap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.SetMultimap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Sets;
+import org.apache.beam.sdk.values.ValueKind;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.HashMultimap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSetMultimap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.SetMultimap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
@@ -90,7 +92,7 @@ import org.slf4j.LoggerFactory;
  * given type, the precedence order above defines which {@link CoderProvider} is chosen.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class CoderRegistry {
 
@@ -114,6 +116,8 @@ public class CoderRegistry {
       builder.put(
           Integer.class, CoderProviders.fromStaticMethods(Integer.class, VarIntCoder.class));
       builder.put(
+          Optional.class, CoderProviders.fromStaticMethods(Optional.class, OptionalCoder.class));
+      builder.put(
           Iterable.class, CoderProviders.fromStaticMethods(Iterable.class, IterableCoder.class));
       builder.put(KV.class, CoderProviders.fromStaticMethods(KV.class, KvCoder.class));
       builder.put(List.class, CoderProviders.fromStaticMethods(List.class, ListCoder.class));
@@ -134,6 +138,8 @@ public class CoderRegistry {
           TimestampedValue.class,
           CoderProviders.fromStaticMethods(
               TimestampedValue.class, TimestampedValue.TimestampedValueCoder.class));
+      builder.put(
+          ValueKind.class, CoderProviders.fromStaticMethods(ValueKind.class, ValueKindCoder.class));
       builder.put(Void.class, CoderProviders.fromStaticMethods(Void.class, VoidCoder.class));
       builder.put(
           byte[].class, CoderProviders.fromStaticMethods(byte[].class, ByteArrayCoder.class));

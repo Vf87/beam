@@ -26,7 +26,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -70,7 +70,7 @@ public class CustomTimestampPolicyWithLimitedDelayTest {
 
     CustomTimestampPolicyWithLimitedDelay<String, String> policy =
         new CustomTimestampPolicyWithLimitedDelay<>(
-            (record -> new Instant(record.getTimestamp())), maxDelay, Optional.empty());
+            record -> new Instant(record.getTimestamp()), maxDelay, Optional.empty());
 
     Instant now = Instant.now();
 
@@ -114,5 +114,41 @@ public class CustomTimestampPolicyWithLimitedDelayTest {
     when(ctx.getBacklogCheckTime()).thenReturn(backlogCheckTime);
 
     assertThat(policy.getWatermark(ctx, now), is(backlogCheckTime.minus(maxDelay)));
+  }
+
+  private static CustomTimestampPolicyWithLimitedDelay<String, String> policy(
+      Duration maxDelay, boolean advanceWatermarkBeforeFirstRecord) {
+    return new CustomTimestampPolicyWithLimitedDelay<>(
+        record -> new Instant(record.getTimestamp()),
+        maxDelay,
+        Optional.empty(),
+        advanceWatermarkBeforeFirstRecord);
+  }
+
+  @Test
+  public void testIdleWatermarkIsPinnedBeforeFirstRecordByDefault() {
+    // Default behaviour: a caught up partition which has delivered nothing stays at the floor.
+    Duration maxDelay = Duration.standardSeconds(60);
+    CustomTimestampPolicyWithLimitedDelay<String, String> policy = policy(maxDelay, false);
+
+    Instant now = Instant.now();
+    TimestampPolicy.PartitionContext ctx = mock(TimestampPolicy.PartitionContext.class);
+    when(ctx.getMessageBacklog()).thenReturn(0L);
+    when(ctx.getBacklogCheckTime()).thenReturn(now);
+
+    assertThat(policy.getWatermark(ctx, now), is(BoundedWindow.TIMESTAMP_MIN_VALUE));
+  }
+
+  @Test
+  public void testIdleWatermarkAdvancesBeforeFirstRecordWhenEnabled() {
+    Duration maxDelay = Duration.standardSeconds(60);
+    CustomTimestampPolicyWithLimitedDelay<String, String> policy = policy(maxDelay, true);
+
+    Instant now = Instant.now();
+    TimestampPolicy.PartitionContext ctx = mock(TimestampPolicy.PartitionContext.class);
+    when(ctx.getMessageBacklog()).thenReturn(0L);
+    when(ctx.getBacklogCheckTime()).thenReturn(now);
+
+    assertThat(policy.getWatermark(ctx, now), is(now.minus(maxDelay)));
   }
 }

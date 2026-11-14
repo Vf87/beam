@@ -17,33 +17,41 @@
  */
 package org.apache.beam.sdk.extensions.sql.impl;
 
-import static org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.config.CalciteConnectionProperty.SCHEMA_FACTORY;
-import static org.apache.beam.vendor.calcite.v1_26_0.org.codehaus.commons.compiler.CompilerFactoryFactory.getDefaultCompilerFactory;
+import static org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.config.CalciteConnectionProperty.SCHEMA_FACTORY;
+import static org.apache.beam.vendor.calcite.v1_40_0.org.codehaus.commons.compiler.CompilerFactoryFactory.getDefaultCompilerFactory;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.auto.service.AutoService;
+import java.lang.reflect.Type;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.function.Consumer;
 import org.apache.beam.sdk.extensions.sql.SqlTransform;
 import org.apache.beam.sdk.extensions.sql.impl.planner.BeamRuleSets;
+import org.apache.beam.sdk.extensions.sql.meta.catalog.CatalogManager;
 import org.apache.beam.sdk.extensions.sql.meta.provider.TableProvider;
 import org.apache.beam.sdk.options.PipelineOptions;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.adapter.enumerable.EnumerableRules;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.avatica.AvaticaFactory;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.jdbc.CalciteConnection;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.jdbc.CalciteFactory;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.jdbc.Driver;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelOptPlanner;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelOptRule;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelTraitDef;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.RelCollationTraitDef;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.rules.CoreRules;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.runtime.Hook;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.tools.RuleSet;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.adapter.enumerable.EnumerableRules;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.avatica.AvaticaFactory;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.jdbc.CalciteConnection;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.jdbc.CalciteFactory;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.jdbc.CalcitePrepare;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.jdbc.Driver;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptPlanner;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptRule;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelTraitDef;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.prepare.CalciteCatalogReader;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.prepare.CalcitePrepareImpl;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelCollationTraitDef;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.rules.CoreRules;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.runtime.CalciteException;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.runtime.Hook;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.tools.RuleSet;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
  * Calcite JDBC driver with Beam defaults.
@@ -55,10 +63,6 @@ import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.tools.RuleSet;
  * <p>The querystring-style parameters are parsed as {@link PipelineOptions}.
  */
 @AutoService(java.sql.Driver.class)
-@SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class JdbcDriver extends Driver {
   public static final JdbcDriver INSTANCE = new JdbcDriver();
   public static final String CONNECT_STRING_PREFIX = "jdbc:beam:";
@@ -104,11 +108,39 @@ public class JdbcDriver extends Driver {
     INSTANCE.register();
   }
 
-  public static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-
   @Override
   protected AvaticaFactory createFactory() {
     return JdbcFactory.wrap((CalciteFactory) super.createFactory());
+  }
+
+  /**
+   * Prepares statements the way Calcite does, but runs {@link MetadataColumnResolver} on each one
+   * between parsing and validation, as {@link CalciteQueryPlanner} does for statements outside
+   * JDBC.
+   */
+  @Override
+  public CalcitePrepare createPrepare() {
+    return new CalcitePrepareImpl() {
+      @Override
+      public <T> CalciteSignature<T> prepareSql(
+          Context context, Query<T> query, Type elementType, long maxRowCount) {
+        MetadataColumnResolver metadataColumns =
+            new MetadataColumnResolver(
+                new CalciteCatalogReader(
+                    context.getRootSchema(),
+                    context.getDefaultSchemaPath(),
+                    context.getTypeFactory(),
+                    context.config()));
+        // Calcite runs PARSE_TREE hooks with the SQL text and the statement it parsed.
+        Consumer<Object[]> resolve = parsed -> metadataColumns.resolve((SqlNode) parsed[1]);
+        try (Hook.Closeable ignored = Hook.PARSE_TREE.addThread(resolve)) {
+          return super.prepareSql(context, query, elementType, maxRowCount);
+        } catch (RuntimeException e) {
+          @Nullable String hinted = metadataColumns.explain(e);
+          throw hinted == null ? e : new CalciteException(hinted, e);
+        }
+      }
+    };
   }
 
   @Override
@@ -130,10 +162,18 @@ public class JdbcDriver extends Driver {
    * CalciteConnection}.
    */
   @Override
-  public Connection connect(String url, Properties info) throws SQLException {
+  @SuppressWarnings("override.return") // https://github.com/typetools/jdk/pull/246
+  public @Nullable Connection connect(String url, Properties info) throws SQLException {
+    @Nullable CalciteConnection connection = (CalciteConnection) super.connect(url, info);
+
+    // null here means that CalciteConnection is not a "suitable driver" based on the parameters
+    if (connection == null) {
+      return null;
+    }
+
     // calciteConnection is initialized with an empty Beam schema,
     // we need to populate it with pipeline options, load table providers, etc
-    return JdbcConnection.initialize((CalciteConnection) super.connect(url, info));
+    return JdbcConnection.initialize(connection);
   }
 
   /**
@@ -148,17 +188,45 @@ public class JdbcDriver extends Driver {
    * all table providers it can find. See {@link BeamCalciteSchemaFactory}.
    */
   public static JdbcConnection connect(TableProvider tableProvider, PipelineOptions options) {
+    JdbcConnection connection = getConnection(options);
+    connection.setSchema(TOP_LEVEL_BEAM_SCHEMA, tableProvider);
+    return connection;
+  }
+
+  /**
+   * Like {@link #connect(TableProvider, PipelineOptions)}, but overrides the top-level schema with
+   * a {@link CatalogManager}.
+   */
+  public static JdbcConnection connect(CatalogManager catalogManager, PipelineOptions options) {
+    JdbcConnection connection = getConnection(options);
+    connection.setSchema(TOP_LEVEL_BEAM_SCHEMA, catalogManager);
+    return connection;
+  }
+
+  private static JdbcConnection getConnection(PipelineOptions options) {
+    Properties properties = new Properties();
+    properties.setProperty(
+        SCHEMA_FACTORY.camelName(), BeamCalciteSchemaFactory.Empty.class.getName());
+    BeamSqlPipelineOptions sqlOptions = options.as(BeamSqlPipelineOptions.class);
+    if (sqlOptions != null) {
+      Map<String, String> calciteConnectionProperties = sqlOptions.getCalciteConnectionProperties();
+      if (calciteConnectionProperties != null) {
+        properties.putAll(calciteConnectionProperties);
+      }
+    }
+    JdbcConnection connection;
     try {
-      Properties properties = new Properties();
-      properties.setProperty(
-          SCHEMA_FACTORY.camelName(), BeamCalciteSchemaFactory.Empty.class.getName());
-      JdbcConnection connection =
-          (JdbcConnection) INSTANCE.connect(CONNECT_STRING_PREFIX, properties);
-      connection.setSchema(TOP_LEVEL_BEAM_SCHEMA, tableProvider);
-      connection.setPipelineOptions(options);
-      return connection;
+      connection = (JdbcConnection) INSTANCE.connect(CONNECT_STRING_PREFIX, properties);
+      // Normally, #connect is allowed to return null when the URL is not suitable. Here, however,
+      // we are
+      // deliberately passing a bogus URL to instantiate a connection, so it should never be null.
+      if (connection == null) {
+        throw new SQLException("Unexpected null when creating synthetic Beam JdbcDriver");
+      }
     } catch (SQLException e) {
       throw new RuntimeException(e);
     }
+    connection.setPipelineOptions(options);
+    return connection;
   }
 }

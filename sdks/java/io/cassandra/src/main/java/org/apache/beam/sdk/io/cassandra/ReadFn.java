@@ -17,39 +17,45 @@
  */
 package org.apache.beam.sdk.io.cassandra;
 
-import com.datastax.driver.core.Cluster;
 import com.datastax.driver.core.ColumnMetadata;
 import com.datastax.driver.core.PreparedStatement;
 import com.datastax.driver.core.ResultSet;
 import com.datastax.driver.core.Session;
 import com.datastax.driver.core.Token;
+import java.math.BigInteger;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.beam.sdk.io.cassandra.CassandraIO.Read;
 import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Joiner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 class ReadFn<T> extends DoFn<Read<T>, T> {
 
   private static final Logger LOG = LoggerFactory.getLogger(ReadFn.class);
 
   @ProcessElement
-  public void processElement(@Element Read<T> read, OutputReceiver<T> receiver) {
+  public void processElement(@Element Read<T> read, OutputReceiver<T> receiver) throws Exception {
     try {
       Session session = ConnectionManager.getSession(read);
       Mapper<T> mapper = read.mapperFactoryFn().apply(session);
       String partitionKey =
-          session.getCluster().getMetadata().getKeyspace(read.keyspace().get())
-              .getTable(read.table().get()).getPartitionKey().stream()
+          session
+              .getCluster()
+              .getMetadata()
+              .getKeyspace(read.keyspace().get())
+              .getTable(read.table().get())
+              .getPartitionKey()
+              .stream()
               .map(ColumnMetadata::getName)
+              .map(ReadFn::quoteIdentifier)
               .collect(Collectors.joining(","));
 
       String query = generateRangeQuery(read, partitionKey, read.ringRanges() != null);
@@ -60,46 +66,73 @@ class ReadFn<T> extends DoFn<Read<T>, T> {
       for (RingRange rr : ringRanges) {
         Token startToken = session.getCluster().getMetadata().newToken(rr.getStart().toString());
         Token endToken = session.getCluster().getMetadata().newToken(rr.getEnd().toString());
-        ResultSet rs =
-            session.execute(preparedStatement.bind().setToken(0, startToken).setToken(1, endToken));
-        Iterator<T> iter = mapper.map(rs);
-        while (iter.hasNext()) {
-          T n = iter.next();
-          receiver.output(n);
+        if (rr.isWrapping()) {
+          // A wrapping range is one that overlaps from the end of the partitioner range and its
+          // start (ie : when the start token of the split is greater than the end token)
+          // We need to generate two queries here : one that goes from the start token to the end
+          // of
+          // the partitioner range, and the other from the start of the partitioner range to the
+          // end token of the split.
+          outputResults(
+              session.execute(getLowestSplitQuery(read, partitionKey, rr.getEnd())),
+              receiver,
+              mapper);
+          outputResults(
+              session.execute(getHighestSplitQuery(read, partitionKey, rr.getStart())),
+              receiver,
+              mapper);
+        } else {
+          ResultSet rs =
+              session.execute(
+                  preparedStatement.bind().setToken(0, startToken).setToken(1, endToken));
+          outputResults(rs, receiver, mapper);
         }
       }
 
       if (read.ringRanges() == null) {
         ResultSet rs = session.execute(preparedStatement.bind());
-        Iterator<T> iter = mapper.map(rs);
-        while (iter.hasNext()) {
-          receiver.output(iter.next());
-        }
+        outputResults(rs, receiver, mapper);
       }
     } catch (Exception ex) {
       LOG.error("error", ex);
+      throw ex;
     }
   }
 
-  private Session getSession(Read<T> read) {
-    Cluster cluster =
-        CassandraIO.getCluster(
-            read.hosts(),
-            read.port(),
-            read.username(),
-            read.password(),
-            read.localDc(),
-            read.consistencyLevel(),
-            read.connectTimeout(),
-            read.readTimeout());
+  private static <T> void outputResults(
+      ResultSet rs, OutputReceiver<T> outputReceiver, Mapper<T> mapper) {
+    Iterator<T> iter = mapper.map(rs);
+    while (iter.hasNext()) {
+      T n = iter.next();
+      outputReceiver.output(n);
+    }
+  }
 
-    return cluster.connect(read.keyspace().get());
+  private static String getHighestSplitQuery(
+      Read<?> spec, String partitionKey, BigInteger highest) {
+    String highestClause = String.format("(token(%s) >= %d)", partitionKey, highest);
+    String finalHighQuery =
+        (spec.query() == null)
+            ? buildInitialQuery(spec, true) + highestClause
+            : spec.query().get() + getJoinerClause(spec.query().get()) + highestClause;
+    LOG.debug("CassandraIO generated a wrapAround query : {}", finalHighQuery);
+    return finalHighQuery;
+  }
+
+  private static String getLowestSplitQuery(Read<?> spec, String partitionKey, BigInteger lowest) {
+    String lowestClause = String.format("(token(%s) < %d)", partitionKey, lowest);
+    String finalLowQuery =
+        (spec.query() == null)
+            ? buildInitialQuery(spec, true) + lowestClause
+            : spec.query().get() + getJoinerClause(spec.query().get()) + lowestClause;
+    LOG.debug("CassandraIO generated a wrapAround query : {}", finalLowQuery);
+    return finalLowQuery;
   }
 
   private static String generateRangeQuery(
       Read<?> spec, String partitionKey, Boolean hasRingRange) {
     final String rangeFilter =
-        (hasRingRange)
+        hasRingRange
             ? Joiner.on(" AND ")
                 .skipNulls()
                 .join(
@@ -115,6 +148,19 @@ class ReadFn<T> extends DoFn<Read<T>, T> {
     return (spec.query() == null)
         ? String.format("SELECT * FROM %s.%s", spec.keyspace().get(), spec.table().get())
             + " WHERE "
-        : spec.query().get() + (hasRingRange ? " AND " : "");
+        : spec.query().get() + (hasRingRange ? getJoinerClause(spec.query().get()) : "");
+  }
+
+  private static String getJoinerClause(String queryString) {
+    return queryString.toUpperCase().contains("WHERE") ? " AND " : " WHERE ";
+  }
+
+  static String quoteIdentifier(String identifier) {
+    if (identifier == null) {
+      return null;
+    }
+    // Escape any existing double quotes by doubling them
+    String escaped = identifier.replace("\"", "\"\"");
+    return "\"" + escaped + "\"";
   }
 }

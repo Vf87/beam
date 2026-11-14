@@ -19,7 +19,7 @@ package org.apache.beam.runners.core;
 
 import static org.apache.beam.sdk.transforms.DoFn.ProcessContinuation.resume;
 import static org.apache.beam.sdk.transforms.DoFn.ProcessContinuation.stop;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
@@ -34,9 +34,9 @@ import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.concurrent.Executors;
 import org.apache.beam.runners.core.SplittableParDoViaKeyedWorkItems.ProcessFn;
@@ -46,14 +46,20 @@ import org.apache.beam.sdk.coders.InstantCoder;
 import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.io.range.OffsetRange;
+import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.testing.ResetDateTimeProvider;
 import org.apache.beam.sdk.testing.TestPipeline;
+import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.DoFnTester;
+import org.apache.beam.sdk.transforms.DoFnSchemaInformation;
+import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.splittabledofn.HasDefaultTracker;
 import org.apache.beam.sdk.transforms.splittabledofn.ManualWatermarkEstimator;
 import org.apache.beam.sdk.transforms.splittabledofn.OffsetRangeTracker;
 import org.apache.beam.sdk.transforms.splittabledofn.RestrictionTracker;
+import org.apache.beam.sdk.transforms.splittabledofn.RestrictionTracker.IsBounded;
 import org.apache.beam.sdk.transforms.splittabledofn.SplitResult;
 import org.apache.beam.sdk.transforms.splittabledofn.WatermarkEstimators;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
@@ -61,12 +67,15 @@ import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.WindowedValueMultiReceiver;
+import org.apache.beam.sdk.values.CausedByDrain;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.ValueInSingleWindow;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.sdk.values.WindowingStrategy;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -131,12 +140,15 @@ public class SplittableParDoProcessFnTest {
   private static class ProcessFnTester<
           InputT, OutputT, RestrictionT, PositionT, WatermarkEstimatorStateT>
       implements AutoCloseable {
-    private final DoFnTester<KeyedWorkItem<byte[], KV<InputT, RestrictionT>>, OutputT> tester;
+    private final DoFnRunner<KeyedWorkItem<byte[], KV<InputT, RestrictionT>>, OutputT> runner;
+    private final List<ValueInSingleWindow<OutputT>> outputs = new ArrayList<>();
     private Instant currentProcessingTime;
 
     private InMemoryTimerInternals timerInternals;
     private TestInMemoryStateInternals<String> stateInternals;
     private InMemoryBundleFinalizer bundleFinalizer;
+    private final ProcessFn<InputT, OutputT, RestrictionT, PositionT, WatermarkEstimatorStateT>
+        processFn;
 
     ProcessFnTester(
         Instant currentProcessingTime,
@@ -147,52 +159,101 @@ public class SplittableParDoProcessFnTest {
         int maxOutputsPerBundle,
         Duration maxBundleDuration)
         throws Exception {
+      this(
+          currentProcessingTime,
+          fn,
+          inputCoder,
+          restrictionCoder,
+          watermarkEstimatorStateCoder,
+          maxOutputsPerBundle,
+          maxBundleDuration,
+          Collections.emptyMap(),
+          NullSideInputReader.empty());
+    }
+
+    ProcessFnTester(
+        Instant currentProcessingTime,
+        final DoFn<InputT, OutputT> fn,
+        Coder<InputT> inputCoder,
+        Coder<RestrictionT> restrictionCoder,
+        Coder<WatermarkEstimatorStateT> watermarkEstimatorStateCoder,
+        int maxOutputsPerBundle,
+        Duration maxBundleDuration,
+        Map<String, PCollectionView<?>> sideInputMapping,
+        SideInputReader sideInputReader)
+        throws Exception {
       // The exact windowing strategy doesn't matter in this test, but it should be able to
       // encode IntervalWindow's because that's what all tests here use.
       WindowingStrategy<InputT, BoundedWindow> windowingStrategy =
           (WindowingStrategy) WindowingStrategy.of(FixedWindows.of(Duration.standardSeconds(1)));
-      final ProcessFn<InputT, OutputT, RestrictionT, PositionT, WatermarkEstimatorStateT>
-          processFn =
-              new ProcessFn<>(
-                  fn,
-                  inputCoder,
-                  restrictionCoder,
-                  watermarkEstimatorStateCoder,
-                  windowingStrategy);
-      this.tester = DoFnTester.of(processFn);
+      this.processFn =
+          new ProcessFn<>(
+              fn,
+              inputCoder,
+              restrictionCoder,
+              watermarkEstimatorStateCoder,
+              windowingStrategy,
+              sideInputMapping);
       this.timerInternals = new InMemoryTimerInternals();
       this.stateInternals = new TestInMemoryStateInternals<>("dummy");
       processFn.setStateInternalsFactory(key -> stateInternals);
       processFn.setTimerInternalsFactory(key -> timerInternals);
+      processFn.setSideInputReader(sideInputReader);
+      PipelineOptions options = PipelineOptionsFactory.create();
+      TupleTag<OutputT> mainOutputTag = new TupleTag<>();
+      WindowedValueMultiReceiver outputReceiver =
+          new WindowedValueMultiReceiver() {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> void output(TupleTag<T> tag, WindowedValue<T> output) {
+              for (BoundedWindow window : output.getWindows()) {
+                outputs.add(
+                    (ValueInSingleWindow<OutputT>)
+                        ValueInSingleWindow.of(
+                            output.getValue(),
+                            output.getTimestamp(),
+                            window,
+                            output.getPaneInfo()));
+              }
+            }
+          };
       processFn.setProcessElementInvoker(
           new OutputAndTimeBoundedSplittableProcessElementInvoker<>(
               fn,
-              tester.getPipelineOptions(),
-              new OutputWindowedValueToDoFnTester<>(tester),
-              new SideInputReader() {
-                @Override
-                public <T> T get(PCollectionView<T> view, BoundedWindow window) {
-                  throw new NoSuchElementException();
-                }
-
-                @Override
-                public <T> boolean contains(PCollectionView<T> view) {
-                  return false;
-                }
-
-                @Override
-                public boolean isEmpty() {
-                  return true;
-                }
-              },
+              options,
+              outputReceiver,
+              mainOutputTag,
+              sideInputReader,
               Executors.newSingleThreadScheduledExecutor(Executors.defaultThreadFactory()),
               maxOutputsPerBundle,
               maxBundleDuration,
               () -> bundleFinalizer));
-      // Do not clone since ProcessFn references non-serializable DoFnTester itself
-      // through the state/timer/output callbacks.
-      this.tester.setCloningBehavior(DoFnTester.CloningBehavior.DO_NOT_CLONE);
-      this.tester.startBundle();
+      this.runner =
+          DoFnRunners.simpleRunner(
+              options,
+              processFn,
+              sideInputReader,
+              outputReceiver,
+              mainOutputTag,
+              Collections.emptyList(),
+              new StepContext() {
+                @Override
+                public StateInternals stateInternals() {
+                  return stateInternals;
+                }
+
+                @Override
+                public TimerInternals timerInternals() {
+                  return timerInternals;
+                }
+              },
+              null,
+              Collections.emptyMap(),
+              windowingStrategy,
+              DoFnSchemaInformation.create(),
+              sideInputMapping);
+      processFn.setup(options);
+      runner.startBundle();
       timerInternals.advanceProcessingTime(currentProcessingTime);
 
       this.currentProcessingTime = currentProcessingTime;
@@ -200,13 +261,14 @@ public class SplittableParDoProcessFnTest {
 
     @Override
     public void close() throws Exception {
-      tester.close();
+      runner.finishBundle();
+      processFn.tearDown();
     }
 
     /** Performs a seed {@link DoFn.ProcessElement} call feeding the element and restriction. */
     void startElement(InputT element, RestrictionT restriction) throws Exception {
       startElement(
-          WindowedValue.of(
+          WindowedValues.of(
               KV.of(element, restriction),
               currentProcessingTime,
               GlobalWindow.INSTANCE,
@@ -214,9 +276,28 @@ public class SplittableParDoProcessFnTest {
     }
 
     void startElement(WindowedValue<KV<InputT, RestrictionT>> windowedValue) throws Exception {
-      tester.processElement(
-          KeyedWorkItems.elementsWorkItem(
-              "key".getBytes(StandardCharsets.UTF_8), Collections.singletonList(windowedValue)));
+      runner.processElement(
+          WindowedValues.valueInGlobalWindow(
+              KeyedWorkItems.elementsWorkItem(
+                  "key".getBytes(StandardCharsets.UTF_8),
+                  Collections.singletonList(windowedValue))));
+    }
+
+    boolean advanceDrain() throws Exception {
+
+      List<TimerInternals.TimerData> timers = new ArrayList<>();
+      timers.add(
+          TimerInternals.TimerData.of(
+              "",
+              StateNamespaces.window(GlobalWindow.Coder.INSTANCE, GlobalWindow.INSTANCE),
+              new Instant(Long.MAX_VALUE),
+              new Instant(Long.MAX_VALUE),
+              TimeDomain.EVENT_TIME,
+              CausedByDrain.CAUSED_BY_DRAIN));
+      runner.processElement(
+          WindowedValues.valueInGlobalWindow(
+              KeyedWorkItems.timersWorkItem("key".getBytes(StandardCharsets.UTF_8), timers)));
+      return true;
     }
 
     /**
@@ -235,51 +316,33 @@ public class SplittableParDoProcessFnTest {
       if (timers.isEmpty()) {
         return false;
       }
-      tester.processElement(
-          KeyedWorkItems.timersWorkItem("key".getBytes(StandardCharsets.UTF_8), timers));
+      runner.processElement(
+          WindowedValues.valueInGlobalWindow(
+              KeyedWorkItems.timersWorkItem("key".getBytes(StandardCharsets.UTF_8), timers)));
       return true;
     }
 
     List<TimestampedValue<OutputT>> peekOutputElementsInWindow(BoundedWindow window) {
-      return tester.peekOutputElementsInWindow(window);
+      List<TimestampedValue<OutputT>> res = new ArrayList<>();
+      for (ValueInSingleWindow<OutputT> value : outputs) {
+        if (value.getWindow().equals(window)) {
+          res.add(TimestampedValue.of(value.getValue(), value.getTimestamp()));
+        }
+      }
+      return res;
     }
 
     List<OutputT> takeOutputElements() {
-      return tester.takeOutputElements();
+      List<OutputT> res = new ArrayList<>();
+      for (ValueInSingleWindow<OutputT> value : outputs) {
+        res.add(value.getValue());
+      }
+      outputs.clear();
+      return res;
     }
 
     public Instant getWatermarkHold() {
       return stateInternals.earliestWatermarkHold();
-    }
-  }
-
-  private static class OutputWindowedValueToDoFnTester<OutputT>
-      implements OutputWindowedValue<OutputT> {
-    private final DoFnTester<?, OutputT> tester;
-
-    private OutputWindowedValueToDoFnTester(DoFnTester<?, OutputT> tester) {
-      this.tester = tester;
-    }
-
-    @Override
-    public void outputWindowedValue(
-        OutputT output,
-        Instant timestamp,
-        Collection<? extends BoundedWindow> windows,
-        PaneInfo pane) {
-      outputWindowedValue(tester.getMainOutputTag(), output, timestamp, windows, pane);
-    }
-
-    @Override
-    public <AdditionalOutputT> void outputWindowedValue(
-        TupleTag<AdditionalOutputT> tag,
-        AdditionalOutputT output,
-        Instant timestamp,
-        Collection<? extends BoundedWindow> windows,
-        PaneInfo pane) {
-      for (BoundedWindow window : windows) {
-        tester.getMutableOutput(tag).add(ValueInSingleWindow.of(output, timestamp, window, pane));
-      }
     }
   }
 
@@ -294,7 +357,8 @@ public class SplittableParDoProcessFnTest {
     }
 
     @GetInitialRestriction
-    public SomeRestriction getInitialRestriction(@Element Integer elem) {
+    public SomeRestriction getInitialRestriction(
+        @SuppressWarnings("unused") @Element Integer elem) {
       return new SomeRestriction();
     }
   }
@@ -322,7 +386,7 @@ public class SplittableParDoProcessFnTest {
             MAX_OUTPUTS_PER_BUNDLE,
             MAX_BUNDLE_DURATION);
     tester.startElement(
-        WindowedValue.of(
+        WindowedValues.of(
             KV.of(42, new SomeRestriction()),
             base,
             Collections.singletonList(w),
@@ -341,15 +405,19 @@ public class SplittableParDoProcessFnTest {
     public void process(
         ProcessContext c,
         RestrictionTracker<OffsetRange, Long> tracker,
-        ManualWatermarkEstimator<Instant> watermarkEstimator) {
+        ManualWatermarkEstimator<Instant> watermarkEstimator,
+        CausedByDrain causedByDrain) {
       for (long i = tracker.currentRestriction().getFrom(); tracker.tryClaim(i); ++i) {
         watermarkEstimator.setWatermark(c.element().plus(Duration.standardSeconds(i)));
         c.output(String.valueOf(i));
+        if (causedByDrain == CausedByDrain.CAUSED_BY_DRAIN) {
+          c.output("drains");
+        }
       }
     }
 
     @GetInitialRestriction
-    public OffsetRange getInitialRestriction(@Element Instant elem) {
+    public OffsetRange getInitialRestriction(@SuppressWarnings("unused") @Element Instant elem) {
       throw new IllegalStateException("Expected to be supplied explicitly in this test");
     }
 
@@ -368,6 +436,83 @@ public class SplittableParDoProcessFnTest {
         @WatermarkEstimatorState Instant watermarkEstimatorState) {
       return new WatermarkEstimators.Manual(watermarkEstimatorState);
     }
+  }
+
+  private static class GetSizeFn extends DoFn<Integer, String> {
+    @ProcessElement
+    public ProcessContinuation process(
+        ProcessContext c, RestrictionTracker<OffsetRange, Long> tracker) {
+      for (long i = tracker.currentRestriction().getFrom(); tracker.tryClaim(i); ++i) {
+        c.output(String.valueOf(i));
+        if (i == 2) {
+          return resume();
+        }
+      }
+      return stop();
+    }
+
+    @GetInitialRestriction
+    public OffsetRange getInitialRestriction() {
+      return new OffsetRange(0, 10);
+    }
+
+    @NewTracker
+    public OffsetRangeTracker newTracker(@Restriction OffsetRange range) {
+      return new OffsetRangeTracker(range);
+    }
+
+    @GetSize
+    public double getSize(@Restriction OffsetRange range) {
+      return range.getTo() - range.getFrom();
+    }
+  }
+
+  // Used to check that backlog can be computed from the restriction tracker if GetSize is not
+  // defined.
+  private static class SdfWithoutGetSize extends DoFn<Integer, String> {
+    @ProcessElement
+    public ProcessContinuation process(
+        ProcessContext c, RestrictionTracker<OffsetRange, Long> tracker) {
+      for (long i = tracker.currentRestriction().getFrom(); tracker.tryClaim(i); ++i) {
+        c.output(String.valueOf(i));
+        if (i == 2) {
+          return resume();
+        }
+      }
+      return stop();
+    }
+
+    @GetInitialRestriction
+    public OffsetRange getInitialRestriction() {
+      return new OffsetRange(0, 10);
+    }
+
+    @NewTracker
+    public OffsetRangeTracker newTracker(@Restriction OffsetRange range) {
+      return new OffsetRangeTracker(range);
+    }
+  }
+
+  @Test
+  public void testDrains() throws Exception {
+    DoFn<Instant, String> fn = new WatermarkUpdateFn();
+    Instant base = Instant.now();
+
+    ProcessFnTester<Instant, String, OffsetRange, Long, Instant> tester =
+        new ProcessFnTester<>(
+            base,
+            fn,
+            InstantCoder.of(),
+            SerializableCoder.of(OffsetRange.class),
+            InstantCoder.of(),
+            3,
+            MAX_BUNDLE_DURATION);
+
+    tester.startElement(base, new OffsetRange(0, 8));
+    assertThat(tester.takeOutputElements(), hasItems("0", "1", "2"));
+    assertEquals(base.plus(Duration.standardSeconds(2)), tester.getWatermarkHold());
+    assertTrue(tester.advanceDrain());
+    assertThat(tester.takeOutputElements(), hasItems("3", "4", "drains", "drains"));
   }
 
   @Test
@@ -409,7 +554,8 @@ public class SplittableParDoProcessFnTest {
     }
 
     @GetInitialRestriction
-    public SomeRestriction getInitialRestriction(@Element Integer elem) {
+    public SomeRestriction getInitialRestriction(
+        @SuppressWarnings("unused") @Element Integer elem) {
       return new SomeRestriction();
     }
   }
@@ -472,7 +618,7 @@ public class SplittableParDoProcessFnTest {
     }
 
     @GetInitialRestriction
-    public OffsetRange getInitialRestriction(@Element Integer elem) {
+    public OffsetRange getInitialRestriction(@SuppressWarnings("unused") @Element Integer elem) {
       throw new UnsupportedOperationException("Expected to be supplied explicitly in this test");
     }
   }
@@ -593,12 +739,15 @@ public class SplittableParDoProcessFnTest {
     private State state = State.BEFORE_SETUP;
 
     @ProcessElement
-    public void process(ProcessContext c, RestrictionTracker<SomeRestriction, Void> tracker) {
+    public void process(
+        @SuppressWarnings("unused") ProcessContext c,
+        @SuppressWarnings("unused") RestrictionTracker<SomeRestriction, Void> tracker) {
       assertEquals(State.INSIDE_BUNDLE, state);
     }
 
     @GetInitialRestriction
-    public SomeRestriction getInitialRestriction(@Element Integer element) {
+    public SomeRestriction getInitialRestriction(
+        @SuppressWarnings("unused") @Element Integer element) {
       return new SomeRestriction();
     }
 
@@ -640,6 +789,323 @@ public class SplittableParDoProcessFnTest {
             MAX_OUTPUTS_PER_BUNDLE,
             MAX_BUNDLE_DURATION)) {
       tester.startElement(42, new SomeRestriction());
+    }
+  }
+
+  @Test
+  public void testReportsBacklog() throws Exception {
+    DoFn<Integer, String> fn = new GetSizeFn();
+    Instant base = Instant.now();
+    final List<Double> backlogs = new ArrayList<>();
+
+    try (ProcessFnTester<Integer, String, OffsetRange, Long, Void> tester =
+        new ProcessFnTester<>(
+            base,
+            fn,
+            BigEndianIntegerCoder.of(),
+            SerializableCoder.of(OffsetRange.class),
+            VoidCoder.of(),
+            MAX_OUTPUTS_PER_BUNDLE,
+            MAX_BUNDLE_DURATION)) {
+      tester.processFn.setBacklogBytesCallback(backlogs::add);
+
+      tester.startElement(42, new OffsetRange(0, 10));
+      // First call outputs 0, 1, and 2, and then resumes.
+      // The residual range should be [3, 10), so size is 7.
+      assertEquals(1, backlogs.size());
+      assertEquals(7.0, backlogs.get(0), 0.001);
+
+      assertTrue(tester.advanceProcessingTimeBy(Duration.standardSeconds(1)));
+      assertEquals(2, backlogs.size());
+      assertEquals(0.0, backlogs.get(1), 0.001);
+    }
+  }
+
+  @Test
+  public void testReportsBacklogWithoutGetSize() throws Exception {
+    DoFn<Integer, String> fn = new SdfWithoutGetSize();
+    Instant base = Instant.now();
+    final List<Double> backlogs = new ArrayList<>();
+
+    try (ProcessFnTester<Integer, String, OffsetRange, Long, Void> tester =
+        new ProcessFnTester<>(
+            base,
+            fn,
+            BigEndianIntegerCoder.of(),
+            SerializableCoder.of(OffsetRange.class),
+            VoidCoder.of(),
+            MAX_OUTPUTS_PER_BUNDLE,
+            MAX_BUNDLE_DURATION)) {
+      tester.processFn.setBacklogBytesCallback(backlogs::add);
+
+      tester.startElement(42, new OffsetRange(0, 10));
+      // First call outputs 0, 1, and 2, and then resumes.
+      // The residual range should be [3, 10), so size is 7.
+      assertEquals(1, backlogs.size());
+      assertEquals(7.0, backlogs.get(0), 0.001);
+
+      assertTrue(tester.advanceProcessingTimeBy(Duration.standardSeconds(1)));
+      assertEquals(2, backlogs.size());
+      assertEquals(0.0, backlogs.get(1), 0.001);
+    }
+  }
+
+  @Test
+  public void testReportsZeroBacklogWhenDone() throws Exception {
+    DoFn<Integer, String> fn = new GetSizeFn();
+    Instant base = Instant.now();
+    final List<Double> backlogs = new ArrayList<>();
+
+    try (ProcessFnTester<Integer, String, OffsetRange, Long, Void> tester =
+        new ProcessFnTester<>(
+            base,
+            fn,
+            BigEndianIntegerCoder.of(),
+            SerializableCoder.of(OffsetRange.class),
+            VoidCoder.of(),
+            MAX_OUTPUTS_PER_BUNDLE,
+            MAX_BUNDLE_DURATION)) {
+      tester.processFn.setBacklogBytesCallback(backlogs::add);
+
+      // OffsetRange(0, 2) completes immediately without resume.
+      tester.startElement(42, new OffsetRange(0, 2));
+      assertEquals(1, backlogs.size());
+      assertEquals(0.0, backlogs.get(0), 0.001);
+    }
+  }
+
+  private static class TruncateFn extends DoFn<Integer, String> {
+    private final boolean truncateToNull;
+    private final List<String> calls = new ArrayList<>();
+
+    public TruncateFn(boolean truncateToNull) {
+      this.truncateToNull = truncateToNull;
+    }
+
+    @ProcessElement
+    public ProcessContinuation process(
+        ProcessContext c, RestrictionTracker<OffsetRange, Long> tracker) {
+      for (long i = tracker.currentRestriction().getFrom(); tracker.tryClaim(i); ++i) {
+        c.output(c.element() + ":" + i);
+        if (i == 2) {
+          return resume();
+        }
+      }
+      return stop();
+    }
+
+    @GetInitialRestriction
+    public OffsetRange getInitialRestriction() {
+      return new OffsetRange(0, 10);
+    }
+
+    @NewTracker
+    public OffsetRangeTracker newTracker(@Restriction OffsetRange range) {
+      return new OffsetRangeTracker(range);
+    }
+
+    @TruncateRestriction
+    public RestrictionTracker.TruncateResult<OffsetRange> truncate(
+        @Restriction OffsetRange restriction, @Element Integer element) {
+      calls.add("truncate:" + element + ":" + restriction);
+      if (truncateToNull) {
+        return null;
+      }
+      // Truncate so that we only process one more element.
+      return RestrictionTracker.TruncateResult.of(
+          new OffsetRange(restriction.getFrom(), restriction.getFrom() + 1));
+    }
+  }
+
+  @Test
+  public void testTruncateRestrictionOnDrain() throws Exception {
+    TruncateFn fn = new TruncateFn(false);
+    Instant base = Instant.now();
+
+    try (ProcessFnTester<Integer, String, OffsetRange, Long, Void> tester =
+        new ProcessFnTester<>(
+            base,
+            fn,
+            BigEndianIntegerCoder.of(),
+            SerializableCoder.of(OffsetRange.class),
+            VoidCoder.of(),
+            MAX_OUTPUTS_PER_BUNDLE,
+            MAX_BUNDLE_DURATION)) {
+      tester.startElement(42, new OffsetRange(0, 10));
+      assertThat(tester.takeOutputElements(), contains("42:0", "42:1", "42:2"));
+
+      assertTrue(tester.advanceDrain());
+      assertThat(tester.takeOutputElements(), contains("42:3"));
+      assertEquals(Collections.singletonList("truncate:42:[3, 10)"), fn.calls);
+      assertEquals(null, tester.getWatermarkHold());
+    }
+  }
+
+  @Test
+  public void testTruncateRestrictionReturnsNullOnDrain() throws Exception {
+    TruncateFn fn = new TruncateFn(true);
+    Instant base = Instant.now();
+
+    try (ProcessFnTester<Integer, String, OffsetRange, Long, Void> tester =
+        new ProcessFnTester<>(
+            base,
+            fn,
+            BigEndianIntegerCoder.of(),
+            SerializableCoder.of(OffsetRange.class),
+            VoidCoder.of(),
+            MAX_OUTPUTS_PER_BUNDLE,
+            MAX_BUNDLE_DURATION)) {
+      tester.startElement(42, new OffsetRange(0, 10));
+      assertThat(tester.takeOutputElements(), contains("42:0", "42:1", "42:2"));
+
+      assertTrue(tester.advanceDrain());
+      assertTrue(tester.takeOutputElements().isEmpty());
+      assertEquals(Collections.singletonList("truncate:42:[3, 10)"), fn.calls);
+      assertEquals(null, tester.getWatermarkHold());
+    }
+  }
+
+  private static class TruncateWithSideInputFn extends DoFn<Integer, String> {
+    private final List<String> calls = new ArrayList<>();
+
+    @ProcessElement
+    public ProcessContinuation process(
+        ProcessContext c, RestrictionTracker<OffsetRange, Long> tracker) {
+      for (long i = tracker.currentRestriction().getFrom(); tracker.tryClaim(i); ++i) {
+        c.output(c.element() + ":" + i);
+        if (i == 2) {
+          return resume();
+        }
+      }
+      return stop();
+    }
+
+    @GetInitialRestriction
+    public OffsetRange getInitialRestriction() {
+      return new OffsetRange(0, 10);
+    }
+
+    @NewTracker
+    public OffsetRangeTracker newTracker(@Restriction OffsetRange range) {
+      return new OffsetRangeTracker(range);
+    }
+
+    @TruncateRestriction
+    public RestrictionTracker.TruncateResult<OffsetRange> truncate(
+        @Restriction OffsetRange restriction,
+        @Element Integer element,
+        @SideInput("sideInput") String sideInput) {
+      calls.add("truncate:" + element + ":" + sideInput + ":" + restriction);
+      return RestrictionTracker.TruncateResult.of(
+          new OffsetRange(restriction.getFrom(), restriction.getFrom() + 1));
+    }
+  }
+
+  @Test
+  public void testTruncateRestrictionWithSideInputOnDrain() throws Exception {
+    TruncateWithSideInputFn fn = new TruncateWithSideInputFn();
+    Instant base = Instant.now();
+    PCollectionView<String> view =
+        TestPipeline.create().apply(Create.of("sideValue")).apply(View.asSingleton());
+    Map<String, PCollectionView<?>> sideInputMapping = Collections.singletonMap("sideInput", view);
+    SideInputReader sideInputReader =
+        new SideInputReader() {
+          @Override
+          public <T> T get(PCollectionView<T> v, BoundedWindow window) {
+            if (v.equals(view)) {
+              return (T) "sideValue";
+            }
+            throw new NoSuchElementException();
+          }
+
+          @Override
+          public <T> boolean contains(PCollectionView<T> v) {
+            return v.equals(view);
+          }
+
+          @Override
+          public boolean isEmpty() {
+            return false;
+          }
+        };
+
+    try (ProcessFnTester<Integer, String, OffsetRange, Long, Void> tester =
+        new ProcessFnTester<>(
+            base,
+            fn,
+            BigEndianIntegerCoder.of(),
+            SerializableCoder.of(OffsetRange.class),
+            VoidCoder.of(),
+            MAX_OUTPUTS_PER_BUNDLE,
+            MAX_BUNDLE_DURATION,
+            sideInputMapping,
+            sideInputReader)) {
+      tester.startElement(42, new OffsetRange(0, 10));
+      assertThat(tester.takeOutputElements(), contains("42:0", "42:1", "42:2"));
+
+      assertTrue(tester.advanceDrain());
+      assertThat(tester.takeOutputElements(), contains("42:3"));
+      assertEquals(Collections.singletonList("truncate:42:sideValue:[3, 10)"), fn.calls);
+    }
+  }
+
+  private static class UnboundedOffsetRangeTracker extends OffsetRangeTracker {
+    public UnboundedOffsetRangeTracker(OffsetRange range) {
+      super(range);
+    }
+
+    @Override
+    public IsBounded isBounded() {
+      return IsBounded.UNBOUNDED;
+    }
+  }
+
+  // Tests that if we don't override TruncateRestriction, the default TruncateRestriction
+  // implementation is used (which for unbounded restrictions stops processing immediately).
+  private static class DefaultTruncateUnboundedFn extends DoFn<Integer, String> {
+    @ProcessElement
+    public ProcessContinuation process(
+        ProcessContext c, RestrictionTracker<OffsetRange, Long> tracker) {
+      for (long i = tracker.currentRestriction().getFrom(); tracker.tryClaim(i); ++i) {
+        c.output(c.element() + ":" + i);
+        if (i == 2) {
+          return resume();
+        }
+      }
+      return stop();
+    }
+
+    @GetInitialRestriction
+    public OffsetRange getInitialRestriction() {
+      return new OffsetRange(0, 10);
+    }
+
+    @NewTracker
+    public RestrictionTracker<OffsetRange, Long> newTracker(@Restriction OffsetRange range) {
+      return new UnboundedOffsetRangeTracker(range);
+    }
+  }
+
+  @Test
+  public void testDefaultTruncateRestrictionUnboundedStopsOnDrain() throws Exception {
+    DefaultTruncateUnboundedFn fn = new DefaultTruncateUnboundedFn();
+    Instant base = Instant.now();
+
+    try (ProcessFnTester<Integer, String, OffsetRange, Long, Void> tester =
+        new ProcessFnTester<>(
+            base,
+            fn,
+            BigEndianIntegerCoder.of(),
+            SerializableCoder.of(OffsetRange.class),
+            VoidCoder.of(),
+            MAX_OUTPUTS_PER_BUNDLE,
+            MAX_BUNDLE_DURATION)) {
+      tester.startElement(42, new OffsetRange(0, 10));
+      assertThat(tester.takeOutputElements(), contains("42:0", "42:1", "42:2"));
+
+      assertTrue(tester.advanceDrain());
+      assertTrue(tester.takeOutputElements().isEmpty());
+      assertEquals(null, tester.getWatermarkHold());
     }
   }
 }

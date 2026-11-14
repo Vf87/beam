@@ -36,23 +36,23 @@ import java.util.List;
 import java.util.Set;
 import java.util.regex.Pattern;
 import org.apache.beam.sdk.annotations.Internal;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Function;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Predicate;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.FluentIterable;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Maps;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Multimap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Multimaps;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Ordering;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Sets;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.reflect.ClassPath;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.reflect.Invokable;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.reflect.Parameter;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.reflect.TypeToken;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Function;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Joiner;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Predicate;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.FluentIterable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Maps;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Multimap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Multimaps;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Ordering;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.reflect.ClassPath;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.reflect.Invokable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.reflect.Parameter;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.reflect.TypeToken;
 import org.hamcrest.Description;
 import org.hamcrest.Matcher;
 import org.hamcrest.StringDescription;
@@ -87,8 +87,8 @@ import org.slf4j.LoggerFactory;
  */
 @Internal
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class ApiSurface {
   private static final Logger LOG = LoggerFactory.getLogger(ApiSurface.class);
@@ -179,10 +179,10 @@ public class ApiSurface {
         // <helper_lambdas>
 
         final Function<Matcher<Class<?>>, String> toMessage =
-            abandonedClassMacther -> {
+            abandonedClassMatcher -> {
               final StringDescription description = new StringDescription();
               description.appendText("No ");
-              abandonedClassMacther.describeTo(description);
+              abandonedClassMatcher.describeTo(description);
               return description.toString();
             };
 
@@ -251,7 +251,7 @@ public class ApiSurface {
       }
 
       @SuppressWarnings({
-        "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+        "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
         "unchecked"
       })
       private boolean classIsAllowed(
@@ -321,7 +321,8 @@ public class ApiSurface {
       try {
         clazz = classInfo.load();
       } catch (NoClassDefFoundError e) {
-        // TODO: Ignore any NoClassDefFoundError errors as a workaround. (BEAM-2231)
+        // TODO: Ignore any NoClassDefFoundError errors as a workaround.
+        // (https://github.com/apache/beam/issues/18368)
         LOG.warn("Failed to load class: {}", classInfo.toString(), e);
         continue;
       }
@@ -470,7 +471,7 @@ public class ApiSurface {
    * A map from exposed types to place where they are exposed, in the sense of being a part of a
    * public-facing API surface.
    *
-   * <p>This map is the adjencency list representation of a directed graph, where an edge from type
+   * <p>This map is the adjacency list representation of a directed graph, where an edge from type
    * {@code T1} to type {@code T2} indicates that {@code T2} directly exposes {@code T1} in its API
    * surface.
    *
@@ -518,15 +519,20 @@ public class ApiSurface {
     return pruned(TypeToken.of(type).getRawType());
   }
 
+  private static final ImmutableSet<String> EXCLUDED_NAMES =
+      ImmutableSet.of(
+          "jdk.internal.HotSpotIntrinsicCandidate",
+          "jdk.internal.vm.annotation.IntrinsicCandidate");
+
   /** Whether a class and all that it references should be pruned from the graph. */
   private boolean pruned(Class<?> clazz) {
     return clazz.isPrimitive()
         || clazz.isArray()
-        || clazz.getCanonicalName().equals("jdk.internal.HotSpotIntrinsicCandidate")
+        || EXCLUDED_NAMES.contains(clazz.getCanonicalName())
         || getPrunedPattern().matcher(clazz.getName()).matches();
   }
 
-  /** Whether a type has already beens sufficiently processed. */
+  /** Whether a type has already been sufficiently processed. */
   private boolean done(Type type) {
     return visited.contains(type);
   }
@@ -712,11 +718,19 @@ public class ApiSurface {
   private void addExposedTypes(Invokable<?, ?> invokable, Class<?> cause) {
     addExposedTypes(invokable.getReturnType(), cause);
     for (Annotation annotation : invokable.getAnnotations()) {
+      Class<? extends Annotation> annotationClass = annotation.annotationType();
+      if (!Modifier.isPublic(annotationClass.getModifiers())) {
+        // Non-public annotations are invisible to Beam users. Example: Guava's
+        // ParametricNullness is package-private. This annotation helps static
+        // analyzers including Kotlin platform.
+        // Details: https://github.com/apache/beam/pull/15835
+        continue;
+      }
       LOG.debug(
           "Adding exposed types from {}, which is an annotation on invokable {}",
           annotation,
           invokable);
-      addExposedTypes(annotation.annotationType(), cause);
+      addExposedTypes(annotationClass, cause);
     }
     for (Parameter parameter : invokable.getParameters()) {
       LOG.debug(
@@ -741,11 +755,19 @@ public class ApiSurface {
         parameter);
     addExposedTypes(parameter.getType(), cause);
     for (Annotation annotation : parameter.getAnnotations()) {
+      Class<? extends Annotation> annotationClass = annotation.annotationType();
+      if (!Modifier.isPublic(annotationClass.getModifiers())) {
+        // Non-public annotations are invisible to Beam users. Example: Guava's
+        // ParametricNullness is package-private. This annotation helps static
+        // analyzers including Kotlin platform.
+        // Details: https://github.com/apache/beam/pull/15835
+        continue;
+      }
       LOG.debug(
           "Adding exposed types from {}, which is an annotation on parameter {}",
           annotation,
           parameter);
-      addExposedTypes(annotation.annotationType(), cause);
+      addExposedTypes(annotationClass, cause);
     }
   }
 

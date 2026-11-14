@@ -29,19 +29,21 @@ import java.util.function.Function;
 import javax.annotation.Nonnull;
 import org.apache.beam.runners.jet.Utils;
 import org.apache.beam.sdk.coders.Coder;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 
 /**
  * /** * Jet {@link com.hazelcast.jet.core.Processor} implementation for Beam's Impulse primitive.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class ImpulseP extends AbstractProcessor {
 
   private final boolean active;
   private final Coder outputCoder;
+
+  @SuppressWarnings("unused")
   private final String ownerId; // do not remove it, very useful for debugging
 
   private ImpulseP(boolean active, Coder outputCoder, String ownerId) {
@@ -53,7 +55,7 @@ public class ImpulseP extends AbstractProcessor {
   @Override
   public boolean complete() {
     if (active) {
-      return tryEmit(Utils.encode(WindowedValue.valueInGlobalWindow(new byte[0]), outputCoder));
+      return tryEmit(Utils.encode(WindowedValues.valueInGlobalWindow(new byte[0]), outputCoder));
     } else {
       return true;
     }

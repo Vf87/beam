@@ -22,7 +22,6 @@ The staging service here can be backed by any beam filesystem.
 # pytype: skip-file
 
 import concurrent.futures
-import contextlib
 import hashlib
 import os
 import queue
@@ -33,11 +32,8 @@ from io import BytesIO
 from typing import Any
 from typing import BinaryIO  # pylint: disable=unused-import
 from typing import Callable
-from typing import Dict
-from typing import List
 from typing import MutableMapping
 from typing import Optional
-from typing import Tuple
 from urllib.request import urlopen
 
 import grpc
@@ -58,7 +54,7 @@ class ArtifactRetrievalService(
 
   def __init__(
       self,
-      file_reader,  # type: Callable[[str], BinaryIO]
+      file_reader: Callable[[str], BinaryIO],
       chunk_size=None,
   ):
     self._file_reader = file_reader
@@ -77,8 +73,7 @@ class ArtifactRetrievalService(
     elif request.artifact.type_urn == common_urns.artifact_types.URL.urn:
       payload = proto_utils.parse_Bytes(
           request.artifact.type_payload, beam_runner_api_pb2.ArtifactUrlPayload)
-      # TODO(Py3): Remove the unneeded contextlib wrapper.
-      read_handle = contextlib.closing(urlopen(payload.url))
+      read_handle = urlopen(payload.url)
     elif request.artifact.type_urn == common_urns.artifact_types.EMBEDDED.urn:
       payload = proto_utils.parse_Bytes(
           request.artifact.type_payload,
@@ -99,18 +94,20 @@ class ArtifactStagingService(
     beam_artifact_api_pb2_grpc.ArtifactStagingServiceServicer):
   def __init__(
       self,
-      file_writer,  # type: Callable[[str, Optional[str]], Tuple[BinaryIO, str]]
-    ):
+      file_writer: Callable[[str, Optional[str]], tuple[BinaryIO, str]],
+  ):
     self._lock = threading.Lock()
-    self._jobs_to_stage = {
-    }  # type: Dict[str, Tuple[Dict[Any, List[beam_runner_api_pb2.ArtifactInformation]], threading.Event]]
+    self._jobs_to_stage: dict[
+        str,
+        tuple[dict[Any, list[beam_runner_api_pb2.ArtifactInformation]],
+              threading.Event]] = {}
     self._file_writer = file_writer
 
   def register_job(
       self,
-      staging_token,  # type: str
-      dependency_sets  # type: MutableMapping[Any, List[beam_runner_api_pb2.ArtifactInformation]]
-    ):
+      staging_token: str,
+      dependency_sets: MutableMapping[
+          Any, list[beam_runner_api_pb2.ArtifactInformation]]):
     if staging_token in self._jobs_to_stage:
       raise ValueError('Already staging %s' % staging_token)
     with self._lock:
@@ -162,8 +159,7 @@ class ArtifactStagingService(
         for key, dependencies in dependency_sets.items():
           dependency_sets[key] = list(
               resolve_as_files(
-                  ForwardingRetrievalService(),
-                  lambda name: self._file_writer(
+                  ForwardingRetrievalService(), lambda name: self._file_writer(
                       os.path.join(staging_token, name)),
                   dependencies))
         requests.done()

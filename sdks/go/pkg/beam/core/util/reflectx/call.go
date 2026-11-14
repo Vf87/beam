@@ -36,18 +36,18 @@ type Func interface {
 	// Type returns the type.
 	Type() reflect.Type
 	// Call invokes the implicit fn with arguments.
-	Call(args []interface{}) []interface{}
+	Call(args []any) []any
 }
 
 var (
-	funcs   = make(map[string]func(interface{}) Func)
+	funcs   = make(map[string]func(any) Func)
 	funcsMu sync.Mutex
 )
 
 // RegisterFunc registers an custom Func factory for the given type, such as
 // "func(int)bool". If multiple Func factories are registered for the same type,
 // the last registration wins.
-func RegisterFunc(t reflect.Type, maker func(interface{}) Func) {
+func RegisterFunc(t reflect.Type, maker func(any) Func) {
 	funcsMu.Lock()
 	defer funcsMu.Unlock()
 
@@ -56,7 +56,7 @@ func RegisterFunc(t reflect.Type, maker func(interface{}) Func) {
 }
 
 // MakeFunc returns a Func for given function.
-func MakeFunc(fn interface{}) Func {
+func MakeFunc(fn any) Func {
 	funcsMu.Lock()
 	maker, exists := funcs[reflect.TypeOf(fn).String()]
 	funcsMu.Unlock()
@@ -83,12 +83,43 @@ func (c *reflectFunc) Type() reflect.Type {
 	return c.fn.Type()
 }
 
-func (c *reflectFunc) Call(args []interface{}) []interface{} {
+func (c *reflectFunc) Call(args []any) []any {
 	return Interface(c.fn.Call(ValueOf(args)))
 }
 
+// MakeFuncWithName returns a Func that wraps fn but whose Name()
+// returns the provided name instead of the compiler-derived symbol.
+// This is essential for closures inside Go generic functions: all
+// type instantiations produce closures with the same compiler name
+// (e.g. "pkg.Func[...].func1"), so the default name-based
+// serialization cannot distinguish them. A stable, type-qualified
+// name ensures cross-worker deserialization resolves the correct
+// function.
+func MakeFuncWithName(name string, fn any) Func {
+	inner := MakeFunc(fn)
+	return &namedFunc{inner: inner, name: name}
+}
+
+type namedFunc struct {
+	inner Func
+	name  string
+}
+
+func (f *namedFunc) Name() string          { return f.name }
+func (f *namedFunc) Type() reflect.Type    { return f.inner.Type() }
+func (f *namedFunc) Call(args []any) []any { return f.inner.Call(args) }
+
+// Interface returns the original unwrapped function, which
+// runtime.RegisterFunction needs for pointer extraction.
+func (f *namedFunc) Interface() any {
+	if rf, ok := f.inner.(*reflectFunc); ok {
+		return rf.fn.Interface()
+	}
+	return nil
+}
+
 // CallNoPanic calls the given Func and catches any panic.
-func CallNoPanic(fn Func, args []interface{}) (ret []interface{}, err error) {
+func CallNoPanic(fn Func, args []any) (ret []any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = errors.Errorf("panic: %v %s", r, debug.Stack())
@@ -98,8 +129,8 @@ func CallNoPanic(fn Func, args []interface{}) (ret []interface{}, err error) {
 }
 
 // ValueOf performs a per-element reflect.ValueOf.
-func ValueOf(list []interface{}) []reflect.Value {
-	ret := make([]reflect.Value, len(list), len(list))
+func ValueOf(list []any) []reflect.Value {
+	ret := make([]reflect.Value, len(list))
 	for i := 0; i < len(list); i++ {
 		ret[i] = reflect.ValueOf(list[i])
 	}
@@ -107,8 +138,8 @@ func ValueOf(list []interface{}) []reflect.Value {
 }
 
 // Interface performs a per-element Interface call.
-func Interface(list []reflect.Value) []interface{} {
-	ret := make([]interface{}, len(list), len(list))
+func Interface(list []reflect.Value) []any {
+	ret := make([]any, len(list))
 	for i := 0; i < len(list); i++ {
 		ret[i] = list[i].Interface()
 	}

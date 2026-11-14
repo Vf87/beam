@@ -19,13 +19,14 @@ package org.apache.beam.sdk.extensions.sql.meta.provider.kafka;
 
 import static org.apache.beam.sdk.schemas.transforms.Cast.castRow;
 import static org.apache.beam.sdk.util.Preconditions.checkArgumentNotNull;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.io.kafka.KafkaRecord;
+import org.apache.beam.sdk.io.kafka.TimestampPolicyFactory;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.schemas.Schema.TypeName;
@@ -35,11 +36,11 @@ import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableListMultimap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableListMultimap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.Headers;
@@ -56,7 +57,21 @@ class NestedPayloadKafkaTable extends BeamKafkaTable {
       String bootstrapServers,
       List<String> topics,
       Optional<PayloadSerializer> payloadSerializer) {
-    super(beamSchema, bootstrapServers, topics);
+    this(
+        beamSchema,
+        bootstrapServers,
+        topics,
+        payloadSerializer,
+        TimestampPolicyFactory.withLogAppendTime());
+  }
+
+  public NestedPayloadKafkaTable(
+      Schema beamSchema,
+      String bootstrapServers,
+      List<String> topics,
+      Optional<PayloadSerializer> payloadSerializer,
+      TimestampPolicyFactory timestampPolicyFactory) {
+    super(beamSchema, bootstrapServers, topics, timestampPolicyFactory);
 
     checkArgument(Schemas.isNestedSchema(schema));
     Schemas.validateNestedSchema(schema);
@@ -140,7 +155,7 @@ class NestedPayloadKafkaTable extends BeamKafkaTable {
   }
 
   // Suppress nullability warnings: ProducerRecord is supposed to accept null arguments.
-  @SuppressWarnings("argument.type.incompatible")
+  @SuppressWarnings("argument")
   @VisibleForTesting
   ProducerRecord<byte[], byte[]> transformOutput(Row row) {
     row = castRow(row, row.getSchema(), schema);

@@ -16,15 +16,18 @@
 
 import typing
 import unittest
+import warnings
 
 import pandas as pd
 
 import apache_beam as beam
 from apache_beam import coders
+from apache_beam import metrics
 from apache_beam.dataframe import convert
 from apache_beam.dataframe import expressions
 from apache_beam.dataframe import frame_base
 from apache_beam.dataframe import transforms
+from apache_beam.runners.portability.fn_api_runner import fn_runner
 from apache_beam.testing.util import assert_that
 from apache_beam.testing.util import equal_to
 
@@ -130,7 +133,9 @@ class TransformTest(unittest.TestCase):
     })
 
     def median_sum_fn(x):
-      return (x.foo + x.bar).median()
+      with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Mean of empty slice")
+        return (x.foo + x.bar).median()
 
     describe = lambda df: df.describe()
 
@@ -165,6 +170,8 @@ class TransformTest(unittest.TestCase):
       a = pd.Series([1, 2, 6])
       self.run_scenario(a, lambda a: a.agg(sum))
       self.run_scenario(a, lambda a: a / a.agg(sum))
+      self.run_scenario(a, lambda a: a / (a.max() - a.min()))
+      self.run_scenario(a, lambda a: a / (a.sum() - 1))
 
       # Tests scalar being used as an input to a downstream stage.
       df = pd.DataFrame({'key': ['a', 'a', 'b'], 'val': [1, 2, 6]})
@@ -206,8 +213,8 @@ class TransformTest(unittest.TestCase):
     with beam.Pipeline() as p:
       result = (
           p
-          | beam.Create([(u'Falcon', 380.), (u'Falcon', 370.), (u'Parrot', 24.),
-                         (u'Parrot', 26.)])
+          | beam.Create([('Falcon', 380.), ('Falcon', 370.), ('Parrot', 24.),
+                         ('Parrot', 26.)])
           | beam.Map(lambda tpl: beam.Row(Animal=tpl[0], Speed=tpl[1]))
           | transforms.DataframeTransform(
               lambda df: df.groupby('Animal').mean(), include_indexes=True))
@@ -218,8 +225,8 @@ class TransformTest(unittest.TestCase):
     with beam.Pipeline() as p:
       df = convert.to_dataframe(
           p
-          | beam.Create([(u'Falcon', 380.), (u'Falcon', 370.), (
-              u'Parrot', 24.), (u'Parrot', 26.)])
+          | beam.Create([('Falcon', 380.), ('Falcon', 370.), ('Parrot', 24.), (
+              'Parrot', 26.)])
           | beam.Map(lambda tpl: beam.Row(Animal=tpl[0], Speed=tpl[1])))
 
       result = convert.to_pcollection(
@@ -253,8 +260,8 @@ class TransformTest(unittest.TestCase):
     with beam.Pipeline() as p:
       result = (
           p
-          | beam.Create([(u'Falcon', 380.), (u'Falcon', 370.), (u'Parrot', 24.),
-                         (u'Parrot', 26.)])
+          | beam.Create([('Falcon', 380.), ('Falcon', 370.), ('Parrot', 24.),
+                         ('Parrot', 26.)])
           | beam.Map(lambda tpl: beam.Row(Animal=tpl[0], Speed=tpl[1]))
           | transforms.DataframeTransform(lambda df: df.Animal))
 
@@ -295,8 +302,7 @@ class TransformTest(unittest.TestCase):
       assert_that(
           dict(x=one, y=two)
           | 'DictIn' >> transforms.DataframeTransform(
-              lambda x,
-              y: (x + y),
+              lambda x, y: (x + y),
               proxy=dict(x=proxy, y=proxy),
               yield_elements='pandas'),
           equal_to_series(three_series),
@@ -310,6 +316,26 @@ class TransformTest(unittest.TestCase):
       res = one | 'DictOut' >> transforms.DataframeTransform(
           lambda x: {'res': 3 * x}, proxy, yield_elements='pandas')
       assert_that(res['res'], equal_to_series(three_series), 'CheckDictOut')
+
+  def test_multiple_dataframes_transforms(self):
+    expected_output = ["Bryan", "DKER2"]
+
+    def transform_func(a, b):
+      b["name"] = "DKER2"
+      return a, b
+
+    with beam.Pipeline() as p:
+      pcol1 = p | "Create1" >> beam.Create([beam.Row(name="Bryan")])
+      pcol2 = p | "Create2" >> beam.Create([beam.Row(name="common")])
+
+      result = ({
+          "a": pcol1, "b": pcol2
+      }
+                |
+                "TransformDF" >> transforms.DataframeTransform(transform_func)
+                | "Flatten" >> beam.Flatten()
+                | transforms.DataframeTransform(lambda df: df.name))
+      assert_that(result, equal_to(expected_output))
 
   def test_cat(self):
     # verify that cat works with a List[Series] since this is
@@ -341,11 +367,56 @@ class TransformTest(unittest.TestCase):
 
     with expressions.allow_non_parallel_operations():
       self.run_scenario(
-          df,
-          lambda df: df.rename(
+          df, lambda df: df.rename(
               columns={'B': 'C'}, index={
                   0: 2, 2: 0
               }, errors='raise'))
+
+
+class FusionTest(unittest.TestCase):
+  @staticmethod
+  def fused_stages(p):
+    return p.result.monitoring_metrics().query(
+        metrics.MetricsFilter().with_name(
+            fn_runner.FnApiRunner.NUM_FUSED_STAGES_COUNTER)
+    )['counters'][0].result
+
+  @staticmethod
+  def create_animal_speed_input(p):
+    return p | beam.Create([
+        AnimalSpeed('Aardvark', 5),
+        AnimalSpeed('Ant', 2),
+        AnimalSpeed('Elephant', 35),
+        AnimalSpeed('Zebra', 40)
+    ],
+                           reshuffle=False)
+
+  def test_loc_filter(self):
+    # TODO(https://github.com/apache/beam/issues/34549): This test relies on
+    # monitoring_metrics property of the FnApiRunner which does not exist on
+    # other runners like Prism.
+    # https://github.com/apache/beam/blob/5f9cd73b7c9a2f37f83971ace3a399d633201dd1/sdks/python/apache_beam/runners/portability/fn_api_runner/fn_runner.py#L1590
+    with beam.Pipeline('FnApiRunner') as p:
+      _ = (
+          self.create_animal_speed_input(p)
+          | transforms.DataframeTransform(lambda df: df[df.Speed > 10]))
+    self.assertEqual(self.fused_stages(p), 1)
+
+  def test_column_manipulation(self):
+    def set_column(df, name, s):
+      df[name] = s
+      return df
+
+    # TODO(https://github.com/apache/beam/issues/34549): This test relies on
+    # monitoring_metrics property of the FnApiRunner which does not exist on
+    # other runners like Prism.
+    # https://github.com/apache/beam/blob/5f9cd73b7c9a2f37f83971ace3a399d633201dd1/sdks/python/apache_beam/runners/portability/fn_api_runner/fn_runner.py#L1590
+    with beam.Pipeline('FnApiRunner') as p:
+      _ = (
+          self.create_animal_speed_input(p)
+          | transforms.DataframeTransform(
+              lambda df: set_column(df, 'x', df.Speed + df.Animal.str.len())))
+    self.assertEqual(self.fused_stages(p), 1)
 
 
 class TransformPartsTest(unittest.TestCase):

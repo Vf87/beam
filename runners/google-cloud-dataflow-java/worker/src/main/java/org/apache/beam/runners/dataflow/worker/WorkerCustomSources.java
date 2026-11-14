@@ -24,7 +24,7 @@ import static org.apache.beam.runners.dataflow.util.Structs.getString;
 import static org.apache.beam.runners.dataflow.util.Structs.getStrings;
 import static org.apache.beam.sdk.util.SerializableUtils.deserializeFromByteArray;
 import static org.apache.beam.sdk.util.SerializableUtils.serializeToByteArray;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.api.client.util.Base64;
 import com.google.api.services.dataflow.model.ApproximateReportedProgress;
@@ -59,13 +59,14 @@ import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.util.BackOff;
 import org.apache.beam.sdk.util.FluentBackoff;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.ValueWithRecordId;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.ByteString;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.Uninterruptibles;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.Uninterruptibles;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -79,8 +80,8 @@ import org.slf4j.LoggerFactory;
  * CloudSource} class.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class WorkerCustomSources {
   private static final String SERIALIZED_SOURCE = "serialized_source";
@@ -160,7 +161,7 @@ public class WorkerCustomSources {
             "Ignoring negative estimated size {} produced by source {}", estimatedSize, source);
       }
     } catch (Exception e) {
-      LOG.warn("Size estimation of the source failed: " + source, e);
+      LOG.warn("Size estimation of the source failed: {}", source, e);
     }
     cloudSource.setMetadata(metadata);
     return cloudSource;
@@ -247,18 +248,38 @@ public class WorkerCustomSources {
           serializedSize);
     }
 
+    List<BoundedSource<T>> bundlesBeforeCoalesce = bundles;
     int numBundlesBeforeRebundling = bundles.size();
     // To further reduce size of the response and service-side memory usage, coalesce
     // the sources into numBundlesLimit compressed serialized bundles.
-    if (bundles.size() > numBundlesLimit) {
+    while (serializedSize > apiByteLimit || bundles.size() > numBundlesLimit) {
+      // bundle size constrained by API limit, adds 5% allowance
+      int targetBundleSizeApiLimit =
+          (int) ((double) (bundles.size() * apiByteLimit) / serializedSize * 0.95);
+      // bundle size constrained by numBundlesLimit
+      int targetBundleSizeBundleLimit = Math.min(numBundlesLimit, bundles.size() - 1);
+      int targetBundleSize = Math.min(targetBundleSizeApiLimit, targetBundleSizeBundleLimit);
+
+      if (targetBundleSize <= 1) {
+        String message =
+            String.format(
+                "Unable to coalesce the sources into compressed serialized bundles to satisfy the "
+                    + "allowable limit when splitting %s. With %d bundles, total serialized size "
+                    + "of %d bytes is still larger than the limit %d. For more information, please "
+                    + "check the corresponding FAQ entry at "
+                    + "https://cloud.google.com/dataflow/docs/guides/common-errors#boundedsource-objects-splitintobundles",
+                source, bundles.size(), serializedSize, apiByteLimit);
+        throw new IllegalArgumentException(message);
+      }
+
+      bundles = limitNumberOfBundles(bundlesBeforeCoalesce, targetBundleSize);
+      serializedSize =
+          DataflowApiUtils.computeSerializedSizeBytes(wrapIntoSourceSplitResponse(bundles));
       LOG.warn(
-          "Splitting source {} into bundles of estimated size {} bytes produced {} bundles. "
-              + "Rebundling into {} bundles.",
+          "Re-bundle source {} into bundles of estimated size {} bytes produced {} bundles.",
           source,
-          desiredBundleSizeBytes,
-          bundles.size(),
-          numBundlesLimit);
-      bundles = limitNumberOfBundles(bundles, numBundlesLimit);
+          serializedSize,
+          bundles.size());
     }
 
     SourceOperationResponse response =
@@ -277,7 +298,7 @@ public class WorkerCustomSources {
                   + "it generated %d BoundedSource objects with total serialized size of %d bytes "
                   + "which is larger than the limit %d. "
                   + "For more information, please check the corresponding FAQ entry at "
-                  + "https://cloud.google.com/dataflow/pipelines/troubleshooting-your-pipeline",
+                  + "https://cloud.google.com/dataflow/docs/guides/common-errors#boundedsource-objects-splitintobundles",
               source,
               desiredBundleSizeBytes,
               numBundlesBeforeRebundling,
@@ -426,7 +447,7 @@ public class WorkerCustomSources {
 
         UnboundedSource<T, UnboundedSource.CheckpointMark> splitSource = parseSource(splitIndex);
 
-        UnboundedSource.CheckpointMark checkpoint = null;
+        UnboundedSource.@Nullable CheckpointMark checkpoint = null;
         if (splitSource.getCheckpointMarkCoder() != null) {
           checkpoint = context.getReaderCheckpoint(splitSource.getCheckpointMarkCoder());
         }
@@ -628,7 +649,7 @@ public class WorkerCustomSources {
 
     @Override
     public WindowedValue<T> getCurrent() throws NoSuchElementException {
-      return WindowedValue.timestampedValueInGlobalWindow(
+      return WindowedValues.timestampedValueInGlobalWindow(
           reader.getCurrent(), reader.getCurrentTimestamp());
     }
 
@@ -640,7 +661,7 @@ public class WorkerCustomSources {
     @VisibleForTesting
     static @Nullable ReportedParallelism longToParallelism(long value) {
       if (value >= 0) {
-        return new ReportedParallelism().setValue(Double.valueOf(value));
+        return new ReportedParallelism().setValue(Double.valueOf((double) value));
       } else {
         return null;
       }
@@ -659,6 +680,8 @@ public class WorkerCustomSources {
         if (fractionConsumed != null) {
           progress.setFractionConsumed(fractionConsumed);
         }
+      } catch (OutOfMemoryError oom) {
+        throw oom;
       } catch (Throwable t) {
         LOG.warn("Error estimating fraction consumed from reader {}", reader, t);
       }
@@ -668,6 +691,8 @@ public class WorkerCustomSources {
         if (parallelism != null) {
           progress.setConsumedParallelism(parallelism);
         }
+      } catch (OutOfMemoryError oom) {
+        throw oom;
       } catch (Throwable t) {
         LOG.warn("Error estimating consumed parallelism from reader {}", reader, t);
       }
@@ -677,6 +702,8 @@ public class WorkerCustomSources {
         if (parallelism != null) {
           progress.setRemainingParallelism(parallelism);
         }
+      } catch (OutOfMemoryError oom) {
+        throw oom;
       } catch (Throwable t) {
         LOG.warn("Error estimating remaining parallelism from reader {}", reader, t);
       }
@@ -757,6 +784,9 @@ public class WorkerCustomSources {
 
   private static class UnboundedReaderIterator<T>
       extends NativeReader.NativeReaderIterator<WindowedValue<ValueWithRecordId<T>>> {
+    // Do not close reader. The reader is cached in StreamingModeExecutionContext.readerCache, and
+    // will be reused until the cache is evicted, expired or invalidated.
+    // See UnboundedReader#iterator().
     private final UnboundedSource.UnboundedReader<T> reader;
     private final StreamingModeExecutionContext context;
     private final boolean started;
@@ -774,9 +804,8 @@ public class WorkerCustomSources {
       this.context = context;
       this.started = started;
       DataflowPipelineDebugOptions debugOptions = options.as(DataflowPipelineDebugOptions.class);
-      this.endTime =
-          Instant.now()
-              .plus(Duration.standardSeconds(debugOptions.getUnboundedReaderMaxReadTimeSec()));
+      long maxReadTimeMs = debugOptions.getUnboundedReaderMaxReadTimeMs();
+      this.endTime = Instant.now().plus(Duration.millis(maxReadTimeMs));
       this.maxElems = debugOptions.getUnboundedReaderMaxElements();
       this.backoffFactory =
           FluentBackoff.DEFAULT
@@ -795,6 +824,7 @@ public class WorkerCustomSources {
       }
       try {
         if (!reader.start()) {
+          context.finishKey();
           return false;
         }
       } catch (Exception e) {
@@ -812,9 +842,13 @@ public class WorkerCustomSources {
       // that there are regular checkpoints and that state does not become too large.
       BackOff backoff = backoffFactory.backoff();
       while (true) {
+        if (context.workIsFailed()) {
+          throw new WorkItemCancelledException(context.getWorkItem().getShardingKey());
+        }
         if (elemsRead >= maxElems
             || Instant.now().isAfter(endTime)
             || context.isSinkFullHintSet()) {
+          context.finishKey();
           return false;
         }
         try {
@@ -827,6 +861,7 @@ public class WorkerCustomSources {
         }
         long nextBackoff = backoff.nextBackOffMillis();
         if (nextBackoff == BackOff.STOP) {
+          context.finishKey();
           return false;
         }
         Uninterruptibles.sleepUninterruptibly(nextBackoff, TimeUnit.MILLISECONDS);
@@ -836,14 +871,16 @@ public class WorkerCustomSources {
     @Override
     public WindowedValue<ValueWithRecordId<T>> getCurrent() throws NoSuchElementException {
       WindowedValue<T> result =
-          WindowedValue.timestampedValueInGlobalWindow(
+          WindowedValues.timestampedValueInGlobalWindow(
               reader.getCurrent(), reader.getCurrentTimestamp());
       return result.withValue(
           new ValueWithRecordId<>(result.getValue(), reader.getCurrentRecordId()));
     }
 
     @Override
-    public void close() {}
+    public void close() {
+      // Don't close reader.
+    }
 
     @Override
     public NativeReader.Progress getProgress() {

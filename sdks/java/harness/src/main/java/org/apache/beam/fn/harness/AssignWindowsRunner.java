@@ -17,30 +17,30 @@
  */
 package org.apache.beam.fn.harness;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.auto.service.AutoService;
 import java.io.IOException;
-import java.util.Collection;
 import java.util.Map;
 import org.apache.beam.fn.harness.MapFnRunners.WindowedValueMapFnFactory;
 import org.apache.beam.model.pipeline.v1.RunnerApi.PTransform;
 import org.apache.beam.model.pipeline.v1.RunnerApi.WindowIntoPayload;
-import org.apache.beam.runners.core.construction.PTransformTranslation;
-import org.apache.beam.runners.core.construction.WindowingStrategyTranslation;
 import org.apache.beam.sdk.function.ThrowingFunction;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.transforms.windowing.WindowFn;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.sdk.util.construction.PTransformTranslation;
+import org.apache.beam.sdk.util.construction.WindowingStrategyTranslation;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.joda.time.Instant;
 
 /** The Java SDK Harness implementation of the {@link Window.Assign} primitive. */
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 class AssignWindowsRunner<T, W extends BoundedWindow> {
 
@@ -89,8 +89,9 @@ class AssignWindowsRunner<T, W extends BoundedWindow> {
   }
 
   WindowedValue<T> assignWindows(WindowedValue<T> input) throws Exception {
-    // TODO: BEAM-4272 consider allocating only once and updating the current value per call.
-    WindowFn<T, W>.AssignContext ctxt =
+    // TODO: https://github.com/apache/beam/issues/18870 consider allocating only once and updating
+    // the current value per call.
+    WindowFn<T, W>.AssignContext assignContext =
         windowFn.new AssignContext() {
           @Override
           public T element() {
@@ -107,7 +108,7 @@ class AssignWindowsRunner<T, W extends BoundedWindow> {
             return Iterables.getOnlyElement(input.getWindows());
           }
         };
-    Collection<W> windows = windowFn.assignWindows(ctxt);
-    return WindowedValue.of(input.getValue(), input.getTimestamp(), windows, input.getPane());
+
+    return WindowedValues.builder(input).setWindows(windowFn.assignWindows(assignContext)).build();
   }
 }

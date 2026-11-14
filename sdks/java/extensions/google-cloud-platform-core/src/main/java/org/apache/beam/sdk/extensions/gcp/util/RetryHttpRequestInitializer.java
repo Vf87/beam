@@ -32,6 +32,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Metrics;
@@ -44,9 +45,6 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Also can take an HttpResponseInterceptor to be applied to the responses.
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class RetryHttpRequestInitializer implements HttpRequestInitializer {
 
   private static final Logger LOG = LoggerFactory.getLogger(RetryHttpRequestInitializer.class);
@@ -58,10 +56,11 @@ public class RetryHttpRequestInitializer implements HttpRequestInitializer {
               307 /* Redirect, handled by the client library */,
               308 /* Resume Incomplete, handled by the client library */));
 
-  /** Http response timeout to use for hanging gets. */
+  /** Default http response timeout to use for hanging gets. */
   private static final int HANGING_GET_TIMEOUT_SEC = 80;
 
   private int writeTimeout;
+  private int readTimeout;
 
   /** Handlers used to provide additional logging information on unsuccessful HTTP requests. */
   private static class LoggingHttpBackOffHandler
@@ -73,7 +72,7 @@ public class RetryHttpRequestInitializer implements HttpRequestInitializer {
     private final Set<Integer> ignoredResponseCodes;
     // aggregate the total time spent in exponential backoff
     private final Counter throttlingMsecs =
-        Metrics.counter(LoggingHttpBackOffHandler.class, "throttling-msecs");
+        Metrics.counter(LoggingHttpBackOffHandler.class, Metrics.THROTTLE_TIME_COUNTER_NAME);
     private int ioExceptionRetries;
     private int unsuccessfulResponseRetries;
     private @Nullable CustomHttpErrors customHttpErrors;
@@ -102,14 +101,12 @@ public class RetryHttpRequestInitializer implements HttpRequestInitializer {
         ioExceptionRetries += 1;
         LOG.debug("Request failed with IOException, will retry: {}", request.getUrl());
       } else {
-        String message =
+        LOG.warn(
             "Request failed with IOException, "
                 + "performed {} retries due to IOExceptions, "
                 + "performed {} retries due to unsuccessful status codes, "
                 + "HTTP framework says request {} be retried, "
-                + "(caller responsible for retrying): {}";
-        LOG.warn(
-            message,
+                + "(caller responsible for retrying): {}",
             ioExceptionRetries,
             unsuccessfulResponseRetries,
             supportsRetry ? "can" : "cannot",
@@ -136,7 +133,7 @@ public class RetryHttpRequestInitializer implements HttpRequestInitializer {
             request.getUrl());
       } else {
 
-        String message =
+        final String message =
             "Request failed with code {}, "
                 + "performed {} retries due to IOExceptions, "
                 + "performed {} retries due to unsuccessful status codes, "
@@ -198,15 +195,18 @@ public class RetryHttpRequestInitializer implements HttpRequestInitializer {
     }
   }
 
-  private final HttpResponseInterceptor responseInterceptor; // response Interceptor to use
+  private final @Nullable HttpResponseInterceptor
+      responseInterceptor; // response Interceptor to use
 
-  private CustomHttpErrors customHttpErrors = null;
+  private @Nullable CustomHttpErrors customHttpErrors = null;
 
   private final NanoClock nanoClock; // used for testing
 
   private final Sleeper sleeper; // used for testing
 
   private Set<Integer> ignoredResponseCodes = new HashSet<>(DEFAULT_IGNORED_RESPONSE_CODES);
+
+  private @Nullable Map<String, String> httpHeaders = null;
 
   public RetryHttpRequestInitializer() {
     this(Collections.emptyList());
@@ -240,19 +240,20 @@ public class RetryHttpRequestInitializer implements HttpRequestInitializer {
       NanoClock nanoClock,
       Sleeper sleeper,
       Collection<Integer> additionalIgnoredResponseCodes,
-      HttpResponseInterceptor responseInterceptor) {
+      @Nullable HttpResponseInterceptor responseInterceptor) {
     this.nanoClock = nanoClock;
     this.sleeper = sleeper;
     this.ignoredResponseCodes.addAll(additionalIgnoredResponseCodes);
     this.responseInterceptor = responseInterceptor;
     this.writeTimeout = 0;
+    // Set a timeout for hanging-gets.
+    // TODO: Do this exclusively for work requests.
+    this.readTimeout = HANGING_GET_TIMEOUT_SEC * 1000;
   }
 
   @Override
   public void initialize(HttpRequest request) throws IOException {
-    // Set a timeout for hanging-gets.
-    // TODO: Do this exclusively for work requests.
-    request.setReadTimeout(HANGING_GET_TIMEOUT_SEC * 1000);
+    request.setReadTimeout(this.readTimeout);
     request.setWriteTimeout(this.writeTimeout);
 
     LoggingHttpBackOffHandler loggingHttpBackOffHandler =
@@ -270,6 +271,11 @@ public class RetryHttpRequestInitializer implements HttpRequestInitializer {
     request.setUnsuccessfulResponseHandler(loggingHttpBackOffHandler);
     request.setIOExceptionHandler(loggingHttpBackOffHandler);
 
+    @Nullable Map<String, String> localHttpHeaders = this.httpHeaders;
+    if (localHttpHeaders != null) {
+      request.getHeaders().putAll(localHttpHeaders);
+    }
+
     // Set response initializer
     if (responseInterceptor != null) {
       request.setResponseInterceptor(responseInterceptor);
@@ -280,8 +286,25 @@ public class RetryHttpRequestInitializer implements HttpRequestInitializer {
     this.customHttpErrors = customErrors;
   }
 
-  /** @param writeTimeout in milliseconds. */
+  /**
+   * Sets the write timeout.
+   *
+   * @param writeTimeout in milliseconds.
+   */
   public void setWriteTimeout(int writeTimeout) {
     this.writeTimeout = writeTimeout;
+  }
+
+  public void setHttpHeaders(Map<String, String> httpHeaders) {
+    this.httpHeaders = httpHeaders;
+  }
+
+  /**
+   * Sets the read timeout.
+   *
+   * @param readTimeout in milliseconds.
+   */
+  public void setReadTimeout(int readTimeout) {
+    this.readTimeout = readTimeout;
   }
 }

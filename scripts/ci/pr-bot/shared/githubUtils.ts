@@ -1,0 +1,179 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+const { Octokit } = require("@octokit/rest");
+const { REPO_OWNER, REPO } = require("./constants");
+
+export interface Label {
+  name: string;
+}
+
+export function getGitHubClient() {
+  let auth = process.env["GITHUB_TOKEN"];
+  if (!auth) {
+    throw new Error(
+      "No github token provided - process.env['GITHUB_TOKEN'] must be set."
+    );
+  }
+  const octokit = new Octokit({ auth });
+  octokit.hook.wrap("request", async (request: any, options: any) => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        return await request(options);
+      } catch (err: any) {
+        const status = err && err.status;
+        if (
+          attempt < 3 &&
+          (status === 500 || status === 502 || status === 503 || status === 504)
+        ) {
+          console.log(
+            `Transient GitHub API error (HTTP ${status}), retrying (attempt ${attempt}/3)...`
+          );
+          await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
+          continue;
+        }
+        throw err;
+      }
+    }
+  });
+  return octokit;
+}
+
+export async function addPrComment(pullNumber: number, body: string) {
+  await getGitHubClient().rest.issues.createComment({
+    owner: REPO_OWNER,
+    repo: REPO,
+    issue_number: pullNumber,
+    body,
+  });
+}
+
+export async function requestPrReviewers(
+  pullNumber: number,
+  reviewers: string[],
+  githubClient?: any
+) {
+  if (!reviewers || reviewers.length === 0) {
+    return;
+  }
+  const client = githubClient || getGitHubClient();
+  for (const reviewer of reviewers) {
+    try {
+      await client.rest.pulls.requestReviewers({
+        owner: REPO_OWNER,
+        repo: REPO,
+        pull_number: pullNumber,
+        reviewers: [reviewer],
+      });
+    } catch (err) {
+      console.log(
+        `Unable to request review from ${reviewer} on PR ${pullNumber} (best effort): ${err}`
+      );
+    }
+  }
+}
+
+export async function nextActionReviewers(
+  pullNumber: number,
+  existingLabels: Label[]
+) {
+  let newLabels = removeNextActionLabel(existingLabels);
+  newLabels.push("Next Action: Reviewers");
+  await getGitHubClient().rest.issues.setLabels({
+    owner: REPO_OWNER,
+    repo: REPO,
+    issue_number: pullNumber,
+    labels: newLabels,
+  });
+}
+
+export async function nextActionAuthor(
+  pullNumber: number,
+  existingLabels: Label[]
+) {
+  let newLabels = removeNextActionLabel(existingLabels);
+  newLabels.push("Next Action: Author");
+  await getGitHubClient().rest.issues.setLabels({
+    owner: REPO_OWNER,
+    repo: REPO,
+    issue_number: pullNumber,
+    labels: newLabels,
+  });
+}
+
+export async function closePr(pullNumber: number) {
+  await getGitHubClient().rest.pulls.update({
+    owner: REPO_OWNER,
+    repo: REPO,
+    pull_number: pullNumber,
+    state: "closed",
+  });
+}
+
+export async function getPrFiles(pullNumber: number): Promise<string[]> {
+  const files = await getGitHubClient().paginate(
+    getGitHubClient().rest.pulls.listFiles,
+    {
+      owner: REPO_OWNER,
+      repo: REPO,
+      pull_number: pullNumber,
+    }
+  );
+  return files.map((file: any) => file.filename);
+}
+
+export async function checkIfCommitter(username: string): Promise<boolean> {
+  const permissionLevel = (
+    await getGitHubClient().rest.repos.getCollaboratorPermissionLevel({
+      owner: REPO_OWNER,
+      repo: REPO,
+      username,
+    })
+  ).data;
+
+  return (
+    permissionLevel.permission === "write" ||
+    permissionLevel.permission === "admin"
+  );
+}
+
+export function getPullAuthorFromPayload(payload: any) {
+  return payload.issue?.user?.login || payload.pull_request?.user?.login;
+}
+
+export function getPullNumberFromPayload(payload: any) {
+  return payload.issue?.number || payload.pull_request?.number;
+}
+
+function removeNextActionLabel(existingLabels: Label[]): string[] {
+  return existingLabels
+    .filter(
+      (label) =>
+        label.name != "Next Action: Reviewers" &&
+        label.name != "Next Action: Author"
+    )
+    .map((label) => label.name);
+}
+
+export function hasLabel(pull: any, labelName: string): boolean {
+  return (pull?.labels || []).some(
+    (label: any) =>
+      (typeof label === "string" ? label : label?.name || "").toLowerCase() ===
+      labelName.toLowerCase()
+  );
+}

@@ -22,28 +22,39 @@
 import collections
 import glob
 import io
+import math
+import numbers
 import tempfile
+from typing import Any
 from typing import Iterable
+from typing import NamedTuple
 
 from apache_beam import pvalue
 from apache_beam.transforms import window
 from apache_beam.transforms.core import Create
 from apache_beam.transforms.core import DoFn
+from apache_beam.transforms.core import Filter
 from apache_beam.transforms.core import Map
 from apache_beam.transforms.core import ParDo
 from apache_beam.transforms.core import WindowInto
 from apache_beam.transforms.ptransform import PTransform
+from apache_beam.transforms.ptransform import ptransform_fn
 from apache_beam.transforms.util import CoGroupByKey
+from apache_beam.utils.windowed_value import PANE_INFO_UNKNOWN
+from apache_beam.utils.windowed_value import PaneInfo
 
 __all__ = [
     'assert_that',
     'equal_to',
+    'equal_to_approx',
     'equal_to_per_window',
+    'has_at_least_one',
     'is_empty',
     'is_not_empty',
     'matches_all',
     # open_shards is internal and has no backwards compatibility guarantees.
     'open_shards',
+    'row_namedtuple_equals_fn',
     'TestWindowedValue',
 ]
 
@@ -55,8 +66,11 @@ class BeamAssertException(Exception):
 
 
 # Used for reifying timestamps and windows for assert_that matchers.
-TestWindowedValue = collections.namedtuple(
-    'TestWindowedValue', 'value timestamp windows')
+class TestWindowedValue(NamedTuple):
+  value: Any
+  timestamp: Any
+  windows: list
+  pane_info: PaneInfo = PANE_INFO_UNKNOWN
 
 
 def contains_in_any_order(iterable):
@@ -158,7 +172,7 @@ def equal_to(expected, equals_fn=None):
     # collection. It can also raise false negatives for types that don't have
     # a deterministic sort order, like pyarrow Tables as of 0.14.1
     if not equals_fn:
-      equals_fn = lambda e, a: e == a
+      equals_fn = row_namedtuple_equals_fn
       try:
         sorted_expected = sorted(expected)
         sorted_actual = sorted(actual)
@@ -191,6 +205,73 @@ def equal_to(expected, equals_fn=None):
       raise BeamAssertException(msg)
 
   return _equal
+
+
+def row_namedtuple_equals_fn(expected, actual, fallback_equals_fn=None):
+  """
+  equals_fn which can be used by equal_to which treats Rows and
+  NamedTuples as equivalent types. This can be useful since Beam converts
+  Rows to NamedTuples when they are sent across portability layers, so a Row
+  may be converted to a NamedTuple automatically by Beam.
+  """
+  if fallback_equals_fn is None:
+    fallback_equals_fn = lambda e, a: e == a
+  if type(expected) is not pvalue.Row and not _is_named_tuple(expected):
+    return fallback_equals_fn(expected, actual)
+  if type(actual) is not pvalue.Row and not _is_named_tuple(actual):
+    return fallback_equals_fn(expected, actual)
+
+  expected_dict = expected._asdict()
+  actual_dict = actual._asdict()
+  if len(expected_dict) != len(actual_dict):
+    return False
+  for k, v in expected_dict.items():
+    if k not in actual_dict:
+      return False
+    if not row_namedtuple_equals_fn(v, actual_dict[k]):
+      return False
+
+  return True
+
+
+def equal_to_approx(expected, rel_tol=1e-09, abs_tol=0.0):
+  """Matcher used by assert_that that compares numeric elements approximately.
+
+  Behaves similarly to `equal_to` for sequence ordering and membership, but any
+  real number elements (integers and floats) are compared using `math.isclose`
+  instead of exact equality.
+
+  Approximate comparisons are also applied to real numbers nested within lists
+  and tuples. Note that `equal_to`'s advanced handling for Beam `Row` and
+  `NamedTuple` is not supported here. All other elements are compared using
+  standard `==` equality.
+
+  Args:
+    expected: The expected output or sequence to compare against.
+    rel_tol: The relative tolerance used by `math.isclose` (default: 1e-09).
+    abs_tol: The absolute tolerance used by `math.isclose` (default: 0.0).
+
+  Example:
+    assert_that(
+        pipeline | beam.Create([1.000000001, 2.0]),
+        equal_to_approx([1.0, 2.0]))
+  """
+  def _approx_equals(expected_element, actual_element):
+    return _elements_approx_equal(
+        expected_element, actual_element, rel_tol, abs_tol)
+
+  return equal_to(expected, equals_fn=_approx_equals)
+
+
+def _elements_approx_equal(expected, actual, rel_tol, abs_tol):
+  if all(isinstance(x, numbers.Real) for x in (expected, actual)):
+    return math.isclose(expected, actual, rel_tol=rel_tol, abs_tol=abs_tol)
+  if (isinstance(expected, (list, tuple)) and type(actual) is type(expected) and
+      len(expected) == len(actual)):
+    return all(
+        _elements_approx_equal(e, a, rel_tol, abs_tol)
+        for e, a in zip(expected, actual))
+  return expected == actual
 
 
 def matches_all(expected):
@@ -260,6 +341,28 @@ def assert_that(
   """
   assert isinstance(actual, pvalue.PCollection), (
       '%s is not a supported type for Beam assert' % type(actual))
+  pipeline = actual.pipeline
+  if getattr(actual.pipeline, 'result', None):
+    # The pipeline was already run. The user most likely called assert_that
+    # after the pipeleline context.
+    raise RuntimeError(
+        'assert_that must be used within a beam.Pipeline context. ' +
+        'Prior to Beam 2.60.0, asserts outside of the context of a pipeline ' +
+        'were silently ignored, starting with Beam 2.60.0 this is no longer ' +
+        'allowed. To fix, move your assert_that call into your pipeline ' +
+        'context so that it is added before the pipeline is run. For more ' +
+        'information, see https://github.com/apache/beam/pull/30771')
+
+  # Usually, the uniqueness of the label is left to the pipeline
+  # writer to guarantee. Since we're in a testing context, we'll
+  # just automatically append a number to the label if it's
+  # already in use, as tests don't typically have to worry about
+  # long-term update compatibility stability of stage names.
+  if label in pipeline.applied_labels:
+    label_idx = 2
+    while f"{label}_{label_idx}" in pipeline.applied_labels:
+      label_idx += 1
+    label = f"{label}_{label_idx}"
 
   if isinstance(matcher, _EqualToPerWindowMatcher):
     reify_windows = True
@@ -267,11 +370,15 @@ def assert_that(
 
   class ReifyTimestampWindow(DoFn):
     def process(
-        self, element, timestamp=DoFn.TimestampParam, window=DoFn.WindowParam):
+        self,
+        element,
+        timestamp=DoFn.TimestampParam,
+        window=DoFn.WindowParam,
+        pane_info=DoFn.PaneInfoParam):
       # This returns TestWindowedValue instead of
       # beam.utils.windowed_value.WindowedValue because ParDo will extract
       # the timestamp and window out of the latter.
-      return [TestWindowedValue(element, timestamp, [window])]
+      return [TestWindowedValue(element, timestamp, [window], pane_info)]
 
   class AddWindow(DoFn):
     def process(self, element, window=DoFn.WindowParam):
@@ -295,17 +402,50 @@ def assert_that(
       # PCollection is empty.
       plain_actual = ((keyed_singleton, keyed_actual)
                       | 'Group' >> CoGroupByKey()
-                      | 'Unkey' >> Map(lambda k_values: k_values[1][1]))
+                      | 'Unkey' >> Map(lambda k_values: list(k_values[1][1])))
 
       if not use_global_window:
         plain_actual = plain_actual | 'AddWindow' >> ParDo(AddWindow())
 
-      plain_actual = plain_actual | 'Match' >> Map(matcher)
+      return plain_actual | 'Match' >> Map(matcher)
 
     def default_label(self):
       return label
 
-  actual | AssertThat()  # pylint: disable=expression-not-assigned
+  return actual | AssertThat()
+
+
+@ptransform_fn
+def AssertThat(pcoll, *args, **kwargs):
+  """Like assert_that, but as an applicable PTransform."""
+  return assert_that(pcoll, *args, **kwargs)
+
+
+def has_at_least_one(input, criterion, label="has_at_least_one"):
+  pipeline = input.pipeline
+  # similar to assert_that, we choose a label if it already exists.
+  if label in pipeline.applied_labels:
+    label_idx = 2
+    while f"{label}_{label_idx}" in pipeline.applied_labels:
+      label_idx += 1
+    label = f"{label}_{label_idx}"
+
+  def _apply_criterion(
+      e=DoFn.ElementParam,
+      t=DoFn.TimestampParam,
+      w=DoFn.WindowParam,
+      p=DoFn.PaneInfoParam):
+    if criterion(e, t, w, p):
+      return e, t, w, p
+
+  def _not_empty(actual):
+    actual = list(actual)
+    if not actual:
+      raise BeamAssertException('Failed assert: nothing matches the criterion')
+
+  result = input | label >> Map(_apply_criterion) | label + "_filter" >> Filter(
+      lambda e: e is not None)
+  assert_that(result, _not_empty)
 
 
 def open_shards(glob_pattern, mode='rt', encoding='utf-8'):
@@ -343,6 +483,12 @@ def _sort_lists(result):
     return sorted(result)
   else:
     return result
+
+
+def _is_named_tuple(obj) -> bool:
+  return (
+      isinstance(obj, tuple) and hasattr(obj, '_asdict') and
+      hasattr(obj, '_fields'))
 
 
 # A utility transform that recursively sorts lists for easier testing.

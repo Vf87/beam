@@ -17,14 +17,15 @@
  */
 package org.apache.beam.runners.flink;
 
+import static org.junit.Assert.assertEquals;
+
 import java.io.Serializable;
 import java.util.Collections;
+import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.apache.beam.model.jobmanagement.v1.JobApi.JobState;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
-import org.apache.beam.runners.core.construction.Environments;
-import org.apache.beam.runners.core.construction.PipelineTranslation;
 import org.apache.beam.runners.jobsubmission.JobInvocation;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.coders.VarIntCoder;
@@ -39,10 +40,12 @@ import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Impulse;
 import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.util.construction.Environments;
+import org.apache.beam.sdk.util.construction.PipelineTranslation;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.ListeningExecutorService;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.MoreExecutors;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ListeningExecutorService;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.MoreExecutors;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -58,6 +61,9 @@ import org.slf4j.LoggerFactory;
  * org.apache.beam.runners.flink.translation.wrappers.streaming.ExecutableStageDoFnOperator}.
  */
 @RunWith(Parameterized.class)
+// TODO(https://github.com/apache/beam/issues/21230): Remove when new version of errorprone is
+// released (2.11.0)
+@SuppressWarnings("unused")
 public class PortableStateExecutionTest implements Serializable {
 
   private static final Logger LOG = LoggerFactory.getLogger(PortableStateExecutionTest.class);
@@ -102,6 +108,7 @@ public class PortableStateExecutionTest implements Serializable {
     options
         .as(PortablePipelineOptions.class)
         .setDefaultEnvironmentType(Environments.ENVIRONMENT_EMBEDDED);
+    options.as(PortablePipelineOptions.class).setEnvironmentCacheMillis(10_000);
     Pipeline p = Pipeline.create(options);
     PCollection<KV<String, String>> output =
         p.apply(Impulse.create())
@@ -130,6 +137,7 @@ public class PortableStateExecutionTest implements Serializable {
                 "statefulDoFn",
                 ParDo.of(
                     new DoFn<KV<String, Integer>, KV<String, String>>() {
+
                       @StateId("valueState")
                       private final StateSpec<ValueState<Integer>> valueStateSpec =
                           StateSpecs.value(VarIntCoder.of());
@@ -192,7 +200,7 @@ public class PortableStateExecutionTest implements Serializable {
     JobInvocation jobInvocation =
         FlinkJobInvoker.create(null)
             .createJobInvocation(
-                "id",
+                "id-" + UUID.randomUUID(),
                 "none",
                 flinkJobExecutor,
                 pipelineProto,
@@ -201,9 +209,15 @@ public class PortableStateExecutionTest implements Serializable {
                     options.as(FlinkPipelineOptions.class), null, Collections.emptyList()));
 
     jobInvocation.start();
-
-    while (jobInvocation.getState() != JobState.Enum.DONE) {
-      Thread.sleep(1000);
+    try {
+      while (!JobInvocation.isTerminated(jobInvocation.getState())) {
+        Thread.sleep(1000);
+      }
+      assertEquals(JobState.Enum.DONE, jobInvocation.getState());
+    } finally {
+      if (!JobInvocation.isTerminated(jobInvocation.getState())) {
+        jobInvocation.cancel();
+      }
     }
   }
 }

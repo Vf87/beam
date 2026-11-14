@@ -23,6 +23,11 @@ Should be called before running the tests.
   <td>Default: <code>false</code></td>
 </tr>
 <tr>
+  <td><code>attached_mode</code></td>
+  <td>Specifies if the pipeline is submitted in attached or detached mode</td>
+  <td>Default: <code>true</code></td>
+</tr>
+<tr>
   <td><code>auto_balance_write_files_sharding_enabled</code></td>
   <td>Flag indicating whether auto-balance sharding for WriteFiles transform should be enabled. This might prove useful in streaming use-case, where pipeline needs to write quite many events into files, typically divided into N shards. Default behavior on Flink would be, that some workers will receive more shards to take care of than others. This cause workers to go out of balance in terms of processing backlog and memory usage. Enabling this feature will make shards to be spread evenly among available workers in improve throughput and memory usage stability.</td>
   <td>Default: <code>false</code></td>
@@ -53,8 +58,13 @@ Should be called before running the tests.
   <td>Default: <code>false</code></td>
 </tr>
 <tr>
+  <td><code>enable_stable_input_drain</code></td>
+  <td>Allow drain operation for flink pipelines that contain RequiresStableInput operator. Note that at time of draining,the RequiresStableInput contract might be violated if there any processing related failures in the DoFn operator.</td>
+  <td>Default: <code>false</code></td>
+</tr>
+<tr>
   <td><code>execution_mode_for_batch</code></td>
-  <td>Flink mode for data exchange of batch pipelines. Reference {@link org.apache.flink.api.common.ExecutionMode}. Set this to BATCH_FORCED if pipelines get blocked, see https://issues.apache.org/jira/browse/FLINK-10672</td>
+  <td>Flink mode for data exchange of batch pipelines. Reference {@link org.apache.flink.api.common.ExecutionMode}. Set this to BATCH_FORCED if pipelines get blocked, see https://issues.apache.org/jira/browse/FLINK-10672.</td>
   <td>Default: <code>PIPELINED</code></td>
 </tr>
 <tr>
@@ -68,19 +78,14 @@ Should be called before running the tests.
   <td>Default: <code>false</code></td>
 </tr>
 <tr>
-  <td><code>fail_on_checkpointing_errors</code></td>
-  <td>Sets the expected behaviour for tasks in case that they encounter an error in their checkpointing procedure. If this is set to true, the task will fail on checkpointing error. If this is set to false, the task will only decline a the checkpoint and continue running. </td>
-  <td>Default: <code>true</code></td>
-</tr>
-<tr>
   <td><code>faster_copy</code></td>
   <td>Remove unneeded deep copy between operators. See https://issues.apache.org/jira/browse/BEAM-11146</td>
   <td>Default: <code>false</code></td>
 </tr>
 <tr>
-  <td><code>files_to_stage</code></td>
-  <td>Jar-Files to send to all workers and put on the classpath. The default value is all files from the classpath.</td>
-  <td></td>
+  <td><code>file_input_split_max_size_m_b</code></td>
+  <td>Set the maximum size of input split when data is read from a filesystem. 0 implies no max size.</td>
+  <td>Default: <code>0</code></td>
 </tr>
 <tr>
   <td><code>finish_bundle_before_checkpointing</code></td>
@@ -88,9 +93,29 @@ Should be called before running the tests.
   <td>Default: <code>false</code></td>
 </tr>
 <tr>
+  <td><code>flink_conf_dir</code></td>
+  <td>Directory containing Flink YAML configuration files. These properties will be set to all jobs submitted to Flink and take precedence over configurations in FLINK_CONF_DIR.</td>
+  <td></td>
+</tr>
+<tr>
   <td><code>flink_master</code></td>
   <td>Address of the Flink Master where the Pipeline should be executed. Can either be of the form "host:port" or one of the special values [local], [collection] or [auto].</td>
   <td>Default: <code>[auto]</code></td>
+</tr>
+<tr>
+  <td><code>force_slot_sharing_group</code></td>
+  <td>Set a slot sharing group for all bounded sources. This is required when using Datastream to have the same scheduling behaviour as the Dataset API.</td>
+  <td>Default: <code>true</code></td>
+</tr>
+<tr>
+  <td><code>force_unaligned_checkpoint_enabled</code></td>
+  <td>Forces unaligned checkpoints, particularly allowing them for iterative jobs.</td>
+  <td>Default: <code>false</code></td>
+</tr>
+<tr>
+  <td><code>job_check_interval_in_secs</code></td>
+  <td>Set job check interval in seconds under detached mode in method waitUntilFinish, by default it is 5 seconds</td>
+  <td>Default: <code>5</code></td>
 </tr>
 <tr>
   <td><code>latency_tracking_interval</code></td>
@@ -98,14 +123,24 @@ Should be called before running the tests.
   <td>Default: <code>0</code></td>
 </tr>
 <tr>
+  <td><code>lazy_batch_grouping_inputs</code></td>
+  <td>Batch only. Decode the values of records sent to GroupByKey and Combine operators lazily, so that records are passed from the network to Flink's sorter without decoding and re-encoding their values. Has no effect in streaming mode. Enabled by default; set to false to disable.</td>
+  <td>Default: <code>true</code></td>
+</tr>
+<tr>
+  <td><code>length_prefix_batch_records</code></td>
+  <td>Batch only. Prefix every record exchanged or sorted by Flink with its encoded length, so that Flink can copy records (e.g. when spilling sorted data to disk) without decoding and re-encoding them. Has no effect in streaming mode. Enabled by default; set to false to disable.</td>
+  <td>Default: <code>true</code></td>
+</tr>
+<tr>
   <td><code>max_bundle_size</code></td>
-  <td>The maximum number of elements in a bundle.</td>
-  <td>Default: <code>1000</code></td>
+  <td>The maximum number of elements in a bundle. Default values are 1000 for a streaming job and 1,000,000 for batch</td>
+  <td>Default: <code>MaxBundleSizeFactory</code></td>
 </tr>
 <tr>
   <td><code>max_bundle_time_mills</code></td>
-  <td>The maximum time to wait before finalising a bundle (in milliseconds).</td>
-  <td>Default: <code>1000</code></td>
+  <td>The maximum time to wait before finalising a bundle (in milliseconds). Default values are 1000 for streaming and 10,000 for batch.</td>
+  <td>Default: <code>MaxBundleTimeFactory</code></td>
 </tr>
 <tr>
   <td><code>max_parallelism</code></td>
@@ -133,14 +168,14 @@ Should be called before running the tests.
   <td>Default: <code>false</code></td>
 </tr>
 <tr>
+  <td><code>operator_chaining</code></td>
+  <td>Sets the behavior of operator chaining.</td>
+  <td>Default: <code>true</code></td>
+</tr>
+<tr>
   <td><code>parallelism</code></td>
   <td>The degree of parallelism to be used when distributing operations onto workers. If the parallelism is not set, the configured Flink default is used, or 1 if none can be found.</td>
   <td>Default: <code>-1</code></td>
-</tr>
-<tr>
-  <td><code>re_iterable_group_by_key_result</code></td>
-  <td>Flag indicating whether result of GBK needs to be re-iterable. Re-iterable result implies that all values for a single key must fit in memory as we currently do not support spilling to disk.</td>
-  <td>Default: <code>false</code></td>
 </tr>
 <tr>
   <td><code>report_checkpoint_duration</code></td>
@@ -163,8 +198,18 @@ Should be called before running the tests.
   <td>Default: <code>-1</code></td>
 </tr>
 <tr>
+  <td><code>sorted_batch_combine</code></td>
+  <td>Batch only. Use a dedicated operator for the final step of GroupByKey and Combine in the global window with the default trigger. It relies on Flink sorting the input by key and does not use keyed state or timers. Has no effect in streaming mode. Enabled by default; set to false to disable.</td>
+  <td>Default: <code>true</code></td>
+</tr>
+<tr>
+  <td><code>source_static_split_threshold_mb</code></td>
+  <td>Static split assignment threshold in MiB per source reader for bounded sources in Flink DataStream mode. The default of 0 always uses lazy assignment. A positive value selects static round-robin assignment for sources with a known, positive estimate below the threshold and lazy assignment otherwise. Any negative value always uses static assignment.</td>
+  <td>Default: <code>0</code></td>
+</tr>
+<tr>
   <td><code>state_backend</code></td>
-  <td>State backend to store Beam's state. Use 'rocksdb' or 'filesystem'.</td>
+  <td>State backend to store Beam's state. Use 'rocksdb' or 'hashmap' (same as 'filesystem').</td>
   <td></td>
 </tr>
 <tr>
@@ -176,5 +221,15 @@ Should be called before running the tests.
   <td><code>state_backend_storage_path</code></td>
   <td>State backend path to persist state backend data. Used to initialize state backend.</td>
   <td></td>
+</tr>
+<tr>
+  <td><code>tolerable_checkpoint_failure_number</code></td>
+  <td>Sets the expected behaviour for tasks in case that they encounter an error in their checkpointing procedure. To tolerate a specific number of failures, set it to a positive number.</td>
+  <td>Default: <code>0</code></td>
+</tr>
+<tr>
+  <td><code>unaligned_checkpoint_enabled</code></td>
+  <td>If set, Unaligned checkpoints contain in-flight data (i.e., data stored in buffers) as part of the checkpoint state, allowing checkpoint barriers to overtake these buffers. Thus, the checkpoint duration becomes independent of the current throughput as checkpoint barriers are effectively not embedded into the stream of data anymore</td>
+  <td>Default: <code>false</code></td>
 </tr>
 </table>

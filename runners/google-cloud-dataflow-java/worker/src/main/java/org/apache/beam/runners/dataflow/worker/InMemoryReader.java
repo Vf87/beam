@@ -18,8 +18,8 @@
 package org.apache.beam.runners.dataflow.worker;
 
 import static com.google.api.client.util.Preconditions.checkNotNull;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects.firstNonNull;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects.firstNonNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.api.services.dataflow.model.ApproximateReportedProgress;
 import java.io.IOException;
@@ -32,8 +32,8 @@ import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.io.range.OffsetRangeTracker;
 import org.apache.beam.sdk.util.CoderUtils;
 import org.apache.beam.sdk.util.StringUtils;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -44,7 +44,7 @@ import org.slf4j.LoggerFactory;
  * @param <T> the type of the elements read from the source
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class InMemoryReader<T> extends NativeReader<T> {
   private static final Logger LOG = LoggerFactory.getLogger(InMemoryReader.class);
@@ -64,10 +64,12 @@ public class InMemoryReader<T> extends NativeReader<T> {
     int maxIndex = encodedElements.size();
     this.startIndex = Math.min(maxIndex, firstNonNull(startIndex, 0));
     this.endIndex = Math.min(maxIndex, firstNonNull(endIndex, maxIndex));
-    checkArgument(this.startIndex >= 0, "negative start index: " + startIndex);
+    checkArgument(this.startIndex >= 0, "negative start index: %s", startIndex);
     checkArgument(
         this.endIndex >= this.startIndex,
-        "end index before start: [" + this.startIndex + ", " + this.endIndex + ")");
+        "end index before start: [%s, %s)",
+        this.startIndex,
+        this.endIndex);
     this.coder = coder;
   }
 

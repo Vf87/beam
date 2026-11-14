@@ -28,16 +28,20 @@ from apache_beam.runners.interactive import cache_manager as cache
 from apache_beam.runners.interactive import interactive_environment as ie
 from apache_beam.runners.interactive.recording_manager import RecordingManager
 from apache_beam.runners.interactive.sql.sql_chain import SqlNode
+from apache_beam.runners.interactive.testing.mock_env import isolated_env
 
 # The module name is also a variable in module.
 _module_name = 'apache_beam.runners.interactive.interactive_environment_test'
 
 
+@unittest.skipIf(
+    not ie.current_env().is_interactive_ready,
+    '[interactive] dependency is not installed.')
+@isolated_env
 class InteractiveEnvironmentTest(unittest.TestCase):
   def setUp(self):
     self._p = beam.Pipeline()
     self._var_in_class_instance = 'a var in class instance'
-    ie.new_env()
 
   def assertVariableWatched(self, variable_name, variable_val):
     self.assertTrue(self._is_variable_watched(variable_name, variable_val))
@@ -164,8 +168,7 @@ class InteractiveEnvironmentTest(unittest.TestCase):
       mocked_atexit.assert_called_once()
 
   def test_cleanup_invoked_when_new_env_replace_not_none_env(self):
-    ie._interactive_beam_env = None
-    ie.new_env()
+    ie._interactive_beam_env = self.current_env
     with patch('apache_beam.runners.interactive.interactive_environment'
                '.InteractiveEnvironment.cleanup') as mocked_cleanup:
       ie.new_env()
@@ -205,13 +208,12 @@ class InteractiveEnvironmentTest(unittest.TestCase):
 
   def test_get_cache_manager_creates_cache_manager_if_absent(self):
     env = ie.InteractiveEnvironment()
-    dummy_pipeline = 'dummy'
+    dummy_pipeline = beam.Pipeline()
     self.assertIsNone(env.get_cache_manager(dummy_pipeline))
     self.assertIsNotNone(
         env.get_cache_manager(dummy_pipeline, create_if_absent=True))
 
   def test_track_user_pipeline_cleanup_non_inspectable_pipeline(self):
-    ie.new_env()
     dummy_pipeline_1 = beam.Pipeline()
     dummy_pipeline_2 = beam.Pipeline()
     dummy_pipeline_3 = beam.Pipeline()
@@ -259,36 +261,24 @@ class InteractiveEnvironmentTest(unittest.TestCase):
     self.assertSetEqual(ie.current_env().computed_pcollections, {not_evicted})
 
   def test_set_get_recording_manager(self):
-    ie._interactive_beam_env = None
-    ie.new_env()
-
     p = beam.Pipeline()
     rm = RecordingManager(p)
     ie.current_env().set_recording_manager(rm, p)
     self.assertIs(rm, ie.current_env().get_recording_manager(p))
 
   def test_recording_manager_create_if_absent(self):
-    ie._interactive_beam_env = None
-    ie.new_env()
-
     p = beam.Pipeline()
     self.assertFalse(ie.current_env().get_recording_manager(p))
     self.assertTrue(
         ie.current_env().get_recording_manager(p, create_if_absent=True))
 
   def test_evict_recording_manager(self):
-    ie._interactive_beam_env = None
-    ie.new_env()
-
     p = beam.Pipeline()
     self.assertFalse(ie.current_env().get_recording_manager(p))
     self.assertTrue(
         ie.current_env().get_recording_manager(p, create_if_absent=True))
 
   def test_describe_all_recordings(self):
-    ie._interactive_beam_env = None
-    ie.new_env()
-
     self.assertFalse(ie.current_env().describe_all_recordings())
 
     p1 = beam.Pipeline()
@@ -334,6 +324,63 @@ class InteractiveEnvironmentTest(unittest.TestCase):
     env.sql_chain[p2] = chain
     with self.assertRaises(ValueError):
       env.get_sql_chain(p2, set_user_pipeline=True)
+
+  @patch(
+      'apache_beam.runners.interactive.interactive_environment.'
+      'assert_bucket_exists',
+      return_value=None)
+  def test_get_gcs_cache_dir_valid_path(self, mock_assert_bucket_exists):
+    env = ie.InteractiveEnvironment()
+    p = beam.Pipeline()
+    cache_root = 'gs://test-cache-dir/'
+    actual_cache_dir = env._get_gcs_cache_dir(p, cache_root)
+    expected_cache_dir = 'gs://test-cache-dir/{}'.format(id(p))
+    self.assertEqual(actual_cache_dir, expected_cache_dir)
+
+  def test_get_gcs_cache_dir_invalid_path(self):
+    env = ie.InteractiveEnvironment()
+    p = beam.Pipeline()
+    cache_root = 'gs://'
+    with self.assertRaises(ValueError):
+      env._get_gcs_cache_dir(p, cache_root)
+
+  def test_pcollection_computing_state(self):
+    env = ie.InteractiveEnvironment()
+    p = beam.Pipeline()
+    pcoll1 = p | 'Create1' >> beam.Create([1])
+    pcoll2 = p | 'Create2' >> beam.Create([2])
+
+    self.assertFalse(env.is_pcollection_computing(pcoll1))
+    self.assertFalse(env.is_pcollection_computing(pcoll2))
+    self.assertEqual(env.computing_pcollections, set())
+
+    env.mark_pcollection_computing({pcoll1})
+    self.assertTrue(env.is_pcollection_computing(pcoll1))
+    self.assertFalse(env.is_pcollection_computing(pcoll2))
+    self.assertEqual(env.computing_pcollections, {pcoll1})
+
+    env.mark_pcollection_computing({pcoll2})
+    self.assertTrue(env.is_pcollection_computing(pcoll1))
+    self.assertTrue(env.is_pcollection_computing(pcoll2))
+    self.assertEqual(env.computing_pcollections, {pcoll1, pcoll2})
+
+    env.unmark_pcollection_computing({pcoll1})
+    self.assertFalse(env.is_pcollection_computing(pcoll1))
+    self.assertTrue(env.is_pcollection_computing(pcoll2))
+    self.assertEqual(env.computing_pcollections, {pcoll2})
+
+    env.unmark_pcollection_computing({pcoll2})
+    self.assertFalse(env.is_pcollection_computing(pcoll1))
+    self.assertFalse(env.is_pcollection_computing(pcoll2))
+    self.assertEqual(env.computing_pcollections, set())
+
+  def test_mark_unmark_empty(self):
+    env = ie.InteractiveEnvironment()
+    # Ensure no errors with empty sets
+    env.mark_pcollection_computing(set())
+    self.assertEqual(env.computing_pcollections, set())
+    env.unmark_pcollection_computing(set())
+    self.assertEqual(env.computing_pcollections, set())
 
 
 if __name__ == '__main__':

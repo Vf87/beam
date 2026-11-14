@@ -19,6 +19,7 @@ package org.apache.beam.sdk.io.thrift;
 
 import static java.util.Collections.unmodifiableMap;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Arrays;
@@ -33,12 +34,10 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
-import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.schemas.FieldValueGetter;
 import org.apache.beam.sdk.schemas.FieldValueTypeInformation;
-import org.apache.beam.sdk.schemas.GetterBasedSchemaProvider;
+import org.apache.beam.sdk.schemas.GetterBasedSchemaProviderV2;
 import org.apache.beam.sdk.schemas.Schema;
-import org.apache.beam.sdk.schemas.Schema.Builder;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.schemas.SchemaProvider;
 import org.apache.beam.sdk.schemas.SchemaUserTypeCreator;
@@ -107,8 +106,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * not. On decoding, we set all non-{@code null} beam row values to the corresponding thrift fields,
  * leaving the rest unset.
  */
-@Experimental(Experimental.Kind.SCHEMAS)
-public final class ThriftSchema extends GetterBasedSchemaProvider {
+public final class ThriftSchema extends GetterBasedSchemaProviderV2 {
   private static final ThriftSchema defaultProvider = new ThriftSchema(Collections.emptyMap());
 
   private final Map<String, FieldType> typedefs;
@@ -124,6 +122,10 @@ public final class ThriftSchema extends GetterBasedSchemaProvider {
    *
    * @see #custom() for how to manually pass the beam type for container typedefs
    */
+  @SuppressFBWarnings(
+      value = "MS_EXPOSE_REP",
+      justification =
+          "The default provider holds an empty typedef map that is never mutated. Callers needing typedefs go through custom(), which builds a separate instance.")
   public static @NonNull SchemaProvider provider() {
     return defaultProvider;
   }
@@ -173,10 +175,13 @@ public final class ThriftSchema extends GetterBasedSchemaProvider {
     final Stream<Schema.Field> fields =
         thriftFieldDescriptors(targetClass).values().stream().map(this::beamField);
     if (TUnion.class.isAssignableFrom(targetClass)) {
-      return OneOfType.create(fields.collect(Collectors.toList())).getOneOfSchema();
+      // Beam OneOf is just a record of fields where exactly one must be non-null, so it doesn't
+      // allow the types of the cases to be nullable
+      return OneOfType.create(fields.map(f -> f.withNullable(false)).collect(Collectors.toList()))
+          .getOneOfSchema();
     } else {
       return fields
-          .reduce(Schema.builder(), Builder::addField, ThriftSchema::throwingCombiner)
+          .reduce(Schema.builder(), Schema.Builder::addField, ThriftSchema::throwingCombiner)
           .build();
     }
   }
@@ -205,18 +210,20 @@ public final class ThriftSchema extends GetterBasedSchemaProvider {
 
   @SuppressWarnings("rawtypes")
   @Override
-  public @NonNull List<FieldValueGetter> fieldValueGetters(
-      @NonNull Class<?> targetClass, @NonNull Schema schema) {
-    return schemaFieldDescriptors(targetClass, schema).keySet().stream()
-        .map(FieldExtractor::new)
+  public <T> @NonNull List<FieldValueGetter<@NonNull T, Object>> fieldValueGetters(
+      @NonNull TypeDescriptor<T> targetTypeDescriptor, @NonNull Schema schema) {
+    return schemaFieldDescriptors(targetTypeDescriptor.getRawType(), schema).keySet().stream()
+        .<FieldExtractor<TFieldIdEnum, @NonNull T>>map(FieldExtractor::new)
         .collect(Collectors.toList());
   }
 
   @Override
   public @NonNull List<FieldValueTypeInformation> fieldValueTypeInformations(
-      @NonNull Class<?> targetClass, @NonNull Schema schema) {
-    return schemaFieldDescriptors(targetClass, schema).values().stream()
-        .map(descriptor -> fieldValueTypeInfo(targetClass, descriptor.fieldName))
+      @NonNull TypeDescriptor<?> targetTypeDescriptor, @NonNull Schema schema) {
+    return schemaFieldDescriptors(targetTypeDescriptor.getRawType(), schema).values().stream()
+        .map(
+            descriptor ->
+                fieldValueTypeInfo(targetTypeDescriptor.getRawType(), descriptor.fieldName))
         .collect(Collectors.toList());
   }
 
@@ -243,10 +250,12 @@ public final class ThriftSchema extends GetterBasedSchemaProvider {
       if (factoryMethods.size() > 1) {
         throw new IllegalStateException("Overloaded factory methods: " + factoryMethods);
       }
-      return FieldValueTypeInformation.forSetter(factoryMethods.get(0), "");
+      return FieldValueTypeInformation.forSetter(
+          TypeDescriptor.of(type), factoryMethods.get(0), "");
     } else {
       try {
-        return FieldValueTypeInformation.forField(type.getDeclaredField(fieldName));
+        return FieldValueTypeInformation.forField(
+            TypeDescriptor.of(type), type.getDeclaredField(fieldName), 0);
       } catch (NoSuchFieldException e) {
         throw new IllegalArgumentException(e);
       }
@@ -255,10 +264,11 @@ public final class ThriftSchema extends GetterBasedSchemaProvider {
 
   @Override
   public @NonNull SchemaUserTypeCreator schemaTypeCreator(
-      @NonNull Class<?> targetClass, @NonNull Schema schema) {
+      @NonNull TypeDescriptor<?> targetTypeDescriptor, @NonNull Schema schema) {
     final Map<TFieldIdEnum, FieldMetaData> fieldDescriptors =
-        schemaFieldDescriptors(targetClass, schema);
-    return params -> restoreThriftObject(targetClass, fieldDescriptors, params);
+        schemaFieldDescriptors(targetTypeDescriptor.getRawType(), schema);
+    return params ->
+        restoreThriftObject(targetTypeDescriptor.getRawType(), fieldDescriptors, params);
   }
 
   @SuppressWarnings("nullness")
@@ -373,7 +383,7 @@ public final class ThriftSchema extends GetterBasedSchemaProvider {
     }
   }
 
-  private static class FieldExtractor<FieldT extends TFieldIdEnum, T extends TBase<T, FieldT>>
+  private static class FieldExtractor<FieldT extends TFieldIdEnum, T extends @NonNull Object>
       implements FieldValueGetter<T, Object> {
     private final FieldT field;
 
@@ -383,8 +393,9 @@ public final class ThriftSchema extends GetterBasedSchemaProvider {
 
     @Override
     public @Nullable Object get(T thrift) {
-      if (!(thrift instanceof TUnion) || thrift.isSet(field)) {
-        final Object value = thrift.getFieldValue(field);
+      TBase<?, TFieldIdEnum> t = (TBase<?, TFieldIdEnum>) thrift;
+      if (!(thrift instanceof TUnion) || t.isSet(field)) {
+        final Object value = t.getFieldValue(field);
         if (value instanceof Enum<?>) {
           return ((Enum<?>) value).ordinal();
         } else {

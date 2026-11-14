@@ -20,11 +20,11 @@ package org.apache.beam.runners.spark.translation;
 import java.util.Collections;
 import java.util.Iterator;
 import org.apache.beam.sdk.transforms.join.RawUnionValue;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValue;
 import org.apache.spark.api.java.function.FlatMapFunction;
 
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 class SparkExecutableStageExtractionFunction<OutputT>
     implements FlatMapFunction<RawUnionValue, WindowedValue<OutputT>> {

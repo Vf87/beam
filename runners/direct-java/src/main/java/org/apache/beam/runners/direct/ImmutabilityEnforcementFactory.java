@@ -17,8 +17,9 @@
  */
 package org.apache.beam.runners.direct;
 
+import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
+
 import java.util.IdentityHashMap;
-import java.util.Map;
 import org.apache.beam.sdk.Pipeline.PipelineVisitor;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderException;
@@ -30,15 +31,14 @@ import org.apache.beam.sdk.util.IllegalMutationException;
 import org.apache.beam.sdk.util.MutationDetector;
 import org.apache.beam.sdk.util.MutationDetectors;
 import org.apache.beam.sdk.util.UserCodeException;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValue;
 
 /**
  * {@link ModelEnforcement} that enforces elements are not modified over the course of processing an
  * element.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 class ImmutabilityEnforcementFactory implements ModelEnforcementFactory {
   public static ModelEnforcementFactory create() {
@@ -107,13 +107,13 @@ class ImmutabilityEnforcementFactory implements ModelEnforcementFactory {
 
   private static class ImmutabilityCheckingEnforcement<T> extends AbstractModelEnforcement<T> {
     private final AppliedPTransform<?, ?, ?> transform;
-    private final Map<WindowedValue<T>, MutationDetector> mutationElements;
+    private final IdentityHashMap<WindowedValue<T>, MutationDetector> mutationElements;
     private final Coder<T> coder;
 
     private ImmutabilityCheckingEnforcement(
         CommittedBundle<T> input, AppliedPTransform<?, ?, ?> transform) {
       this.transform = transform;
-      coder = input.getPCollection().getCoder();
+      coder = checkStateNotNull(input.getPCollection()).getCoder();
       mutationElements = new IdentityHashMap<>();
     }
 
@@ -129,7 +129,7 @@ class ImmutabilityEnforcementFactory implements ModelEnforcementFactory {
 
     @Override
     public void afterElement(WindowedValue<T> element) {
-      verifyUnmodified(mutationElements.get(element));
+      verifyUnmodified(checkStateNotNull(mutationElements.get(element)));
     }
 
     @Override

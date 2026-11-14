@@ -43,7 +43,7 @@ import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.junit.Ignore;
 import org.junit.Rule;
@@ -540,10 +540,8 @@ public class XmlSourceTest {
     exception.expectMessage("MyCustomValidationEventHandler failure mesage");
     try (Reader<WrongTrainType> reader = source.createReader(null)) {
 
-      List<WrongTrainType> results = new ArrayList<>();
       for (boolean available = reader.start(); available; available = reader.advance()) {
-        WrongTrainType train = reader.getCurrent();
-        results.add(train);
+        reader.getCurrent();
       }
     }
   }

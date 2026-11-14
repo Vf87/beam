@@ -21,10 +21,10 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.Assert.assertThrows;
 
-import com.alibaba.fastjson.JSON;
 import java.util.List;
 import org.apache.beam.sdk.coders.ByteArrayCoder;
 import org.apache.beam.sdk.extensions.protobuf.PayloadMessages;
+import org.apache.beam.sdk.extensions.sql.TableUtils;
 import org.apache.beam.sdk.extensions.sql.meta.Table;
 import org.apache.beam.sdk.io.kafka.KafkaRecordCoder;
 import org.apache.beam.sdk.io.kafka.ProducerRecordCoder;
@@ -34,7 +34,7 @@ import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.junit.Test;
 
 public class BeamKafkaTableProtoTest extends BeamKafkaTableTest {
@@ -86,7 +86,7 @@ public class BeamKafkaTableProtoTest extends BeamKafkaTableTest {
 
   private static BeamKafkaTable getBeamKafkaTable(Schema schema) {
     return (BeamKafkaTable)
-        (new KafkaTableProvider()
+        new KafkaTableProvider()
             .buildBeamSqlTable(
                 Table.builder()
                     .name("kafka")
@@ -94,11 +94,11 @@ public class BeamKafkaTableProtoTest extends BeamKafkaTableTest {
                     .schema(schema)
                     .location("localhost/mytopic")
                     .properties(
-                        JSON.parseObject(
+                        TableUtils.parseProperties(
                             "{ \"format\": \"proto\", \"protoClass\": \""
                                 + PayloadMessages.TestMessage.class.getName()
                                 + "\" }"))
-                    .build()));
+                    .build());
   }
 
   @Override

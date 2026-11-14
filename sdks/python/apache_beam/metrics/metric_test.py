@@ -16,7 +16,7 @@
 #
 
 # pytype: skip-file
-
+import re
 import unittest
 
 import hamcrest as hc
@@ -28,10 +28,12 @@ from apache_beam.metrics.cells import DistributionData
 from apache_beam.metrics.execution import MetricKey
 from apache_beam.metrics.execution import MetricsContainer
 from apache_beam.metrics.execution import MetricsEnvironment
+from apache_beam.metrics.metric import Lineage
 from apache_beam.metrics.metric import MetricResults
 from apache_beam.metrics.metric import Metrics
 from apache_beam.metrics.metric import MetricsFilter
 from apache_beam.metrics.metricbase import MetricName
+from apache_beam.runners.direct.direct_runner import BundleBasedDirectRunner
 from apache_beam.runners.worker import statesampler
 from apache_beam.testing.metric_result_matchers import DistributionMatcher
 from apache_beam.testing.metric_result_matchers import MetricResultMatcher
@@ -39,6 +41,7 @@ from apache_beam.testing.test_pipeline import TestPipeline
 from apache_beam.testing.util import assert_that
 from apache_beam.testing.util import equal_to
 from apache_beam.utils import counters
+from apache_beam.utils.histogram import LinearBucket
 
 
 class NameTest(unittest.TestCase):
@@ -200,7 +203,7 @@ class MetricsTest(unittest.TestCase):
     # Verify user distribution counter.
     metric_results = res.metrics().query()
     matcher = MetricResultMatcher(
-        step='ApplyPardo',
+        step=hc.contains_string('ApplyPardo'),
         namespace=hc.contains_string('SomeDoFn'),
         name='element_dist',
         committed=DistributionMatcher(
@@ -208,8 +211,7 @@ class MetricsTest(unittest.TestCase):
             count_value=hc.greater_than_or_equal_to(0),
             min_value=hc.greater_than_or_equal_to(0),
             max_value=hc.greater_than_or_equal_to(0)))
-    hc.assert_that(
-        metric_results['distributions'], hc.contains_inanyorder(matcher))
+    hc.assert_that(metric_results['distributions'], hc.has_item(matcher))
 
   def test_create_counter_distribution(self):
     sampler = statesampler.StateSampler('', counters.CounterFactory())
@@ -246,6 +248,77 @@ class MetricsTest(unittest.TestCase):
             DistributionData(12, 2, 2, 10))
     finally:
       sampler.stop()
+
+
+class LineageTest(unittest.TestCase):
+  def test_fq_name(self):
+    test_cases = {
+        "apache-beam": "apache-beam",
+        "`apache-beam`": "`apache-beam`",
+        "apache.beam": "`apache.beam`",
+        "apache:beam": "`apache:beam`",
+        "apache beam": "`apache beam`",
+        "`apache beam`": "`apache beam`",
+        "apache\tbeam": "`apache\tbeam`",
+        "apache\nbeam": "`apache\nbeam`"
+    }
+    for k, v in test_cases.items():
+      self.assertEqual("apache:" + v, Lineage.get_fq_name("apache", k))
+      self.assertEqual(
+          "apache:beam:" + v, Lineage.get_fq_name("apache", k, subtype="beam"))
+      self.assertEqual(
+          "apache:beam:" + v + '.' + v,
+          Lineage.get_fq_name("apache", k, k, subtype="beam"))
+
+  def test_add(self):
+    lineage = Lineage(Lineage.SOURCE)
+    added = set()
+    # override
+    lineage.metric = added
+    lineage.add("s", "1", "2")
+    lineage.add("s:3.4")
+    lineage.add("s", "5", "6.7")
+    lineage.add("s", "1", "2", subtype="t")
+    lineage.add("sys", "seg1", "seg2", "seg3/part2/part3", last_segment_sep='/')
+    self.assertSetEqual(
+        added,
+        {('s:', '1.', '2'), ('s:3.4:', ), ('s:', '5.', '6.7'),
+         ('s:', 't:', '1.', '2'),
+         ('sys:', 'seg1.', 'seg2.', 'seg3/', 'part2/', 'part3')})
+
+
+class HistogramTest(unittest.TestCase):
+  def test_histogram(self):
+    class WordExtractingDoFn(beam.DoFn):
+      def __init__(self):
+        self.word_lengths_dist = Metrics.histogram(
+            self.__class__,
+            'latency_histogram_ms',
+            LinearBucket(0, 1, num_buckets=10))
+
+      def process(self, element):
+        text_line = element.strip()
+        words = re.findall(r'[\w\']+', text_line, re.UNICODE)
+        for w in words:
+          self.word_lengths_dist.update(len(w))
+        return words
+
+    with beam.Pipeline(runner=BundleBasedDirectRunner()) as p:
+      lines = p | 'read' >> beam.Create(["x x x yyyyyy yyyyyy yyyyyy"])
+      _ = (
+          lines
+          | 'split' >>
+          (beam.ParDo(WordExtractingDoFn()).with_output_types(str)))
+
+    result = p.result
+
+    filter = MetricsFilter().with_name('latency_histogram_ms')
+    query_result = result.metrics().query(filter)
+    histogram = query_result['histograms'][0].committed.histogram
+    assert histogram._buckets == {1: 3, 6: 3}
+    assert histogram.total_count() == 6
+    assert 1 < histogram.get_linear_interpolation(0.50) < 3
+    assert histogram.get_linear_interpolation(0.99) > 3
 
 
 if __name__ == '__main__':

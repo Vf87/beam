@@ -24,11 +24,13 @@ import argparse
 import importlib
 import keyword
 import logging
-from typing import Dict
-from typing import List
+import traceback
 from typing import Optional
-from typing import Tuple
 from typing import Union
+
+from IPython.core.magic import Magics
+from IPython.core.magic import line_cell_magic
+from IPython.core.magic import magics_class
 
 import apache_beam as beam
 from apache_beam.pvalue import PValue
@@ -53,9 +55,6 @@ from apache_beam.testing import test_stream
 from apache_beam.testing.test_stream_service import TestStreamServiceController
 from apache_beam.transforms.sql import SqlTransform
 from apache_beam.typehints.native_type_compatibility import match_is_named_tuple
-from IPython.core.magic import Magics
-from IPython.core.magic import line_cell_magic
-from IPython.core.magic import magics_class
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -124,7 +123,7 @@ class BeamSqlParser:
             'names and the SQL keywords, such as "SELECT", "FROM", "WHERE" and '
             'etc.'))
 
-  def parse(self, args: List[str]) -> Optional[argparse.Namespace]:
+  def parse(self, args: list[str]) -> Optional[argparse.Namespace]:
     """Parses a list of string inputs.
 
     The parsed namespace contains these attributes:
@@ -201,6 +200,7 @@ class BeamSqlMagics(Magics):
           'Runner "%s" is not supported. Supported runners are %s.',
           runner,
           _SUPPORTED_RUNNERS)
+      return
     query = ' '.join(query)
 
     found = find_pcolls(query, pcoll_by_name(), verbose=verbose)
@@ -243,14 +243,14 @@ class BeamSqlMagics(Magics):
 
 
 @progress_indicated
-def collect_data_for_local_run(query: str, found: Dict[str, beam.PCollection]):
+def collect_data_for_local_run(query: str, found: dict[str, beam.PCollection]):
   from apache_beam.runners.interactive import interactive_beam as ib
   for name, pcoll in found.items():
     try:
       _ = ib.collect(pcoll)
     except (KeyboardInterrupt, SystemExit):
       raise
-    except:
+    except:  # pylint: disable=bare-except
       _LOGGER.error(
           'Cannot collect data for PCollection %s. Please make sure the '
           'PCollections queried in the sql "%s" are all from a single '
@@ -266,8 +266,8 @@ def collect_data_for_local_run(query: str, found: Dict[str, beam.PCollection]):
 def apply_sql(
     query: str,
     output_name: Optional[str],
-    found: Dict[str, beam.PCollection],
-    run: bool = True) -> Tuple[str, Union[PValue, SqlNode], SqlChain]:
+    found: dict[str, beam.PCollection],
+    run: bool = True) -> tuple[str, Union[PValue, SqlNode], SqlChain]:
   """Applies a SqlTransform with the given sql and queried PCollections.
 
   Args:
@@ -299,8 +299,9 @@ def apply_sql(
       return output_name, output, chain
     except (KeyboardInterrupt, SystemExit):
       raise
-    except Exception as e:
-      on_error('Error when applying the Beam SQL: %s', e)
+    except:  # pylint: disable=bare-except
+      on_error('Error when applying the Beam SQL: %s', traceback.format_exc())
+      raise
   else:
     return output_name, chain.current, chain
 
@@ -308,7 +309,7 @@ def apply_sql(
 def pcolls_from_streaming_cache(
     user_pipeline: beam.Pipeline,
     query_pipeline: beam.Pipeline,
-    name_to_pcoll: Dict[str, beam.PCollection]) -> Dict[str, beam.PCollection]:
+    name_to_pcoll: dict[str, beam.PCollection]) -> dict[str, beam.PCollection]:
   """Reads PCollection cache through the TestStream.
 
   Args:
@@ -360,7 +361,7 @@ def pcolls_from_streaming_cache(
 
 def _generate_output_name(
     output_name: Optional[str], query: str,
-    found: Dict[str, beam.PCollection]) -> str:
+    found: dict[str, beam.PCollection]) -> str:
   """Generates a unique output name if None is provided.
 
   Otherwise, returns the given output name directly.
@@ -375,11 +376,11 @@ def _generate_output_name(
 
 def _build_query_components(
     query: str,
-    found: Dict[str, beam.PCollection],
+    found: dict[str, beam.PCollection],
     output_name: str,
     run: bool = True
-) -> Tuple[str,
-           Union[Dict[str, beam.PCollection], beam.PCollection, beam.Pipeline],
+) -> tuple[str,
+           Union[dict[str, beam.PCollection], beam.PCollection, beam.Pipeline],
            SqlChain]:
   """Builds necessary components needed to apply the SqlTransform.
 
@@ -451,8 +452,9 @@ def cache_output(output_name: str, output: PValue) -> None:
     output.pipeline.run().wait_until_finish()
   except (KeyboardInterrupt, SystemExit):
     raise
-  except Exception as e:
-    _LOGGER.warning(_NOT_SUPPORTED_MSG, e, output.pipeline.runner)
+  except:  # pylint: disable=bare-except
+    _LOGGER.warning(
+        _NOT_SUPPORTED_MSG, traceback.format_exc(), output.pipeline.runner)
     return
   ie.current_env().mark_pcollection_computed([output])
   visualize_computed_pcoll(

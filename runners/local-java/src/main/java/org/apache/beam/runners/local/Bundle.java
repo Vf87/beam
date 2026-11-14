@@ -17,15 +17,14 @@
  */
 package org.apache.beam.runners.local;
 
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValue;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
 /** An immutable collection of elements which are part of a {@code PCollection}. */
 public interface Bundle<T, CollectionT> extends Iterable<WindowedValue<T>> {
   /** Returns the PCollection that the elements of this bundle belong to. */
-  @Nullable
-  CollectionT getPCollection();
+  @Nullable CollectionT getPCollection();
 
   /**
    * Returns the key that was output in the most recent {@code GroupByKey} in the execution of this

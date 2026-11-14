@@ -25,9 +25,11 @@ import (
 	"reflect"
 
 	// Library imports
+	"github.com/apache/beam/sdks/v2/go/pkg/beam"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/runtime"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/runtime/exec"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/runtime/graphx/schema"
+	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/sdf"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/typex"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/util/reflectx"
 )
@@ -48,6 +50,8 @@ func init() {
 	schema.RegisterType(reflect.TypeOf((*failKVFn)(nil)).Elem())
 	runtime.RegisterType(reflect.TypeOf((*hashFn)(nil)).Elem())
 	schema.RegisterType(reflect.TypeOf((*hashFn)(nil)).Elem())
+	runtime.RegisterType(reflect.TypeOf((*nonEmptyFn)(nil)).Elem())
+	schema.RegisterType(reflect.TypeOf((*nonEmptyFn)(nil)).Elem())
 	runtime.RegisterType(reflect.TypeOf((*sumFn)(nil)).Elem())
 	schema.RegisterType(reflect.TypeOf((*sumFn)(nil)).Elem())
 	reflectx.RegisterStructWrapper(reflect.TypeOf((*diffFn)(nil)).Elem(), wrapMakerDiffFn)
@@ -57,81 +61,91 @@ func init() {
 	reflectx.RegisterStructWrapper(reflect.TypeOf((*failGBKFn)(nil)).Elem(), wrapMakerFailGBKFn)
 	reflectx.RegisterStructWrapper(reflect.TypeOf((*failKVFn)(nil)).Elem(), wrapMakerFailKVFn)
 	reflectx.RegisterStructWrapper(reflect.TypeOf((*hashFn)(nil)).Elem(), wrapMakerHashFn)
+	reflectx.RegisterStructWrapper(reflect.TypeOf((*nonEmptyFn)(nil)).Elem(), wrapMakerNonEmptyFn)
 	reflectx.RegisterStructWrapper(reflect.TypeOf((*sumFn)(nil)).Elem(), wrapMakerSumFn)
 	reflectx.RegisterFunc(reflect.TypeOf((*func(int, int) int)(nil)).Elem(), funcMakerIntIntГInt)
 	reflectx.RegisterFunc(reflect.TypeOf((*func(int, func(*int) bool) error)(nil)).Elem(), funcMakerIntIterIntГError)
 	reflectx.RegisterFunc(reflect.TypeOf((*func(int, func(*string) bool) error)(nil)).Elem(), funcMakerIntIterStringГError)
-	reflectx.RegisterFunc(reflect.TypeOf((*func(int, typex.T) int)(nil)).Elem(), funcMakerIntTypex۰TГInt)
+	reflectx.RegisterFunc(reflect.TypeOf((*func(int, beam.T) int)(nil)).Elem(), funcMakerIntTypex۰TГInt)
 	reflectx.RegisterFunc(reflect.TypeOf((*func(int) error)(nil)).Elem(), funcMakerIntГError)
 	reflectx.RegisterFunc(reflect.TypeOf((*func(int) int)(nil)).Elem(), funcMakerIntГInt)
-	reflectx.RegisterFunc(reflect.TypeOf((*func([]byte, func(*typex.T) bool, func(*typex.T) bool, func(t typex.T), func(t typex.T), func(t typex.T)) error)(nil)).Elem(), funcMakerSliceOfByteIterTypex۰TIterTypex۰TEmitTypex۰TEmitTypex۰TEmitTypex۰TГError)
-	reflectx.RegisterFunc(reflect.TypeOf((*func([]byte, func(*typex.T) bool, func(*typex.T) bool, func(*typex.T) bool) error)(nil)).Elem(), funcMakerSliceOfByteIterTypex۰TIterTypex۰TIterTypex۰TГError)
-	reflectx.RegisterFunc(reflect.TypeOf((*func(typex.X, func(*typex.Y) bool) error)(nil)).Elem(), funcMakerTypex۰XIterTypex۰YГError)
-	reflectx.RegisterFunc(reflect.TypeOf((*func(typex.X, typex.Y) error)(nil)).Elem(), funcMakerTypex۰XTypex۰YГError)
-	reflectx.RegisterFunc(reflect.TypeOf((*func(typex.X) error)(nil)).Elem(), funcMakerTypex۰XГError)
+	reflectx.RegisterFunc(reflect.TypeOf((*func([]byte, func(*beam.T) bool, func(*beam.T) bool, func(t beam.T), func(t beam.T), func(t beam.T)) error)(nil)).Elem(), funcMakerSliceOfByteIterTypex۰TIterTypex۰TEmitTypex۰TEmitTypex۰TEmitTypex۰TГError)
+	reflectx.RegisterFunc(reflect.TypeOf((*func([]byte, func(*beam.T) bool, func(*beam.T) bool, func(*beam.T) bool) error)(nil)).Elem(), funcMakerSliceOfByteIterTypex۰TIterTypex۰TIterTypex۰TГError)
+	reflectx.RegisterFunc(reflect.TypeOf((*func([]byte, func(*beam.Z) bool) error)(nil)).Elem(), funcMakerSliceOfByteIterTypex۰ZГError)
+	reflectx.RegisterFunc(reflect.TypeOf((*func(beam.X, func(*beam.Y) bool) error)(nil)).Elem(), funcMakerTypex۰XIterTypex۰YГError)
+	reflectx.RegisterFunc(reflect.TypeOf((*func(beam.X, beam.Y) error)(nil)).Elem(), funcMakerTypex۰XTypex۰YГError)
+	reflectx.RegisterFunc(reflect.TypeOf((*func(beam.X) error)(nil)).Elem(), funcMakerTypex۰XГError)
 	reflectx.RegisterFunc(reflect.TypeOf((*func() int)(nil)).Elem(), funcMakerГInt)
-	exec.RegisterEmitter(reflect.TypeOf((*func(typex.T))(nil)).Elem(), emitMakerTypex۰T)
+	exec.RegisterEmitter(reflect.TypeOf((*func(beam.T))(nil)).Elem(), emitMakerTypex۰T)
 	exec.RegisterInput(reflect.TypeOf((*func(*int) bool)(nil)).Elem(), iterMakerInt)
 	exec.RegisterInput(reflect.TypeOf((*func(*string) bool)(nil)).Elem(), iterMakerString)
-	exec.RegisterInput(reflect.TypeOf((*func(*typex.T) bool)(nil)).Elem(), iterMakerTypex۰T)
-	exec.RegisterInput(reflect.TypeOf((*func(*typex.Y) bool)(nil)).Elem(), iterMakerTypex۰Y)
+	exec.RegisterInput(reflect.TypeOf((*func(*beam.T) bool)(nil)).Elem(), iterMakerTypex۰T)
+	exec.RegisterInput(reflect.TypeOf((*func(*beam.Y) bool)(nil)).Elem(), iterMakerTypex۰Y)
+	exec.RegisterInput(reflect.TypeOf((*func(*beam.Z) bool)(nil)).Elem(), iterMakerTypex۰Z)
 }
 
-func wrapMakerDiffFn(fn interface{}) map[string]reflectx.Func {
+func wrapMakerDiffFn(fn any) map[string]reflectx.Func {
 	dfn := fn.(*diffFn)
 	return map[string]reflectx.Func{
-		"ProcessElement": reflectx.MakeFunc(func(a0 []byte, a1 func(*typex.T) bool, a2 func(*typex.T) bool, a3 func(t typex.T), a4 func(t typex.T), a5 func(t typex.T)) error {
+		"ProcessElement": reflectx.MakeFunc(func(a0 []byte, a1 func(*beam.T) bool, a2 func(*beam.T) bool, a3 func(t beam.T), a4 func(t beam.T), a5 func(t beam.T)) error {
 			return dfn.ProcessElement(a0, a1, a2, a3, a4, a5)
 		}),
 	}
 }
 
-func wrapMakerElmCountCombineFn(fn interface{}) map[string]reflectx.Func {
+func wrapMakerElmCountCombineFn(fn any) map[string]reflectx.Func {
 	dfn := fn.(*elmCountCombineFn)
 	return map[string]reflectx.Func{
-		"AddInput":          reflectx.MakeFunc(func(a0 int, a1 typex.T) int { return dfn.AddInput(a0, a1) }),
+		"AddInput":          reflectx.MakeFunc(func(a0 int, a1 beam.T) int { return dfn.AddInput(a0, a1) }),
 		"CreateAccumulator": reflectx.MakeFunc(func() int { return dfn.CreateAccumulator() }),
 		"ExtractOutput":     reflectx.MakeFunc(func(a0 int) int { return dfn.ExtractOutput(a0) }),
 		"MergeAccumulators": reflectx.MakeFunc(func(a0 int, a1 int) int { return dfn.MergeAccumulators(a0, a1) }),
 	}
 }
 
-func wrapMakerErrFn(fn interface{}) map[string]reflectx.Func {
+func wrapMakerErrFn(fn any) map[string]reflectx.Func {
 	dfn := fn.(*errFn)
 	return map[string]reflectx.Func{
 		"ProcessElement": reflectx.MakeFunc(func(a0 int) error { return dfn.ProcessElement(a0) }),
 	}
 }
 
-func wrapMakerFailFn(fn interface{}) map[string]reflectx.Func {
+func wrapMakerFailFn(fn any) map[string]reflectx.Func {
 	dfn := fn.(*failFn)
 	return map[string]reflectx.Func{
-		"ProcessElement": reflectx.MakeFunc(func(a0 typex.X) error { return dfn.ProcessElement(a0) }),
+		"ProcessElement": reflectx.MakeFunc(func(a0 beam.X) error { return dfn.ProcessElement(a0) }),
 	}
 }
 
-func wrapMakerFailGBKFn(fn interface{}) map[string]reflectx.Func {
+func wrapMakerFailGBKFn(fn any) map[string]reflectx.Func {
 	dfn := fn.(*failGBKFn)
 	return map[string]reflectx.Func{
-		"ProcessElement": reflectx.MakeFunc(func(a0 typex.X, a1 func(*typex.Y) bool) error { return dfn.ProcessElement(a0, a1) }),
+		"ProcessElement": reflectx.MakeFunc(func(a0 beam.X, a1 func(*beam.Y) bool) error { return dfn.ProcessElement(a0, a1) }),
 	}
 }
 
-func wrapMakerFailKVFn(fn interface{}) map[string]reflectx.Func {
+func wrapMakerFailKVFn(fn any) map[string]reflectx.Func {
 	dfn := fn.(*failKVFn)
 	return map[string]reflectx.Func{
-		"ProcessElement": reflectx.MakeFunc(func(a0 typex.X, a1 typex.Y) error { return dfn.ProcessElement(a0, a1) }),
+		"ProcessElement": reflectx.MakeFunc(func(a0 beam.X, a1 beam.Y) error { return dfn.ProcessElement(a0, a1) }),
 	}
 }
 
-func wrapMakerHashFn(fn interface{}) map[string]reflectx.Func {
+func wrapMakerHashFn(fn any) map[string]reflectx.Func {
 	dfn := fn.(*hashFn)
 	return map[string]reflectx.Func{
 		"ProcessElement": reflectx.MakeFunc(func(a0 int, a1 func(*string) bool) error { return dfn.ProcessElement(a0, a1) }),
 	}
 }
 
-func wrapMakerSumFn(fn interface{}) map[string]reflectx.Func {
+func wrapMakerNonEmptyFn(fn any) map[string]reflectx.Func {
+	dfn := fn.(*nonEmptyFn)
+	return map[string]reflectx.Func{
+		"ProcessElement": reflectx.MakeFunc(func(a0 []byte, a1 func(*beam.Z) bool) error { return dfn.ProcessElement(a0, a1) }),
+	}
+}
+
+func wrapMakerSumFn(fn any) map[string]reflectx.Func {
 	dfn := fn.(*sumFn)
 	return map[string]reflectx.Func{
 		"ProcessElement": reflectx.MakeFunc(func(a0 int, a1 func(*int) bool) error { return dfn.ProcessElement(a0, a1) }),
@@ -142,7 +156,7 @@ type callerIntIntГInt struct {
 	fn func(int, int) int
 }
 
-func funcMakerIntIntГInt(fn interface{}) reflectx.Func {
+func funcMakerIntIntГInt(fn any) reflectx.Func {
 	f := fn.(func(int, int) int)
 	return &callerIntIntГInt{fn: f}
 }
@@ -155,12 +169,12 @@ func (c *callerIntIntГInt) Type() reflect.Type {
 	return reflect.TypeOf(c.fn)
 }
 
-func (c *callerIntIntГInt) Call(args []interface{}) []interface{} {
+func (c *callerIntIntГInt) Call(args []any) []any {
 	out0 := c.fn(args[0].(int), args[1].(int))
-	return []interface{}{out0}
+	return []any{out0}
 }
 
-func (c *callerIntIntГInt) Call2x1(arg0, arg1 interface{}) interface{} {
+func (c *callerIntIntГInt) Call2x1(arg0, arg1 any) any {
 	return c.fn(arg0.(int), arg1.(int))
 }
 
@@ -168,7 +182,7 @@ type callerIntIterIntГError struct {
 	fn func(int, func(*int) bool) error
 }
 
-func funcMakerIntIterIntГError(fn interface{}) reflectx.Func {
+func funcMakerIntIterIntГError(fn any) reflectx.Func {
 	f := fn.(func(int, func(*int) bool) error)
 	return &callerIntIterIntГError{fn: f}
 }
@@ -181,12 +195,12 @@ func (c *callerIntIterIntГError) Type() reflect.Type {
 	return reflect.TypeOf(c.fn)
 }
 
-func (c *callerIntIterIntГError) Call(args []interface{}) []interface{} {
+func (c *callerIntIterIntГError) Call(args []any) []any {
 	out0 := c.fn(args[0].(int), args[1].(func(*int) bool))
-	return []interface{}{out0}
+	return []any{out0}
 }
 
-func (c *callerIntIterIntГError) Call2x1(arg0, arg1 interface{}) interface{} {
+func (c *callerIntIterIntГError) Call2x1(arg0, arg1 any) any {
 	return c.fn(arg0.(int), arg1.(func(*int) bool))
 }
 
@@ -194,7 +208,7 @@ type callerIntIterStringГError struct {
 	fn func(int, func(*string) bool) error
 }
 
-func funcMakerIntIterStringГError(fn interface{}) reflectx.Func {
+func funcMakerIntIterStringГError(fn any) reflectx.Func {
 	f := fn.(func(int, func(*string) bool) error)
 	return &callerIntIterStringГError{fn: f}
 }
@@ -207,21 +221,21 @@ func (c *callerIntIterStringГError) Type() reflect.Type {
 	return reflect.TypeOf(c.fn)
 }
 
-func (c *callerIntIterStringГError) Call(args []interface{}) []interface{} {
+func (c *callerIntIterStringГError) Call(args []any) []any {
 	out0 := c.fn(args[0].(int), args[1].(func(*string) bool))
-	return []interface{}{out0}
+	return []any{out0}
 }
 
-func (c *callerIntIterStringГError) Call2x1(arg0, arg1 interface{}) interface{} {
+func (c *callerIntIterStringГError) Call2x1(arg0, arg1 any) any {
 	return c.fn(arg0.(int), arg1.(func(*string) bool))
 }
 
 type callerIntTypex۰TГInt struct {
-	fn func(int, typex.T) int
+	fn func(int, beam.T) int
 }
 
-func funcMakerIntTypex۰TГInt(fn interface{}) reflectx.Func {
-	f := fn.(func(int, typex.T) int)
+func funcMakerIntTypex۰TГInt(fn any) reflectx.Func {
+	f := fn.(func(int, beam.T) int)
 	return &callerIntTypex۰TГInt{fn: f}
 }
 
@@ -233,20 +247,20 @@ func (c *callerIntTypex۰TГInt) Type() reflect.Type {
 	return reflect.TypeOf(c.fn)
 }
 
-func (c *callerIntTypex۰TГInt) Call(args []interface{}) []interface{} {
-	out0 := c.fn(args[0].(int), args[1].(typex.T))
-	return []interface{}{out0}
+func (c *callerIntTypex۰TГInt) Call(args []any) []any {
+	out0 := c.fn(args[0].(int), args[1].(beam.T))
+	return []any{out0}
 }
 
-func (c *callerIntTypex۰TГInt) Call2x1(arg0, arg1 interface{}) interface{} {
-	return c.fn(arg0.(int), arg1.(typex.T))
+func (c *callerIntTypex۰TГInt) Call2x1(arg0, arg1 any) any {
+	return c.fn(arg0.(int), arg1.(beam.T))
 }
 
 type callerIntГError struct {
 	fn func(int) error
 }
 
-func funcMakerIntГError(fn interface{}) reflectx.Func {
+func funcMakerIntГError(fn any) reflectx.Func {
 	f := fn.(func(int) error)
 	return &callerIntГError{fn: f}
 }
@@ -259,12 +273,12 @@ func (c *callerIntГError) Type() reflect.Type {
 	return reflect.TypeOf(c.fn)
 }
 
-func (c *callerIntГError) Call(args []interface{}) []interface{} {
+func (c *callerIntГError) Call(args []any) []any {
 	out0 := c.fn(args[0].(int))
-	return []interface{}{out0}
+	return []any{out0}
 }
 
-func (c *callerIntГError) Call1x1(arg0 interface{}) interface{} {
+func (c *callerIntГError) Call1x1(arg0 any) any {
 	return c.fn(arg0.(int))
 }
 
@@ -272,7 +286,7 @@ type callerIntГInt struct {
 	fn func(int) int
 }
 
-func funcMakerIntГInt(fn interface{}) reflectx.Func {
+func funcMakerIntГInt(fn any) reflectx.Func {
 	f := fn.(func(int) int)
 	return &callerIntГInt{fn: f}
 }
@@ -285,21 +299,21 @@ func (c *callerIntГInt) Type() reflect.Type {
 	return reflect.TypeOf(c.fn)
 }
 
-func (c *callerIntГInt) Call(args []interface{}) []interface{} {
+func (c *callerIntГInt) Call(args []any) []any {
 	out0 := c.fn(args[0].(int))
-	return []interface{}{out0}
+	return []any{out0}
 }
 
-func (c *callerIntГInt) Call1x1(arg0 interface{}) interface{} {
+func (c *callerIntГInt) Call1x1(arg0 any) any {
 	return c.fn(arg0.(int))
 }
 
 type callerSliceOfByteIterTypex۰TIterTypex۰TEmitTypex۰TEmitTypex۰TEmitTypex۰TГError struct {
-	fn func([]byte, func(*typex.T) bool, func(*typex.T) bool, func(t typex.T), func(t typex.T), func(t typex.T)) error
+	fn func([]byte, func(*beam.T) bool, func(*beam.T) bool, func(t beam.T), func(t beam.T), func(t beam.T)) error
 }
 
-func funcMakerSliceOfByteIterTypex۰TIterTypex۰TEmitTypex۰TEmitTypex۰TEmitTypex۰TГError(fn interface{}) reflectx.Func {
-	f := fn.(func([]byte, func(*typex.T) bool, func(*typex.T) bool, func(t typex.T), func(t typex.T), func(t typex.T)) error)
+func funcMakerSliceOfByteIterTypex۰TIterTypex۰TEmitTypex۰TEmitTypex۰TEmitTypex۰TГError(fn any) reflectx.Func {
+	f := fn.(func([]byte, func(*beam.T) bool, func(*beam.T) bool, func(t beam.T), func(t beam.T), func(t beam.T)) error)
 	return &callerSliceOfByteIterTypex۰TIterTypex۰TEmitTypex۰TEmitTypex۰TEmitTypex۰TГError{fn: f}
 }
 
@@ -311,21 +325,21 @@ func (c *callerSliceOfByteIterTypex۰TIterTypex۰TEmitTypex۰TEmitTypex۰TEmitTy
 	return reflect.TypeOf(c.fn)
 }
 
-func (c *callerSliceOfByteIterTypex۰TIterTypex۰TEmitTypex۰TEmitTypex۰TEmitTypex۰TГError) Call(args []interface{}) []interface{} {
-	out0 := c.fn(args[0].([]byte), args[1].(func(*typex.T) bool), args[2].(func(*typex.T) bool), args[3].(func(t typex.T)), args[4].(func(t typex.T)), args[5].(func(t typex.T)))
-	return []interface{}{out0}
+func (c *callerSliceOfByteIterTypex۰TIterTypex۰TEmitTypex۰TEmitTypex۰TEmitTypex۰TГError) Call(args []any) []any {
+	out0 := c.fn(args[0].([]byte), args[1].(func(*beam.T) bool), args[2].(func(*beam.T) bool), args[3].(func(t beam.T)), args[4].(func(t beam.T)), args[5].(func(t beam.T)))
+	return []any{out0}
 }
 
-func (c *callerSliceOfByteIterTypex۰TIterTypex۰TEmitTypex۰TEmitTypex۰TEmitTypex۰TГError) Call6x1(arg0, arg1, arg2, arg3, arg4, arg5 interface{}) interface{} {
-	return c.fn(arg0.([]byte), arg1.(func(*typex.T) bool), arg2.(func(*typex.T) bool), arg3.(func(t typex.T)), arg4.(func(t typex.T)), arg5.(func(t typex.T)))
+func (c *callerSliceOfByteIterTypex۰TIterTypex۰TEmitTypex۰TEmitTypex۰TEmitTypex۰TГError) Call6x1(arg0, arg1, arg2, arg3, arg4, arg5 any) any {
+	return c.fn(arg0.([]byte), arg1.(func(*beam.T) bool), arg2.(func(*beam.T) bool), arg3.(func(t beam.T)), arg4.(func(t beam.T)), arg5.(func(t beam.T)))
 }
 
 type callerSliceOfByteIterTypex۰TIterTypex۰TIterTypex۰TГError struct {
-	fn func([]byte, func(*typex.T) bool, func(*typex.T) bool, func(*typex.T) bool) error
+	fn func([]byte, func(*beam.T) bool, func(*beam.T) bool, func(*beam.T) bool) error
 }
 
-func funcMakerSliceOfByteIterTypex۰TIterTypex۰TIterTypex۰TГError(fn interface{}) reflectx.Func {
-	f := fn.(func([]byte, func(*typex.T) bool, func(*typex.T) bool, func(*typex.T) bool) error)
+func funcMakerSliceOfByteIterTypex۰TIterTypex۰TIterTypex۰TГError(fn any) reflectx.Func {
+	f := fn.(func([]byte, func(*beam.T) bool, func(*beam.T) bool, func(*beam.T) bool) error)
 	return &callerSliceOfByteIterTypex۰TIterTypex۰TIterTypex۰TГError{fn: f}
 }
 
@@ -337,21 +351,47 @@ func (c *callerSliceOfByteIterTypex۰TIterTypex۰TIterTypex۰TГError) Type() re
 	return reflect.TypeOf(c.fn)
 }
 
-func (c *callerSliceOfByteIterTypex۰TIterTypex۰TIterTypex۰TГError) Call(args []interface{}) []interface{} {
-	out0 := c.fn(args[0].([]byte), args[1].(func(*typex.T) bool), args[2].(func(*typex.T) bool), args[3].(func(*typex.T) bool))
-	return []interface{}{out0}
+func (c *callerSliceOfByteIterTypex۰TIterTypex۰TIterTypex۰TГError) Call(args []any) []any {
+	out0 := c.fn(args[0].([]byte), args[1].(func(*beam.T) bool), args[2].(func(*beam.T) bool), args[3].(func(*beam.T) bool))
+	return []any{out0}
 }
 
-func (c *callerSliceOfByteIterTypex۰TIterTypex۰TIterTypex۰TГError) Call4x1(arg0, arg1, arg2, arg3 interface{}) interface{} {
-	return c.fn(arg0.([]byte), arg1.(func(*typex.T) bool), arg2.(func(*typex.T) bool), arg3.(func(*typex.T) bool))
+func (c *callerSliceOfByteIterTypex۰TIterTypex۰TIterTypex۰TГError) Call4x1(arg0, arg1, arg2, arg3 any) any {
+	return c.fn(arg0.([]byte), arg1.(func(*beam.T) bool), arg2.(func(*beam.T) bool), arg3.(func(*beam.T) bool))
+}
+
+type callerSliceOfByteIterTypex۰ZГError struct {
+	fn func([]byte, func(*beam.Z) bool) error
+}
+
+func funcMakerSliceOfByteIterTypex۰ZГError(fn any) reflectx.Func {
+	f := fn.(func([]byte, func(*beam.Z) bool) error)
+	return &callerSliceOfByteIterTypex۰ZГError{fn: f}
+}
+
+func (c *callerSliceOfByteIterTypex۰ZГError) Name() string {
+	return reflectx.FunctionName(c.fn)
+}
+
+func (c *callerSliceOfByteIterTypex۰ZГError) Type() reflect.Type {
+	return reflect.TypeOf(c.fn)
+}
+
+func (c *callerSliceOfByteIterTypex۰ZГError) Call(args []any) []any {
+	out0 := c.fn(args[0].([]byte), args[1].(func(*beam.Z) bool))
+	return []any{out0}
+}
+
+func (c *callerSliceOfByteIterTypex۰ZГError) Call2x1(arg0, arg1 any) any {
+	return c.fn(arg0.([]byte), arg1.(func(*beam.Z) bool))
 }
 
 type callerTypex۰XIterTypex۰YГError struct {
-	fn func(typex.X, func(*typex.Y) bool) error
+	fn func(beam.X, func(*beam.Y) bool) error
 }
 
-func funcMakerTypex۰XIterTypex۰YГError(fn interface{}) reflectx.Func {
-	f := fn.(func(typex.X, func(*typex.Y) bool) error)
+func funcMakerTypex۰XIterTypex۰YГError(fn any) reflectx.Func {
+	f := fn.(func(beam.X, func(*beam.Y) bool) error)
 	return &callerTypex۰XIterTypex۰YГError{fn: f}
 }
 
@@ -363,21 +403,21 @@ func (c *callerTypex۰XIterTypex۰YГError) Type() reflect.Type {
 	return reflect.TypeOf(c.fn)
 }
 
-func (c *callerTypex۰XIterTypex۰YГError) Call(args []interface{}) []interface{} {
-	out0 := c.fn(args[0].(typex.X), args[1].(func(*typex.Y) bool))
-	return []interface{}{out0}
+func (c *callerTypex۰XIterTypex۰YГError) Call(args []any) []any {
+	out0 := c.fn(args[0].(beam.X), args[1].(func(*beam.Y) bool))
+	return []any{out0}
 }
 
-func (c *callerTypex۰XIterTypex۰YГError) Call2x1(arg0, arg1 interface{}) interface{} {
-	return c.fn(arg0.(typex.X), arg1.(func(*typex.Y) bool))
+func (c *callerTypex۰XIterTypex۰YГError) Call2x1(arg0, arg1 any) any {
+	return c.fn(arg0.(beam.X), arg1.(func(*beam.Y) bool))
 }
 
 type callerTypex۰XTypex۰YГError struct {
-	fn func(typex.X, typex.Y) error
+	fn func(beam.X, beam.Y) error
 }
 
-func funcMakerTypex۰XTypex۰YГError(fn interface{}) reflectx.Func {
-	f := fn.(func(typex.X, typex.Y) error)
+func funcMakerTypex۰XTypex۰YГError(fn any) reflectx.Func {
+	f := fn.(func(beam.X, beam.Y) error)
 	return &callerTypex۰XTypex۰YГError{fn: f}
 }
 
@@ -389,21 +429,21 @@ func (c *callerTypex۰XTypex۰YГError) Type() reflect.Type {
 	return reflect.TypeOf(c.fn)
 }
 
-func (c *callerTypex۰XTypex۰YГError) Call(args []interface{}) []interface{} {
-	out0 := c.fn(args[0].(typex.X), args[1].(typex.Y))
-	return []interface{}{out0}
+func (c *callerTypex۰XTypex۰YГError) Call(args []any) []any {
+	out0 := c.fn(args[0].(beam.X), args[1].(beam.Y))
+	return []any{out0}
 }
 
-func (c *callerTypex۰XTypex۰YГError) Call2x1(arg0, arg1 interface{}) interface{} {
-	return c.fn(arg0.(typex.X), arg1.(typex.Y))
+func (c *callerTypex۰XTypex۰YГError) Call2x1(arg0, arg1 any) any {
+	return c.fn(arg0.(beam.X), arg1.(beam.Y))
 }
 
 type callerTypex۰XГError struct {
-	fn func(typex.X) error
+	fn func(beam.X) error
 }
 
-func funcMakerTypex۰XГError(fn interface{}) reflectx.Func {
-	f := fn.(func(typex.X) error)
+func funcMakerTypex۰XГError(fn any) reflectx.Func {
+	f := fn.(func(beam.X) error)
 	return &callerTypex۰XГError{fn: f}
 }
 
@@ -415,20 +455,20 @@ func (c *callerTypex۰XГError) Type() reflect.Type {
 	return reflect.TypeOf(c.fn)
 }
 
-func (c *callerTypex۰XГError) Call(args []interface{}) []interface{} {
-	out0 := c.fn(args[0].(typex.X))
-	return []interface{}{out0}
+func (c *callerTypex۰XГError) Call(args []any) []any {
+	out0 := c.fn(args[0].(beam.X))
+	return []any{out0}
 }
 
-func (c *callerTypex۰XГError) Call1x1(arg0 interface{}) interface{} {
-	return c.fn(arg0.(typex.X))
+func (c *callerTypex۰XГError) Call1x1(arg0 any) any {
+	return c.fn(arg0.(beam.X))
 }
 
 type callerГInt struct {
 	fn func() int
 }
 
-func funcMakerГInt(fn interface{}) reflectx.Func {
+func funcMakerГInt(fn any) reflectx.Func {
 	f := fn.(func() int)
 	return &callerГInt{fn: f}
 }
@@ -441,34 +481,41 @@ func (c *callerГInt) Type() reflect.Type {
 	return reflect.TypeOf(c.fn)
 }
 
-func (c *callerГInt) Call(args []interface{}) []interface{} {
+func (c *callerГInt) Call(args []any) []any {
 	out0 := c.fn()
-	return []interface{}{out0}
+	return []any{out0}
 }
 
-func (c *callerГInt) Call0x1() interface{} {
+func (c *callerГInt) Call0x1() any {
 	return c.fn()
 }
 
 type emitNative struct {
-	n  exec.ElementProcessor
-	fn interface{}
+	n   exec.ElementProcessor
+	fn  any
+	est *sdf.WatermarkEstimator
 
 	ctx   context.Context
+	pn    typex.PaneInfo
 	ws    []typex.Window
 	et    typex.EventTime
 	value exec.FullValue
 }
 
-func (e *emitNative) Init(ctx context.Context, ws []typex.Window, et typex.EventTime) error {
+func (e *emitNative) Init(ctx context.Context, pn typex.PaneInfo, ws []typex.Window, et typex.EventTime) error {
 	e.ctx = ctx
+	e.pn = pn
 	e.ws = ws
 	e.et = et
 	return nil
 }
 
-func (e *emitNative) Value() interface{} {
+func (e *emitNative) Value() any {
 	return e.fn
+}
+
+func (e *emitNative) AttachEstimator(est *sdf.WatermarkEstimator) {
+	e.est = est
 }
 
 func emitMakerTypex۰T(n exec.ElementProcessor) exec.ReusableEmitter {
@@ -477,8 +524,11 @@ func emitMakerTypex۰T(n exec.ElementProcessor) exec.ReusableEmitter {
 	return ret
 }
 
-func (e *emitNative) invokeTypex۰T(val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: val}
+func (e *emitNative) invokeTypex۰T(val beam.T) {
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -486,7 +536,7 @@ func (e *emitNative) invokeTypex۰T(val typex.T) {
 
 type iterNative struct {
 	s  exec.ReStream
-	fn interface{}
+	fn any
 
 	// cur is the "current" stream, if any.
 	cur exec.Stream
@@ -501,7 +551,7 @@ func (v *iterNative) Init() error {
 	return nil
 }
 
-func (v *iterNative) Value() interface{} {
+func (v *iterNative) Value() any {
 	return v.fn
 }
 
@@ -555,7 +605,7 @@ func iterMakerTypex۰T(s exec.ReStream) exec.ReusableInput {
 	return ret
 }
 
-func (v *iterNative) readTypex۰T(value *typex.T) bool {
+func (v *iterNative) readTypex۰T(value *beam.T) bool {
 	elm, err := v.cur.Read()
 	if err != nil {
 		if err == io.EOF {
@@ -563,7 +613,7 @@ func (v *iterNative) readTypex۰T(value *typex.T) bool {
 		}
 		panic(fmt.Sprintf("broken stream: %v", err))
 	}
-	*value = elm.Elm.(typex.T)
+	*value = elm.Elm.(beam.T)
 	return true
 }
 
@@ -573,7 +623,7 @@ func iterMakerTypex۰Y(s exec.ReStream) exec.ReusableInput {
 	return ret
 }
 
-func (v *iterNative) readTypex۰Y(value *typex.Y) bool {
+func (v *iterNative) readTypex۰Y(value *beam.Y) bool {
 	elm, err := v.cur.Read()
 	if err != nil {
 		if err == io.EOF {
@@ -581,7 +631,25 @@ func (v *iterNative) readTypex۰Y(value *typex.Y) bool {
 		}
 		panic(fmt.Sprintf("broken stream: %v", err))
 	}
-	*value = elm.Elm.(typex.Y)
+	*value = elm.Elm.(beam.Y)
+	return true
+}
+
+func iterMakerTypex۰Z(s exec.ReStream) exec.ReusableInput {
+	ret := &iterNative{s: s}
+	ret.fn = ret.readTypex۰Z
+	return ret
+}
+
+func (v *iterNative) readTypex۰Z(value *beam.Z) bool {
+	elm, err := v.cur.Read()
+	if err != nil {
+		if err == io.EOF {
+			return false
+		}
+		panic(fmt.Sprintf("broken stream: %v", err))
+	}
+	*value = elm.Elm.(beam.Z)
 	return true
 }
 

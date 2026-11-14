@@ -31,33 +31,23 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.IsInstanceOf.instanceOf;
 
 import com.mongodb.BasicDBObject;
-import com.mongodb.MongoClient;
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Filters;
-import de.flapdoodle.embed.mongo.MongodExecutable;
-import de.flapdoodle.embed.mongo.MongodProcess;
-import de.flapdoodle.embed.mongo.MongodStarter;
-import de.flapdoodle.embed.mongo.config.IMongodConfig;
-import de.flapdoodle.embed.mongo.config.MongoCmdOptionsBuilder;
-import de.flapdoodle.embed.mongo.config.MongodConfigBuilder;
-import de.flapdoodle.embed.mongo.config.Net;
-import de.flapdoodle.embed.mongo.config.Storage;
-import de.flapdoodle.embed.mongo.distribution.Version;
-import de.flapdoodle.embed.process.runtime.Network;
 import java.util.Arrays;
 import org.apache.beam.sdk.extensions.sql.impl.BeamSqlEnv;
 import org.apache.beam.sdk.extensions.sql.impl.rel.BeamPushDownIOSourceRel;
 import org.apache.beam.sdk.extensions.sql.impl.rel.BeamRelNode;
 import org.apache.beam.sdk.extensions.sql.impl.rel.BeamSqlRelUtils;
-import org.apache.beam.sdk.io.common.NetworkTestHelper;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.bson.Document;
 import org.junit.After;
 import org.junit.AfterClass;
@@ -66,11 +56,12 @@ import org.junit.BeforeClass;
 import org.junit.ClassRule;
 import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.testcontainers.containers.MongoDBContainer;
+import org.testcontainers.utility.DockerImageName;
 
 /**
  * A test of {@link org.apache.beam.sdk.extensions.sql.meta.provider.mongodb.MongoDbTable} on an
@@ -94,12 +85,11 @@ public class MongoDbReadWriteIT {
   private static final String hostname = "localhost";
   private static final String database = "beam";
   private static final String collection = "collection";
+  private static final DockerImageName MONGO_IMAGE = DockerImageName.parse("mongo:4.4.17");
 
-  @ClassRule public static final TemporaryFolder MONGODB_LOCATION = new TemporaryFolder();
+  @ClassRule
+  public static final MongoDBContainer MONGO_CONTAINER = new MongoDBContainer(MONGO_IMAGE);
 
-  private static final MongodStarter mongodStarter = MongodStarter.getDefaultInstance();
-  private static MongodExecutable mongodExecutable;
-  private static MongodProcess mongodProcess;
   private static MongoClient client;
 
   private static BeamSqlEnv sqlEnv;
@@ -110,36 +100,16 @@ public class MongoDbReadWriteIT {
 
   @BeforeClass
   public static void setUp() throws Exception {
-    int port = NetworkTestHelper.getAvailableLocalPort();
-    LOG.info("Starting MongoDB embedded instance on {}", port);
-    IMongodConfig mongodConfig =
-        new MongodConfigBuilder()
-            .version(Version.Main.PRODUCTION)
-            .configServer(false)
-            .replication(new Storage(MONGODB_LOCATION.getRoot().getPath(), null, 0))
-            .net(new Net(hostname, port, Network.localhostIsIPv6()))
-            .cmdOptions(
-                new MongoCmdOptionsBuilder()
-                    .syncDelay(10)
-                    .useNoPrealloc(true)
-                    .useSmallFiles(true)
-                    .useNoJournal(true)
-                    .verbose(false)
-                    .build())
-            .build();
-    mongodExecutable = mongodStarter.prepare(mongodConfig);
-    mongodProcess = mongodExecutable.start();
-    client = new MongoClient(hostname, port);
-
+    int port = MONGO_CONTAINER.getMappedPort(27017);
+    LOG.info("Starting MongoDB container on {}", port);
+    client = MongoClients.create("mongodb://" + hostname + ":" + port);
     mongoSqlUrl = String.format("mongodb://%s:%d/%s/%s", hostname, port, database, collection);
   }
 
   @AfterClass
   public static void tearDown() throws Exception {
-    client.dropDatabase(database);
+    client.getDatabase(database).drop();
     client.close();
-    mongodProcess.stop();
-    mongodExecutable.stop();
   }
 
   @Before
@@ -303,10 +273,9 @@ public class MongoDbReadWriteIT {
             .append(
                 "$or",
                 ImmutableList.of(
-                        new Document("c_varchar", "varchar"),
-                        new Document(
-                            "c_varchar", new Document("$not", new Document("$eq", "fakeString"))))
-                    .asList())
+                    new Document("c_varchar", "varchar"),
+                    new Document(
+                        "c_varchar", new Document("$not", new Document("$eq", "fakeString")))))
             .append("c_boolean", true)
             .append("c_integer", 2147483647);
     final Schema expectedSchema =

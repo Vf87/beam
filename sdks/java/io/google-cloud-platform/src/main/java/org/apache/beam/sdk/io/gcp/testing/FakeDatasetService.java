@@ -21,81 +21,173 @@ import static org.junit.Assert.assertEquals;
 
 import com.google.api.client.googleapis.json.GoogleJsonResponseException;
 import com.google.api.client.http.HttpHeaders;
+import com.google.api.client.http.HttpResponseException;
+import com.google.api.client.http.HttpStatusCodes;
 import com.google.api.core.ApiFuture;
 import com.google.api.core.ApiFutures;
+import com.google.api.gax.grpc.GrpcStatusCode;
+import com.google.api.gax.rpc.ApiException;
 import com.google.api.services.bigquery.model.Dataset;
 import com.google.api.services.bigquery.model.DatasetReference;
 import com.google.api.services.bigquery.model.Table;
 import com.google.api.services.bigquery.model.TableDataInsertAllResponse;
+import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableReference;
 import com.google.api.services.bigquery.model.TableRow;
-import com.google.cloud.bigquery.storage.v1beta2.AppendRowsResponse;
-import com.google.cloud.bigquery.storage.v1beta2.BatchCommitWriteStreamsResponse;
-import com.google.cloud.bigquery.storage.v1beta2.FinalizeWriteStreamResponse;
-import com.google.cloud.bigquery.storage.v1beta2.FlushRowsResponse;
-import com.google.cloud.bigquery.storage.v1beta2.ProtoRows;
-import com.google.cloud.bigquery.storage.v1beta2.WriteStream;
-import com.google.cloud.bigquery.storage.v1beta2.WriteStream.Type;
+import com.google.api.services.bigquery.model.TableSchema;
+import com.google.cloud.bigquery.storage.v1.AppendRowsRequest;
+import com.google.cloud.bigquery.storage.v1.AppendRowsResponse;
+import com.google.cloud.bigquery.storage.v1.BatchCommitWriteStreamsResponse;
+import com.google.cloud.bigquery.storage.v1.Exceptions;
+import com.google.cloud.bigquery.storage.v1.FinalizeWriteStreamResponse;
+import com.google.cloud.bigquery.storage.v1.FlushRowsResponse;
+import com.google.cloud.bigquery.storage.v1.ProtoRows;
+import com.google.cloud.bigquery.storage.v1.StorageError;
+import com.google.cloud.bigquery.storage.v1.WriteStream;
+import com.google.errorprone.annotations.FormatMethod;
+import com.google.errorprone.annotations.FormatString;
+import com.google.protobuf.Any;
 import com.google.protobuf.ByteString;
+import com.google.protobuf.DescriptorProtos;
+import com.google.protobuf.Descriptors;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.Timestamp;
+import com.google.rpc.Code;
+import io.grpc.Status;
 import java.io.IOException;
 import java.io.Serializable;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.annotations.Internal;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryHelpers;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryServices.DatasetService;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryServices.StreamAppendClient;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryServices.WriteStreamService;
 import org.apache.beam.sdk.io.gcp.bigquery.ErrorContainer;
 import org.apache.beam.sdk.io.gcp.bigquery.InsertRetryPolicy;
 import org.apache.beam.sdk.io.gcp.bigquery.InsertRetryPolicy.Context;
+import org.apache.beam.sdk.io.gcp.bigquery.StorageApiCDC;
 import org.apache.beam.sdk.io.gcp.bigquery.TableRowToStorageApiProto;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.values.FailsafeValueInSingleWindow;
 import org.apache.beam.sdk.values.ValueInSingleWindow;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.HashBasedTable;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Maps;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Predicates;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.HashBasedTable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Maps;
 
 /** A fake dataset service that can be serialized, for use in testReadFromTable. */
 @Internal
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness", // TODO(https://github.com/apache/beam/issues/20497)
+  "LockOnNonEnclosingClassLiteral"
 })
-public class FakeDatasetService implements DatasetService, Serializable {
+public class FakeDatasetService implements DatasetService, WriteStreamService, Serializable {
   // Table information must be static, as each ParDo will get a separate instance of
   // FakeDatasetServices, and they must all modify the same storage.
-  static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Table<
+  static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Table<
           String, String, Map<String, TableContainer>>
       tables;
-
   static Map<String, Stream> writeStreams;
 
   @Override
   public void close() throws Exception {}
 
+  private static Exceptions.StorageException getStorageException(
+      String streamName, StorageError.StorageErrorCode code, String errorMessage) {
+    StorageError storageError =
+        StorageError.newBuilder()
+            .setEntity(streamName)
+            .setCode(code)
+            .setErrorMessage(errorMessage)
+            .build();
+    int grpcCode = io.grpc.Status.Code.OK.value();
+    if (code == StorageError.StorageErrorCode.SCHEMA_MISMATCH_EXTRA_FIELDS) {
+      grpcCode = io.grpc.Status.Code.INVALID_ARGUMENT.value();
+    } else if (code == StorageError.StorageErrorCode.STREAM_NOT_FOUND) {
+      grpcCode = io.grpc.Status.Code.NOT_FOUND.value();
+    } else if (code == StorageError.StorageErrorCode.STREAM_FINALIZED) {
+      grpcCode = io.grpc.Status.Code.FAILED_PRECONDITION.value();
+    } else if (code == StorageError.StorageErrorCode.OFFSET_OUT_OF_RANGE) {
+      grpcCode = io.grpc.Status.Code.OUT_OF_RANGE.value();
+    } else if (code == StorageError.StorageErrorCode.OFFSET_ALREADY_EXISTS) {
+      grpcCode = io.grpc.Status.Code.ALREADY_EXISTS.value();
+    }
+    com.google.rpc.Status status =
+        com.google.rpc.Status.newBuilder()
+            .setCode(grpcCode)
+            .setMessage(errorMessage)
+            .addDetails(Any.pack(storageError))
+            .build();
+    return org.apache.beam.sdk.util.Preconditions.checkArgumentNotNull(
+        Exceptions.toStorageException(status, null));
+  }
+
   static class Stream {
-    final List<TableRow> stream;
+    static class Entry {
+      enum UpdateType {
+        INSERT,
+        UPSERT,
+        DELETE
+      };
+
+      final TableRow tableRow;
+      final UpdateType updateType;
+      final long sqn;
+
+      public Entry(TableRow tableRow, UpdateType updateType, long sqn) {
+        this.tableRow = tableRow;
+        this.updateType = updateType;
+        this.sqn = sqn;
+      }
+    }
+
+    final String streamName;
+    final List<Entry> stream;
     final TableContainer tableContainer;
-    final Type type;
+    final WriteStream.Type type;
     long nextFlushPosition;
     boolean finalized;
+    TableSchema currentSchema;
+    @Nullable TableSchema updatedSchema = null;
 
-    Stream(TableContainer tableContainer, Type type) {
+    Stream(String streamName, TableContainer tableContainer, WriteStream.Type type) {
+      this.streamName = streamName;
       this.stream = Lists.newArrayList();
       this.tableContainer = tableContainer;
+      this.currentSchema = tableContainer.getTable().getSchema();
       this.type = type;
       this.finalized = false;
       this.nextFlushPosition = 0;
+    }
+
+    void setUpdatedSchema(TableSchema tableSchema) {
+      this.updatedSchema = tableSchema;
+    }
+
+    TableSchema getUpdatedSchema() {
+      return this.updatedSchema;
+    }
+
+    WriteStream toWriteStream() {
+      TableSchema tableSchema = updatedSchema != null ? updatedSchema : currentSchema;
+      return WriteStream.newBuilder()
+          .setName(streamName)
+          .setType(type)
+          .setTableSchema(TableRowToStorageApiProto.schemaToProtoTableSchema(tableSchema))
+          .build();
     }
 
     long finalizeStream() {
@@ -103,24 +195,51 @@ public class FakeDatasetService implements DatasetService, Serializable {
       return stream.size();
     }
 
-    void appendRows(long position, List<TableRow> rowsToAppend) {
+    @Nullable
+    Exceptions.StorageException appendRows(long position, List<Entry> rowsToAppend) {
       if (finalized) {
-        throw new RuntimeException("Stream already finalized.");
+        return getStorageException(
+            streamName, StorageError.StorageErrorCode.STREAM_FINALIZED, "Stream finalized");
       }
+
       if (position != -1 && position != stream.size()) {
-        throw new RuntimeException("Bad append: " + position);
+        String errorMessage =
+            String.format("expected offset %d, received %d", stream.size(), position);
+        StorageError.StorageErrorCode code =
+            position > stream.size()
+                ? StorageError.StorageErrorCode.OFFSET_OUT_OF_RANGE
+                : StorageError.StorageErrorCode.OFFSET_ALREADY_EXISTS;
+        return getStorageException(streamName, code, errorMessage);
       }
+
       stream.addAll(rowsToAppend);
+      if (type == WriteStream.Type.COMMITTED) {
+        rowsToAppend.forEach(this::applyEntry);
+      }
+      return null;
     }
 
     void flush(long position) {
-      Preconditions.checkState(type == Type.BUFFERED);
+      Preconditions.checkState(type == WriteStream.Type.BUFFERED);
       Preconditions.checkState(!finalized);
       if (position >= stream.size()) {
         throw new RuntimeException("");
       }
       for (; nextFlushPosition <= position; ++nextFlushPosition) {
-        tableContainer.addRow(stream.get((int) nextFlushPosition), "");
+        applyEntry(stream.get((int) nextFlushPosition));
+      }
+    }
+
+    void applyEntry(Entry entry) {
+      switch (entry.updateType) {
+        case INSERT:
+          tableContainer.addRow(entry.tableRow, "");
+          break;
+        case UPSERT:
+          tableContainer.upsertRow(entry.tableRow, entry.sqn);
+          break;
+        case DELETE:
+          tableContainer.deleteRow(entry.tableRow, entry.sqn);
       }
     }
 
@@ -128,9 +247,30 @@ public class FakeDatasetService implements DatasetService, Serializable {
       if (!finalized) {
         throw new RuntimeException("Can't commit unfinalized stream.");
       }
-      Preconditions.checkState(type == Type.PENDING);
-      stream.forEach(tr -> tableContainer.addRow(tr, null));
+      Preconditions.checkState(type == WriteStream.Type.PENDING);
+      stream.forEach(this::applyEntry);
     }
+  }
+
+  Function<TableRow, Boolean> shouldFailRow =
+      (Function<TableRow, Boolean> & Serializable) tr -> false;
+
+  private volatile String appendRowsErrorCode = null;
+  private volatile String appendRowsErrorDescription = null;
+  private volatile @Nullable StorageError.StorageErrorCode appendRowsStorageErrorCode = null;
+  private static AtomicInteger appendRowsStorageErrorRemainingCount = new AtomicInteger(0);
+
+  public void setAppendRowsError(Throwable t) {
+    io.grpc.Status status = io.grpc.Status.fromThrowable(t);
+    this.appendRowsErrorCode = status.getCode().name();
+    this.appendRowsErrorDescription = status.getDescription();
+  }
+
+  public void setAppendRowsStorageError(
+      StorageError.StorageErrorCode code, String description, int failureCount) {
+    this.appendRowsStorageErrorCode = code;
+    this.appendRowsErrorDescription = description;
+    appendRowsStorageErrorRemainingCount.set(failureCount);
   }
 
   Map<String, List<String>> insertErrors = Maps.newHashMap();
@@ -139,10 +279,17 @@ public class FakeDatasetService implements DatasetService, Serializable {
   static AtomicInteger insertCount;
 
   public static void setUp() {
-    tables = HashBasedTable.create();
-    insertCount = new AtomicInteger(0);
-    writeStreams = Maps.newHashMap();
-    FakeJobService.setUp();
+    synchronized (FakeDatasetService.class) {
+      tables = HashBasedTable.create();
+      insertCount = new AtomicInteger(0);
+      appendRowsStorageErrorRemainingCount = new AtomicInteger(0);
+      writeStreams = Maps.newHashMap();
+      FakeJobService.setUp();
+    }
+  }
+
+  public void setShouldFailRow(Function<TableRow, Boolean> shouldFailRow) {
+    this.shouldFailRow = shouldFailRow;
   }
 
   @Override
@@ -156,13 +303,28 @@ public class FakeDatasetService implements DatasetService, Serializable {
   @Override
   public Table getTable(TableReference tableRef, @Nullable List<String> selectedFields)
       throws InterruptedException, IOException {
-    synchronized (tables) {
+    return getTable(tableRef, selectedFields, null);
+  }
+
+  @Override
+  public Table getTable(
+      TableReference tableRef,
+      @Nullable List<String> selectedFields,
+      @Nullable TableMetadataView view)
+      throws InterruptedException, IOException {
+    return getTableImpl(tableRef, selectedFields, view);
+  }
+
+  public Table getTableImpl(
+      TableReference tableRef,
+      @Nullable List<String> selectedFields,
+      @Nullable TableMetadataView view)
+      throws InterruptedException, IOException {
+    synchronized (FakeDatasetService.class) {
       Map<String, TableContainer> dataset =
           tables.get(tableRef.getProjectId(), tableRef.getDatasetId());
       if (dataset == null) {
-        throwNotFound(
-            "Tried to get a dataset %s:%s, but no such dataset was set",
-            tableRef.getProjectId(), tableRef.getDatasetId());
+        return null;
       }
       TableContainer tableContainer = dataset.get(tableRef.getTableId());
 
@@ -170,24 +332,29 @@ public class FakeDatasetService implements DatasetService, Serializable {
     }
   }
 
+  public List<TableRow> getAllRows(TableReference tableReference)
+      throws InterruptedException, IOException {
+    return getAllRows(
+        tableReference.getProjectId(), tableReference.getDatasetId(), tableReference.getTableId());
+  }
+
   public List<TableRow> getAllRows(String projectId, String datasetId, String tableId)
       throws InterruptedException, IOException {
-    synchronized (tables) {
-      TableContainer tableContainer = getTableContainer(projectId, datasetId, tableId);
+    synchronized (FakeDatasetService.class) {
       return getTableContainer(projectId, datasetId, tableId).getRows();
     }
   }
 
   public List<String> getAllIds(String projectId, String datasetId, String tableId)
       throws InterruptedException, IOException {
-    synchronized (tables) {
+    synchronized (FakeDatasetService.class) {
       return getTableContainer(projectId, datasetId, tableId).getIds();
     }
   }
 
   private TableContainer getTableContainer(String projectId, String datasetId, String tableId)
       throws InterruptedException, IOException {
-    synchronized (tables) {
+    synchronized (FakeDatasetService.class) {
       Map<String, TableContainer> dataset = tables.get(projectId, datasetId);
       if (dataset == null) {
         throwNotFound(
@@ -206,7 +373,7 @@ public class FakeDatasetService implements DatasetService, Serializable {
   @Override
   public void deleteTable(TableReference tableRef) throws IOException, InterruptedException {
     validateWholeTableReference(tableRef);
-    synchronized (tables) {
+    synchronized (FakeDatasetService.class) {
       Map<String, TableContainer> dataset =
           tables.get(tableRef.getProjectId(), tableRef.getDatasetId());
       if (dataset == null) {
@@ -239,7 +406,7 @@ public class FakeDatasetService implements DatasetService, Serializable {
   public void createTable(Table table) throws IOException {
     TableReference tableReference = table.getTableReference();
     validateWholeTableReference(tableReference);
-    synchronized (tables) {
+    synchronized (FakeDatasetService.class) {
       Map<String, TableContainer> dataset =
           tables.get(tableReference.getProjectId(), tableReference.getDatasetId());
       if (dataset == null) {
@@ -247,7 +414,175 @@ public class FakeDatasetService implements DatasetService, Serializable {
             "Tried to get a dataset %s:%s, but no such table was set",
             tableReference.getProjectId(), tableReference.getDatasetId());
       }
-      dataset.computeIfAbsent(tableReference.getTableId(), k -> new TableContainer(table));
+      dataset.computeIfAbsent(
+          tableReference.getTableId(),
+          k -> {
+            TableContainer tableContainer = new TableContainer(table);
+            // Create the default stream.
+            String streamName =
+                String.format(
+                    "projects/%s/datasets/%s/tables/%s/streams/_default",
+                    tableReference.getProjectId(),
+                    tableReference.getDatasetId(),
+                    BigQueryHelpers.stripPartitionDecorator(tableReference.getTableId()));
+            writeStreams.put(
+                streamName, new Stream(streamName, tableContainer, WriteStream.Type.COMMITTED));
+
+            return tableContainer;
+          });
+    }
+  }
+
+  public void updateTableSchema(TableReference tableReference, TableSchema tableSchema)
+      throws IOException {
+    validateWholeTableReference(tableReference);
+    synchronized (FakeDatasetService.class) {
+      Map<String, TableContainer> dataset =
+          tables.get(tableReference.getProjectId(), tableReference.getDatasetId());
+      if (dataset == null) {
+        throwNotFound(
+            "Tried to get a dataset %s:%s, but no such table was set",
+            tableReference.getProjectId(), tableReference.getDatasetId());
+      }
+      @Nullable TableContainer tableContainer = dataset.get(tableReference.getTableId());
+      if (tableContainer == null) {
+        throwNotFound("Tried to get a table %s, but no such table existed", tableReference);
+      }
+      checkSchemaChanges(tableContainer.table.getSchema().getFields(), tableSchema.getFields());
+      tableContainer.table.setSchema(tableSchema);
+
+      for (Stream stream : writeStreams.values()) {
+        if (stream.tableContainer == tableContainer) {
+          stream.setUpdatedSchema(tableSchema);
+        }
+      }
+    }
+  }
+
+  @FormatMethod
+  void checkSchemaPredicate(boolean predicate, String msgFormat, Object... args)
+      throws IOException {
+    String msg = String.format(msgFormat, args);
+    if (!predicate) {
+      throw new GoogleJsonResponseException(
+          new HttpResponseException.Builder(
+              HttpStatusCodes.STATUS_CODE_PRECONDITION_FAILED, msg, new HttpHeaders()),
+          null);
+    }
+  }
+
+  private void checkSchemaChanges(
+      List<TableFieldSchema> oldSchema, List<TableFieldSchema> newSchema) throws IOException {
+    List<com.google.cloud.bigquery.storage.v1.TableFieldSchema> oldSchemaProtos =
+        oldSchema.stream()
+            .map(TableRowToStorageApiProto::tableFieldToProtoTableField)
+            .collect(Collectors.toList());
+
+    List<com.google.cloud.bigquery.storage.v1.TableFieldSchema> newSchemaProtos =
+        newSchema.stream()
+            .map(TableRowToStorageApiProto::tableFieldToProtoTableField)
+            .collect(Collectors.toList());
+    checkSchemaChangesProtos(oldSchemaProtos, newSchemaProtos);
+  }
+
+  private void checkSchemaChangesProtos(
+      List<com.google.cloud.bigquery.storage.v1.TableFieldSchema> oldSchemaProtos,
+      List<com.google.cloud.bigquery.storage.v1.TableFieldSchema> newSchemaProtos)
+      throws IOException {
+    // Convert new schema to a map for easy name-based lookup
+    Map<String, com.google.cloud.bigquery.storage.v1.TableFieldSchema> newFields =
+        newSchemaProtos.stream()
+            .collect(Collectors.toMap(t -> t.getName().toLowerCase(), Function.identity()));
+    Map<String, Integer> newFieldIndices =
+        IntStream.range(0, newSchemaProtos.size())
+            .boxed()
+            .collect(Collectors.toMap(i -> newSchemaProtos.get(i).getName().toLowerCase(), i -> i));
+
+    Map<String, com.google.cloud.bigquery.storage.v1.TableFieldSchema> oldFields =
+        oldSchemaProtos.stream()
+            .collect(Collectors.toMap(t -> t.getName().toLowerCase(), Function.identity()));
+
+    for (com.google.cloud.bigquery.storage.v1.TableFieldSchema oldField : oldSchemaProtos) {
+      com.google.cloud.bigquery.storage.v1.TableFieldSchema newField =
+          newFields.get(oldField.getName().toLowerCase());
+      // 1. Check that no fields were removed
+      checkSchemaPredicate(newField != null, "Cannot remove field %s", oldField.getName());
+
+      // 2. Check that the types match
+      checkSchemaPredicate(
+          oldField.getType().equals(newField.getType()),
+          "Field type cannot change for field %s: %s to %s",
+          oldField.getName(),
+          oldField.getType(),
+          newField.getType());
+
+      com.google.cloud.bigquery.storage.v1.TableFieldSchema.Mode oldMode = oldField.getMode();
+      com.google.cloud.bigquery.storage.v1.TableFieldSchema.Mode newMode = newField.getMode();
+
+      // 3. Check that the mode only changes if relaxing from REQUIRED to NULLABLE
+      if (oldMode.equals(com.google.cloud.bigquery.storage.v1.TableFieldSchema.Mode.REQUIRED)) {
+        checkSchemaPredicate(
+            newMode.equals(com.google.cloud.bigquery.storage.v1.TableFieldSchema.Mode.REQUIRED)
+                || newMode.equals(
+                    com.google.cloud.bigquery.storage.v1.TableFieldSchema.Mode.NULLABLE),
+            "Cannot change mode of %s from REQUIRED to %s",
+            oldField.getName(),
+            newMode);
+      } else {
+        checkSchemaPredicate(
+            oldMode.equals(newMode),
+            "Cannot change mode of %s from %s to %s",
+            oldField.getName(),
+            oldMode,
+            newMode);
+      }
+
+      // 4. Recursively check nested schema fields
+      if (oldField.getFieldsCount() > 0) {
+        checkSchemaPredicate(
+            newField.getFieldsCount() >= oldField.getFieldsCount(), "Cannot remove nested fields");
+        checkSchemaChangesProtos(oldField.getFieldsList(), newField.getFieldsList());
+      }
+    }
+
+    for (com.google.cloud.bigquery.storage.v1.TableFieldSchema newField : newSchemaProtos) {
+      if (oldFields.containsKey(newField.getName().toLowerCase())) {
+        // We've already checked this above.
+        continue;
+      }
+
+      int newIndex = newFieldIndices.get(newField.getName().toLowerCase());
+      checkSchemaPredicate(
+          newIndex >= oldFields.size(), "New fields can only be added at the end of a schema.");
+      checkSchemaPredicate(
+          !newField
+              .getMode()
+              .equals(com.google.cloud.bigquery.storage.v1.TableFieldSchema.Mode.REQUIRED),
+          "New field cannot be required");
+      if (newField.getFieldsCount() > 0) {
+        // Recurse only on the new fields.
+        checkSchemaChangesProtos(Collections.emptyList(), newField.getFieldsList());
+      }
+    }
+  }
+
+  public void setPrimaryKey(TableReference tableReference, List<String> columns)
+      throws IOException {
+    validateWholeTableReference(tableReference);
+    synchronized (FakeDatasetService.class) {
+      Map<String, TableContainer> dataset =
+          tables.get(tableReference.getProjectId(), tableReference.getDatasetId());
+      if (dataset == null) {
+        throwNotFound(
+            "Tried to get a dataset %s:%s, but no such table was set",
+            tableReference.getProjectId(), tableReference.getDatasetId());
+      }
+      @Nullable TableContainer tableContainer = dataset.get(tableReference.getTableId());
+      if (tableContainer == null) {
+        throwNotFound("Tried to get a table %s, but no such table existed", tableReference);
+      }
+      // Set primary key columns.
+      tableContainer.setPrimaryKeyColumns(columns);
     }
   }
 
@@ -260,7 +595,7 @@ public class FakeDatasetService implements DatasetService, Serializable {
   @Override
   public Dataset getDataset(String projectId, String datasetId)
       throws IOException, InterruptedException {
-    synchronized (tables) {
+    synchronized (FakeDatasetService.class) {
       Map<String, TableContainer> dataset = tables.get(projectId, datasetId);
       if (dataset == null) {
         throwNotFound(
@@ -280,7 +615,7 @@ public class FakeDatasetService implements DatasetService, Serializable {
       String description,
       Long defaultTableExpirationMs /* ignored */)
       throws IOException, InterruptedException {
-    synchronized (tables) {
+    synchronized (FakeDatasetService.class) {
       Map<String, TableContainer> dataset = tables.get(projectId, datasetId);
       if (dataset == null) {
         dataset = new HashMap<>();
@@ -292,7 +627,7 @@ public class FakeDatasetService implements DatasetService, Serializable {
   @Override
   public void deleteDataset(String projectId, String datasetId)
       throws IOException, InterruptedException {
-    synchronized (tables) {
+    synchronized (FakeDatasetService.class) {
       tables.remove(projectId, datasetId);
     }
   }
@@ -341,7 +676,7 @@ public class FakeDatasetService implements DatasetService, Serializable {
       List<ValueInSingleWindow<TableRow>> successfulRows)
       throws IOException, InterruptedException {
     Map<TableRow, List<TableDataInsertAllResponse.InsertErrors>> insertErrors = getInsertErrors();
-    synchronized (tables) {
+    synchronized (FakeDatasetService.class) {
       if (ignoreInsertIds) {
         insertIdList = null;
       }
@@ -379,7 +714,7 @@ public class FakeDatasetService implements DatasetService, Serializable {
                     row,
                     rowList.get(i).getTimestamp(),
                     rowList.get(i).getWindow(),
-                    rowList.get(i).getPane()));
+                    rowList.get(i).getPaneInfo()));
           }
         } else {
           errorContainer.add(
@@ -396,7 +731,7 @@ public class FakeDatasetService implements DatasetService, Serializable {
       TableReference tableReference, @Nullable String tableDescription)
       throws IOException, InterruptedException {
     validateWholeTableReference(tableReference);
-    synchronized (tables) {
+    synchronized (FakeDatasetService.class) {
       TableContainer tableContainer =
           getTableContainer(
               tableReference.getProjectId(),
@@ -408,46 +743,208 @@ public class FakeDatasetService implements DatasetService, Serializable {
   }
 
   @Override
-  public WriteStream createWriteStream(String tableUrn, Type type)
+  public Table patchTableSchema(TableReference tableReference, TableSchema newSchema)
       throws IOException, InterruptedException {
-    if (type != Type.PENDING && type != Type.BUFFERED) {
-      throw new RuntimeException("We only support PENDING or BUFFERED streams.");
-    }
-    TableReference tableReference =
-        BigQueryHelpers.parseTableUrn(BigQueryHelpers.stripPartitionDecorator(tableUrn));
-    synchronized (tables) {
+    updateTableSchema(tableReference, newSchema);
+    synchronized (FakeDatasetService.class) {
       TableContainer tableContainer =
           getTableContainer(
               tableReference.getProjectId(),
               tableReference.getDatasetId(),
               tableReference.getTableId());
-      String streamName = UUID.randomUUID().toString();
-      writeStreams.put(streamName, new Stream(tableContainer, type));
-      return WriteStream.newBuilder().setName(streamName).build();
+      return tableContainer.getTable();
     }
   }
 
   @Override
-  public StreamAppendClient getStreamAppendClient(String streamName, Descriptor descriptor) {
+  public WriteStream createWriteStream(String tableUrn, WriteStream.Type type)
+      throws InterruptedException {
+    try {
+      TableReference tableReference =
+          BigQueryHelpers.parseTableUrn(BigQueryHelpers.stripPartitionDecorator(tableUrn));
+      synchronized (FakeDatasetService.class) {
+        TableContainer tableContainer =
+            getTableContainer(
+                tableReference.getProjectId(),
+                tableReference.getDatasetId(),
+                tableReference.getTableId());
+        String streamName = UUID.randomUUID().toString();
+        Stream stream = new Stream(streamName, tableContainer, type);
+        writeStreams.put(streamName, stream);
+        return stream.toWriteStream();
+      }
+    } catch (IOException e) {
+      // TODO(relax): Return the exact error that BigQuery returns.
+      throw new ApiException(e, GrpcStatusCode.of(Status.Code.NOT_FOUND), false);
+    }
+  }
+
+  @Override
+  @Nullable
+  public com.google.cloud.bigquery.storage.v1.TableSchema getWriteStreamSchema(String streamName) {
+    synchronized (FakeDatasetService.class) {
+      @Nullable Stream stream = writeStreams.get(streamName);
+      if (stream != null) {
+        return stream.toWriteStream().getTableSchema();
+      }
+    }
+    // TODO(relax): Return the exact error that BigQuery returns.
+    throw new ApiException(null, GrpcStatusCode.of(Status.Code.NOT_FOUND), false);
+  }
+
+  @Override
+  public StreamAppendClient getStreamAppendClient(
+      String streamName,
+      DescriptorProtos.DescriptorProto descriptor,
+      boolean useConnectionPool,
+      AppendRowsRequest.MissingValueInterpretation missingValueInterpretation)
+      throws Exception {
     return new StreamAppendClient() {
+      private Descriptor protoDescriptor = null;
+      private TableSchema currentSchema;
+      private @Nullable com.google.cloud.bigquery.storage.v1.TableSchema updatedSchema;
+      TableRowToStorageApiProto.SchemaInformation schemaInformation;
+      private boolean initialized;
+
+      private boolean usedForInsert = false;
+      private boolean usedForUpdate = false;
+
+      @Nullable
+      Exceptions.StorageException tryInitialize() throws Exception {
+        synchronized (FakeDatasetService.class) {
+          if (!initialized) {
+            this.protoDescriptor = TableRowToStorageApiProto.wrapDescriptorProto(descriptor);
+
+            Stream stream = writeStreams.get(streamName);
+            if (stream == null) {
+              return getStorageException(
+                  streamName, StorageError.StorageErrorCode.STREAM_NOT_FOUND, "Stream not found");
+            }
+
+            // TODO: we should validate the descriptor against the table schema and ensure it
+            // matches.
+
+            currentSchema = stream.tableContainer.getTable().getSchema();
+            schemaInformation =
+                TableRowToStorageApiProto.SchemaInformation.fromTableSchema(
+                    TableRowToStorageApiProto.schemaToProtoTableSchema(currentSchema));
+            initialized = true;
+          }
+        }
+        return null;
+      }
+
       @Override
       public ApiFuture<AppendRowsResponse> appendRows(long offset, ProtoRows rows)
           throws Exception {
-        synchronized (tables) {
+        if (appendRowsStorageErrorCode != null
+            && appendRowsStorageErrorRemainingCount.getAndDecrement() > 0) {
+          return ApiFutures.immediateFailedFuture(
+              getStorageException(
+                  streamName,
+                  appendRowsStorageErrorCode,
+                  appendRowsErrorDescription != null
+                      ? appendRowsErrorDescription
+                      : "Storage error"));
+        }
+        if (appendRowsErrorCode != null) {
+          io.grpc.Status.Code code = io.grpc.Status.Code.valueOf(appendRowsErrorCode);
+          io.grpc.Status status =
+              appendRowsErrorDescription != null
+                  ? code.toStatus().withDescription(appendRowsErrorDescription)
+                  : code.toStatus();
+          return ApiFutures.immediateFailedFuture(new io.grpc.StatusRuntimeException(status));
+        }
+        // The BigQuery client returns stream-open errors when the first append is called, so we
+        // duplicate that here.
+        Exceptions.StorageException storageException = tryInitialize();
+        if (storageException != null) {
+          return ApiFutures.immediateFailedFuture(storageException);
+        }
+
+        AppendRowsResponse.Builder responseBuilder = AppendRowsResponse.newBuilder();
+        synchronized (FakeDatasetService.class) {
           Stream stream = writeStreams.get(streamName);
           if (stream == null) {
-            throw new RuntimeException("No such stream: " + streamName);
+            return ApiFutures.immediateFailedFuture(
+                getStorageException(
+                    streamName,
+                    StorageError.StorageErrorCode.STREAM_NOT_FOUND,
+                    "Stream not found"));
           }
-          List<TableRow> tableRows =
+          List<Stream.Entry> streamEntries =
               Lists.newArrayListWithExpectedSize(rows.getSerializedRowsCount());
-          for (ByteString bytes : rows.getSerializedRowsList()) {
-            tableRows.add(
+          Map<Integer, String> rowIndexToErrorMessage = Maps.newHashMap();
+          for (int i = 0; i < rows.getSerializedRowsCount(); ++i) {
+            ByteString bytes = rows.getSerializedRows(i);
+            DynamicMessage msg = DynamicMessage.parseFrom(protoDescriptor, bytes);
+            TableRow tableRow =
                 TableRowToStorageApiProto.tableRowFromMessage(
-                    DynamicMessage.parseFrom(descriptor, bytes)));
+                    schemaInformation,
+                    DynamicMessage.parseFrom(protoDescriptor, bytes),
+                    false,
+                    Predicates.alwaysTrue());
+            if (shouldFailRow.apply(tableRow)) {
+              rowIndexToErrorMessage.put(i, "Failing row " + tableRow.toPrettyString());
+            }
+            String insertTypeStr = null;
+            long changeSequenceNum = -1;
+            Descriptors.FieldDescriptor fieldDescriptor =
+                protoDescriptor.findFieldByName(StorageApiCDC.CHANGE_TYPE_COLUMN);
+            if (fieldDescriptor != null) {
+              insertTypeStr = (String) msg.getField(fieldDescriptor);
+            }
+            fieldDescriptor = protoDescriptor.findFieldByName(StorageApiCDC.CHANGE_SQN_COLUMN);
+            if (fieldDescriptor != null) {
+              String changeSequenceNumHex = (String) msg.getField(fieldDescriptor);
+              changeSequenceNum = Long.parseUnsignedLong(changeSequenceNumHex, 16);
+            }
+            Stream.Entry.UpdateType insertType = Stream.Entry.UpdateType.INSERT;
+            if (insertTypeStr != null) {
+              insertType = Stream.Entry.UpdateType.valueOf(insertTypeStr);
+            }
+            if (insertType == Stream.Entry.UpdateType.INSERT) {
+              Preconditions.checkArgument(
+                  !usedForUpdate, "Stream can't be used for update and insert.");
+              usedForInsert = true;
+            } else {
+              Preconditions.checkArgument(
+                  !usedForInsert, "Stream can't be used for update and insert.");
+              usedForUpdate = true;
+            }
+            streamEntries.add(new Stream.Entry(tableRow, insertType, changeSequenceNum));
           }
-          stream.appendRows(offset, tableRows);
+          if (!rowIndexToErrorMessage.isEmpty()) {
+            return ApiFutures.immediateFailedFuture(
+                new Exceptions.AppendSerializationError(
+                    Code.INVALID_ARGUMENT.getNumber(),
+                    "Append serialization failed for writer: " + streamName,
+                    stream.streamName,
+                    rowIndexToErrorMessage));
+          }
+          @Nullable Exceptions.StorageException failure = stream.appendRows(offset, streamEntries);
+          if (failure != null) {
+            return ApiFutures.immediateFailedFuture(failure);
+          }
+          if (stream.getUpdatedSchema() != null) {
+            com.google.cloud.bigquery.storage.v1.TableSchema newSchema =
+                TableRowToStorageApiProto.schemaToProtoTableSchema(stream.getUpdatedSchema());
+            responseBuilder.setUpdatedSchema(newSchema);
+            if (this.updatedSchema == null) {
+              this.updatedSchema = newSchema;
+              this.schemaInformation =
+                  TableRowToStorageApiProto.SchemaInformation.fromTableSchema(this.updatedSchema);
+            }
+          }
         }
-        return ApiFutures.immediateFuture(AppendRowsResponse.newBuilder().build());
+        return ApiFutures.immediateFuture(responseBuilder.build());
+      }
+
+      @Override
+      public com.google.cloud.bigquery.storage.v1.@org.checkerframework.checker.nullness.qual
+              .Nullable
+          TableSchema getUpdatedSchema() {
+        return this.updatedSchema;
       }
 
       @Override
@@ -457,13 +954,13 @@ public class FakeDatasetService implements DatasetService, Serializable {
       public void pin() {}
 
       @Override
-      public void unpin() throws Exception {}
+      public void unpin() {}
     };
   }
 
   @Override
   public ApiFuture<FlushRowsResponse> flush(String streamName, long offset) {
-    synchronized (tables) {
+    synchronized (FakeDatasetService.class) {
       Stream stream = writeStreams.get(streamName);
       if (stream == null) {
         throw new RuntimeException("No such stream: " + streamName);
@@ -475,7 +972,7 @@ public class FakeDatasetService implements DatasetService, Serializable {
 
   @Override
   public ApiFuture<FinalizeWriteStreamResponse> finalizeWriteStream(String streamName) {
-    synchronized (tables) {
+    synchronized (FakeDatasetService.class) {
       Stream stream = writeStreams.get(streamName);
       if (stream == null) {
         throw new RuntimeException("No such stream: " + streamName);
@@ -489,7 +986,7 @@ public class FakeDatasetService implements DatasetService, Serializable {
   @Override
   public ApiFuture<BatchCommitWriteStreamsResponse> commitWriteStreams(
       String tableUrn, Iterable<String> writeStreamNames) {
-    synchronized (tables) {
+    synchronized (FakeDatasetService.class) {
       for (String streamName : writeStreamNames) {
         Stream stream = writeStreams.get(streamName);
         if (stream == null) {
@@ -510,7 +1007,7 @@ public class FakeDatasetService implements DatasetService, Serializable {
    */
   public void failOnInsert(
       Map<TableRow, List<TableDataInsertAllResponse.InsertErrors>> insertErrors) {
-    synchronized (tables) {
+    synchronized (FakeDatasetService.class) {
       for (Map.Entry<TableRow, List<TableDataInsertAllResponse.InsertErrors>> entry :
           insertErrors.entrySet()) {
         List<String> errorStrings = Lists.newArrayList();
@@ -525,7 +1022,7 @@ public class FakeDatasetService implements DatasetService, Serializable {
   Map<TableRow, List<TableDataInsertAllResponse.InsertErrors>> getInsertErrors() {
     Map<TableRow, List<TableDataInsertAllResponse.InsertErrors>> parsedInsertErrors =
         Maps.newHashMap();
-    synchronized (tables) {
+    synchronized (FakeDatasetService.class) {
       for (Map.Entry<String, List<String>> entry : this.insertErrors.entrySet()) {
         TableRow tableRow = BigQueryHelpers.fromJsonString(entry.getKey(), TableRow.class);
         List<TableDataInsertAllResponse.InsertErrors> allErrors = Lists.newArrayList();
@@ -540,10 +1037,11 @@ public class FakeDatasetService implements DatasetService, Serializable {
     return parsedInsertErrors;
   }
 
-  void throwNotFound(String format, Object... args) throws IOException {
+  @FormatMethod
+  void throwNotFound(@FormatString String format, Object... args) throws IOException {
     throw new IOException(
         String.format(format, args),
-        new GoogleJsonResponseException.Builder(404, String.format(format, args), new HttpHeaders())
+        new HttpResponseException.Builder(404, String.format(format, args), new HttpHeaders())
             .build());
   }
 }

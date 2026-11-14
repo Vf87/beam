@@ -22,13 +22,17 @@ import com.rabbitmq.client.AMQP.BasicProperties;
 import com.rabbitmq.client.Envelope;
 import com.rabbitmq.client.GetResponse;
 import com.rabbitmq.client.LongString;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -36,8 +40,14 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * reason of this class is that AMQP.BasicProperties doesn't provide a serializable public API.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
+@SuppressFBWarnings(
+    value = "CT_CONSTRUCTOR_THROW",
+    justification =
+        "Pre-existing finding, not triaged yet."
+            + " Making the class final or moving the throwing code"
+            + " into a static factory method may fix it.")
 public class RabbitMqMessage implements Serializable {
 
   /**
@@ -73,33 +83,43 @@ public class RabbitMqMessage implements Serializable {
         envelope, nextProperties, processed.getBody(), processed.getMessageCount());
   }
 
-  private static Map<String, Object> serializableHeaders(Map<String, Object> headers) {
+  @VisibleForTesting
+  static Map<String, Object> serializableHeaders(Map<String, Object> headers) {
     Map<String, Object> returned = new HashMap<>();
     if (headers != null) {
       for (Map.Entry<String, Object> h : headers.entrySet()) {
         Object value = h.getValue();
-        if (!(value instanceof Serializable)) {
-          try {
-            if (value instanceof LongString) {
-              LongString longString = (LongString) value;
-              byte[] bytes = longString.getBytes();
-              String s = new String(bytes, StandardCharsets.UTF_8);
-              value = s;
-            } else {
-              throw new RuntimeException(String.format("no transformation defined for %s", value));
-            }
-          } catch (Throwable t) {
-            throw new UnsupportedOperationException(
-                String.format(
-                    "can't make unserializable value %s a serializable value (which is mandatory for Apache Beam dataflow implementation)",
-                    value),
-                t);
-          }
+        if (value instanceof List<?>) {
+          // Transformation for List type headers
+          value =
+              ((List<?>) value)
+                  .stream().map(RabbitMqMessage::getTransformedValue).collect(Collectors.toList());
+        } else if (!(value instanceof Serializable)) {
+          value = getTransformedValue(value);
         }
         returned.put(h.getKey(), value);
       }
     }
     return returned;
+  }
+
+  private static Object getTransformedValue(Object value) {
+    try {
+      if (value instanceof LongString) {
+        LongString longString = (LongString) value;
+        byte[] bytes = longString.getBytes();
+        value = new String(bytes, StandardCharsets.UTF_8);
+      } else {
+        throw new RuntimeException(String.format("No transformation defined for %s", value));
+      }
+    } catch (Throwable t) {
+      throw new UnsupportedOperationException(
+          String.format(
+              "Can't make unserializable value %s a serializable value (which is mandatory for Apache Beam dataflow implementation)",
+              value),
+          t);
+    }
+    return value;
   }
 
   private final @Nullable String routingKey;
@@ -119,6 +139,7 @@ public class RabbitMqMessage implements Serializable {
   private final @Nullable String appId;
   private final @Nullable String clusterId;
 
+  @SuppressWarnings("JavaUtilDate")
   public RabbitMqMessage(byte[] body) {
     this.body = body;
     routingKey = "";
@@ -138,6 +159,7 @@ public class RabbitMqMessage implements Serializable {
     clusterId = null;
   }
 
+  @SuppressWarnings("JavaUtilDate")
   public RabbitMqMessage(String routingKey, GetResponse delivery) {
     this.routingKey = routingKey;
     delivery = serializableDeliveryOf(delivery);
@@ -158,6 +180,7 @@ public class RabbitMqMessage implements Serializable {
     clusterId = delivery.getProps().getClusterId();
   }
 
+  @SuppressWarnings("JavaUtilDate")
   public RabbitMqMessage(
       String routingKey,
       byte[] body,
@@ -311,7 +334,9 @@ public class RabbitMqMessage implements Serializable {
           && Objects.equals(replyTo, other.replyTo)
           && Objects.equals(expiration, other.expiration)
           && Objects.equals(messageId, other.messageId)
-          && Objects.equals(timestamp, other.timestamp)
+          && Objects.equals(
+              timestamp == null ? null : timestamp.toInstant(),
+              other.timestamp == null ? null : other.timestamp.toInstant())
           && Objects.equals(type, other.type)
           && Objects.equals(userId, other.userId)
           && Objects.equals(appId, other.appId)

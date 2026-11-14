@@ -23,8 +23,11 @@ import static org.hamcrest.Matchers.containsInAnyOrder;
 import com.google.api.core.ApiFuture;
 import com.google.api.core.ApiFutures;
 import com.google.api.gax.grpc.GrpcTransportChannel;
+import com.google.api.gax.rpc.AlreadyExistsException;
+import com.google.api.gax.rpc.DeadlineExceededException;
 import com.google.api.gax.rpc.FixedTransportChannelProvider;
 import com.google.api.gax.rpc.TransportChannelProvider;
+import com.google.api.gax.rpc.UnavailableException;
 import com.google.cloud.pubsub.v1.AckReplyConsumer;
 import com.google.cloud.pubsub.v1.MessageReceiver;
 import com.google.cloud.pubsub.v1.Publisher;
@@ -39,6 +42,7 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingDeque;
@@ -50,9 +54,9 @@ import org.apache.beam.sdk.io.gcp.pubsub.PubsubClient.TopicPath;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.testing.TestPipelineOptions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Streams;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Streams;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.hamcrest.Matcher;
 import org.joda.time.DateTime;
@@ -64,6 +68,8 @@ import org.joda.time.format.DateTimeFormatter;
 import org.junit.rules.TestRule;
 import org.junit.runner.Description;
 import org.junit.runners.model.Statement;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test rule which creates a new topic and subscription with randomized names and exposes the APIs
@@ -71,10 +77,8 @@ import org.junit.runners.model.Statement;
  *
  * <p>Deletes topic and subscription on shutdown.
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class TestPubsub implements TestRule {
+  private static final Logger LOG = LoggerFactory.getLogger(TestPubsub.class);
   private static final DateTimeFormatter DATETIME_FORMAT =
       DateTimeFormat.forPattern("YYYY-MM-dd-HH-mm-ss-SSS");
   private static final String EVENTS_TOPIC_NAME = "events";
@@ -148,25 +152,29 @@ public class TestPubsub implements TestRule {
     } else {
       channel = ManagedChannelBuilder.forTarget(pubsubEndpoint).useTransportSecurity().build();
     }
-    channelProvider = FixedTransportChannelProvider.create(GrpcTransportChannel.create(channel));
-    topicAdmin =
+    TransportChannelProvider chanProvider =
+        FixedTransportChannelProvider.create(GrpcTransportChannel.create(channel));
+    channelProvider = chanProvider;
+    TopicAdminClient topAdmin =
         TopicAdminClient.create(
             TopicAdminSettings.newBuilder()
                 .setCredentialsProvider(pipelineOptions::getGcpCredential)
-                .setTransportChannelProvider(channelProvider)
+                .setTransportChannelProvider(chanProvider)
                 .setEndpoint(pubsubEndpoint)
                 .build());
-    subscriptionAdmin =
+    topicAdmin = topAdmin;
+    SubscriptionAdminClient subAdmin =
         SubscriptionAdminClient.create(
             SubscriptionAdminSettings.newBuilder()
                 .setCredentialsProvider(pipelineOptions::getGcpCredential)
-                .setTransportChannelProvider(channelProvider)
+                .setTransportChannelProvider(chanProvider)
                 .setEndpoint(pubsubEndpoint)
                 .build());
+    subscriptionAdmin = subAdmin;
     TopicPath eventsTopicPathTmp =
         PubsubClient.topicPathFromName(
             pipelineOptions.getProject(), createTopicName(description, EVENTS_TOPIC_NAME));
-    topicAdmin.createTopic(eventsTopicPathTmp.getPath());
+    createTopicWithRetry(topAdmin, eventsTopicPathTmp.getPath());
 
     // Set this after successful creation; it signals that the topic needs teardown
     eventsTopicPath = eventsTopicPathTmp;
@@ -178,35 +186,85 @@ public class TestPubsub implements TestRule {
             String.format(
                 "projects/%s/subscriptions/%s", pipelineOptions.getProject(), subscriptionName));
 
-    subscriptionAdmin.createSubscription(
+    createSubscriptionWithRetry(
+        subAdmin,
         subscriptionPathTmp.getPath(),
         topicPath().getPath(),
-        PushConfig.getDefaultInstance(),
         DEFAULT_ACK_DEADLINE_SECONDS);
 
     subscriptionPath = subscriptionPathTmp;
   }
 
+  static void createTopicWithRetry(TopicAdminClient topicAdmin, String topicPath) {
+    for (int attempt = 1; ; attempt++) {
+      try {
+        topicAdmin.createTopic(topicPath);
+        return;
+      } catch (AlreadyExistsException e) {
+        return;
+      } catch (DeadlineExceededException | UnavailableException e) {
+        if (attempt >= 3) {
+          throw e;
+        }
+        LOG.warn(
+            "Timed out or unavailable creating topic {} (attempt {}/3), retrying...",
+            topicPath,
+            attempt,
+            e);
+      }
+    }
+  }
+
+  static void createSubscriptionWithRetry(
+      SubscriptionAdminClient subscriptionAdmin,
+      String subscriptionPath,
+      String topicPath,
+      int ackDeadlineSeconds) {
+    for (int attempt = 1; ; attempt++) {
+      try {
+        subscriptionAdmin.createSubscription(
+            subscriptionPath, topicPath, PushConfig.getDefaultInstance(), ackDeadlineSeconds);
+        return;
+      } catch (AlreadyExistsException e) {
+        return;
+      } catch (DeadlineExceededException | UnavailableException e) {
+        if (attempt >= 3) {
+          throw e;
+        }
+        LOG.warn(
+            "Timed out or unavailable creating subscription {} (attempt {}/3), retrying...",
+            subscriptionPath,
+            attempt,
+            e);
+      }
+    }
+  }
+
   private void tearDown() {
-    if (subscriptionAdmin == null || topicAdmin == null || channel == null) {
+    SubscriptionAdminClient subAdmin = subscriptionAdmin;
+    TopicAdminClient topAdmin = topicAdmin;
+    ManagedChannel chan = channel;
+    if (subAdmin == null || topAdmin == null || chan == null) {
       return;
     }
 
     try {
-      if (subscriptionPath != null) {
-        subscriptionAdmin.deleteSubscription(subscriptionPath.getPath());
+      SubscriptionPath subPath = subscriptionPath;
+      if (subPath != null) {
+        subAdmin.deleteSubscription(subPath.getPath());
       }
-      if (eventsTopicPath != null) {
+      TopicPath topPath = eventsTopicPath;
+      if (topPath != null) {
         for (String subscriptionPath :
-            topicAdmin.listTopicSubscriptions(eventsTopicPath.getPath()).iterateAll()) {
-          subscriptionAdmin.deleteSubscription(subscriptionPath);
+            topAdmin.listTopicSubscriptions(topPath.getPath()).iterateAll()) {
+          subAdmin.deleteSubscription(subscriptionPath);
         }
-        topicAdmin.deleteTopic(eventsTopicPath.getPath());
+        topAdmin.deleteTopic(topPath.getPath());
       }
     } finally {
-      subscriptionAdmin.close();
-      topicAdmin.close();
-      channel.shutdown();
+      subAdmin.close();
+      topAdmin.close();
+      chan.shutdown();
 
       subscriptionAdmin = null;
       topicAdmin = null;
@@ -251,31 +309,37 @@ public class TestPubsub implements TestRule {
 
   /** Topic path where events will be published to. */
   public TopicPath topicPath() {
-    return eventsTopicPath;
+    return Preconditions.checkNotNull(eventsTopicPath, "eventsTopicPath is not initialized");
   }
 
   /** Subscription path used to listen for messages on {@link #topicPath()}. */
   public SubscriptionPath subscriptionPath() {
-    return subscriptionPath;
+    return Preconditions.checkNotNull(subscriptionPath, "subscriptionPath is not initialized");
   }
 
   private List<String> listSubscriptions(TopicPath topicPath) {
-    Preconditions.checkNotNull(topicAdmin);
+    TopicAdminClient topAdmin =
+        Preconditions.checkNotNull(topicAdmin, "topicAdmin is not initialized");
+    SubscriptionPath subPath =
+        Preconditions.checkNotNull(subscriptionPath, "subscriptionPath is not initialized");
     // Exclude subscriptionPath, the subscription that we created
-    return Streams.stream(topicAdmin.listTopicSubscriptions(topicPath.getPath()).iterateAll())
-        .filter((path) -> !path.equals(subscriptionPath.getPath()))
+    return Streams.stream(topAdmin.listTopicSubscriptions(topicPath.getPath()).iterateAll())
+        .filter((path) -> !path.equals(subPath.getPath()))
         .collect(Collectors.toList());
   }
 
   /** Publish messages to {@link #topicPath()}. */
   public void publish(List<PubsubMessage> messages) {
-    Preconditions.checkNotNull(eventsTopicPath);
+    TopicPath topPath =
+        Preconditions.checkNotNull(eventsTopicPath, "eventsTopicPath is not initialized");
+    TransportChannelProvider chanProvider =
+        Preconditions.checkNotNull(channelProvider, "channelProvider is not initialized");
     Publisher eventPublisher;
     try {
       eventPublisher =
-          Publisher.newBuilder(eventsTopicPath.getPath())
+          Publisher.newBuilder(topPath.getPath())
               .setCredentialsProvider(pipelineOptions::getGcpCredential)
-              .setChannelProvider(channelProvider)
+              .setChannelProvider(chanProvider)
               .setEndpoint(pubsubEndpoint)
               .build();
     } catch (IOException e) {
@@ -288,8 +352,11 @@ public class TestPubsub implements TestRule {
                 (message) -> {
                   com.google.pubsub.v1.PubsubMessage.Builder builder =
                       com.google.pubsub.v1.PubsubMessage.newBuilder()
-                          .setData(ByteString.copyFrom(message.getPayload()))
-                          .putAllAttributes(message.getAttributeMap());
+                          .setData(ByteString.copyFrom(message.getPayload()));
+                  Map<String, String> attributeMap = message.getAttributeMap();
+                  if (attributeMap != null) {
+                    builder.putAllAttributes(attributeMap);
+                  }
                   return eventPublisher.publish(builder.build());
                 })
             .collect(Collectors.toList());
@@ -311,7 +378,10 @@ public class TestPubsub implements TestRule {
    */
   public List<PubsubMessage> waitForNMessages(int n, Duration timeoutDuration)
       throws IOException, InterruptedException {
-    Preconditions.checkNotNull(subscriptionPath);
+    SubscriptionPath subPath =
+        Preconditions.checkNotNull(subscriptionPath, "subscriptionPath is not initialized");
+    TransportChannelProvider chanProvider =
+        Preconditions.checkNotNull(channelProvider, "channelProvider is not initialized");
 
     BlockingQueue<com.google.pubsub.v1.PubsubMessage> receivedMessages =
         new LinkedBlockingDeque<>(n);
@@ -326,9 +396,9 @@ public class TestPubsub implements TestRule {
         };
 
     Subscriber subscriber =
-        Subscriber.newBuilder(subscriptionPath.getPath(), receiver)
+        Subscriber.newBuilder(subPath.getPath(), receiver)
             .setCredentialsProvider(pipelineOptions::getGcpCredential)
-            .setChannelProvider(channelProvider)
+            .setChannelProvider(chanProvider)
             .setEndpoint(pubsubEndpoint)
             .build();
     subscriber.startAsync();
@@ -340,6 +410,7 @@ public class TestPubsub implements TestRule {
       try {
         Thread.sleep(1000);
       } catch (InterruptedException ignored) {
+        // Ignore interrupt and continue polling.
       }
     }
 
@@ -368,10 +439,13 @@ public class TestPubsub implements TestRule {
    *     hasProperty("payload", equalTo("hello".getBytes(StandardCharsets.US_ASCII))),
    *     hasProperty("payload", equalTo("world".getBytes(StandardCharsets.US_ASCII))))
    *   .waitForUpTo(Duration.standardSeconds(20));
-   * </pre>
+   * }</pre>
    *
+   * @param matchers Matchers to assert on the received messages.
    */
-  public PollingAssertion assertThatTopicEventuallyReceives(Matcher<PubsubMessage>... matchers) {
+  @SafeVarargs
+  public final PollingAssertion assertThatTopicEventuallyReceives(
+      Matcher<PubsubMessage>... matchers) {
     return timeoutDuration ->
         assertThat(
             waitForNMessages(matchers.length, timeoutDuration), containsInAnyOrder(matchers));
@@ -426,15 +500,5 @@ public class TestPubsub implements TestRule {
     } else {
       throw new AssertionError("Timed out before subscription created for " + topicPath());
     }
-  }
-
-  private PubsubClient.OutgoingMessage toOutgoingMessage(PubsubMessage message) {
-    return PubsubClient.OutgoingMessage.of(
-        com.google.pubsub.v1.PubsubMessage.newBuilder()
-            .setData(ByteString.copyFrom(message.getPayload()))
-            .putAllAttributes(message.getAttributeMap())
-            .build(),
-        DateTime.now().getMillis(),
-        null);
   }
 }

@@ -21,6 +21,7 @@ import static org.hamcrest.Matchers.isA;
 
 import java.io.Serializable;
 import org.apache.beam.sdk.Pipeline.PipelineExecutionException;
+import org.apache.beam.sdk.testing.BeamParallelJunit4Runner;
 import org.apache.beam.sdk.testing.NeedsRunner;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
@@ -33,16 +34,18 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
+import org.junit.rules.Timeout;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
 
 /** Tests for {@link WithTimestamps}. */
-@RunWith(JUnit4.class)
+@RunWith(BeamParallelJunit4Runner.class)
 public class WithTimestampsTest implements Serializable {
 
   @Rule public final transient TestPipeline p = TestPipeline.create();
 
   @Rule public transient ExpectedException thrown = ExpectedException.none();
+
+  @Rule public transient Timeout globalTimeout = Timeout.seconds(1200);
 
   @Test
   @Category(ValidatesRunner.class)
@@ -115,7 +118,8 @@ public class WithTimestampsTest implements Serializable {
             .apply("FirstTimestamp", WithTimestamps.of(timestampFn))
             .apply(
                 "WithSkew",
-                WithTimestamps.of(backInTimeFn).withAllowedTimestampSkew(skew.plus(100L)));
+                WithTimestamps.of(backInTimeFn)
+                    .withAllowedTimestampSkew(skew.plus(Duration.millis(100L))));
 
     PCollection<KV<String, Instant>> timestampedVals =
         timestampedWithSkew.apply(

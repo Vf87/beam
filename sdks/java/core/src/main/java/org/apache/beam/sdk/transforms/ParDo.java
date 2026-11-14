@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.transforms;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.io.Serializable;
 import java.lang.reflect.ParameterizedType;
@@ -44,12 +44,13 @@ import org.apache.beam.sdk.schemas.utils.SelectHelpers;
 import org.apache.beam.sdk.state.StateSpec;
 import org.apache.beam.sdk.transforms.DoFn.WindowedContext;
 import org.apache.beam.sdk.transforms.display.DisplayData;
-import org.apache.beam.sdk.transforms.display.DisplayData.Builder;
 import org.apache.beam.sdk.transforms.display.DisplayData.ItemSpec;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignature;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignature.FieldAccessDeclaration;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignature.MethodWithExtraParameters;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignature.OnTimerMethod;
+import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter.ElementParameter;
+import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter.ProcessContextParameter;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter.SchemaElementParameter;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter.SideInputParameter;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignatures;
@@ -64,7 +65,7 @@ import org.apache.beam.sdk.values.PValue;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -387,7 +388,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  *     documentation for ParDo</a>
  */
 @SuppressWarnings({
-  "nullness", // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness", // TODO(https://github.com/apache/beam/issues/20497)
   "rawtypes"
 })
 public class ParDo {
@@ -431,7 +432,7 @@ public class ParDo {
     }
   }
 
-  private static void validateStateApplicableForInput(DoFn<?, ?> fn, PCollection<?> input) {
+  private static void validateStateApplicableForInput(PCollection<?> input) {
     Coder<?> inputCoder = input.getCoder();
     checkArgument(
         inputCoder instanceof KvCoder,
@@ -445,8 +446,8 @@ public class ParDo {
     } catch (Coder.NonDeterministicException exc) {
       throw new IllegalArgumentException(
           String.format(
-              "%s requires a deterministic key coder in order to use state and timers",
-              ParDo.class.getSimpleName()));
+              "%s requires a deterministic key coder in order to use state and timers, the reason is:%n %s",
+              ParDo.class.getSimpleName(), exc.getMessage()));
     }
   }
 
@@ -638,6 +639,7 @@ public class ParDo {
               fn.getClass().getName()));
     }
   }
+
   /**
    * Extract information on how the DoFn uses schemas. In particular, if the schema of an element
    * parameter does not match the input PCollection's schema, convert.
@@ -663,6 +665,7 @@ public class ParDo {
               input.getSchema(),
               signature.fieldAccessDeclarations(),
               fn);
+      doFnSchemaInformation = doFnSchemaInformation.withFieldAccessDescriptor(accessDescriptor);
       Schema selectedSchema = SelectHelpers.getOutputSchema(input.getSchema(), accessDescriptor);
       ConvertHelpers.ConvertedSchemaInformation converted =
           ConvertHelpers.getConvertedSchemaInformation(selectedSchema, elementT, schemaRegistry);
@@ -682,6 +685,13 @@ public class ParDo {
         doFnSchemaInformation =
             doFnSchemaInformation.withUnboxPrimitiveParameter(
                 (SchemaCoder<?>) input.getCoder(), accessDescriptor, selectedSchema, elementT);
+      }
+    }
+    for (DoFnSignature.Parameter p : processElementMethod.extraParameters()) {
+      if (p instanceof ProcessContextParameter || p instanceof ElementParameter) {
+        doFnSchemaInformation =
+            doFnSchemaInformation.withFieldAccessDescriptor(FieldAccessDescriptor.withAllFields());
+        break;
       }
     }
 
@@ -716,6 +726,7 @@ public class ParDo {
       this.fnDisplayData = fnDisplayData;
       this.sideInputs = sideInputs;
     }
+
     /**
      * Returns a new {@link ParDo} {@link PTransform} that's like this {@link PTransform} but with
      * the specified additional side inputs. Does not modify this {@link PTransform}.
@@ -821,7 +832,7 @@ public class ParDo {
      * DoFn#populateDisplayData}.
      */
     @Override
-    public void populateDisplayData(Builder builder) {
+    public void populateDisplayData(DisplayData.Builder builder) {
       super.populateDisplayData(builder);
       ParDo.populateDisplayData(builder, fn, fnDisplayData);
     }
@@ -940,7 +951,7 @@ public class ParDo {
 
       DoFnSignature signature = DoFnSignatures.getSignature(fn.getClass());
       if (signature.usesState() || signature.usesTimers()) {
-        validateStateApplicableForInput(fn, input);
+        validateStateApplicableForInput(input);
       }
 
       validateSideInputTypes(sideInputs, fn);
@@ -984,7 +995,7 @@ public class ParDo {
     }
 
     @Override
-    public void populateDisplayData(Builder builder) {
+    public void populateDisplayData(DisplayData.Builder builder) {
       super.populateDisplayData(builder);
       ParDo.populateDisplayData(builder, fn, fnDisplayData);
     }
@@ -1054,6 +1065,11 @@ public class ParDo {
           public String dispatchSet(Coder<?> elementCoder) {
             return "SetState<" + elementCoder + ">";
           }
+
+          @Override
+          public String dispatchMultimap(Coder<?> keyCoder, Coder<?> valueCoder) {
+            return "MultimapState<" + keyCoder + ", " + valueCoder + ">";
+          }
         });
   }
 
@@ -1073,9 +1089,5 @@ public class ParDo {
         throw new RuntimeException(e);
       }
     }
-  }
-
-  private static boolean isSplittable(DoFn<?, ?> fn) {
-    return DoFnSignatures.signatureForDoFn(fn).processElement().isSplittable();
   }
 }

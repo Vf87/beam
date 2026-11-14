@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.io.gcp.bigquery;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.time.temporal.ChronoUnit;
 import org.joda.time.LocalDateTime;
@@ -626,10 +626,6 @@ public final class CivilTimeEncoder {
   private static void checkValidDateTimeMicros(java.time.LocalDateTime dateTime) {
     checkValidDateTimeSeconds(dateTime);
     checkArgument(dateTime.equals(dateTime.truncatedTo(ChronoUnit.MICROS)));
-  }
-
-  private static void checkValidDateTimeNanos(java.time.LocalDateTime dateTime) {
-    checkValidDateTimeSeconds(dateTime);
   }
 
   private static void checkValidMicroOfSecond(int microOfSecond) {

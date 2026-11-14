@@ -17,49 +17,118 @@
  */
 package org.apache.beam.sdk.io.gcp.bigquery;
 
+import com.google.api.services.bigquery.model.TableRow;
+import com.google.cloud.bigquery.storage.v1.TableSchema;
+import com.google.protobuf.DescriptorProtos;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Message;
-import java.time.Duration;
+import java.io.IOException;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryServices.DatasetService;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.schemas.Schema;
+import org.apache.beam.sdk.transforms.SerializableBiFunction;
 import org.apache.beam.sdk.transforms.SerializableFunction;
+import org.apache.beam.sdk.util.Preconditions;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.Cache;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.CacheBuilder;
+import org.checkerframework.checker.nullness.qual.NonNull;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
-@SuppressWarnings({"nullness"})
 /** Storage API DynamicDestinations used when the input is a Beam Row. */
-class StorageApiDynamicDestinationsBeamRow<T, DestinationT>
+class StorageApiDynamicDestinationsBeamRow<T, DestinationT extends @NonNull Object>
     extends StorageApiDynamicDestinations<T, DestinationT> {
-  private final Schema schema;
+  private final TableSchema tableSchema;
   private final SerializableFunction<T, Row> toRow;
-  private final Cache<DestinationT, Descriptor> destinationDescriptorCache =
-      CacheBuilder.newBuilder().expireAfterAccess(Duration.ofMinutes(15)).build();
+  private final @Nullable
+      SerializableBiFunction<TableRowToStorageApiProto.@Nullable SchemaInformation, T, TableRow>
+      formatRecordOnFailureFunction;
+
+  private final boolean usesCdc;
 
   StorageApiDynamicDestinationsBeamRow(
       DynamicDestinations<T, DestinationT> inner,
       Schema schema,
-      SerializableFunction<T, Row> toRow) {
+      SerializableFunction<T, Row> toRow,
+      @Nullable
+          SerializableBiFunction<TableRowToStorageApiProto.@Nullable SchemaInformation, T, TableRow>
+          formatRecordOnFailureFunction,
+      boolean usesCdc) {
     super(inner);
-    this.schema = schema;
+    this.tableSchema = BeamRowToStorageApiProto.protoTableSchemaFromBeamSchema(schema);
     this.toRow = toRow;
+    this.formatRecordOnFailureFunction = formatRecordOnFailureFunction;
+    this.usesCdc = usesCdc;
   }
 
   @Override
-  public MessageConverter<T> getMessageConverter(DestinationT destination) throws Exception {
-    return new MessageConverter<T>() {
-      Descriptor descriptor =
-          destinationDescriptorCache.get(
-              destination, () -> BeamRowToStorageApiProto.getDescriptorFromSchema(schema));
-
-      @Override
-      public Descriptor getSchemaDescriptor() {
-        return descriptor;
-      }
-
-      @Override
-      public Message toMessage(T element) {
-        return BeamRowToStorageApiProto.messageFromBeamRow(descriptor, toRow.apply(element));
-      }
-    };
+  public MessageConverter<T> getMessageConverter(
+      DestinationT destination,
+      PipelineOptions pipelineOptions,
+      DatasetService datasetService,
+      BigQueryServices.WriteStreamService writeStreamService)
+      throws Exception {
+    return new BeamRowConverter();
   }
+
+  class BeamRowConverter implements MessageConverter<T> {
+    final Descriptor descriptor;
+    final @Nullable Descriptor cdcDescriptor;
+
+    BeamRowConverter() throws Exception {
+      this.descriptor =
+          TableRowToStorageApiProto.getDescriptorFromTableSchema(tableSchema, true, false);
+      if (usesCdc) {
+        cdcDescriptor =
+            TableRowToStorageApiProto.getDescriptorFromTableSchema(
+                Preconditions.checkStateNotNull(tableSchema), true, true);
+      } else {
+        cdcDescriptor = null;
+      }
+    }
+
+    @Override
+    public void updateSchemaFromTable() throws IOException, InterruptedException {}
+
+    @Override
+    public TableSchema getTableSchema() {
+      return tableSchema;
+    }
+
+    @Override
+    public DescriptorProtos.DescriptorProto getDescriptor(boolean includeCdcColumns) {
+      return cdcDescriptor != null ? cdcDescriptor.toProto() : descriptor.toProto();
+    }
+
+    @Override
+    public StorageApiWritePayload toMessage(
+        T element,
+        @Nullable RowMutationInformation rowMutationInformation,
+        TableRowToStorageApiProto.ErrorCollector collectedExceptions)
+        throws Exception {
+      String changeType = null;
+      String changeSequenceNum = null;
+      Descriptor descriptorToUse = descriptor;
+      if (rowMutationInformation != null) {
+        changeType = rowMutationInformation.getMutationType().toString();
+        changeSequenceNum = rowMutationInformation.getChangeSequenceNumber();
+        descriptorToUse = Preconditions.checkStateNotNull(cdcDescriptor);
+      }
+      Message msg =
+          BeamRowToStorageApiProto.messageFromBeamRow(
+              descriptorToUse, toRow.apply(element), changeType, changeSequenceNum);
+      return StorageApiWritePayload.of(
+          msg.toByteArray(),
+          null,
+          formatRecordOnFailureFunction != null ? toFailsafeTableRow(element) : null);
+    }
+
+    @Override
+    public TableRow toFailsafeTableRow(T element) {
+      if (formatRecordOnFailureFunction != null) {
+        return formatRecordOnFailureFunction.apply(null, element);
+      } else {
+        return BigQueryUtils.toTableRow(toRow.apply(element));
+      }
+    }
+  }
+  ;
 }

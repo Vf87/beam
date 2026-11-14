@@ -17,7 +17,7 @@
  */
 package org.apache.beam.runners.direct;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables.getOnlyElement;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables.getOnlyElement;
 
 import com.google.auto.value.AutoValue;
 import java.io.IOException;
@@ -25,8 +25,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
-import org.apache.beam.runners.core.construction.ReadTranslation;
-import org.apache.beam.runners.core.construction.SplittableParDo;
 import org.apache.beam.runners.direct.UnboundedReadDeduplicator.NeverDeduplicator;
 import org.apache.beam.sdk.io.UnboundedSource;
 import org.apache.beam.sdk.io.UnboundedSource.CheckpointMark;
@@ -37,11 +35,14 @@ import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.util.CoderUtils;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.construction.ReadTranslation;
+import org.apache.beam.sdk.util.construction.SplittableParDo;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
@@ -51,8 +52,7 @@ import org.joda.time.Instant;
  * PTransform}.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 class UnboundedReadEvaluatorFactory implements TransformEvaluatorFactory {
   // Occasionally close an existing reader and resume from checkpoint, to exercise close-and-resume
@@ -143,7 +143,7 @@ class UnboundedReadEvaluatorFactory implements TransformEvaluatorFactory {
           do {
             if (deduplicator.shouldOutput(reader.getCurrentRecordId())) {
               output.add(
-                  WindowedValue.timestampedValueInGlobalWindow(
+                  WindowedValues.timestampedValueInGlobalWindow(
                       reader.getCurrent(), reader.getCurrentTimestamp()));
             }
             numElements++;
@@ -168,20 +168,21 @@ class UnboundedReadEvaluatorFactory implements TransformEvaluatorFactory {
               .addOutput(output)
               .addUnprocessedElements(
                   Collections.singleton(
-                      WindowedValue.timestampedValueInGlobalWindow(residual, watermark)));
+                      WindowedValues.timestampedValueInGlobalWindow(residual, watermark)));
         } else {
           Instant watermark = reader.getWatermark();
           if (watermark.isBefore(BoundedWindow.TIMESTAMP_MAX_VALUE)) {
-            // If the reader had no elements available, but the shard is not done, reuse it later
-            // Might be better to finalize old checkpoint.
+            // If the reader had no elements available, but the shard is not done, reuse it later.
+            // Finalize old checkpoint now.
+            final CheckpointMarkT checkpoint = shard.getCheckpoint();
+            if (checkpoint != null) {
+              checkpoint.finalizeCheckpoint();
+            }
             resultBuilder.addUnprocessedElements(
                 Collections.<WindowedValue<?>>singleton(
-                    WindowedValue.timestampedValueInGlobalWindow(
+                    WindowedValues.timestampedValueInGlobalWindow(
                         UnboundedSourceShard.of(
-                            shard.getSource(),
-                            shard.getDeduplicator(),
-                            reader,
-                            shard.getCheckpoint()),
+                            shard.getSource(), shard.getDeduplicator(), reader, null),
                         watermark)));
           } else {
             // End of input. Close the reader after finalizing old checkpoint.
@@ -237,10 +238,11 @@ class UnboundedReadEvaluatorFactory implements TransformEvaluatorFactory {
     private boolean startReader(
         UnboundedReader<OutputT> reader, UnboundedSourceShard<OutputT, CheckpointMarkT> shard)
         throws IOException {
-      if (shard.getExistingReader() == null) {
+      UnboundedReader<OutputT> existingReader = shard.getExistingReader();
+      if (existingReader == null) {
         return reader.start();
       } else {
-        return shard.getExistingReader().advance();
+        return existingReader.advance();
       }
     }
 
@@ -296,6 +298,7 @@ class UnboundedReadEvaluatorFactory implements TransformEvaluatorFactory {
       return of(source, deduplicator, null, null);
     }
 
+    @SuppressWarnings("nullness") // https://github.com/google/auto/issues/1320
     static <T, CheckpointT extends CheckpointMark> UnboundedSourceShard<T, CheckpointT> of(
         UnboundedSource<T, CheckpointT> source,
         UnboundedReadDeduplicator deduplicator,
@@ -344,7 +347,7 @@ class UnboundedReadEvaluatorFactory implements TransformEvaluatorFactory {
         initialShards.add(
             evaluationContext
                 .<UnboundedSourceShard<T, ?>>createRootBundle()
-                .add(WindowedValue.valueInGlobalWindow(shard))
+                .add(WindowedValues.valueInGlobalWindow(shard))
                 .commit(BoundedWindow.TIMESTAMP_MAX_VALUE));
       }
       return initialShards.build();

@@ -39,7 +39,6 @@ import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.experimental.runners.Enclosed;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
 
 /** Test the various NEXMark queries yield results coherent with their models. */
 @RunWith(Enclosed.class)
@@ -122,13 +121,13 @@ public class SqlQueryTest {
     }
 
     @Test
-    @Ignore("https://jira.apache.org/jira/browse/BEAM-7072")
+    @Ignore("https://github.com/apache/beam/issues/19541")
     public void sqlQuery5MatchesModelBatch() {
       queryMatchesModel("SqlQuery5TestBatch", getQuery5(CONFIG), new Query5Model(CONFIG), false);
     }
 
     @Test
-    @Ignore("https://jira.apache.org/jira/browse/BEAM-7072")
+    @Ignore("https://github.com/apache/beam/issues/19541")
     public void sqlQuery5MatchesModelStreaming() {
       queryMatchesModel("SqlQuery5TestStreaming", getQuery5(CONFIG), new Query5Model(CONFIG), true);
     }
@@ -144,7 +143,7 @@ public class SqlQueryTest {
     }
   }
 
-  @RunWith(JUnit4.class)
+  @RunWith(org.apache.beam.sdk.testing.BeamParallelJunit4Runner.class)
   public static class SqlQueryTestCalcite extends SqlQueryTestCases {
     @Override
     protected SqlQuery1 getQuery1() {
@@ -169,62 +168,6 @@ public class SqlQueryTest {
     @Override
     protected SqlQuery7 getQuery7(NexmarkConfiguration configuration) {
       return new SqlQuery7(configuration);
-    }
-  }
-
-  @RunWith(JUnit4.class)
-  public static class SqlQueryTestZetaSql extends SqlQueryTestCases {
-    @Override
-    protected SqlQuery1 getQuery1() {
-      throw new UnsupportedOperationException("Query1 not implemented for ZetaSQL");
-    }
-
-    @Override
-    protected SqlQuery2 getQuery2(long skipFactor) {
-      return SqlQuery2.zetaSqlQuery2(skipFactor);
-    }
-
-    @Override
-    protected SqlQuery3 getQuery3(NexmarkConfiguration configuration) {
-      return SqlQuery3.zetaSqlQuery3(configuration);
-    }
-
-    @Override
-    protected SqlQuery5 getQuery5(NexmarkConfiguration configuration) {
-      throw new UnsupportedOperationException("Query5 is not implemented for ZetaSQL");
-    }
-
-    @Override
-    protected SqlQuery7 getQuery7(NexmarkConfiguration configuration) {
-      throw new UnsupportedOperationException("Query7 is not implemented for ZetaSQL");
-    }
-
-    @Override
-    @Test
-    @Ignore("Query1 is not implemented for ZetaSQL")
-    public void sqlQuery1MatchesModelBatch() {
-      throw new UnsupportedOperationException("Query1 is not implemented for ZetaSQL");
-    }
-
-    @Override
-    @Test
-    @Ignore("Query1 is not implemented for ZetaSQL")
-    public void sqlQuery1MatchesModelStreaming() {
-      throw new UnsupportedOperationException("Query1 is not implemented for ZetaSQL");
-    }
-
-    @Override
-    @Test
-    @Ignore("Query7 is not implemented for ZetaSQL")
-    public void sqlQuery7MatchesModelBatch() {
-      throw new UnsupportedOperationException("Query7 is not implemented for ZetaSQL");
-    }
-
-    @Override
-    @Test
-    @Ignore("Query7 is not implemented for ZetaSQL")
-    public void sqlQuery7MatchesModelStreaming() {
-      throw new UnsupportedOperationException("Query7 is not implemented for ZetaSQL");
     }
   }
 }

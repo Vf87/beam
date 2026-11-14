@@ -19,9 +19,7 @@ package org.apache.beam.sdk.transforms;
 
 import static org.apache.beam.sdk.TestUtils.LINES;
 import static org.apache.beam.sdk.TestUtils.LINES2;
-import static org.apache.beam.sdk.TestUtils.LINES_ARRAY;
 import static org.apache.beam.sdk.TestUtils.NO_LINES;
-import static org.apache.beam.sdk.TestUtils.NO_LINES_ARRAY;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
@@ -47,6 +45,7 @@ import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.io.GenerateSequence;
+import org.apache.beam.sdk.testing.BeamParallelJunit4Runner;
 import org.apache.beam.sdk.testing.FlattenWithHeterogeneousCoders;
 import org.apache.beam.sdk.testing.NeedsRunner;
 import org.apache.beam.sdk.testing.PAssert;
@@ -65,23 +64,25 @@ import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
 import org.joda.time.Duration;
 import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
+import org.junit.rules.Timeout;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
 
 /** Tests for Flatten. */
-@RunWith(JUnit4.class)
+@RunWith(BeamParallelJunit4Runner.class)
 public class FlattenTest implements Serializable {
 
   @Rule public final transient TestPipeline p = TestPipeline.create();
 
   @Rule public transient ExpectedException thrown = ExpectedException.none();
+
+  @Rule public transient Timeout globalTimeout = Timeout.seconds(1200);
 
   private static class ClassWithoutCoder {}
 
@@ -252,7 +253,7 @@ public class FlattenTest implements Serializable {
 
     PCollection<String> output = input.apply(Flatten.iterables());
 
-    PAssert.that(output).containsInAnyOrder(LINES_ARRAY);
+    PAssert.that(output).containsInAnyOrder(LINES.toArray(new String[0]));
 
     p.run();
   }
@@ -265,7 +266,7 @@ public class FlattenTest implements Serializable {
 
     PCollection<String> output = input.apply(Flatten.iterables());
 
-    PAssert.that(output).containsInAnyOrder(LINES_ARRAY);
+    PAssert.that(output).containsInAnyOrder(LINES.toArray(new String[0]));
 
     p.run();
   }
@@ -280,7 +281,7 @@ public class FlattenTest implements Serializable {
 
     PCollection<String> output = input.apply(Flatten.iterables());
 
-    PAssert.that(output).containsInAnyOrder(LINES_ARRAY);
+    PAssert.that(output).containsInAnyOrder(LINES.toArray(new String[0]));
 
     p.run();
   }
@@ -297,7 +298,7 @@ public class FlattenTest implements Serializable {
 
     PCollection<String> output = input.apply(Flatten.iterables());
 
-    PAssert.that(output).containsInAnyOrder(LINES_ARRAY);
+    PAssert.that(output).containsInAnyOrder(LINES.toArray(new String[0]));
 
     p.run();
   }
@@ -312,7 +313,7 @@ public class FlattenTest implements Serializable {
 
     PCollection<String> output = input.apply(Flatten.iterables());
 
-    PAssert.that(output).containsInAnyOrder(NO_LINES_ARRAY);
+    PAssert.that(output).containsInAnyOrder(NO_LINES.toArray(new String[0]));
 
     p.run();
   }
@@ -401,6 +402,32 @@ public class FlattenTest implements Serializable {
 
   @Test
   @Category(NeedsRunner.class)
+  public void testFlattenWithPCollection() {
+    PCollection<String> output =
+        p.apply(Create.of(LINES))
+            .apply("FlattenWithLines1", Flatten.with(p.apply("Create1", Create.of(LINES))))
+            .apply("FlattenWithLines2", Flatten.with(p.apply("Create2", Create.of(LINES2))));
+
+    PAssert.that(output).containsInAnyOrder(flattenLists(Arrays.asList(LINES, LINES2, LINES)));
+    p.run();
+  }
+
+  @Test
+  @Category(NeedsRunner.class)
+  public void testFlattenWithPTransform() {
+    PCollection<String> output =
+        p.apply(Create.of(LINES))
+            .apply("Create1", Flatten.with(Create.of(LINES)))
+            .apply("Create2", Flatten.with(Create.of(LINES2)));
+
+    PAssert.that(output).containsInAnyOrder(flattenLists(Arrays.asList(LINES, LINES2, LINES)));
+    p.run();
+  }
+
+  /////////////////////////////////////////////////////////////////////////////
+
+  @Test
+  @Category(NeedsRunner.class)
   public void testEqualWindowFnPropagation() {
     PCollection<String> input1 =
         p.apply("CreateInput1", Create.of("Input1"))
@@ -467,6 +494,7 @@ public class FlattenTest implements Serializable {
   public void testFlattenGetName() {
     Assert.assertEquals("Flatten.Iterables", Flatten.<String>iterables().getName());
     Assert.assertEquals("Flatten.PCollections", Flatten.<String>pCollections().getName());
+    Assert.assertEquals("Flatten.With", Flatten.<String>with((PCollection<String>) null).getName());
   }
 
   /////////////////////////////////////////////////////////////////////////////
@@ -488,7 +516,7 @@ public class FlattenTest implements Serializable {
     List<PCollection<T>> pcs = new ArrayList<>();
     int index = 0;
     for (List<T> list : lists) {
-      PCollection<T> pc = p.apply("Create" + (index++), Create.of(list).withCoder(coder));
+      PCollection<T> pc = p.apply("Create" + index++, Create.of(list).withCoder(coder));
       pcs.add(pc);
     }
     return PCollectionList.of(pcs);

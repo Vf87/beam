@@ -19,12 +19,14 @@ package org.apache.beam.sdk.io.gcp.bigquery;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
@@ -39,11 +41,13 @@ import com.google.api.client.googleapis.json.GoogleJsonError;
 import com.google.api.client.googleapis.json.GoogleJsonError.ErrorInfo;
 import com.google.api.client.googleapis.json.GoogleJsonErrorContainer;
 import com.google.api.client.googleapis.json.GoogleJsonResponseException;
+import com.google.api.client.http.GenericUrl;
+import com.google.api.client.http.HttpRequest;
 import com.google.api.client.http.HttpResponseException;
 import com.google.api.client.http.LowLevelHttpResponse;
 import com.google.api.client.json.GenericJson;
 import com.google.api.client.json.Json;
-import com.google.api.client.json.jackson2.JacksonFactory;
+import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.client.testing.http.MockHttpTransport;
 import com.google.api.client.testing.http.MockLowLevelHttpRequest;
 import com.google.api.client.testing.util.MockSleeper;
@@ -80,32 +84,40 @@ import io.grpc.Status;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.Executors;
 import org.apache.beam.runners.core.metrics.GcpResourceIdentifiers;
 import org.apache.beam.runners.core.metrics.MetricsContainerImpl;
 import org.apache.beam.runners.core.metrics.MonitoringInfoConstants;
 import org.apache.beam.runners.core.metrics.MonitoringInfoMetricName;
+import org.apache.beam.sdk.extensions.gcp.options.GcsOptions;
 import org.apache.beam.sdk.extensions.gcp.util.BackOffAdapter;
-import org.apache.beam.sdk.extensions.gcp.util.FastNanoClockAndSleeper;
 import org.apache.beam.sdk.extensions.gcp.util.RetryHttpRequestInitializer;
 import org.apache.beam.sdk.extensions.gcp.util.Transport;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryServicesImpl.DatasetServiceImpl;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryServicesImpl.JobServiceImpl;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQuerySinkMetrics.RowStatus;
 import org.apache.beam.sdk.metrics.MetricName;
 import org.apache.beam.sdk.metrics.MetricsEnvironment;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.testing.ExpectedLogs;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
+import org.apache.beam.sdk.util.FastNanoClockAndSleeper;
 import org.apache.beam.sdk.util.FluentBackoff;
 import org.apache.beam.sdk.values.FailsafeValueInSingleWindow;
 import org.apache.beam.sdk.values.ValueInSingleWindow;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Verify;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Verify;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.joda.time.Duration;
 import org.junit.Before;
 import org.junit.Rule;
@@ -118,6 +130,7 @@ import org.mockito.MockitoAnnotations;
 /** Tests for {@link BigQueryServicesImpl}. */
 @RunWith(JUnit4.class)
 public class BigQueryServicesImplTest {
+
   @Rule public ExpectedException thrown = ExpectedException.none();
   @Rule public ExpectedLogs expectedLogs = ExpectedLogs.none(BigQueryServicesImpl.class);
   // A test can make mock responses through setupMockResponses
@@ -139,8 +152,9 @@ public class BigQueryServicesImplTest {
           public LowLevelHttpResponse execute() throws IOException {
             Verify.verify(
                 index < responses.length,
-                "The number of HttpRequest invocation exceeded the number of prepared mock requests. Index: %d",
-                index);
+                "The number of HttpRequest invocation exceeded the number of prepared mock requests. Index: %s - Len is: %s",
+                index,
+                responses.length);
             return responses[index++];
           }
         };
@@ -162,6 +176,7 @@ public class BigQueryServicesImplTest {
 
   @FunctionalInterface
   private interface MockSetupFunction {
+
     void apply(LowLevelHttpResponse t) throws IOException;
   }
 
@@ -245,7 +260,7 @@ public class BigQueryServicesImplTest {
           when(response.getContent()).thenReturn(toStream(testJob));
         });
 
-    Sleeper sleeper = new FastNanoClockAndSleeper();
+    Sleeper sleeper = new FastNanoClockAndSleeper()::sleep;
     JobServiceImpl.startJob(
         testJob,
         new ApiErrorExtractor(),
@@ -274,7 +289,7 @@ public class BigQueryServicesImplTest {
           when(response.getStatusCode()).thenReturn(409); // 409 means already exists
         });
 
-    Sleeper sleeper = new FastNanoClockAndSleeper();
+    Sleeper sleeper = new FastNanoClockAndSleeper()::sleep;
     JobServiceImpl.startJob(
         testJob,
         new ApiErrorExtractor(),
@@ -309,7 +324,7 @@ public class BigQueryServicesImplTest {
           when(response.getContent()).thenReturn(toStream(testJob));
         });
 
-    Sleeper sleeper = new FastNanoClockAndSleeper();
+    Sleeper sleeper = new FastNanoClockAndSleeper()::sleep;
     JobServiceImpl.startJob(
         testJob,
         new ApiErrorExtractor(),
@@ -466,10 +481,46 @@ public class BigQueryServicesImplTest {
         });
 
     BigQueryServicesImpl.DatasetServiceImpl datasetService =
-        new BigQueryServicesImpl.DatasetServiceImpl(
-            bigquery, null, PipelineOptionsFactory.create());
+        new BigQueryServicesImpl.DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
 
-    Table table = datasetService.getTable(tableRef, null, BackOff.ZERO_BACKOFF, Sleeper.DEFAULT);
+    Table table =
+        datasetService.getTable(
+            tableRef, Collections.emptyList(), null, BackOff.ZERO_BACKOFF, Sleeper.DEFAULT);
+
+    assertEquals(testTable, table);
+    verifyAllResponsesAreRead();
+  }
+
+  @Test
+  public void testGetTableNullProjectSucceeds() throws Exception {
+    TableReference tableRef =
+        new TableReference().setProjectId(null).setDatasetId("datasetId").setTableId("tableId");
+
+    Table testTable = new Table();
+    testTable.setTableReference(tableRef.clone().setProjectId("projectId"));
+
+    setupMockResponses(
+        response -> {
+          when(response.getStatusCode()).thenReturn(403);
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getContent())
+              .thenReturn(toStream(errorWithReasonAndStatus("rateLimitExceeded", 403)));
+        },
+        response -> {
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getStatusCode()).thenReturn(200);
+          when(response.getContent()).thenReturn(toStream(testTable));
+        });
+
+    BigQueryOptions options = PipelineOptionsFactory.create().as(BigQueryOptions.class);
+    options.setBigQueryProject("projectId");
+
+    BigQueryServicesImpl.DatasetServiceImpl datasetService =
+        new BigQueryServicesImpl.DatasetServiceImpl(bigquery, options);
+
+    Table table =
+        datasetService.getTable(
+            tableRef, Collections.emptyList(), null, BackOff.ZERO_BACKOFF, Sleeper.DEFAULT);
 
     assertEquals(testTable, table);
     verifyAllResponsesAreRead();
@@ -484,15 +535,16 @@ public class BigQueryServicesImplTest {
         });
 
     BigQueryServicesImpl.DatasetServiceImpl datasetService =
-        new BigQueryServicesImpl.DatasetServiceImpl(
-            bigquery, null, PipelineOptionsFactory.create());
+        new BigQueryServicesImpl.DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
 
     TableReference tableRef =
         new TableReference()
             .setProjectId("projectId")
             .setDatasetId("datasetId")
             .setTableId("tableId");
-    Table table = datasetService.getTable(tableRef, null, BackOff.ZERO_BACKOFF, Sleeper.DEFAULT);
+    Table table =
+        datasetService.getTable(
+            tableRef, Collections.emptyList(), null, BackOff.ZERO_BACKOFF, Sleeper.DEFAULT);
 
     assertNull(table);
     verifyAllResponsesAreRead();
@@ -516,9 +568,49 @@ public class BigQueryServicesImplTest {
     thrown.expectMessage(String.format("Unable to get table: %s", tableRef.getTableId()));
 
     BigQueryServicesImpl.DatasetServiceImpl datasetService =
-        new BigQueryServicesImpl.DatasetServiceImpl(
-            bigquery, null, PipelineOptionsFactory.create());
-    datasetService.getTable(tableRef, null, BackOff.STOP_BACKOFF, Sleeper.DEFAULT);
+        new BigQueryServicesImpl.DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
+    datasetService.getTable(
+        tableRef, Collections.emptyList(), null, BackOff.STOP_BACKOFF, Sleeper.DEFAULT);
+  }
+
+  @Test
+  public void testDeleteTableNotFoundSucceeds() throws IOException, InterruptedException {
+    setupMockResponses(
+        response -> {
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getStatusCode()).thenReturn(404);
+        });
+
+    BigQueryServicesImpl.DatasetServiceImpl datasetService =
+        new BigQueryServicesImpl.DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
+
+    TableReference tableRef =
+        new TableReference()
+            .setProjectId("projectId")
+            .setDatasetId("datasetId")
+            .setTableId("tableId");
+
+    datasetService.deleteTable(tableRef);
+
+    // exactly one response is prepared, so a retry of the 404 would trip the Verify inside the mock
+    // request. the assertion is therefore both "did not throw" and "did not retry"
+    verifyAllResponsesAreRead();
+  }
+
+  @Test
+  public void testDeleteDatasetNotFoundSucceeds() throws IOException, InterruptedException {
+    setupMockResponses(
+        response -> {
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getStatusCode()).thenReturn(404);
+        });
+
+    BigQueryServicesImpl.DatasetServiceImpl datasetService =
+        new BigQueryServicesImpl.DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
+
+    datasetService.deleteDataset("projectId", "datasetId");
+
+    verifyAllResponsesAreRead();
   }
 
   @Test
@@ -546,8 +638,7 @@ public class BigQueryServicesImplTest {
         });
 
     BigQueryServicesImpl.DatasetServiceImpl datasetService =
-        new BigQueryServicesImpl.DatasetServiceImpl(
-            bigquery, null, PipelineOptionsFactory.create());
+        new BigQueryServicesImpl.DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
 
     assertFalse(datasetService.isTableEmpty(tableRef, BackOff.ZERO_BACKOFF, Sleeper.DEFAULT));
 
@@ -563,8 +654,7 @@ public class BigQueryServicesImplTest {
         });
 
     BigQueryServicesImpl.DatasetServiceImpl datasetService =
-        new BigQueryServicesImpl.DatasetServiceImpl(
-            bigquery, null, PipelineOptionsFactory.create());
+        new BigQueryServicesImpl.DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
 
     TableReference tableRef =
         new TableReference()
@@ -597,8 +687,7 @@ public class BigQueryServicesImplTest {
             .setTableId("tableId");
 
     BigQueryServicesImpl.DatasetServiceImpl datasetService =
-        new BigQueryServicesImpl.DatasetServiceImpl(
-            bigquery, null, PipelineOptionsFactory.create());
+        new BigQueryServicesImpl.DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
 
     thrown.expect(IOException.class);
     thrown.expectMessage(String.format("Unable to list table data: %s", tableRef.getTableId()));
@@ -668,7 +757,7 @@ public class BigQueryServicesImplTest {
         });
 
     DatasetServiceImpl dataService =
-        new DatasetServiceImpl(bigquery, null, PipelineOptionsFactory.create());
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
     dataService.insertAll(
         ref,
         rows,
@@ -713,7 +802,7 @@ public class BigQueryServicesImplTest {
         });
 
     DatasetServiceImpl dataService =
-        new DatasetServiceImpl(bigquery, null, PipelineOptionsFactory.create());
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
     dataService.insertAll(
         ref,
         rows,
@@ -733,6 +822,145 @@ public class BigQueryServicesImplTest {
     expectedLogs.verifyInfo("BigQuery insertAll error, retrying:");
 
     verifyWriteMetricWasSet("project", "dataset", "table", "quotaexceeded", 1);
+  }
+
+  @Test
+  public void testTransientNetworkErrorReason_socketTimeout() {
+    assertEquals(
+        "socketTimeout",
+        DatasetServiceImpl.transientNetworkErrorReason(
+            new SocketTimeoutException("Read timed out")));
+  }
+
+  @Test
+  public void testTransientNetworkErrorReason_wrappedSocketTimeout() {
+    assertEquals(
+        "socketTimeout",
+        DatasetServiceImpl.transientNetworkErrorReason(
+            new IOException("wrapper", new SocketTimeoutException("Read timed out"))));
+  }
+
+  @Test
+  public void testTransientNetworkErrorReason_connectionReset() {
+    assertEquals(
+        "connectionReset",
+        DatasetServiceImpl.transientNetworkErrorReason(new SocketException("Connection reset")));
+  }
+
+  @Test
+  public void testTransientNetworkErrorReason_brokenPipe() {
+    assertEquals(
+        "brokenPipe",
+        DatasetServiceImpl.transientNetworkErrorReason(new SocketException("Broken pipe")));
+  }
+
+  @Test
+  public void testTransientNetworkErrorReason_nonTransient() {
+    assertNull(DatasetServiceImpl.transientNetworkErrorReason(new IOException("Some other error")));
+  }
+
+  /**
+   * Tests that {@link DatasetServiceImpl#insertAll} retries when a SocketTimeoutException occurs
+   * during response body reading (outside RetryHttpRequestInitializer scope).
+   */
+  @Test
+  public void testInsertSocketTimeoutRetry() throws Exception {
+    TableReference ref =
+        new TableReference().setProjectId("project").setDatasetId("dataset").setTableId("table");
+    List<FailsafeValueInSingleWindow<TableRow, TableRow>> rows = new ArrayList<>();
+    rows.add(wrapValue(new TableRow()));
+
+    // First response: 200 OK but content stream throws SocketTimeoutException during body read,
+    // simulating a timeout mid-chunked-response. Second response succeeds.
+    setupMockResponses(
+        response -> {
+          when(response.getStatusCode()).thenReturn(200);
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getContent())
+              .thenReturn(
+                  new InputStream() {
+                    @Override
+                    public int read() throws IOException {
+                      throw new SocketTimeoutException("Read timed out");
+                    }
+                  });
+        },
+        response -> {
+          when(response.getStatusCode()).thenReturn(200);
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getContent()).thenReturn(toStream(new TableDataInsertAllResponse()));
+        });
+
+    DatasetServiceImpl dataService =
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
+    dataService.insertAll(
+        ref,
+        rows,
+        null,
+        BackOffAdapter.toGcpBackOff(TEST_BACKOFF.backoff()),
+        TEST_BACKOFF,
+        new MockSleeper(),
+        InsertRetryPolicy.alwaysRetry(),
+        null,
+        null,
+        false,
+        false,
+        false,
+        null);
+
+    verifyAllResponsesAreRead();
+    expectedLogs.verifyWarn(
+        "BigQuery insertAll transient network error, routing rows to retry policy");
+  }
+
+  /**
+   * Tests that {@link DatasetServiceImpl#insertAll} throws IOException when SocketTimeoutException
+   * retries are exhausted via the outer insertAll backoff.
+   */
+  @Test
+  public void testInsertSocketTimeoutExhausted() throws Exception {
+    TableReference ref =
+        new TableReference().setProjectId("project").setDatasetId("dataset").setTableId("table");
+    List<FailsafeValueInSingleWindow<TableRow, TableRow>> rows = new ArrayList<>();
+    rows.add(wrapValue(new TableRow()));
+
+    // Single response that times out during body read. With maxRetries(0) on the outer backoff
+    // there is no retry; the synthetic timeout errors are collected and IOException is thrown.
+    setupMockResponses(
+        response -> {
+          when(response.getStatusCode()).thenReturn(200);
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getContent())
+              .thenReturn(
+                  new InputStream() {
+                    @Override
+                    public int read() throws IOException {
+                      throw new SocketTimeoutException("Read timed out");
+                    }
+                  });
+        });
+
+    DatasetServiceImpl dataService =
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
+    // Rows are routed through InsertRetryPolicy as synthetic "timeout" errors; when the outer
+    // backoff is exhausted insertAll throws IOException("Insert failed: ...").
+    assertThrows(
+        IOException.class,
+        () ->
+            dataService.insertAll(
+                ref,
+                rows,
+                null,
+                BackOffAdapter.toGcpBackOff(FluentBackoff.DEFAULT.withMaxRetries(0).backoff()),
+                FluentBackoff.DEFAULT.withMaxRetries(0),
+                new MockSleeper(),
+                InsertRetryPolicy.alwaysRetry(),
+                null,
+                null,
+                false,
+                false,
+                false,
+                null));
   }
 
   /** Tests that {@link DatasetServiceImpl#insertAll} can stop quotaExceeded retry attempts. */
@@ -770,7 +998,7 @@ public class BigQueryServicesImplTest {
     thrown.expectMessage("quotaExceeded");
 
     DatasetServiceImpl dataService =
-        new DatasetServiceImpl(bigquery, null, PipelineOptionsFactory.create());
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
     dataService.insertAll(
         ref,
         rows,
@@ -789,6 +1017,167 @@ public class BigQueryServicesImplTest {
     verifyAllResponsesAreRead();
 
     verifyWriteMetricWasSet("project", "dataset", "table", "quotaexceeded", 1);
+  }
+
+  /**
+   * Tests that {@link DatasetServiceImpl#insertAll} sets perWorkerMetrics properly when the Backoff
+   * limit is hit.
+   */
+  @Test
+  public void testInsertAll_InternalBigQueryErrors() throws Exception {
+    BigQuerySinkMetrics.setSupportStreamingInsertsMetrics(true);
+    BigQuerySinkMetricsTest.TestMetricsContainer testMetricsContainer =
+        new BigQuerySinkMetricsTest.TestMetricsContainer();
+    MetricsEnvironment.setCurrentContainer(testMetricsContainer);
+    BigQuerySinkMetrics.setSupportMetricsDeletion(true);
+
+    TableReference ref =
+        new TableReference().setProjectId("project").setDatasetId("dataset").setTableId("table");
+    List<FailsafeValueInSingleWindow<TableRow, TableRow>> rows =
+        ImmutableList.of(
+            wrapValue(new TableRow().set("row", "a")), wrapValue(new TableRow().set("row", "b")));
+    List<String> insertIds = ImmutableList.of("a", "b");
+
+    final TableDataInsertAllResponse aFailed =
+        new TableDataInsertAllResponse()
+            .setInsertErrors(
+                ImmutableList.of(
+                    new InsertErrors().setIndex(0L).setErrors(ImmutableList.of(new ErrorProto()))));
+    MockSetupFunction aFailedResponse =
+        response -> {
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getStatusCode()).thenReturn(200);
+          when(response.getContent()).thenReturn(toStream(aFailed));
+        };
+
+    // Expect 4 InsertAll RPCS:
+    // 1st request will return an RPC error that should be retried
+    // 2nd-4th RPCs will fail to insert Row A.
+    // Expect client throw an exception after 4th RPC due to hitting backoff limits.
+    setupMockResponses(
+        response -> {
+          when(response.getStatusCode()).thenReturn(403);
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getContent())
+              .thenReturn(toStream(errorWithReasonAndStatus("rateLimitExceeded", 403)));
+        },
+        aFailedResponse,
+        aFailedResponse,
+        aFailedResponse,
+        aFailedResponse);
+
+    DatasetServiceImpl dataService =
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
+    try {
+      dataService.insertAll(
+          ref,
+          rows,
+          insertIds,
+          BackOffAdapter.toGcpBackOff(TEST_BACKOFF.backoff()),
+          TEST_BACKOFF,
+          new MockSleeper(),
+          InsertRetryPolicy.alwaysRetry(),
+          null,
+          null,
+          false,
+          false,
+          false,
+          null);
+      fail();
+    } catch (Exception e) {
+    }
+    verifyAllResponsesAreRead();
+
+    String tableId = "datasets/dataset/tables/table";
+    BigQuerySinkMetrics.RpcMethod method = BigQuerySinkMetrics.RpcMethod.STREAMING_INSERTS;
+    MetricName okRpcRequestName =
+        BigQuerySinkMetrics.createRPCRequestCounter(method, "OK", tableId).getName();
+    MetricName rateLimitRpcRequestName =
+        BigQuerySinkMetrics.createRPCRequestCounter(method, "rateLimitExceeded", tableId).getName();
+
+    MetricName okRowsAppendedName =
+        BigQuerySinkMetrics.appendRowsRowStatusCounter(RowStatus.SUCCESSFUL, "OK", tableId)
+            .getName();
+    MetricName internalRowsAppendedName =
+        BigQuerySinkMetrics.appendRowsRowStatusCounter(RowStatus.RETRIED, "INTERNAL", tableId)
+            .getName();
+    MetricName rateLimitRowsAppendedName =
+        BigQuerySinkMetrics.appendRowsRowStatusCounter(
+                RowStatus.RETRIED, "rateLimitExceeded", tableId)
+            .getName();
+    MetricName failedRowsName =
+        BigQuerySinkMetrics.appendRowsRowStatusCounter(RowStatus.FAILED, "INTERNAL", tableId)
+            .getName();
+
+    testMetricsContainer.assertPerWorkerCounterValue(okRpcRequestName, 4L);
+    testMetricsContainer.assertPerWorkerCounterValue(rateLimitRpcRequestName, 1L);
+    testMetricsContainer.assertPerWorkerCounterValue(okRowsAppendedName, 1L);
+    testMetricsContainer.assertPerWorkerCounterValue(internalRowsAppendedName, 3L);
+    testMetricsContainer.assertPerWorkerCounterValue(rateLimitRowsAppendedName, 2L);
+    testMetricsContainer.assertPerWorkerCounterValue(failedRowsName, 1L);
+
+    assertThat(testMetricsContainer.perWorkerHistograms.size(), equalTo(1));
+  }
+
+  /**
+   * Tests that {@link DatasetServiceImpl#insertAll} sets perWorkerMetrics properly when BigQuery
+   * returns unretryable Rpc Error.
+   */
+  @Test
+  public void testInsertAll_RpcErrors() throws Exception {
+    BigQuerySinkMetrics.setSupportStreamingInsertsMetrics(true);
+    BigQuerySinkMetricsTest.TestMetricsContainer testMetricsContainer =
+        new BigQuerySinkMetricsTest.TestMetricsContainer();
+    MetricsEnvironment.setCurrentContainer(testMetricsContainer);
+    BigQuerySinkMetrics.setSupportMetricsDeletion(true);
+
+    TableReference ref =
+        new TableReference().setProjectId("project").setDatasetId("dataset").setTableId("table");
+    List<FailsafeValueInSingleWindow<TableRow, TableRow>> rows =
+        ImmutableList.of(
+            wrapValue(new TableRow().set("row", "a")), wrapValue(new TableRow().set("row", "b")));
+    List<String> insertIds = ImmutableList.of("a", "b");
+
+    // Expect 1 RPC request
+    // 1st request will return an RPC error that is not retryable.
+    // Expect client to record metrics and rethrow the error.
+    setupMockResponses(
+        response -> {
+          when(response.getStatusCode()).thenReturn(403);
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getContent())
+              .thenReturn(toStream(errorWithReasonAndStatus("actuallyForbidden", 403)));
+        });
+
+    DatasetServiceImpl dataService =
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
+    try {
+      dataService.insertAll(
+          ref,
+          rows,
+          insertIds,
+          BackOffAdapter.toGcpBackOff(TEST_BACKOFF.backoff()),
+          TEST_BACKOFF,
+          new MockSleeper(),
+          InsertRetryPolicy.alwaysRetry(),
+          null,
+          null,
+          false,
+          false,
+          false,
+          null);
+      fail();
+    } catch (Exception e) {
+    }
+    verifyAllResponsesAreRead();
+
+    String tableId = "datasets/dataset/tables/table";
+    BigQuerySinkMetrics.RpcMethod method = BigQuerySinkMetrics.RpcMethod.STREAMING_INSERTS;
+    MetricName forbiddenRpcName =
+        BigQuerySinkMetrics.createRPCRequestCounter(method, "actuallyForbidden", tableId).getName();
+
+    testMetricsContainer.assertPerWorkerCounterValue(forbiddenRpcName, 1L);
+    assertThat(testMetricsContainer.perWorkerHistograms.size(), equalTo(1));
   }
 
   // A BackOff that makes a total of 4 attempts
@@ -829,7 +1218,7 @@ public class BigQueryServicesImplTest {
         });
 
     DatasetServiceImpl dataService =
-        new DatasetServiceImpl(bigquery, null, PipelineOptionsFactory.create());
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
     dataService.insertAll(
         ref,
         rows,
@@ -849,6 +1238,293 @@ public class BigQueryServicesImplTest {
 
     verifyWriteMetricWasSet("project", "dataset", "table", "unknown", 1);
     verifyWriteMetricWasSet("project", "dataset", "table", "ok", 1);
+  }
+
+  /** Tests that {@link DatasetServiceImpl#insertAll} does not go over limit of rows per request. */
+  @Test
+  public void testInsertWithinRowCountLimits() throws Exception {
+    TableReference ref =
+        new TableReference().setProjectId("project").setDatasetId("dataset").setTableId("tablercl");
+    List<FailsafeValueInSingleWindow<TableRow, TableRow>> rows =
+        ImmutableList.of(
+            wrapValue(new TableRow().set("row", "a")),
+            wrapValue(new TableRow().set("row", "b")),
+            wrapValue(new TableRow().set("row", "c")));
+    List<String> insertIds = ImmutableList.of("a", "b", "c");
+
+    final TableDataInsertAllResponse allRowsSucceeded = new TableDataInsertAllResponse();
+
+    setupMockResponses(
+        response -> {
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getStatusCode()).thenReturn(200);
+          when(response.getContent()).thenReturn(toStream(allRowsSucceeded));
+        },
+        response -> {
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getStatusCode()).thenReturn(200);
+          when(response.getContent()).thenReturn(toStream(allRowsSucceeded));
+        },
+        response -> {
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getStatusCode()).thenReturn(200);
+          when(response.getContent()).thenReturn(toStream(allRowsSucceeded));
+        });
+
+    PipelineOptions options =
+        PipelineOptionsFactory.fromArgs("--maxStreamingRowsToBatch=1").create();
+    options.as(GcsOptions.class).setExecutorService(Executors.newSingleThreadExecutor());
+
+    DatasetServiceImpl dataService = new DatasetServiceImpl(bigquery, options);
+    dataService.insertAll(
+        ref,
+        rows,
+        insertIds,
+        BackOffAdapter.toGcpBackOff(TEST_BACKOFF.backoff()),
+        TEST_BACKOFF,
+        new MockSleeper(),
+        InsertRetryPolicy.alwaysRetry(),
+        null,
+        null,
+        false,
+        false,
+        false,
+        null);
+
+    verifyAllResponsesAreRead();
+
+    verifyWriteMetricWasSet("project", "dataset", "tablercl", "ok", 3);
+  }
+
+  /** Tests that {@link DatasetServiceImpl#insertAll} does not go over limit of rows per request. */
+  @SuppressWarnings("InlineMeInliner") // inline `Strings.repeat()` - Java 11+ API only
+  @Test
+  public void testInsertWithinRequestByteSizeLimitsErrorsOut() throws Exception {
+    TableReference ref =
+        new TableReference().setProjectId("project").setDatasetId("dataset").setTableId("tablersl");
+    TableSchema schema =
+        new TableSchema()
+            .setFields(ImmutableList.of(new TableFieldSchema().setName("rows").setType("STRING")));
+    Table testTable = new Table().setTableReference(ref).setSchema(schema);
+
+    List<FailsafeValueInSingleWindow<TableRow, TableRow>> rows =
+        ImmutableList.of(
+            wrapValue(new TableRow().set("row", Strings.repeat("abcdefghi", 1024 * 1025))),
+            wrapValue(new TableRow().set("row", "a")),
+            wrapValue(new TableRow().set("row", "b")));
+    List<String> insertIds = ImmutableList.of("a", "b", "c");
+
+    final TableDataInsertAllResponse allRowsSucceeded = new TableDataInsertAllResponse();
+
+    setupMockResponses(
+        response -> {
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getStatusCode()).thenReturn(200);
+          when(response.getContent()).thenReturn(toStream(allRowsSucceeded));
+          when(response.getContent()).thenReturn(toStream(testTable));
+        },
+        response -> {
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getStatusCode()).thenReturn(200);
+          when(response.getContent()).thenReturn(toStream(allRowsSucceeded));
+          when(response.getContent()).thenReturn(toStream(testTable));
+        });
+
+    DatasetServiceImpl dataService =
+        new DatasetServiceImpl(
+            bigquery, PipelineOptionsFactory.fromArgs("--maxStreamingBatchSize=15").create());
+    List<ValueInSingleWindow<TableRow>> failedInserts = Lists.newArrayList();
+    List<ValueInSingleWindow<TableRow>> successfulRows = Lists.newArrayList();
+    RuntimeException e =
+        assertThrows(
+            RuntimeException.class,
+            () ->
+                dataService.<TableRow>insertAll(
+                    ref,
+                    rows,
+                    insertIds,
+                    BackOffAdapter.toGcpBackOff(TEST_BACKOFF.backoff()),
+                    TEST_BACKOFF,
+                    new MockSleeper(),
+                    InsertRetryPolicy.alwaysRetry(),
+                    failedInserts,
+                    ErrorContainer.TABLE_ROW_ERROR_CONTAINER,
+                    false,
+                    false,
+                    false,
+                    successfulRows));
+
+    assertThat(e.getMessage(), containsString("exceeding the BigQueryIO limit"));
+  }
+
+  /**
+   * Tests that {@link DatasetServiceImpl#insertAll} does not go over limit of rows per request and
+   * schema difference check.
+   */
+  @SuppressWarnings("InlineMeInliner") // inline `Strings.repeat()` - Java 11+ API only
+  @Test
+  public void testInsertWithinRequestByteSizeLimitsWithBadSchemaErrorsOut() throws Exception {
+    TableReference ref =
+        new TableReference().setProjectId("project").setDatasetId("dataset").setTableId("tablersl");
+
+    TableSchema schema =
+        new TableSchema()
+            .setFields(ImmutableList.of(new TableFieldSchema().setName("row").setType("STRING")));
+    Table testTable = new Table().setTableReference(ref).setSchema(schema);
+
+    List<FailsafeValueInSingleWindow<TableRow, TableRow>> rows =
+        ImmutableList.of(
+            wrapValue(
+                new TableRow()
+                    .set("row", Strings.repeat("abcdefghi", 1024 * 1025))
+                    .set("badField", "goodValue")),
+            wrapValue(new TableRow().set("row", "a")),
+            wrapValue(new TableRow().set("row", "b")));
+    List<String> insertIds = ImmutableList.of("a", "b", "c");
+
+    final TableDataInsertAllResponse allRowsSucceeded = new TableDataInsertAllResponse();
+
+    setupMockResponses(
+        response -> {
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getStatusCode()).thenReturn(200);
+          when(response.getContent()).thenReturn(toStream(allRowsSucceeded));
+          when(response.getContent()).thenReturn(toStream(testTable));
+        },
+        response -> {
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getStatusCode()).thenReturn(200);
+          when(response.getContent()).thenReturn(toStream(allRowsSucceeded));
+          when(response.getContent()).thenReturn(toStream(testTable));
+        });
+
+    DatasetServiceImpl dataService =
+        new DatasetServiceImpl(
+            bigquery, PipelineOptionsFactory.fromArgs("--maxStreamingBatchSize=15").create());
+    List<ValueInSingleWindow<TableRow>> failedInserts = Lists.newArrayList();
+    List<ValueInSingleWindow<TableRow>> successfulRows = Lists.newArrayList();
+    RuntimeException e =
+        assertThrows(
+            RuntimeException.class,
+            () ->
+                dataService.<TableRow>insertAll(
+                    ref,
+                    rows,
+                    insertIds,
+                    BackOffAdapter.toGcpBackOff(TEST_BACKOFF.backoff()),
+                    TEST_BACKOFF,
+                    new MockSleeper(),
+                    InsertRetryPolicy.alwaysRetry(),
+                    failedInserts,
+                    ErrorContainer.TABLE_ROW_ERROR_CONTAINER,
+                    false,
+                    false,
+                    false,
+                    successfulRows));
+
+    assertThat(e.getMessage(), containsString("exceeding the BigQueryIO limit"));
+    assertThat(
+        e.getMessage(),
+        containsString("Problematic row had extra schema fields: {Unknown fields: badField}"));
+  }
+
+  @SuppressWarnings("InlineMeInliner") // inline `Strings.repeat()` - Java 11+ API only
+  @Test
+  public void testInsertRetryTransientsAboveRequestByteSizeLimits() throws Exception {
+    TableReference ref =
+        new TableReference().setProjectId("project").setDatasetId("dataset").setTableId("table");
+    List<FailsafeValueInSingleWindow<TableRow, TableRow>> rows =
+        ImmutableList.of(
+            wrapValue(new TableRow().set("row", Strings.repeat("abcdefghi", 1024 * 1025))),
+            wrapValue(new TableRow().set("row", "a")),
+            wrapValue(new TableRow().set("row", "b")));
+    List<String> insertIds = ImmutableList.of("a", "b", "c");
+
+    final TableDataInsertAllResponse allRowsSucceeded = new TableDataInsertAllResponse();
+
+    setupMockResponses(
+        response -> {
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getStatusCode()).thenReturn(200);
+          when(response.getContent()).thenReturn(toStream(allRowsSucceeded));
+        });
+
+    DatasetServiceImpl dataService =
+        new DatasetServiceImpl(
+            bigquery, PipelineOptionsFactory.fromArgs("--maxStreamingBatchSize=15").create());
+    List<ValueInSingleWindow<TableRow>> failedInserts = Lists.newArrayList();
+    List<ValueInSingleWindow<TableRow>> successfulRows = Lists.newArrayList();
+    dataService.<TableRow>insertAll(
+        ref,
+        rows,
+        insertIds,
+        BackOffAdapter.toGcpBackOff(TEST_BACKOFF.backoff()),
+        TEST_BACKOFF,
+        new MockSleeper(),
+        InsertRetryPolicy.retryTransientErrors(),
+        failedInserts,
+        ErrorContainer.TABLE_ROW_ERROR_CONTAINER,
+        false,
+        false,
+        false,
+        successfulRows);
+
+    assertEquals(1, failedInserts.size());
+    assertEquals(2, successfulRows.size());
+
+    verifyAllResponsesAreRead();
+    verifyWriteMetricWasSet("project", "dataset", "table", "ok", 1);
+  }
+
+  /** Tests that {@link DatasetServiceImpl#insertAll} does not go over limit of rows per request. */
+  @Test
+  public void testInsertWithinRequestByteSizeLimits() throws Exception {
+    TableReference ref =
+        new TableReference().setProjectId("project").setDatasetId("dataset").setTableId("tablebsl");
+    List<FailsafeValueInSingleWindow<TableRow, TableRow>> rows =
+        ImmutableList.of(
+            wrapValue(new TableRow().set("row", "a")),
+            wrapValue(new TableRow().set("row", "b")),
+            wrapValue(new TableRow().set("row", "cdefghijklmnopqrstuvwxyz")));
+    List<String> insertIds = ImmutableList.of("a", "b", "c");
+
+    final TableDataInsertAllResponse allRowsSucceeded = new TableDataInsertAllResponse();
+
+    setupMockResponses(
+        response -> {
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getStatusCode()).thenReturn(200);
+          when(response.getContent()).thenReturn(toStream(allRowsSucceeded));
+        },
+        response -> {
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getStatusCode()).thenReturn(200);
+          when(response.getContent()).thenReturn(toStream(allRowsSucceeded));
+        });
+
+    PipelineOptions options =
+        PipelineOptionsFactory.fromArgs("--maxStreamingBatchSize=15").create();
+    options.as(GcsOptions.class).setExecutorService(Executors.newSingleThreadExecutor());
+
+    DatasetServiceImpl dataService = new DatasetServiceImpl(bigquery, options);
+    dataService.insertAll(
+        ref,
+        rows,
+        insertIds,
+        BackOffAdapter.toGcpBackOff(TEST_BACKOFF.backoff()),
+        TEST_BACKOFF,
+        new MockSleeper(),
+        InsertRetryPolicy.retryTransientErrors(),
+        new ArrayList<>(),
+        ErrorContainer.TABLE_ROW_ERROR_CONTAINER,
+        false,
+        false,
+        false,
+        null);
+
+    verifyAllResponsesAreRead();
+
+    verifyWriteMetricWasSet("project", "dataset", "tablebsl", "ok", 2);
   }
 
   /** Tests that {@link DatasetServiceImpl#insertAll} fails gracefully when persistent issues. */
@@ -894,7 +1570,7 @@ public class BigQueryServicesImplTest {
         row0FailureResponseFunction);
 
     DatasetServiceImpl dataService =
-        new DatasetServiceImpl(bigquery, null, PipelineOptionsFactory.create());
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
 
     // Expect it to fail.
     try {
@@ -937,8 +1613,6 @@ public class BigQueryServicesImplTest {
     List<FailsafeValueInSingleWindow<TableRow, TableRow>> rows = new ArrayList<>();
     rows.add(wrapValue(new TableRow()));
 
-    final TableDataInsertAllResponse allRowsSucceeded =
-        new TableDataInsertAllResponse().setInsertErrors(ImmutableList.of());
     // First response is 403 non-{rate-limited, quota-exceeded}, second response has valid payload
     // but should not be invoked.
     setupMockResponses(
@@ -955,7 +1629,7 @@ public class BigQueryServicesImplTest {
         });
 
     DatasetServiceImpl dataService =
-        new DatasetServiceImpl(bigquery, null, PipelineOptionsFactory.create());
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
     thrown.expect(RuntimeException.class);
     thrown.expectMessage("actually forbidden");
     try {
@@ -984,6 +1658,150 @@ public class BigQueryServicesImplTest {
     }
 
     verifyWriteMetricWasSet("project", "dataset", "table", "actually forbidden", 1);
+  }
+
+  /** Tests that {@link DatasetServiceImpl#insertAll} logs suggested remedy for insert timeouts. */
+  @Test
+  public void testInsertTimeoutLog() throws Exception {
+    TableReference ref =
+        new TableReference().setProjectId("project").setDatasetId("dataset").setTableId("table");
+    List<FailsafeValueInSingleWindow<TableRow, TableRow>> rows = new ArrayList<>();
+    rows.add(wrapValue(new TableRow()));
+
+    setupMockResponses(
+        response -> {
+          when(response.getStatusCode()).thenReturn(400);
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getContent())
+              .thenReturn(
+                  toStream(errorWithReasonAndStatus(" No rows present in the request. ", 400)));
+        });
+
+    DatasetServiceImpl dataService =
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
+    RuntimeException e =
+        assertThrows(
+            RuntimeException.class,
+            () ->
+                dataService.insertAll(
+                    ref,
+                    rows,
+                    null,
+                    BackOffAdapter.toGcpBackOff(TEST_BACKOFF.backoff()),
+                    TEST_BACKOFF,
+                    new MockSleeper(),
+                    InsertRetryPolicy.alwaysRetry(),
+                    null,
+                    null,
+                    false,
+                    false,
+                    false,
+                    null));
+
+    assertThat(e.getCause().getMessage(), containsString("No rows present in the request."));
+
+    verifyAllResponsesAreRead();
+    expectedLogs.verifyError("No rows present in the request error likely caused by");
+
+    verifyWriteMetricWasSet("project", "dataset", "table", " no rows present in the request. ", 1);
+  }
+
+  /**
+   * Tests that {@link DatasetServiceImpl#insertAll} logs and includes suggested remedy when the
+   * BigQuery API is reported as not enabled for the project.
+   */
+  @Test
+  public void testInsertBigQueryNotEnabledErrorLog() throws Exception {
+    TableReference ref =
+        new TableReference().setProjectId("project").setDatasetId("dataset").setTableId("table");
+    List<FailsafeValueInSingleWindow<TableRow, TableRow>> rows = new ArrayList<>();
+    rows.add(wrapValue(new TableRow()));
+
+    setupMockResponses(
+        response -> {
+          when(response.getStatusCode()).thenReturn(400);
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getContent())
+              .thenReturn(
+                  toStream(
+                      errorWithReasonAndStatus(
+                          "The project project has not enabled BigQuery.", 400)));
+        });
+
+    DatasetServiceImpl dataService =
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
+    RuntimeException e =
+        assertThrows(
+            RuntimeException.class,
+            () ->
+                dataService.insertAll(
+                    ref,
+                    rows,
+                    null,
+                    BackOffAdapter.toGcpBackOff(TEST_BACKOFF.backoff()),
+                    TEST_BACKOFF,
+                    new MockSleeper(),
+                    InsertRetryPolicy.alwaysRetry(),
+                    null,
+                    null,
+                    false,
+                    false,
+                    false,
+                    null));
+
+    assertThat(e.getCause().getMessage(), containsString("has not enabled BigQuery."));
+    assertThat(
+        e.getCause().getMessage(),
+        containsString(
+            "check the Google Cloud Status Dashboard (https://status.cloud.google.com/)"));
+
+    verifyAllResponsesAreRead();
+    expectedLogs.verifyError(
+        "check the Google Cloud Status Dashboard (https://status.cloud.google.com/)");
+
+    verifyWriteMetricWasSet(
+        "project", "dataset", "table", "the project project has not enabled bigquery.", 1);
+  }
+
+  /**
+   * Tests that {@link BigQueryServicesImpl#executeWithRetries} fails fast without retrying and
+   * includes both the BigQuery error and suggested remedy when the BigQuery API is reported as not
+   * enabled for the project.
+   */
+  @Test
+  public void testExecuteWithRetriesBigQueryNotEnabled() throws Exception {
+    setupMockResponses(
+        response -> {
+          when(response.getStatusCode()).thenReturn(400);
+          when(response.getContentType()).thenReturn(Json.MEDIA_TYPE);
+          when(response.getContent())
+              .thenReturn(
+                  toStream(
+                      errorWithReasonAndStatus(
+                          "The project projectId has not enabled BigQuery.", 400)));
+        });
+
+    IOException e =
+        assertThrows(
+            IOException.class,
+            () ->
+                BigQueryServicesImpl.executeWithRetries(
+                    bigquery.tables().get("projectId", "datasetId", "tableId"),
+                    "Unable to get table: tableId, aborting after 9 retries.",
+                    new MockSleeper(),
+                    BackOffAdapter.toGcpBackOff(TEST_BACKOFF.backoff()),
+                    BigQueryServicesImpl.ALWAYS_RETRY));
+
+    assertThat(e.getMessage(), containsString("The project projectId has not enabled BigQuery."));
+    assertThat(
+        e.getMessage(),
+        containsString(
+            "check the Google Cloud Status Dashboard (https://status.cloud.google.com/)"));
+    assertFalse(e.getMessage().contains("aborting after 9 retries."));
+
+    verifyAllResponsesAreRead();
+    expectedLogs.verifyError(
+        "check the Google Cloud Status Dashboard (https://status.cloud.google.com/)");
   }
 
   /**
@@ -1040,7 +1858,7 @@ public class BigQueryServicesImplTest {
         });
 
     DatasetServiceImpl dataService =
-        new DatasetServiceImpl(bigquery, null, PipelineOptionsFactory.create());
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
 
     List<ValueInSingleWindow<TableRow>> failedInserts = Lists.newArrayList();
     dataService.insertAll(
@@ -1087,7 +1905,7 @@ public class BigQueryServicesImplTest {
     setupMockResponses(allRowsSucceededResponseFunction, allRowsSucceededResponseFunction);
 
     DatasetServiceImpl dataService =
-        new DatasetServiceImpl(bigquery, null, PipelineOptionsFactory.create());
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
 
     // First, test with all flags disabled
     dataService.insertAll(
@@ -1140,12 +1958,12 @@ public class BigQueryServicesImplTest {
   /** A helper to convert a string response back to a {@link GenericJson} subclass. */
   private static <T extends GenericJson> T fromString(String content, Class<T> clazz)
       throws IOException {
-    return JacksonFactory.getDefaultInstance().fromString(content, clazz);
+    return GsonFactory.getDefaultInstance().fromString(content, clazz);
   }
 
   /** A helper to wrap a {@link GenericJson} object in a content stream. */
   private static InputStream toStream(GenericJson content) throws IOException {
-    return new ByteArrayInputStream(JacksonFactory.getDefaultInstance().toByteArray(content));
+    return new ByteArrayInputStream(GsonFactory.getDefaultInstance().toByteArray(content));
   }
 
   /** A helper that generates the error JSON payload that Google APIs produce. */
@@ -1166,19 +1984,25 @@ public class BigQueryServicesImplTest {
 
   @Test
   public void testGetErrorInfo() throws IOException {
-    DatasetServiceImpl dataService =
-        new DatasetServiceImpl(bigquery, null, PipelineOptionsFactory.create());
+    HttpResponseException.Builder builder = mock(HttpResponseException.Builder.class);
+
     ErrorInfo info = new ErrorInfo();
+    info.setReason("QuotaExceeded");
     List<ErrorInfo> infoList = new ArrayList<>();
     infoList.add(info);
-    info.setReason("QuotaExceeded");
     GoogleJsonError error = new GoogleJsonError();
     error.setErrors(infoList);
-    HttpResponseException.Builder builder = mock(HttpResponseException.Builder.class);
     IOException validException = new GoogleJsonResponseException(builder, error);
+
     IOException invalidException = new IOException();
-    assertEquals(info.getReason(), dataService.getErrorInfo(validException).getReason());
-    assertNull(dataService.getErrorInfo(invalidException));
+    IOException nullDetailsException = new GoogleJsonResponseException(builder, null);
+    IOException nullErrorsException =
+        new GoogleJsonResponseException(builder, new GoogleJsonError());
+
+    assertEquals(info.getReason(), DatasetServiceImpl.getErrorInfo(validException).getReason());
+    assertNull(DatasetServiceImpl.getErrorInfo(invalidException));
+    assertNull(DatasetServiceImpl.getErrorInfo(nullDetailsException));
+    assertNull(DatasetServiceImpl.getErrorInfo(nullErrorsException));
   }
 
   @Test
@@ -1195,8 +2019,7 @@ public class BigQueryServicesImplTest {
         });
 
     BigQueryServicesImpl.DatasetServiceImpl services =
-        new BigQueryServicesImpl.DatasetServiceImpl(
-            bigquery, null, PipelineOptionsFactory.create());
+        new BigQueryServicesImpl.DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
     Table ret =
         services.tryCreateTable(
             testTable, new RetryBoundedBackOff(BackOff.ZERO_BACKOFF, 0), Sleeper.DEFAULT);
@@ -1229,8 +2052,7 @@ public class BigQueryServicesImplTest {
     thrown.expectMessage("actually forbidden");
 
     BigQueryServicesImpl.DatasetServiceImpl services =
-        new BigQueryServicesImpl.DatasetServiceImpl(
-            bigquery, null, PipelineOptionsFactory.create());
+        new BigQueryServicesImpl.DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
     try {
       services.tryCreateTable(
           testTable, new RetryBoundedBackOff(BackOff.ZERO_BACKOFF, 3), Sleeper.DEFAULT);
@@ -1266,8 +2088,7 @@ public class BigQueryServicesImplTest {
         });
 
     BigQueryServicesImpl.DatasetServiceImpl services =
-        new BigQueryServicesImpl.DatasetServiceImpl(
-            bigquery, null, PipelineOptionsFactory.create());
+        new BigQueryServicesImpl.DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
     Table ret =
         services.tryCreateTable(
             testTable, new RetryBoundedBackOff(BackOff.ZERO_BACKOFF, 0), Sleeper.DEFAULT);
@@ -1298,8 +2119,7 @@ public class BigQueryServicesImplTest {
         });
 
     BigQueryServicesImpl.DatasetServiceImpl services =
-        new BigQueryServicesImpl.DatasetServiceImpl(
-            bigquery, null, PipelineOptionsFactory.create());
+        new BigQueryServicesImpl.DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
     Table ret =
         services.tryCreateTable(
             testTable, new RetryBoundedBackOff(BackOff.ZERO_BACKOFF, 3), Sleeper.DEFAULT);
@@ -1345,7 +2165,7 @@ public class BigQueryServicesImplTest {
         });
 
     DatasetServiceImpl dataService =
-        new DatasetServiceImpl(bigquery, null, PipelineOptionsFactory.create());
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
 
     List<ValueInSingleWindow<TableRow>> failedInserts = Lists.newArrayList();
     dataService.insertAll(
@@ -1405,7 +2225,7 @@ public class BigQueryServicesImplTest {
         });
 
     DatasetServiceImpl dataService =
-        new DatasetServiceImpl(bigquery, null, PipelineOptionsFactory.create());
+        new DatasetServiceImpl(bigquery, PipelineOptionsFactory.create());
 
     List<ValueInSingleWindow<BigQueryInsertError>> failedInserts = Lists.newArrayList();
     dataService.insertAll(
@@ -1568,9 +2388,11 @@ public class BigQueryServicesImplTest {
   }
 
   @Test
-  public void testRetryAttemptCounter() {
-    BigQueryServicesImpl.StorageClientImpl.RetryAttemptCounter counter =
-        new BigQueryServicesImpl.StorageClientImpl.RetryAttemptCounter();
+  public void testRetryAttemptCounter() throws IOException {
+    BigQueryServicesImpl.StorageClientImpl impl =
+        new BigQueryServicesImpl.StorageClientImpl(
+            PipelineOptionsFactory.create().as(BigQueryOptions.class));
+    BigQueryServicesImpl.StorageClientImpl.RetryAttemptCounter counter = impl.getListener();
 
     RetryInfo retryInfo =
         RetryInfo.newBuilder()
@@ -1594,7 +2416,7 @@ public class BigQueryServicesImplTest {
               @Override
               public RetryInfo parseBytes(byte[] serialized) {
                 try {
-                  Parser<RetryInfo> parser = (RetryInfo.newBuilder().build()).getParserForType();
+                  Parser<RetryInfo> parser = RetryInfo.newBuilder().build().getParserForType();
                   return parser.parseFrom(serialized);
                 } catch (Exception e) {
                   return null;
@@ -1612,19 +2434,100 @@ public class BigQueryServicesImplTest {
 
     // Nulls don't bump the counter.
     counter.onRetryAttempt(null, null);
+    impl.reportPendingMetrics();
     assertEquals(0, (long) container.getCounter(metricName).getCumulative());
 
     // Resource exhausted with empty metadata doesn't bump the counter.
     counter.onRetryAttempt(
         Status.RESOURCE_EXHAUSTED.withDescription("You have consumed some quota"), new Metadata());
+    impl.reportPendingMetrics();
     assertEquals(0, (long) container.getCounter(metricName).getCumulative());
 
     // Resource exhausted with retry info bumps the counter.
     counter.onRetryAttempt(Status.RESOURCE_EXHAUSTED.withDescription("Stop for a while"), metadata);
+    impl.reportPendingMetrics();
     assertEquals(123456, (long) container.getCounter(metricName).getCumulative());
 
     // Other errors with retry info doesn't bump the counter.
     counter.onRetryAttempt(Status.UNAVAILABLE.withDescription("Server is gone"), metadata);
+    impl.reportPendingMetrics();
     assertEquals(123456, (long) container.getCounter(metricName).getCumulative());
+  }
+
+  @Test
+  public void testQuotaProjectIdOverrides() throws IOException {
+    BigQueryOptions options = PipelineOptionsFactory.create().as(BigQueryOptions.class);
+    options.setBigQueryQuotaProjectId("my-quota-project");
+
+    assertEquals(
+        "my-quota-project",
+        new BigQueryServicesImpl.StorageClientImpl(options)
+            .getClient()
+            .getSettings()
+            .getQuotaProjectId());
+    assertEquals(
+        "my-quota-project",
+        new BigQueryServicesImpl.WriteStreamServiceImpl(options)
+            .getClient()
+            .getSettings()
+            .getQuotaProjectId());
+  }
+
+  @Test
+  public void testQuotaProjectIdSetsRequestHeader() throws IOException {
+    BigQueryOptions options = PipelineOptionsFactory.create().as(BigQueryOptions.class);
+    options.setGcpCredential(null);
+    GenericUrl url = new GenericUrl("https://bigquery.googleapis.com/bigquery/v2/projects");
+
+    HttpRequest request =
+        BigQueryServicesImpl.newBigQueryClient(options)
+            .build()
+            .getRequestFactory()
+            .buildGetRequest(url);
+    request.getInterceptor().intercept(request);
+    assertNull(request.getHeaders().getFirstHeaderStringValue("x-goog-user-project"));
+
+    options.setBigQueryQuotaProjectId("my-quota-project");
+    request =
+        BigQueryServicesImpl.newBigQueryClient(options)
+            .build()
+            .getRequestFactory()
+            .buildGetRequest(url);
+    // The interceptor runs before every attempt, including retries.
+    request.getInterceptor().intercept(request);
+    assertEquals(
+        "my-quota-project", request.getHeaders().getFirstHeaderStringValue("x-goog-user-project"));
+
+    // Simulate HttpCredentialsAdapter re-initializing headers from a credential that carries
+    // its own quota project after a 401 refresh: the configured value must win on the retry.
+    request.getHeaders().set("x-goog-user-project", "credential-project");
+    request.getInterceptor().intercept(request);
+    assertEquals(
+        "my-quota-project", request.getHeaders().getFirstHeaderStringValue("x-goog-user-project"));
+  }
+
+  @Test
+  public void testEndpointOverrides() throws IOException {
+    BigQueryOptions options = PipelineOptionsFactory.create().as(BigQueryOptions.class);
+    options.setBigQueryEndpoint("http://example.com:80");
+
+    assertEquals(
+        "http://example.com:80/bigquery/v2/",
+        new BigQueryServicesImpl.JobServiceImpl(options).getClient().getBaseUrl());
+    assertEquals(
+        "http://example.com:80/bigquery/v2/",
+        new BigQueryServicesImpl.DatasetServiceImpl(options).getClient().getBaseUrl());
+    assertEquals(
+        "example.com:80",
+        new BigQueryServicesImpl.WriteStreamServiceImpl(options)
+            .getClient()
+            .getSettings()
+            .getEndpoint());
+    assertEquals(
+        "example.com:80",
+        new BigQueryServicesImpl.StorageClientImpl(options)
+            .getClient()
+            .getSettings()
+            .getEndpoint());
   }
 }

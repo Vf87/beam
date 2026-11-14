@@ -22,8 +22,8 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.eq;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 import java.util.Arrays;
@@ -39,7 +39,7 @@ import org.apache.beam.runners.core.InMemoryStateInternals;
 import org.apache.beam.runners.core.SideInputReader;
 import org.apache.beam.runners.core.StateInternals;
 import org.apache.beam.runners.core.StateNamespaces;
-import org.apache.beam.runners.dataflow.worker.StateFetcher.SideInputState;
+import org.apache.beam.runners.dataflow.worker.streaming.sideinput.SideInputState;
 import org.apache.beam.runners.dataflow.worker.util.ListOutputManager;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill.GlobalDataRequest;
@@ -59,17 +59,21 @@ import org.apache.beam.sdk.transforms.windowing.SlidingWindows;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.transforms.windowing.WindowFn;
 import org.apache.beam.sdk.util.CoderUtils;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.WindowedValueMultiReceiver;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.ByteString;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.hamcrest.Matchers;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.Timeout;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.Mock;
@@ -79,7 +83,7 @@ import org.mockito.MockitoAnnotations;
 /** Unit tests for {@link StreamingSideInputDoFnRunner}. */
 @RunWith(JUnit4.class)
 public class StreamingSideInputDoFnRunnerTest {
-
+  @Rule public transient Timeout globalTimeout = Timeout.seconds(600);
   private static final FixedWindows WINDOW_FN = FixedWindows.of(Duration.millis(10));
 
   static TupleTag<String> mainOutputTag = new TupleTag<>();
@@ -146,6 +150,7 @@ public class StreamingSideInputDoFnRunnerTest {
 
     runner.startBundle();
     runner.processElement(createDatum("e", 0));
+    runner.finishKey("key");
     runner.finishBundle();
 
     assertTrue(outputManager.getOutput(mainOutputTag).isEmpty());
@@ -205,11 +210,12 @@ public class StreamingSideInputDoFnRunnerTest {
     long timestamp = 1L;
 
     WindowedValue<String> elem =
-        WindowedValue.of(
+        WindowedValues.of(
             "e", new Instant(timestamp), Arrays.asList(window1, window2), PaneInfo.NO_FIRING);
 
     runner.startBundle();
     runner.processElement(elem);
+    runner.finishKey("key");
     runner.finishBundle();
 
     assertTrue(outputManager.getOutput(mainOutputTag).isEmpty());
@@ -313,6 +319,7 @@ public class StreamingSideInputDoFnRunnerTest {
     when(mockSideInputReader.get(eq(view), any(BoundedWindow.class))).thenReturn("data");
 
     runner.startBundle();
+    runner.finishKey("key");
     runner.finishBundle();
 
     assertThat(outputManager.getOutput(mainOutputTag), contains(createDatum("e:data", 0)));
@@ -369,6 +376,7 @@ public class StreamingSideInputDoFnRunnerTest {
 
     runner.startBundle();
     runner.processElement(createDatum("e2", 2));
+    runner.finishKey("key");
     runner.finishBundle();
 
     assertThat(
@@ -380,19 +388,17 @@ public class StreamingSideInputDoFnRunnerTest {
     assertThat(sideInputFetcher.elementBag(createWindow(0)).read(), Matchers.emptyIterable());
   }
 
-  @SuppressWarnings("unchecked")
-  private <ReceiverT> StreamingSideInputDoFnRunner<String, String, IntervalWindow> createRunner(
-      DoFnRunners.OutputManager outputManager,
+  private StreamingSideInputDoFnRunner<String, String, IntervalWindow> createRunner(
+      WindowedValueMultiReceiver outputManager,
       List<PCollectionView<String>> views,
       StreamingSideInputFetcher<String, IntervalWindow> sideInputFetcher)
       throws Exception {
     return createRunner(WINDOW_FN, outputManager, views, sideInputFetcher);
   }
 
-  @SuppressWarnings("unchecked")
-  private <ReceiverT> StreamingSideInputDoFnRunner<String, String, IntervalWindow> createRunner(
+  private StreamingSideInputDoFnRunner<String, String, IntervalWindow> createRunner(
       WindowFn<?, ?> windowFn,
-      DoFnRunners.OutputManager outputManager,
+      WindowedValueMultiReceiver outputManager,
       List<PCollectionView<String>> views,
       StreamingSideInputFetcher<String, IntervalWindow> sideInputFetcher)
       throws Exception {
@@ -413,7 +419,7 @@ public class StreamingSideInputDoFnRunnerTest {
     return new StreamingSideInputDoFnRunner<>(simpleDoFnRunner, sideInputFetcher);
   }
 
-  private <ReceiverT> StreamingSideInputFetcher<String, IntervalWindow> createFetcher(
+  private StreamingSideInputFetcher<String, IntervalWindow> createFetcher(
       List<PCollectionView<String>> views) throws Exception {
     @SuppressWarnings({"unchecked", "rawtypes"})
     Iterable<PCollectionView<?>> typedViews = (Iterable) views;
@@ -447,7 +453,7 @@ public class StreamingSideInputDoFnRunnerTest {
   }
 
   private WindowedValue<String> createDatum(String element, long timestamp) {
-    return WindowedValue.of(
+    return WindowedValues.of(
         element,
         new Instant(timestamp),
         Arrays.asList(createWindow(timestamp)),

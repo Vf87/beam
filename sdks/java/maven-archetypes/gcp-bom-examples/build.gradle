@@ -25,17 +25,20 @@ ext.summary = """A Maven Archetype to create a project
 using the Beam Google Cloud Platform BOM"""
 
 processResources {
-    filter org.apache.tools.ant.filters.ReplaceTokens, tokens: [
+    dependsOn 'generateSources'
+    // Filter arguments are not tracked by Gradle, so declare the tokens as an input property.
+    def resourceTokens = [
             'project.version':  version,
             'bigquery.version': dependencies.create(project.library.java.google_api_services_bigquery).getVersion(),
             'google-api-client.version': dependencies.create(project.library.java.google_api_client).getVersion(),
-            'hamcrest.version': dependencies.create(project.library.java.hamcrest_library).getVersion(),
+            'hamcrest.version': dependencies.create(project.library.java.hamcrest).getVersion(),
             'jackson.version': dependencies.create(project.library.java.jackson_core).getVersion(),
             'joda.version': dependencies.create(project.library.java.joda_time).getVersion(),
             'junit.version': dependencies.create(project.library.java.junit).getVersion(),
+            'kafka.version': dependencies.create(project.library.java.kafka_clients).getVersion(),
             'pubsub.version': dependencies.create(project.library.java.google_api_services_pubsub).getVersion(),
             'slf4j.version': dependencies.create(project.library.java.slf4j_api).getVersion(),
-            'spark.version': dependencies.create(project.library.java.spark_core).getVersion(),
+            'spark.version': dependencies.create(project.library.java.spark3_core).getVersion(),
             'nemo.version': dependencies.create(project.library.java.nemo_compiler_frontend_beam).getVersion(),
             'hadoop.version': dependencies.create(project.library.java.hadoop_client).getVersion(),
             'mockito.version': dependencies.create(project.library.java.mockito_core).getVersion(),
@@ -46,6 +49,8 @@ processResources {
             'maven-surefire-plugin.version': dependencies.create(project.library.maven.maven_surefire_plugin).getVersion(),
             'flink.artifact.name': 'beam-runners-flink-'.concat(project(":runners:flink:${project.ext.latestFlinkVersion}").getName()),
     ]
+    inputs.property('resourceTokens', resourceTokens)
+    filter org.apache.tools.ant.filters.ReplaceTokens, tokens: resourceTokens
 }
 
 /*
@@ -68,6 +73,12 @@ task generateSources(type: Exec) {
     outputs.dir('src/main/resources/archetype-resources/src')
     environment "HERE", "."
     commandLine '../examples/generate-sources.sh'
+}
+// add dependency BeamModulePlugin defined custom tasks
+// they are defined only when certain flags are provided (e.g. -Prelease; -Ppublishing, etc)
+def sourcesJar = project.tasks.findByName('sourcesJar')
+if (sourcesJar != null) {
+    sourcesJar.dependsOn generateSources
 }
 
 sourceSets {

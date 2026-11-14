@@ -36,17 +36,18 @@ import org.apache.beam.runners.jet.Utils;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.options.PipelineOptions;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 
 /**
  * Jet {@link com.hazelcast.jet.core.Processor} implementation for reading from a bounded Beam
  * source.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
   "nullness",
   "keyfor"
-}) // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+}) // TODO(https://github.com/apache/beam/issues/20497)
 public class BoundedSourceP<T> extends AbstractProcessor implements Traverser {
 
   private final Traverser<BoundedSource<T>> shardsTraverser;
@@ -79,7 +80,7 @@ public class BoundedSourceP<T> extends AbstractProcessor implements Traverser {
     try {
       Object item = currentReader.getCurrent();
       WindowedValue<Object> res =
-          WindowedValue.timestampedValueInGlobalWindow(item, currentReader.getCurrentTimestamp());
+          WindowedValues.timestampedValueInGlobalWindow(item, currentReader.getCurrentTimestamp());
       if (!currentReader.advance()) {
         nextShard();
       }
@@ -186,7 +187,6 @@ public class BoundedSourceP<T> extends AbstractProcessor implements Traverser {
     private final SerializablePipelineOptions options;
     private final Coder outputCoder;
     private final String ownerId;
-    private transient ProcessorSupplier.Context context;
 
     private BoundedSourceProcessorSupplier(
         List<BoundedSource<T>> shards,
@@ -200,16 +200,13 @@ public class BoundedSourceP<T> extends AbstractProcessor implements Traverser {
     }
 
     @Override
-    public void init(@Nonnull Context context) {
-      this.context = context;
-    }
+    public void init(@Nonnull Context context) {}
 
     @Nonnull
     @Override
     public Collection<? extends Processor> get(int count) {
-      int indexBase = context.memberIndex() * context.localParallelism();
       List<Processor> res = new ArrayList<>(count);
-      for (int i = 0; i < count; i++, indexBase++) {
+      for (int i = 0; i < count; i++) {
         res.add(
             new BoundedSourceP<>(
                 Utils.roundRobinSubList(shards, i, count), options.get(), outputCoder, ownerId));

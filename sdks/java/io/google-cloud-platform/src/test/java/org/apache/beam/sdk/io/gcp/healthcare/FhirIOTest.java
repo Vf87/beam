@@ -17,18 +17,20 @@
  */
 package org.apache.beam.sdk.io.gcp.healthcare;
 
-import java.util.ArrayList;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
+
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import org.apache.beam.sdk.coders.ListCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.io.gcp.healthcare.FhirIOPatientEverything.PatientEverythingParameter;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.MapElements;
-import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TypeDescriptors;
 import org.junit.Assert;
@@ -62,8 +64,7 @@ public class FhirIOTest {
 
   @Test
   public void test_FhirIO_failedSearches() {
-    List<FhirSearchParameter<String>> input =
-        Arrays.asList(FhirSearchParameter.of("resource-type-1", null));
+    FhirSearchParameter<String> input = FhirSearchParameter.of("resource-type-1", null);
     FhirIO.Search.Result searchResult =
         pipeline
             .apply(Create.of(input).withCoder(FhirSearchParameterCoder.of(StringUtf8Coder.of())))
@@ -75,7 +76,7 @@ public class FhirIOTest {
         failed.apply(
             MapElements.into(TypeDescriptors.strings()).via(HealthcareIOError::getDataResource));
 
-    PAssert.that(failedMsgIds).containsInAnyOrder(Arrays.asList("bad-store"));
+    PAssert.that(failedMsgIds).containsInAnyOrder(input.toString());
     PAssert.that(searchResult.getResources()).empty();
     PAssert.that(searchResult.getKeyedResources()).empty();
     pipeline.run();
@@ -83,8 +84,7 @@ public class FhirIOTest {
 
   @Test
   public void test_FhirIO_failedSearchesWithGenericParameters() {
-    List<FhirSearchParameter<List<String>>> input =
-        Arrays.asList(FhirSearchParameter.of("resource-type-1", null));
+    FhirSearchParameter<List<String>> input = FhirSearchParameter.of("resource-type-1", null);
     FhirIO.Search.Result searchResult =
         pipeline
             .apply(
@@ -100,7 +100,7 @@ public class FhirIOTest {
         failed.apply(
             MapElements.into(TypeDescriptors.strings()).via(HealthcareIOError::getDataResource));
 
-    PAssert.that(failedMsgIds).containsInAnyOrder(Arrays.asList("bad-store"));
+    PAssert.that(failedMsgIds).containsInAnyOrder(input.toString());
     PAssert.that(searchResult.getResources()).empty();
     PAssert.that(searchResult.getKeyedResources()).empty();
     pipeline.run();
@@ -113,7 +113,7 @@ public class FhirIOTest {
 
     PCollection<String> fhirBundles = pipeline.apply(Create.of(emptyMessages));
 
-    FhirIO.Write.Result writeResult =
+    FhirIO.Write.AbstractResult writeResult =
         fhirBundles.apply(
             FhirIO.Write.executeBundles(
                 "projects/foo/locations/us-central1/datasets/bar/hl7V2Stores/baz"));
@@ -133,27 +133,28 @@ public class FhirIOTest {
     pipeline.run();
   }
 
-  private static final long NUM_ELEMENTS = 11;
+  @Test
+  public void test_FhirIO_failedPatientEverything() {
+    PatientEverythingParameter input =
+        PatientEverythingParameter.builder().setResourceName("bad-resource-name").build();
+    FhirIOPatientEverything.Result everythingResult =
+        pipeline.apply(Create.of(input)).apply(FhirIO.getPatientEverything());
 
-  private static ArrayList<KV<String, String>> createTestData() {
-    String[] scientists = {
-      "Einstein",
-      "Darwin",
-      "Copernicus",
-      "Pasteur",
-      "Curie",
-      "Faraday",
-      "Newton",
-      "Bohr",
-      "Galilei",
-      "Maxwell"
-    };
-    ArrayList<KV<String, String>> data = new ArrayList<>();
-    for (int i = 0; i < NUM_ELEMENTS; i++) {
-      int index = i % scientists.length;
-      KV<String, String> element = KV.of("key", scientists[index]);
-      data.add(element);
-    }
-    return data;
+    PCollection<HealthcareIOError<String>> failed = everythingResult.getFailedReads();
+    PCollection<String> failedEverything =
+        failed.apply(
+            MapElements.into(TypeDescriptors.strings()).via(HealthcareIOError::getDataResource));
+
+    PAssert.that(failedEverything).containsInAnyOrder(input.toString());
+    PAssert.that(everythingResult.getPatientCompartments()).empty();
+    pipeline.run();
+  }
+
+  @Test
+  public void test_FhirIO_Export_invalidUri() {
+    final String invalidUri = "someInvalidUri";
+    pipeline.apply(FhirIO.exportResources("fakeStore", invalidUri));
+    final RuntimeException exceptionThrown = assertThrows(RuntimeException.class, pipeline::run);
+    assertTrue(exceptionThrown.getMessage().contains(invalidUri));
   }
 }

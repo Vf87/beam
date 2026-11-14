@@ -22,8 +22,8 @@ import static org.apache.beam.sdk.extensions.sql.impl.schema.BeamTableUtils.csvL
 import static org.apache.beam.sdk.util.RowJsonUtils.jsonToRow;
 import static org.apache.beam.sdk.util.RowJsonUtils.newObjectMapperWith;
 
-import com.alibaba.fastjson.JSONObject;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.auto.service.AutoService;
 import com.google.auto.value.AutoValue;
 import java.io.Serializable;
@@ -51,9 +51,8 @@ import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.sdk.values.TypeDescriptors;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.base.MoreObjects;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
 import org.apache.commons.csv.CSVFormat;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
@@ -75,7 +74,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  */
 @AutoService(TableProvider.class)
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class TextTableProvider extends InMemoryMetaTableProvider {
 
@@ -89,9 +88,9 @@ public class TextTableProvider extends InMemoryMetaTableProvider {
     Schema schema = table.getSchema();
 
     String filePattern = table.getLocation();
-    JSONObject properties = table.getProperties();
-    String format = MoreObjects.firstNonNull(properties.getString("format"), "csv");
-    String deadLetterFile = properties.getString("deadLetterFile");
+    ObjectNode properties = table.getProperties();
+    String format = properties.path("format").asText("csv");
+    String deadLetterFile = properties.path("deadLetterFile").asText(null);
 
     // Backwards compatibility: previously "type": "text" meant CSV and "format" was where the
     // CSV format went. So assume that any other format is the CSV format.
@@ -103,7 +102,7 @@ public class TextTableProvider extends InMemoryMetaTableProvider {
 
     switch (format) {
       case "csv":
-        String specifiedCsvFormat = properties.getString("csvformat");
+        String specifiedCsvFormat = properties.path("csvformat").asText(null);
         CSVFormat csvFormat =
             specifiedCsvFormat != null
                 ? CSVFormat.valueOf(specifiedCsvFormat)
@@ -133,7 +132,6 @@ public class TextTableProvider extends InMemoryMetaTableProvider {
   /** Write-side converter for for {@link TextTable} with format {@code 'lines'}. */
   public static class LinesWriteConverter extends PTransform<PCollection<Row>, PCollection<String>>
       implements Serializable {
-    private static final Schema SCHEMA = Schema.builder().addStringField("line").build();
 
     public LinesWriteConverter() {}
 

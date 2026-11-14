@@ -16,37 +16,52 @@
 #
 # pytype: skip-file
 
+import glob
 import json
 import logging
 import math
 import os
+import pytz
+import pytest
+import re
+import shutil
 import tempfile
 import unittest
-from typing import List
+from typing import Any
 
+import fastavro
 import hamcrest as hc
 
-import avro
-import avro.datafile
-from avro.datafile import DataFileWriter
-from avro.io import DatumWriter
-from avro.schema import Parse
 from fastavro.schema import parse_schema
 from fastavro import writer
 
 import apache_beam as beam
-from apache_beam import Create
+from apache_beam import Create, schema_pb2
 from apache_beam.io import avroio
 from apache_beam.io import filebasedsource
 from apache_beam.io import iobase
 from apache_beam.io import source_test_utils
+from apache_beam.io.avroio import _FastAvroSource  # For testing
+from apache_beam.io.avroio import avro_schema_to_beam_schema  # For testing
+from apache_beam.io.avroio import beam_schema_to_avro_schema  # For testing
+from apache_beam.io.avroio import avro_union_type_to_beam_type  # For testing
+from apache_beam.io.avroio import avro_dict_to_beam_row  # For testing
+from apache_beam.io.avroio import beam_row_to_avro_dict  # For testing
 from apache_beam.io.avroio import _create_avro_sink  # For testing
-from apache_beam.io.avroio import _create_avro_source  # For testing
+from apache_beam.io.filesystems import FileSystems
+from apache_beam.options.pipeline_options import StandardOptions
 from apache_beam.testing.test_pipeline import TestPipeline
+from apache_beam.testing.test_stream import TestStream
 from apache_beam.testing.util import assert_that
 from apache_beam.testing.util import equal_to
 from apache_beam.transforms.display import DisplayData
 from apache_beam.transforms.display_test import DisplayDataItemMatcher
+from apache_beam.transforms.sql import SqlTransform
+from apache_beam.transforms.userstate import CombiningValueStateSpec
+from apache_beam.transforms.util import LogElements
+from apache_beam.utils.timestamp import Timestamp
+from apache_beam.typehints import schemas
+from datetime import datetime
 
 # Import snappy optionally; some tests will be skipped when import fails.
 try:
@@ -72,7 +87,7 @@ RECORDS = [{
 
 class AvroBase(object):
 
-  _temp_files = []  # type: List[str]
+  _temp_files: list[str] = []
 
   def __init__(self, methodName='runTest'):
     super().__init__(methodName)
@@ -100,7 +115,13 @@ class AvroBase(object):
         os.remove(path)
     self._temp_files = []
 
-  def _write_data(self, directory, prefix, codec, count, sync_interval):
+  def _write_data(
+      self,
+      directory=None,
+      prefix=None,
+      codec=None,
+      count=None,
+      sync_interval=None):
     raise NotImplementedError
 
   def _write_pattern(self, num_files, return_filenames=False):
@@ -121,7 +142,7 @@ class AvroBase(object):
 
   def _run_avro_test(
       self, pattern, desired_bundle_size, perform_splitting, expected_result):
-    source = _create_avro_source(pattern, use_fastavro=self.use_fastavro)
+    source = _FastAvroSource(pattern)
 
     if perform_splitting:
       assert desired_bundle_size
@@ -142,6 +163,112 @@ class AvroBase(object):
       read_records = source_test_utils.read_from_source(source, None, None)
       self.assertCountEqual(expected_result, read_records)
 
+  def test_schema_read_write(self):
+    with tempfile.TemporaryDirectory() as tmp_dirname:
+      path = os.path.join(tmp_dirname, 'tmp_filename')
+      rows = [beam.Row(a=1, b=['x', 'y']), beam.Row(a=2, b=['t', 'u'])]
+      stable_repr = lambda row: json.dumps(row._asdict())
+      with TestPipeline() as p:
+        _ = p | Create(rows) | avroio.WriteToAvro(path) | beam.Map(print)
+      with TestPipeline() as p:
+        readback = (
+            p
+            | avroio.ReadFromAvro(path + '*', as_rows=True)
+            | beam.Map(stable_repr))
+        assert_that(readback, equal_to([stable_repr(r) for r in rows]))
+
+  @pytest.mark.xlang_sql_expansion_service
+  @unittest.skipIf(
+      TestPipeline().get_pipeline_options().view_as(StandardOptions).runner
+      is None,
+      "Must be run with a runner that supports staging java artifacts.")
+  def test_avro_schema_to_beam_schema_with_nullable_atomic_fields(self):
+    records = []
+    records.extend(self.RECORDS)
+    records.append({
+        'name': 'Bruce', 'favorite_number': None, 'favorite_color': None
+    })
+    avro_schema = fastavro.parse_schema(json.loads(self.SCHEMA_STRING))
+    beam_schema = avro_schema_to_beam_schema(avro_schema)
+
+    with TestPipeline() as p:
+      readback = (
+          p
+          | Create(records)
+          | beam.Map(avro_dict_to_beam_row(avro_schema, beam_schema))
+          | SqlTransform("SELECT * FROM PCOLLECTION")
+          | beam.Map(beam_row_to_avro_dict(avro_schema, beam_schema)))
+      assert_that(readback, equal_to(records))
+
+  def test_avro_union_type_to_beam_type_with_nullable_long(self):
+    union_type = ['null', 'long']
+    beam_type = avro_union_type_to_beam_type(union_type)
+    expected_beam_type = schema_pb2.FieldType(
+        atomic_type=schema_pb2.INT64, nullable=True)
+    hc.assert_that(beam_type, hc.equal_to(expected_beam_type))
+
+  def test_avro_union_type_to_beam_type_with_string_long(self):
+    union_type = ['string', 'long']
+    beam_type = avro_union_type_to_beam_type(union_type)
+    expected_beam_type = schemas.typing_to_runner_api(Any)
+    hc.assert_that(beam_type, hc.equal_to(expected_beam_type))
+
+  def test_avro_union_type_to_beam_type_with_record_and_null(self):
+    record_type = {
+        'type': 'record',
+        'name': 'TestRecord',
+        'fields': [{
+            'name': 'field1', 'type': 'string'
+        }, {
+            'name': 'field2', 'type': 'int'
+        }]
+    }
+    union_type = [record_type, 'null']
+    beam_type = avro_union_type_to_beam_type(union_type)
+    expected_beam_type = schema_pb2.FieldType(
+        row_type=schema_pb2.RowType(
+            schema=schema_pb2.Schema(
+                fields=[
+                    schemas.schema_field(
+                        'field1',
+                        schema_pb2.FieldType(atomic_type=schema_pb2.STRING)),
+                    schemas.schema_field(
+                        'field2',
+                        schema_pb2.FieldType(atomic_type=schema_pb2.INT32))
+                ])),
+        nullable=True)
+    hc.assert_that(beam_type, hc.equal_to(expected_beam_type))
+
+  def test_avro_union_type_to_beam_type_with_nullable_annotated_string(self):
+    annotated_string_type = {"avro.java.string": "String", "type": "string"}
+    union_type = ['null', annotated_string_type]
+
+    beam_type = avro_union_type_to_beam_type(union_type)
+
+    expected_beam_type = schema_pb2.FieldType(
+        atomic_type=schema_pb2.STRING, nullable=True)
+    hc.assert_that(beam_type, hc.equal_to(expected_beam_type))
+
+  def test_avro_union_type_to_beam_type_with_only_null(self):
+    union_type = ['null']
+    beam_type = avro_union_type_to_beam_type(union_type)
+    expected_beam_type = schemas.typing_to_runner_api(Any)
+    hc.assert_that(beam_type, hc.equal_to(expected_beam_type))
+
+  def test_avro_union_type_to_beam_type_with_multiple_types(self):
+    union_type = ['null', 'string', 'int']
+    beam_type = avro_union_type_to_beam_type(union_type)
+    expected_beam_type = schemas.typing_to_runner_api(Any)
+    hc.assert_that(beam_type, hc.equal_to(expected_beam_type))
+
+  def test_avro_schema_to_beam_and_back(self):
+    avro_schema = fastavro.parse_schema(json.loads(self.SCHEMA_STRING))
+    beam_schema = avro_schema_to_beam_schema(avro_schema)
+    converted_avro_schema = beam_schema_to_avro_schema(beam_schema)
+    expected_fields = json.loads(self.SCHEMA_STRING)["fields"]
+    hc.assert_that(
+        converted_avro_schema["fields"], hc.equal_to(expected_fields))
+
   def test_read_without_splitting(self):
     file_name = self._write_data()
     expected_result = self.RECORDS
@@ -155,10 +282,9 @@ class AvroBase(object):
   def test_source_display_data(self):
     file_name = 'some_avro_source'
     source = \
-        _create_avro_source(
+        _FastAvroSource(
             file_name,
             validate=False,
-            use_fastavro=self.use_fastavro
         )
     dd = DisplayData.create_from(source)
 
@@ -174,8 +300,7 @@ class AvroBase(object):
     read = \
         avroio.ReadFromAvro(
             file_name,
-            validate=False,
-            use_fastavro=self.use_fastavro)
+            validate=False)
     dd = DisplayData.create_from(read)
 
     # No extra avro parameters for AvroSource.
@@ -188,14 +313,7 @@ class AvroBase(object):
   def test_sink_display_data(self):
     file_name = 'some_avro_sink'
     sink = _create_avro_sink(
-        file_name,
-        self.SCHEMA,
-        'null',
-        '.end',
-        0,
-        None,
-        'application/x-avro',
-        use_fastavro=self.use_fastavro)
+        file_name, self.SCHEMA, 'null', '.end', 0, None, 'application/x-avro')
     dd = DisplayData.create_from(sink)
 
     expected_items = [
@@ -211,8 +329,8 @@ class AvroBase(object):
 
   def test_write_display_data(self):
     file_name = 'some_avro_sink'
-    write = avroio.WriteToAvro(
-        file_name, self.SCHEMA, use_fastavro=self.use_fastavro)
+    write = avroio.WriteToAvro(file_name, self.SCHEMA)
+    write.expand(beam.PCollection(beam.Pipeline()))
     dd = DisplayData.create_from(write)
     expected_items = [
         DisplayDataItemMatcher('schema', str(self.SCHEMA)),
@@ -226,12 +344,12 @@ class AvroBase(object):
 
   def test_read_reentrant_without_splitting(self):
     file_name = self._write_data()
-    source = _create_avro_source(file_name, use_fastavro=self.use_fastavro)
+    source = _FastAvroSource(file_name)
     source_test_utils.assert_reentrant_reads_succeed((source, None, None))
 
   def test_read_reantrant_with_splitting(self):
     file_name = self._write_data()
-    source = _create_avro_source(file_name, use_fastavro=self.use_fastavro)
+    source = _FastAvroSource(file_name)
     splits = [split for split in source.split(desired_bundle_size=100000)]
     assert len(splits) == 1
     source_test_utils.assert_reentrant_reads_succeed(
@@ -252,7 +370,7 @@ class AvroBase(object):
     sync_interval = 16000
     file_name = self._write_data(count=num_records, sync_interval=sync_interval)
 
-    source = _create_avro_source(file_name, use_fastavro=self.use_fastavro)
+    source = _FastAvroSource(file_name)
 
     splits = [split for split in source.split(desired_bundle_size=float('inf'))]
     assert len(splits) == 1
@@ -312,7 +430,7 @@ class AvroBase(object):
 
   def test_dynamic_work_rebalancing_exhaustive(self):
     def compare_split_points(file_name):
-      source = _create_avro_source(file_name, use_fastavro=self.use_fastavro)
+      source = _FastAvroSource(file_name)
       splits = [
           split for split in source.split(desired_bundle_size=float('inf'))
       ]
@@ -340,17 +458,14 @@ class AvroBase(object):
       f.write(corrupted_data)
       corrupted_file_name = f.name
 
-    source = _create_avro_source(
-        corrupted_file_name, use_fastavro=self.use_fastavro)
+    source = _FastAvroSource(corrupted_file_name)
     with self.assertRaisesRegex(ValueError, r'expected sync marker'):
       source_test_utils.read_from_source(source, None, None)
 
   def test_read_from_avro(self):
     path = self._write_data()
     with TestPipeline() as p:
-      assert_that(
-          p | avroio.ReadFromAvro(path, use_fastavro=self.use_fastavro),
-          equal_to(self.RECORDS))
+      assert_that(p | avroio.ReadFromAvro(path), equal_to(self.RECORDS))
 
   def test_read_all_from_avro_single_file(self):
     path = self._write_data()
@@ -358,7 +473,7 @@ class AvroBase(object):
       assert_that(
           p \
           | Create([path]) \
-          | avroio.ReadAllFromAvro(use_fastavro=self.use_fastavro),
+          | avroio.ReadAllFromAvro(),
           equal_to(self.RECORDS))
 
   def test_read_all_from_avro_many_single_files(self):
@@ -369,7 +484,7 @@ class AvroBase(object):
       assert_that(
           p \
           | Create([path1, path2, path3]) \
-          | avroio.ReadAllFromAvro(use_fastavro=self.use_fastavro),
+          | avroio.ReadAllFromAvro(),
           equal_to(self.RECORDS * 3))
 
   def test_read_all_from_avro_file_pattern(self):
@@ -378,7 +493,7 @@ class AvroBase(object):
       assert_that(
           p \
           | Create([file_pattern]) \
-          | avroio.ReadAllFromAvro(use_fastavro=self.use_fastavro),
+          | avroio.ReadAllFromAvro(),
           equal_to(self.RECORDS * 5))
 
   def test_read_all_from_avro_many_file_patterns(self):
@@ -389,7 +504,7 @@ class AvroBase(object):
       assert_that(
           p \
           | Create([file_pattern1, file_pattern2, file_pattern3]) \
-          | avroio.ReadAllFromAvro(use_fastavro=self.use_fastavro),
+          | avroio.ReadAllFromAvro(),
           equal_to(self.RECORDS * 10))
 
   def test_read_all_from_avro_with_filename(self):
@@ -399,9 +514,96 @@ class AvroBase(object):
       assert_that(
           p \
           | Create([file_pattern]) \
-          | avroio.ReadAllFromAvro(use_fastavro=self.use_fastavro,
-                                   with_filename=True),
+          | avroio.ReadAllFromAvro(with_filename=True),
           equal_to(result))
+
+  class _WriteFilesFn(beam.DoFn):
+    """writes a couple of files with deferral."""
+
+    COUNT_STATE = CombiningValueStateSpec('count', combine_fn=sum)
+
+    def __init__(self, SCHEMA, RECORDS, tempdir):
+      self._thread = None
+      self.SCHEMA = SCHEMA
+      self.RECORDS = RECORDS
+      self.tempdir = tempdir
+
+    def get_expect(self, match_updated_files):
+      results_file1 = [('file1', x) for x in self.gen_records(1)]
+      results_file2 = [('file2', x) for x in self.gen_records(3)]
+      if match_updated_files:
+        results_file1 += [('file1', x) for x in self.gen_records(2)]
+      return results_file1 + results_file2
+
+    def gen_records(self, count):
+      return self.RECORDS * (count // len(self.RECORDS)) + self.RECORDS[:(
+          count % len(self.RECORDS))]
+
+    def process(self, element, count_state=beam.DoFn.StateParam(COUNT_STATE)):
+      counter = count_state.read()
+      if counter == 0:
+        count_state.add(1)
+        with open(FileSystems.join(self.tempdir, 'file1'), 'wb') as f:
+          writer(f, self.SCHEMA, self.gen_records(2))
+        with open(FileSystems.join(self.tempdir, 'file2'), 'wb') as f:
+          writer(f, self.SCHEMA, self.gen_records(3))
+      # convert dumb key to basename in output
+      basename = FileSystems.split(element[1][0])[1]
+      content = element[1][1]
+      yield basename, content
+
+  def test_read_all_continuously_new(self):
+    with TestPipeline() as pipeline:
+      tempdir = tempfile.mkdtemp()
+      writer_fn = self._WriteFilesFn(self.SCHEMA, self.RECORDS, tempdir)
+      with open(FileSystems.join(tempdir, 'file1'), 'wb') as f:
+        writer(f, writer_fn.SCHEMA, writer_fn.gen_records(1))
+      match_pattern = FileSystems.join(tempdir, '*')
+      interval = 0.5
+      last = 2
+
+      p_read_once = (
+          pipeline
+          | 'Continuously read new files' >> avroio.ReadAllFromAvroContinuously(
+              match_pattern,
+              with_filename=True,
+              start_timestamp=Timestamp.now(),
+              interval=interval,
+              stop_timestamp=Timestamp.now() + last,
+              match_updated_files=False)
+          | 'add dumb key' >> beam.Map(lambda x: (0, x))
+          | 'Write files on-the-fly' >> beam.ParDo(writer_fn))
+      assert_that(
+          p_read_once,
+          equal_to(writer_fn.get_expect(match_updated_files=False)),
+          label='assert read new files results')
+
+  def test_read_all_continuously_update(self):
+    with TestPipeline() as pipeline:
+      tempdir = tempfile.mkdtemp()
+      writer_fn = self._WriteFilesFn(self.SCHEMA, self.RECORDS, tempdir)
+      with open(FileSystems.join(tempdir, 'file1'), 'wb') as f:
+        writer(f, writer_fn.SCHEMA, writer_fn.gen_records(1))
+      match_pattern = FileSystems.join(tempdir, '*')
+      interval = 0.5
+      last = 2
+
+      p_read_upd = (
+          pipeline
+          | 'Continuously read updated files' >>
+          avroio.ReadAllFromAvroContinuously(
+              match_pattern,
+              with_filename=True,
+              start_timestamp=Timestamp.now(),
+              interval=interval,
+              stop_timestamp=Timestamp.now() + last,
+              match_updated_files=True)
+          | 'add dumb key' >> beam.Map(lambda x: (0, x))
+          | 'Write files on-the-fly' >> beam.ParDo(writer_fn))
+      assert_that(
+          p_read_upd,
+          equal_to(writer_fn.get_expect(match_updated_files=True)),
+          label='assert read updated files results')
 
   def test_sink_transform(self):
     with tempfile.NamedTemporaryFile() as dst:
@@ -410,12 +612,12 @@ class AvroBase(object):
         # pylint: disable=expression-not-assigned
         p \
         | beam.Create(self.RECORDS) \
-        | avroio.WriteToAvro(path, self.SCHEMA, use_fastavro=self.use_fastavro)
+        | avroio.WriteToAvro(path, self.SCHEMA,)
       with TestPipeline() as p:
         # json used for stable sortability
         readback = \
             p \
-            | avroio.ReadFromAvro(path + '*', use_fastavro=self.use_fastavro) \
+            | avroio.ReadFromAvro(path + '*', ) \
             | beam.Map(json.dumps)
         assert_that(readback, equal_to([json.dumps(r) for r in self.RECORDS]))
 
@@ -430,55 +632,34 @@ class AvroBase(object):
         | avroio.WriteToAvro(
             path,
             self.SCHEMA,
-            codec='snappy',
-            use_fastavro=self.use_fastavro)
+            codec='snappy')
       with TestPipeline() as p:
         # json used for stable sortability
         readback = \
             p \
-            | avroio.ReadFromAvro(path + '*', use_fastavro=self.use_fastavro) \
+            | avroio.ReadFromAvro(path + '*') \
             | beam.Map(json.dumps)
         assert_that(readback, equal_to([json.dumps(r) for r in self.RECORDS]))
 
+  def test_writer_open_and_close(self):
+    # Create and then close a temp file so we can manually open it later
+    dst = tempfile.NamedTemporaryFile(delete=False)
+    dst.close()
 
-@unittest.skipIf(
-    os.environ.get('RUN_SKIPPED_PY3_TESTS') != '1',
-    'This test requires that Beam depends on avro-python3>=1.9 or newer. '
-    'See: BEAM-6522.')
-class TestAvro(AvroBase, unittest.TestCase):
-  def __init__(self, methodName='runTest'):
-    super().__init__(methodName)
-    self.use_fastavro = False
-    self.SCHEMA = Parse(self.SCHEMA_STRING)
+    schema = parse_schema(json.loads(self.SCHEMA_STRING))
+    sink = _create_avro_sink(
+        'some_avro_sink', schema, 'null', '.end', 0, None, 'application/x-avro')
 
-  def _write_data(
-      self,
-      directory=None,
-      prefix=tempfile.template,
-      codec='null',
-      count=len(RECORDS),
-      sync_interval=avro.datafile.SYNC_INTERVAL):
-    old_sync_interval = avro.datafile.SYNC_INTERVAL
-    try:
-      avro.datafile.SYNC_INTERVAL = sync_interval
-      with tempfile.NamedTemporaryFile(delete=False,
-                                       dir=directory,
-                                       prefix=prefix) as f:
-        writer = DataFileWriter(f, DatumWriter(), self.SCHEMA, codec=codec)
-        len_records = len(self.RECORDS)
-        for i in range(count):
-          writer.append(self.RECORDS[i % len_records])
-        writer.close()
-        self._temp_files.append(f.name)
-        return f.name
-    finally:
-      avro.datafile.SYNC_INTERVAL = old_sync_interval
+    w = sink.open(dst.name)
+
+    sink.close(w)
+
+    os.unlink(dst.name)
 
 
 class TestFastAvro(AvroBase, unittest.TestCase):
   def __init__(self, methodName='runTest'):
     super().__init__(methodName)
-    self.use_fastavro = True
     self.SCHEMA = parse_schema(json.loads(self.SCHEMA_STRING))
 
   def _write_data(
@@ -497,6 +678,273 @@ class TestFastAvro(AvroBase, unittest.TestCase):
       writer(f, self.SCHEMA, all_records, codec=codec, **kwargs)
       self._temp_files.append(f.name)
     return f.name
+
+
+class GenerateEvent(beam.PTransform):
+  @staticmethod
+  def sample_data():
+    return GenerateEvent()
+
+  def expand(self, input):
+    elemlist = [{'age': 10}, {'age': 20}, {'age': 30}]
+    elem = elemlist
+    return (
+        input
+        | TestStream().add_elements(
+            elements=elem,
+            event_timestamp=datetime(
+                2021, 3, 1, 0, 0, 1, 0,
+                tzinfo=pytz.UTC).timestamp()).add_elements(
+                    elements=elem,
+                    event_timestamp=datetime(
+                        2021, 3, 1, 0, 0, 2, 0,
+                        tzinfo=pytz.UTC).timestamp()).add_elements(
+                            elements=elem,
+                            event_timestamp=datetime(
+                                2021, 3, 1, 0, 0, 3, 0,
+                                tzinfo=pytz.UTC).timestamp()).add_elements(
+                                    elements=elem,
+                                    event_timestamp=datetime(
+                                        2021, 3, 1, 0, 0, 4, 0,
+                                        tzinfo=pytz.UTC).timestamp()).
+        advance_watermark_to(
+            datetime(2021, 3, 1, 0, 0, 5, 0,
+                     tzinfo=pytz.UTC).timestamp()).add_elements(
+                         elements=elem,
+                         event_timestamp=datetime(
+                             2021, 3, 1, 0, 0, 5, 0,
+                             tzinfo=pytz.UTC).timestamp()).
+        add_elements(
+            elements=elem,
+            event_timestamp=datetime(
+                2021, 3, 1, 0, 0, 6,
+                0, tzinfo=pytz.UTC).timestamp()).add_elements(
+                    elements=elem,
+                    event_timestamp=datetime(
+                        2021, 3, 1, 0, 0, 7, 0,
+                        tzinfo=pytz.UTC).timestamp()).add_elements(
+                            elements=elem,
+                            event_timestamp=datetime(
+                                2021, 3, 1, 0, 0, 8, 0,
+                                tzinfo=pytz.UTC).timestamp()).add_elements(
+                                    elements=elem,
+                                    event_timestamp=datetime(
+                                        2021, 3, 1, 0, 0, 9, 0,
+                                        tzinfo=pytz.UTC).timestamp()).
+        advance_watermark_to(
+            datetime(2021, 3, 1, 0, 0, 10, 0,
+                     tzinfo=pytz.UTC).timestamp()).add_elements(
+                         elements=elem,
+                         event_timestamp=datetime(
+                             2021, 3, 1, 0, 0, 10, 0,
+                             tzinfo=pytz.UTC).timestamp()).add_elements(
+                                 elements=elem,
+                                 event_timestamp=datetime(
+                                     2021, 3, 1, 0, 0, 11, 0,
+                                     tzinfo=pytz.UTC).timestamp()).
+        add_elements(
+            elements=elem,
+            event_timestamp=datetime(
+                2021, 3, 1, 0, 0, 12, 0,
+                tzinfo=pytz.UTC).timestamp()).add_elements(
+                    elements=elem,
+                    event_timestamp=datetime(
+                        2021, 3, 1, 0, 0, 13, 0,
+                        tzinfo=pytz.UTC).timestamp()).add_elements(
+                            elements=elem,
+                            event_timestamp=datetime(
+                                2021, 3, 1, 0, 0, 14, 0,
+                                tzinfo=pytz.UTC).timestamp()).
+        advance_watermark_to(
+            datetime(2021, 3, 1, 0, 0, 15, 0,
+                     tzinfo=pytz.UTC).timestamp()).add_elements(
+                         elements=elem,
+                         event_timestamp=datetime(
+                             2021, 3, 1, 0, 0, 15, 0,
+                             tzinfo=pytz.UTC).timestamp()).add_elements(
+                                 elements=elem,
+                                 event_timestamp=datetime(
+                                     2021, 3, 1, 0, 0, 16, 0,
+                                     tzinfo=pytz.UTC).timestamp()).
+        add_elements(
+            elements=elem,
+            event_timestamp=datetime(
+                2021, 3, 1, 0, 0, 17, 0,
+                tzinfo=pytz.UTC).timestamp()).add_elements(
+                    elements=elem,
+                    event_timestamp=datetime(
+                        2021, 3, 1, 0, 0, 18, 0,
+                        tzinfo=pytz.UTC).timestamp()).add_elements(
+                            elements=elem,
+                            event_timestamp=datetime(
+                                2021, 3, 1, 0, 0, 19, 0,
+                                tzinfo=pytz.UTC).timestamp()).
+        advance_watermark_to(
+            datetime(2021, 3, 1, 0, 0, 20, 0,
+                     tzinfo=pytz.UTC).timestamp()).add_elements(
+                         elements=elem,
+                         event_timestamp=datetime(
+                             2021, 3, 1, 0, 0, 20, 0,
+                             tzinfo=pytz.UTC).timestamp()).advance_watermark_to(
+                                 datetime(
+                                     2021, 3, 1, 0, 0, 25, 0, tzinfo=pytz.UTC).
+                                 timestamp()).advance_watermark_to_infinity())
+
+
+class WriteStreamingTest(unittest.TestCase):
+  def setUp(self):
+    super().setUp()
+    self.tempdir = tempfile.mkdtemp()
+
+  def tearDown(self):
+    if os.path.exists(self.tempdir):
+      shutil.rmtree(self.tempdir)
+
+  def test_write_streaming_2_shards_default_shard_name_template(
+      self, num_shards=2):
+    with TestPipeline() as p:
+      output = (
+          p
+          | GenerateEvent.sample_data()
+          | 'User windowing' >> beam.transforms.core.WindowInto(
+              beam.transforms.window.FixedWindows(60),
+              trigger=beam.transforms.trigger.AfterWatermark(),
+              accumulation_mode=beam.transforms.trigger.AccumulationMode.
+              DISCARDING,
+              allowed_lateness=beam.utils.timestamp.Duration(seconds=0)))
+      #AvroIO
+      avroschema = {
+          'name': 'dummy', # your supposed to be file name with .avro extension
+          'type': 'record', # type of avro serilazation, there are more (see
+                            # above docs)
+          'fields': [ # this defines actual keys & their types
+              {'name': 'age', 'type': 'int'},
+          ],
+        }
+      output2 = output | 'WriteToAvro' >> beam.io.WriteToAvro(
+          file_path_prefix=self.tempdir + "/ouput_WriteToAvro",
+          file_name_suffix=".avro",
+          num_shards=num_shards,
+          schema=avroschema)
+      _ = output2 | 'LogElements after WriteToAvro' >> LogElements(
+          prefix='after WriteToAvro ', with_window=True, level=logging.INFO)
+
+    # Regex to match the expected windowed file pattern
+    # Example:
+    #  ouput_WriteToAvro-[1614556800.0, 1614556805.0)-00000-of-00002.avro
+    # It captures: window_interval, shard_num, total_shards
+    pattern_string = (
+        r'.*-\[(?P<window_start>[\d\.]+), '
+        r'(?P<window_end>[\d\.]+|Infinity)\)-'
+        r'(?P<shard_num>\d{5})-of-(?P<total_shards>\d{5})\.avro$')
+    pattern = re.compile(pattern_string)
+    file_names = []
+    for file_name in glob.glob(self.tempdir + '/ouput_WriteToAvro*'):
+      match = pattern.match(file_name)
+      self.assertIsNotNone(
+          match, f"File name {file_name} did not match expected pattern.")
+      if match:
+        file_names.append(file_name)
+    print("Found files matching expected pattern:", file_names)
+    self.assertEqual(
+        len(file_names),
+        num_shards,
+        "expected %d files, but got: %d" % (num_shards, len(file_names)))
+
+  def test_write_streaming_2_shards_custom_shard_name_template(
+      self, num_shards=2, shard_name_template='-V-SSSSS-of-NNNNN'):
+    with TestPipeline() as p:
+      output = (p | GenerateEvent.sample_data())
+      #AvroIO
+      avroschema = {
+          'name': 'dummy', # your supposed to be file name with .avro extension
+          'type': 'record', # type of avro serilazation
+          'fields': [ # this defines actual keys & their types
+              {'name': 'age', 'type': 'int'},
+          ],
+        }
+      output2 = output | 'WriteToAvro' >> beam.io.WriteToAvro(
+          file_path_prefix=self.tempdir + "/ouput_WriteToAvro",
+          file_name_suffix=".avro",
+          shard_name_template=shard_name_template,
+          num_shards=num_shards,
+          triggering_frequency=60,
+          schema=avroschema)
+      _ = output2 | 'LogElements after WriteToAvro' >> LogElements(
+          prefix='after WriteToAvro ', with_window=True, level=logging.INFO)
+
+    # Regex to match the expected windowed file pattern
+    # Example:
+    # ouput_WriteToAvro-[2021-03-01T00-00-00, 2021-03-01T00-01-00)-
+    #   00000-of-00002.avro
+    # It captures: window_interval, shard_num, total_shards
+    pattern_string = (
+        r'.*-\[(?P<window_start>\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}), '
+        r'(?P<window_end>\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}|Infinity)\)-'
+        r'(?P<shard_num>\d{5})-of-(?P<total_shards>\d{5})\.avro$')
+    pattern = re.compile(pattern_string)
+    file_names = []
+    for file_name in glob.glob(self.tempdir + '/ouput_WriteToAvro*'):
+      match = pattern.match(file_name)
+      self.assertIsNotNone(
+          match, f"File name {file_name} did not match expected pattern.")
+      if match:
+        file_names.append(file_name)
+    print("Found files matching expected pattern:", file_names)
+    self.assertEqual(
+        len(file_names),
+        num_shards,
+        "expected %d files, but got: %d" % (num_shards, len(file_names)))
+
+  def test_write_streaming_2_shards_custom_shard_name_template_5s_window(
+      self,
+      num_shards=2,
+      shard_name_template='-V-SSSSS-of-NNNNN',
+      triggering_frequency=5):
+    with TestPipeline() as p:
+      output = (p | GenerateEvent.sample_data())
+      #AvroIO
+      avroschema = {
+          'name': 'dummy', # your supposed to be file name with .avro extension 
+          'type': 'record', # type of avro serilazation
+          'fields': [ # this defines actual keys & their types
+              {'name': 'age', 'type': 'int'},
+          ],
+        }
+      output2 = output | 'WriteToAvro' >> beam.io.WriteToAvro(
+          file_path_prefix=self.tempdir + "/ouput_WriteToAvro",
+          file_name_suffix=".txt",
+          shard_name_template=shard_name_template,
+          num_shards=num_shards,
+          triggering_frequency=triggering_frequency,
+          schema=avroschema)
+      _ = output2 | 'LogElements after WriteToAvro' >> LogElements(
+          prefix='after WriteToAvro ', with_window=True, level=logging.INFO)
+
+    # Regex to match the expected windowed file pattern
+    # Example:
+    #   ouput_WriteToAvro-[2021-03-01T00-00-00, 2021-03-01T00-01-00)-
+    #     00000-of-00002.avro
+    # It captures: window_interval, shard_num, total_shards
+    pattern_string = (
+        r'.*-\[(?P<window_start>\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}), '
+        r'(?P<window_end>\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}|Infinity)\)-'
+        r'(?P<shard_num>\d{5})-of-(?P<total_shards>\d{5})\.txt$')
+    pattern = re.compile(pattern_string)
+    file_names = []
+    for file_name in glob.glob(self.tempdir + '/ouput_WriteToAvro*'):
+      match = pattern.match(file_name)
+      self.assertIsNotNone(
+          match, f"File name {file_name} did not match expected pattern.")
+      if match:
+        file_names.append(file_name)
+    print("Found files matching expected pattern:", file_names)
+    # for 5s window size, the input should be processed by 5 windows with
+    # 2 shards per window
+    self.assertEqual(
+        len(file_names),
+        10,
+        "expected %d files, but got: %d" % (num_shards, len(file_names)))
 
 
 if __name__ == '__main__':

@@ -24,9 +24,6 @@ import org.apache.avro.io.DatumWriter;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.util.MimeTypes;
 
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 class AvroRowWriter<AvroT, T> extends BigQueryRowWriter<T> {
   private final DataFileWriter<AvroT> writer;
   private final Schema schema;
@@ -42,14 +39,24 @@ class AvroRowWriter<AvroT, T> extends BigQueryRowWriter<T> {
 
     this.schema = schema;
     this.toAvroRecord = toAvroRecord;
-    this.writer =
+    // getOutputStream() is established by the superclass constructor, which the checker
+    // cannot see through the partially-initialized receiver.
+    @SuppressWarnings("nullness")
+    DataFileWriter<AvroT> initializedWriter =
         new DataFileWriter<>(writerFactory.apply(schema)).create(schema, getOutputStream());
+    this.writer = initializedWriter;
   }
 
   @Override
-  public void write(T element) throws IOException {
+  public void write(T element) throws IOException, BigQueryRowSerializationException {
     AvroWriteRequest<T> writeRequest = new AvroWriteRequest<>(element, schema);
-    writer.append(toAvroRecord.apply(writeRequest));
+    AvroT serializedRequest;
+    try {
+      serializedRequest = toAvroRecord.apply(writeRequest);
+    } catch (Exception e) {
+      throw new BigQueryRowSerializationException(e);
+    }
+    writer.append(serializedRequest);
   }
 
   public Schema getSchema() {

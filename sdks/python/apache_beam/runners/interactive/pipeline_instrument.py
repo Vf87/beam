@@ -24,14 +24,13 @@ to transform original pipeline into a one-shot pipeline with interactivity.
 # pytype: skip-file
 
 import logging
-from typing import Dict
 
 import apache_beam as beam
 from apache_beam.pipeline import PipelineVisitor
 from apache_beam.portability.api import beam_runner_api_pb2
+from apache_beam.runners.interactive import background_caching_job
 from apache_beam.runners.interactive import interactive_environment as ie
 from apache_beam.runners.interactive import pipeline_fragment as pf
-from apache_beam.runners.interactive import background_caching_job
 from apache_beam.runners.interactive import utils
 from apache_beam.runners.interactive.caching.cacheable import Cacheable
 from apache_beam.runners.interactive.caching.cacheable import CacheKey
@@ -178,8 +177,7 @@ class PipelineInstrument(object):
       visited_copy = visited.copy()
       consuming_transforms = {
           t_id: t
-          for t_id,
-          t in transforms.items()
+          for t_id, t in transforms.items()
           if set(outputs).intersection(set(t.inputs.values()))
       }
       consuming_transforms = set(consuming_transforms.keys())
@@ -201,8 +199,7 @@ class PipelineInstrument(object):
       ]
       producing_transforms = {
           t_id: t
-          for t_id,
-          t in transforms.items()
+          for t_id, t in transforms.items()
           if set(inputs).intersection(set(t.outputs.values()))
       }
       (t, pc) = self._required_components(
@@ -284,7 +281,7 @@ class PipelineInstrument(object):
     roots = [root for root in pipeline_proto.root_transform_ids]
 
     # Get the transform IDs of the caching transforms. These caching operations
-    # are added the the _background_caching_pipeline in the instrument() method.
+    # are added to the _background_caching_pipeline in the instrument() method.
     # It's added there so that multiple calls to this method won't add multiple
     # caching operations (idempotent).
     transforms = pipeline_proto.components.transforms
@@ -296,11 +293,11 @@ class PipelineInstrument(object):
     # Get the IDs of the unbounded sources.
     required_transform_labels = [src.full_label for src in sources]
     unbounded_source_ids = [
-        k for k,
-        v in transforms.items() if v.unique_name in required_transform_labels
+        k for k, v in transforms.items()
+        if v.unique_name in required_transform_labels
     ]
 
-    # The required transforms are the tranforms that we want to cut out of
+    # The required transforms are the transforms that we want to cut out of
     # the pipeline_proto and insert into a new pipeline to return.
     required_transform_ids = (
         roots + caching_transform_ids + unbounded_source_ids)
@@ -334,7 +331,7 @@ class PipelineInstrument(object):
     return pipeline_to_execute
 
   @property
-  def cacheables(self) -> Dict[str, Cacheable]:
+  def cacheables(self) -> dict[str, Cacheable]:
     """Returns the Cacheables by PCollection ids.
 
     If you're already working with user defined pipelines and PCollections,
@@ -374,7 +371,7 @@ class PipelineInstrument(object):
     pipeline to instances in the user pipeline."""
     return self._runner_pcoll_to_user_pcoll
 
-  def find_cacheables(self) -> Dict[str, Cacheable]:
+  def find_cacheables(self) -> dict[str, Cacheable]:
     """Finds PCollections that need to be cached for analyzed pipeline.
 
     There might be multiple pipelines defined and watched, this will only find
@@ -596,8 +593,8 @@ class PipelineInstrument(object):
     is_cached = self._cache_manager.exists('full', key)
     is_computed = (
         pcoll in self._runner_pcoll_to_user_pcoll and
-        self._runner_pcoll_to_user_pcoll[pcoll] in
-        ie.current_env().computed_pcollections)
+        self._runner_pcoll_to_user_pcoll[pcoll]
+        in ie.current_env().computed_pcollections)
     if ((is_cached and is_computed) or is_unbounded_source_output):
       if key not in self._cached_pcoll_read:
         # Mutates the pipeline with cache read transform attached

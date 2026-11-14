@@ -23,8 +23,8 @@ import static org.junit.Assert.assertTrue;
 import java.util.stream.Collectors;
 import org.apache.beam.sdk.schemas.FieldAccessDescriptor.FieldDescriptor;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
@@ -265,9 +265,7 @@ public class FieldAccessDescriptorTest {
   @Test
   public void testInvalidQualifier() {
     thrown.expect(IllegalArgumentException.class);
-    FieldAccessDescriptor fieldAccessDescriptor =
-        FieldAccessDescriptor.withFieldNames("field0[]{}.field2")
-            .resolve(DOUBLE_NESTED_ARRAY_SCHEMA);
+    FieldAccessDescriptor.withFieldNames("field0[]{}.field2").resolve(DOUBLE_NESTED_ARRAY_SCHEMA);
   }
 
   private static final Schema NESTED_ARRAY_MAP_SCHEMA =

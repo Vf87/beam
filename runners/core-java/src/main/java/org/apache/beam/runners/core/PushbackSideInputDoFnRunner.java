@@ -20,7 +20,8 @@ package org.apache.beam.runners.core;
 import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.CausedByDrain;
+import org.apache.beam.sdk.values.WindowedValue;
 import org.joda.time.Instant;
 
 /**
@@ -50,14 +51,19 @@ public interface PushbackSideInputDoFnRunner<InputT, OutputT> {
       BoundedWindow window,
       Instant timestamp,
       Instant outputTimestamp,
-      TimeDomain timeDomain);
+      TimeDomain timeDomain,
+      CausedByDrain causedByDrain);
+
+  /** Calls the underlying {@link DoFn.OnWindowExpiration} method. */
+  <KeyT> void onWindowExpiration(BoundedWindow window, Instant outputTimestamp, KeyT key);
 
   /** Calls the underlying {@link DoFn.FinishBundle} method. */
   void finishBundle();
 
   /**
+   * Returns the underlying fn instance.
+   *
    * @since 2.5.0
-   * @return the underlying fn instance.
    */
   DoFn<InputT, OutputT> getFn();
 }

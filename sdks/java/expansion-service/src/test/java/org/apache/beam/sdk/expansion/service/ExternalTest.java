@@ -26,25 +26,26 @@ import java.io.Serializable;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
-import org.apache.beam.runners.core.construction.External;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
-import org.apache.beam.sdk.testing.UsesCrossLanguageTransforms;
+import org.apache.beam.sdk.testing.UsesJavaExpansionService;
+import org.apache.beam.sdk.testing.UsesPythonExpansionService;
 import org.apache.beam.sdk.testing.ValidatesRunner;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Filter;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.util.construction.External;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.sdk.values.TypeDescriptors;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.Server;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.ServerBuilder;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Server;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.ServerBuilder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.checkerframework.checker.nullness.qual.RequiresNonNull;
 import org.junit.After;
@@ -59,7 +60,7 @@ import org.junit.runners.JUnit4;
 /** Test External transforms. */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class ExternalTest implements Serializable {
   @Rule public transient TestPipeline testPipeline = TestPipeline.create();
@@ -100,7 +101,11 @@ public class ExternalTest implements Serializable {
   }
 
   @Test
-  @Category({ValidatesRunner.class, UsesCrossLanguageTransforms.class})
+  @Category({
+    ValidatesRunner.class,
+    UsesJavaExpansionService.class,
+    UsesPythonExpansionService.class
+  })
   @RequiresNonNull("localExpansionAddr")
   public void expandSingleTest() {
     PCollection<String> col =
@@ -112,7 +117,11 @@ public class ExternalTest implements Serializable {
   }
 
   @Test
-  @Category({ValidatesRunner.class, UsesCrossLanguageTransforms.class})
+  @Category({
+    ValidatesRunner.class,
+    UsesJavaExpansionService.class,
+    UsesPythonExpansionService.class
+  })
   @RequiresNonNull("localExpansionAddr")
   public void expandMultipleTest() {
     PCollection<String> pcol =
@@ -129,7 +138,11 @@ public class ExternalTest implements Serializable {
   }
 
   @Test
-  @Category({ValidatesRunner.class, UsesCrossLanguageTransforms.class})
+  @Category({
+    ValidatesRunner.class,
+    UsesJavaExpansionService.class,
+    UsesPythonExpansionService.class
+  })
   @RequiresNonNull("localExpansionAddr")
   public void expandMultiOutputTest() {
     PCollectionTuple pTuple =
@@ -151,26 +164,26 @@ public class ExternalTest implements Serializable {
     private final TupleTag<Integer> odd = new TupleTag<Integer>("odd") {};
 
     @Override
-    public Map<String, ExpansionService.TransformProvider> knownTransforms() {
+    public Map<String, TransformProvider> knownTransforms() {
       return ImmutableMap.of(
           TEST_URN_SIMPLE,
-              spec -> MapElements.into(TypeDescriptors.strings()).via((String x) -> x + x),
+          (spec, options) -> MapElements.into(TypeDescriptors.strings()).via((String x) -> x + x),
           TEST_URN_LE,
-              spec -> Filter.lessThanEq(Integer.parseInt(spec.getPayload().toStringUtf8())),
+          (spec, options) -> Filter.lessThanEq(Integer.parseInt(spec.getPayload().toStringUtf8())),
           TEST_URN_MULTI,
-              spec ->
-                  ParDo.of(
-                          new DoFn<Integer, Integer>() {
-                            @ProcessElement
-                            public void processElement(ProcessContext c) {
-                              if (c.element() % 2 == 0) {
-                                c.output(c.element());
-                              } else {
-                                c.output(odd, c.element());
-                              }
-                            }
-                          })
-                      .withOutputTags(even, TupleTagList.of(odd)));
+          (spec, options) ->
+              ParDo.of(
+                      new DoFn<Integer, Integer>() {
+                        @ProcessElement
+                        public void processElement(ProcessContext c) {
+                          if (c.element() % 2 == 0) {
+                            c.output(c.element());
+                          } else {
+                            c.output(odd, c.element());
+                          }
+                        }
+                      })
+                  .withOutputTags(even, TupleTagList.of(odd)));
     }
   }
 }

@@ -50,11 +50,12 @@ WindowFn.
 # pytype: skip-file
 
 import abc
+from collections.abc import Iterable
 from functools import total_ordering
 from typing import Any
-from typing import Iterable
-from typing import List
+from typing import Generic
 from typing import Optional
+from typing import TypeVar
 
 from google.protobuf import duration_pb2
 from google.protobuf import timestamp_pb2
@@ -102,8 +103,9 @@ class TimestampCombiner(object):
   OUTPUT_AT_EARLIEST_TRANSFORMED = 'OUTPUT_AT_EARLIEST_TRANSFORMED'
 
   @staticmethod
-  def get_impl(timestamp_combiner, window_fn):
-    # type: (beam_runner_api_pb2.OutputTime.Enum, WindowFn) -> timeutil.TimestampCombinerImpl
+  def get_impl(
+      timestamp_combiner: beam_runner_api_pb2.OutputTime.Enum,
+      window_fn: 'WindowFn') -> timeutil.TimestampCombinerImpl:
     if timestamp_combiner == TimestampCombiner.OUTPUT_AT_EOW:
       return timeutil.OutputAtEndOfWindowImpl()
     elif timestamp_combiner == TimestampCombiner.OUTPUT_AT_EARLIEST:
@@ -122,18 +124,17 @@ class WindowFn(urns.RunnerApiFn, metaclass=abc.ABCMeta):
     """Context passed to WindowFn.assign()."""
     def __init__(
         self,
-        timestamp,  # type: TimestampTypes
-        element=None,  # type: Optional[Any]
-        window=None  # type: Optional[BoundedWindow]
-    ):
-      # type: (...) -> None
+        timestamp: TimestampTypes,
+        element: Optional[Any] = None,
+        window: Optional['BoundedWindow'] = None) -> None:
       self.timestamp = Timestamp.of(timestamp)
       self.element = element
       self.window = window
 
   @abc.abstractmethod
-  def assign(self, assign_context):
-    # type: (AssignContext) -> Iterable[BoundedWindow]
+  def assign(self,
+             assign_context: 'AssignContext') -> Iterable['BoundedWindow']:
+    # noqa: F821
 
     """Associates windows to an element.
 
@@ -147,35 +148,30 @@ class WindowFn(urns.RunnerApiFn, metaclass=abc.ABCMeta):
 
   class MergeContext(object):
     """Context passed to WindowFn.merge() to perform merging, if any."""
-    def __init__(self, windows):
-      # type: (Iterable[BoundedWindow]) -> None
+    def __init__(self, windows: Iterable['BoundedWindow']) -> None:
       self.windows = list(windows)
 
-    def merge(self, to_be_merged, merge_result):
-      # type: (Iterable[BoundedWindow], BoundedWindow) -> None
+    def merge(
+        self,
+        to_be_merged: Iterable['BoundedWindow'],
+        merge_result: 'BoundedWindow') -> None:
       raise NotImplementedError
 
   @abc.abstractmethod
-  def merge(self, merge_context):
-    # type: (WindowFn.MergeContext) -> None
-
+  def merge(self, merge_context: 'WindowFn.MergeContext') -> None:
     """Returns a window that is the result of merging a set of windows."""
     raise NotImplementedError
 
-  def is_merging(self):
-    # type: () -> bool
-
+  def is_merging(self) -> bool:
     """Returns whether this WindowFn merges windows."""
     return True
 
   @abc.abstractmethod
-  def get_window_coder(self):
-    # type: () -> coders.Coder
+  def get_window_coder(self) -> coders.Coder:
     raise NotImplementedError
 
-  def get_transformed_output_time(self, window, input_timestamp):  # pylint: disable=unused-argument
-    # type: (BoundedWindow, Timestamp) -> Timestamp
-
+  def get_transformed_output_time(
+      self, window: 'BoundedWindow', input_timestamp: Timestamp) -> Timestamp:  # pylint: disable=unused-argument
     """Given input time and output window, returns output time for window.
 
     If TimestampCombiner.OUTPUT_AT_EARLIEST_TRANSFORMED is used in the
@@ -203,22 +199,18 @@ class BoundedWindow(object):
   Attributes:
     end: End of window.
   """
-  def __init__(self, end):
-    # type: (TimestampTypes) -> None
+  def __init__(self, end: TimestampTypes) -> None:
     self._end = Timestamp.of(end)
 
   @property
-  def start(self):
-    # type: () -> Timestamp
+  def start(self) -> Timestamp:
     raise NotImplementedError
 
   @property
-  def end(self):
-    # type: () -> Timestamp
+  def end(self) -> Timestamp:
     return self._end
 
-  def max_timestamp(self):
-    # type: () -> Timestamp
+  def max_timestamp(self) -> Timestamp:
     return self.end.predecessor()
 
   def __eq__(self, other):
@@ -263,31 +255,49 @@ class IntervalWindow(windowed_value._IntervalWindowBase, BoundedWindow):
     start: Start of window as seconds since Unix epoch.
     end: End of window as seconds since Unix epoch.
   """
+  @classmethod
+  def from_micros(cls, start_micros: int, end_micros: int) -> 'IntervalWindow':
+    w = cls(None, None)
+    try:
+      w._start_micros = start_micros
+      w._end_micros = end_micros
+    except OverflowError:
+      return cls(Timestamp(micros=start_micros), Timestamp(micros=end_micros))
+    return w
+
   def __lt__(self, other):
+    if isinstance(other, IntervalWindow):
+      if self._end_micros != other._end_micros:
+        return self._end_micros < other._end_micros
+      return hash(self) < hash(other)
     if self.end != other.end:
       return self.end < other.end
     return hash(self) < hash(other)
 
-  def intersects(self, other):
-    # type: (IntervalWindow) -> bool
-    return other.start < self.end or self.start < other.end
+  def intersects(self, other: 'IntervalWindow') -> bool:
+    return (
+        other._start_micros < self._end_micros or
+        self._start_micros < other._end_micros)
 
-  def union(self, other):
-    # type: (IntervalWindow) -> IntervalWindow
-    return IntervalWindow(
-        min(self.start, other.start), max(self.end, other.end))
+  def union(self, other: 'IntervalWindow') -> 'IntervalWindow':
+    w = IntervalWindow(None, None)
+    w._start_micros = min(self._start_micros, other._start_micros)
+    w._end_micros = max(self._end_micros, other._end_micros)
+    return w
+
+
+V = TypeVar("V")
 
 
 @total_ordering
-class TimestampedValue(object):
+class TimestampedValue(Generic[V]):
   """A timestamped value having a value and a timestamp.
 
   Attributes:
     value: The underlying value.
     timestamp: Timestamp associated with the value as seconds since Unix epoch.
   """
-  def __init__(self, value, timestamp):
-    # type: (Any, TimestampTypes) -> None
+  def __init__(self, value: V, timestamp: TimestampTypes) -> None:
     self.value = value
     self.timestamp = Timestamp.of(timestamp)
 
@@ -309,16 +319,19 @@ class TimestampedValue(object):
 
 class GlobalWindow(BoundedWindow):
   """The default window into which all data is placed (via GlobalWindows)."""
-  _instance = None  # type: GlobalWindow
+  _instance: Optional['GlobalWindow'] = None
 
   def __new__(cls):
     if cls._instance is None:
       cls._instance = super(GlobalWindow, cls).__new__(cls)
+      super(GlobalWindow,
+            cls._instance).__init__(GlobalWindow._getTimestampFromProto())
     return cls._instance
 
-  def __init__(self):
-    # type: () -> None
-    super().__init__(GlobalWindow._getTimestampFromProto())
+  def __init__(self) -> None:
+    # Intentionally a no-op: super().__init__ is called once in __new__
+    # so repeated GlobalWindow() calls do not re-initialize the singleton.
+    pass
 
   def __repr__(self):
     return 'GlobalWindow'
@@ -331,46 +344,54 @@ class GlobalWindow(BoundedWindow):
     return self is other or type(self) is type(other)
 
   @property
-  def start(self):
-    # type: () -> Timestamp
+  def start(self) -> Timestamp:
     return MIN_TIMESTAMP
 
   @staticmethod
-  def _getTimestampFromProto():
-    # type: () -> Timestamp
+  def _getTimestampFromProto() -> Timestamp:
     ts_millis = int(
         common_urns.constants.GLOBAL_WINDOW_MAX_TIMESTAMP_MILLIS.constant)
     return Timestamp(micros=ts_millis * 1000)
 
 
 class NonMergingWindowFn(WindowFn):
-  def is_merging(self):
-    # type: () -> bool
+  def is_merging(self) -> bool:
     return False
 
-  def merge(self, merge_context):
-    # type: (WindowFn.MergeContext) -> None
+  def merge(self, merge_context: WindowFn.MergeContext) -> None:
     pass  # No merging.
 
 
 class GlobalWindows(NonMergingWindowFn):
   """A windowing function that assigns everything to one global window."""
   @classmethod
+  def windowed_batch(
+      cls,
+      batch: Any,
+      timestamp: Timestamp = MIN_TIMESTAMP,
+      pane_info: windowed_value.PaneInfo = windowed_value.PANE_INFO_UNKNOWN
+  ) -> windowed_value.WindowedBatch:
+    return windowed_value.HomogeneousWindowedBatch.of(
+        batch, timestamp, (GlobalWindow(), ), pane_info)
+
+  @classmethod
   def windowed_value(
       cls,
-      value,  # type: Any
-      timestamp=MIN_TIMESTAMP,  # type: Timestamp
-      pane_info=windowed_value.PANE_INFO_UNKNOWN  # type: windowed_value.PaneInfo
-  ):
-    # type: (...) -> WindowedValue
+      value: Any,
+      timestamp: Timestamp = MIN_TIMESTAMP,
+      pane_info: windowed_value.PaneInfo = windowed_value.PANE_INFO_UNKNOWN
+  ) -> WindowedValue:
     return WindowedValue(value, timestamp, (GlobalWindow(), ), pane_info)
 
-  def assign(self, assign_context):
-    # type: (WindowFn.AssignContext) -> List[GlobalWindow]
+  @classmethod
+  def windowed_value_at_end_of_window(cls, value):
+    return cls.windowed_value(value, GlobalWindow().max_timestamp())
+
+  def assign(self,
+             assign_context: WindowFn.AssignContext) -> list[GlobalWindow]:
     return [GlobalWindow()]
 
-  def get_window_coder(self):
-    # type: () -> coders.GlobalWindowCoder
+  def get_window_coder(self) -> coders.GlobalWindowCoder:
     return coders.GlobalWindowCoder()
 
   def __hash__(self):
@@ -385,8 +406,8 @@ class GlobalWindows(NonMergingWindowFn):
 
   @staticmethod
   @urns.RunnerApiFn.register_urn(common_urns.global_windows.urn, None)
-  def from_runner_api_parameter(unused_fn_parameter, unused_context):
-    # type: (...) -> GlobalWindows
+  def from_runner_api_parameter(
+      unused_fn_parameter, unused_context) -> 'GlobalWindows':
     return GlobalWindows()
 
 
@@ -404,11 +425,7 @@ class FixedWindows(NonMergingWindowFn):
       value in range [0, size). If it is not it will be normalized to this
       range.
   """
-  def __init__(
-      self,
-      size,  # type: DurationTypes
-      offset=0  # type: TimestampTypes
-  ):
+  def __init__(self, size: DurationTypes, offset: TimestampTypes = 0):
     """Initialize a ``FixedWindows`` function for a given size and offset.
 
     Args:
@@ -422,15 +439,16 @@ class FixedWindows(NonMergingWindowFn):
       raise ValueError('The size parameter must be strictly positive.')
     self.size = Duration.of(size)
     self.offset = Timestamp.of(offset) % self.size
+    self._size_micros = self.size.micros
+    self._offset_micros = self.offset.micros
 
-  def assign(self, context):
-    # type: (WindowFn.AssignContext) -> List[IntervalWindow]
-    timestamp = context.timestamp
-    start = timestamp - (timestamp - self.offset) % self.size
-    return [IntervalWindow(start, start + self.size)]
+  def assign(self, context: WindowFn.AssignContext) -> list[IntervalWindow]:
+    ts = context.timestamp
+    ts_m = ts.micros if isinstance(ts, Timestamp) else Timestamp.of(ts).micros
+    start_m = ts_m - (ts_m - self._offset_micros) % self._size_micros
+    return [IntervalWindow.from_micros(start_m, start_m + self._size_micros)]
 
-  def get_window_coder(self):
-    # type: () -> coders.IntervalWindowCoder
+  def get_window_coder(self) -> coders.IntervalWindowCoder:
     return coders.IntervalWindowCoder()
 
   def __eq__(self, other):
@@ -453,11 +471,10 @@ class FixedWindows(NonMergingWindowFn):
   @urns.RunnerApiFn.register_urn(
       common_urns.fixed_windows.urn,
       standard_window_fns_pb2.FixedWindowsPayload)
-  def from_runner_api_parameter(fn_parameter, unused_context):
-    # type: (...) -> FixedWindows
+  def from_runner_api_parameter(fn_parameter, unused_context) -> 'FixedWindows':
     return FixedWindows(
-        size=Duration(micros=fn_parameter.size.ToMicroseconds()),
-        offset=Timestamp(micros=fn_parameter.offset.ToMicroseconds()))
+        size=Duration(micros=proto_utils.to_micros(fn_parameter.size)),
+        offset=Timestamp(micros=proto_utils.to_micros(fn_parameter.offset)))
 
 
 class SlidingWindows(NonMergingWindowFn):
@@ -474,32 +491,34 @@ class SlidingWindows(NonMergingWindowFn):
       t=N * period + offset where t=0 is the epoch. The offset must be a value
       in range [0, period). If it is not it will be normalized to this range.
   """
-
-  def __init__(self,
-               size,  # type: DurationTypes
-               period,  # type: DurationTypes
-               offset=0,  # type: TimestampTypes
-              ):
+  def __init__(
+      self,
+      size: DurationTypes,
+      period: DurationTypes,
+      offset: TimestampTypes = 0,
+  ):
     if size <= 0:
       raise ValueError('The size parameter must be strictly positive.')
+    if period <= 0:
+      raise ValueError('The period parameter must be strictly positive.')
     self.size = Duration.of(size)
     self.period = Duration.of(period)
     self.offset = Timestamp.of(offset) % period
+    self._size_micros = self.size.micros
+    self._period_micros = self.period.micros
+    self._offset_micros = self.offset.micros
 
-  def assign(self, context):
-    # type: (WindowFn.AssignContext) -> List[IntervalWindow]
-    timestamp = context.timestamp
-    start = timestamp - ((timestamp - self.offset) % self.period)
+  def assign(self, context: WindowFn.AssignContext) -> list[IntervalWindow]:
+    ts = context.timestamp
+    ts_m = ts.micros if isinstance(ts, Timestamp) else Timestamp.of(ts).micros
+    start_m = ts_m - ((ts_m - self._offset_micros) % self._period_micros)
+    size_m = self._size_micros
     return [
-        IntervalWindow(Timestamp(micros=s), Timestamp(micros=s) + self.size)
-        for s in range(
-            start.micros,
-            timestamp.micros - self.size.micros,
-            -self.period.micros)
+        IntervalWindow.from_micros(s, s + size_m)
+        for s in range(start_m, ts_m - size_m, -self._period_micros)
     ]
 
-  def get_window_coder(self):
-    # type: () -> coders.IntervalWindowCoder
+  def get_window_coder(self) -> coders.IntervalWindowCoder:
     return coders.IntervalWindowCoder()
 
   def __eq__(self, other):
@@ -526,12 +545,12 @@ class SlidingWindows(NonMergingWindowFn):
   @urns.RunnerApiFn.register_urn(
       common_urns.sliding_windows.urn,
       standard_window_fns_pb2.SlidingWindowsPayload)
-  def from_runner_api_parameter(fn_parameter, unused_context):
-    # type: (...) -> SlidingWindows
+  def from_runner_api_parameter(
+      fn_parameter, unused_context) -> 'SlidingWindows':
     return SlidingWindows(
-        size=Duration(micros=fn_parameter.size.ToMicroseconds()),
-        offset=Timestamp(micros=fn_parameter.offset.ToMicroseconds()),
-        period=Duration(micros=fn_parameter.period.ToMicroseconds()))
+        size=Duration(micros=proto_utils.to_micros(fn_parameter.size)),
+        offset=Timestamp(micros=proto_utils.to_micros(fn_parameter.offset)),
+        period=Duration(micros=proto_utils.to_micros(fn_parameter.period)))
 
 
 class Sessions(WindowFn):
@@ -543,24 +562,22 @@ class Sessions(WindowFn):
   Attributes:
     gap_size: Size of the gap between windows as floating-point seconds.
   """
-  def __init__(self, gap_size):
-    # type: (DurationTypes) -> None
+  def __init__(self, gap_size: DurationTypes) -> None:
     if gap_size <= 0:
       raise ValueError('The size parameter must be strictly positive.')
     self.gap_size = Duration.of(gap_size)
+    self._gap_micros = self.gap_size.micros
 
-  def assign(self, context):
-    # type: (WindowFn.AssignContext) -> List[IntervalWindow]
-    timestamp = context.timestamp
-    return [IntervalWindow(timestamp, timestamp + self.gap_size)]
+  def assign(self, context: WindowFn.AssignContext) -> list[IntervalWindow]:
+    ts = context.timestamp
+    ts_m = ts.micros if isinstance(ts, Timestamp) else Timestamp.of(ts).micros
+    return [IntervalWindow.from_micros(ts_m, ts_m + self._gap_micros)]
 
-  def get_window_coder(self):
-    # type: () -> coders.IntervalWindowCoder
+  def get_window_coder(self) -> coders.IntervalWindowCoder:
     return coders.IntervalWindowCoder()
 
-  def merge(self, merge_context):
-    # type: (WindowFn.MergeContext) -> None
-    to_merge = []  # type: List[BoundedWindow]
+  def merge(self, merge_context: WindowFn.MergeContext) -> None:
+    to_merge: list[BoundedWindow] = []
     end = MIN_TIMESTAMP
     for w in sorted(merge_context.windows, key=lambda w: w.start):
       if to_merge:
@@ -598,7 +615,6 @@ class Sessions(WindowFn):
   @urns.RunnerApiFn.register_urn(
       common_urns.session_windows.urn,
       standard_window_fns_pb2.SessionWindowsPayload)
-  def from_runner_api_parameter(fn_parameter, unused_context):
-    # type: (...) -> Sessions
+  def from_runner_api_parameter(fn_parameter, unused_context) -> 'Sessions':
     return Sessions(
-        gap_size=Duration(micros=fn_parameter.gap_size.ToMicroseconds()))
+        gap_size=Duration(micros=proto_utils.to_micros(fn_parameter.gap_size)))

@@ -21,6 +21,7 @@
 
 import argparse
 import shlex
+import sys
 from unittest import SkipTest
 
 from apache_beam.internal import pickler
@@ -70,7 +71,9 @@ class TestPipeline(Pipeline):
       argv=None,
       is_integration_test=False,
       blocking=True,
-      additional_pipeline_args=None):
+      additional_pipeline_args=None,
+      display_data=None,
+      timeout=None):
     """Initialize a pipeline object for test.
 
     Args:
@@ -93,7 +96,10 @@ class TestPipeline(Pipeline):
         completed.
       additional_pipeline_args (List[str]): additional pipeline arguments to be
         included when construction the pipeline options object.
-
+      display_data (Dict[str, Any]): a dictionary of static data associated
+        with this pipeline that can be displayed when it runs.
+      timeout (int, optional): Milliseconds to wait for the pipeline to finish.
+        If the timeout is reached, an AssertionError is raised.        
     Raises:
       ValueError: if either the runner or options argument is not
         of the expected type.
@@ -104,16 +110,17 @@ class TestPipeline(Pipeline):
     self.options_list = (
         self._parse_test_option_args(argv) + additional_pipeline_args)
     self.blocking = blocking
+    self.timeout = timeout
     if options is None:
       options = PipelineOptions(self.options_list)
-    super().__init__(runner, options)
+    super().__init__(runner, options, display_data=display_data)
 
   def run(self, test_runner_api=True):
     result = super().run(
         test_runner_api=(
             False if self.not_use_test_runner_api else test_runner_api))
     if self.blocking:
-      state = result.wait_until_finish()
+      state = result.wait_until_finish(duration=self.timeout)
       assert state in (PipelineState.DONE, PipelineState.CANCELLED), \
           "Pipeline execution failed."
 
@@ -160,6 +167,19 @@ class TestPipeline(Pipeline):
     return shlex.split(test_pipeline_options) \
       if test_pipeline_options else []
 
+  @classmethod
+  def get_options_list(cls, argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--test-pipeline-options',
+        type=str,
+        action='store',
+        help='Pipeline options for the test')
+    known, _ = parser.parse_known_args(argv if argv is not None else sys.argv)
+    opts = known.test_pipeline_options or getattr(
+        cls, 'pytest_test_pipeline_options', None)
+    return shlex.split(opts) if opts else []
+
   def get_full_options_as_args(self, **extra_opts):
     """Get full pipeline options as an argument list.
 
@@ -189,7 +209,9 @@ class TestPipeline(Pipeline):
       None if option is not found in existing option list which is generated
       by parsing value of argument `test-pipeline-options`.
     """
-    parser = argparse.ArgumentParser()
+    # Parse one flag at a time; disable prefix matching so e.g. --mode does
+    # not satisfy --model_path when both appear in options_list.
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     opt_name = opt_name[:2] if opt_name[:2] == '--' else opt_name
     # Option name should start with '--' when it's used for parsing.
     if bool_option:

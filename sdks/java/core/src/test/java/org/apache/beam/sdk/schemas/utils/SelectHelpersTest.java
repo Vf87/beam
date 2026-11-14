@@ -27,9 +27,9 @@ import org.apache.beam.sdk.schemas.FieldAccessDescriptor;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -357,7 +357,7 @@ public class SelectHelpersTest {
             .resolve(ARRAY_SCHEMA);
     Schema outputSchema = SelectHelpers.getOutputSchema(ARRAY_SCHEMA, fieldAccessDescriptor);
 
-    Schema expectedElementSchema = Schema.builder().addStringField("field1").build();
+    Schema.builder().addStringField("field1").build();
     Schema expectedSchema = Schema.builder().addArrayField("field1", FieldType.STRING).build();
     assertEquals(expectedSchema, outputSchema);
 
@@ -373,7 +373,7 @@ public class SelectHelpersTest {
             .resolve(ITERABLE_SCHEMA);
     Schema outputSchema = SelectHelpers.getOutputSchema(ITERABLE_SCHEMA, fieldAccessDescriptor);
 
-    Schema expectedElementSchema = Schema.builder().addStringField("field1").build();
+    Schema.builder().addStringField("field1").build();
     Schema expectedSchema = Schema.builder().addIterableField("field1", FieldType.STRING).build();
     assertEquals(expectedSchema, outputSchema);
 
@@ -389,7 +389,7 @@ public class SelectHelpersTest {
         FieldAccessDescriptor.withFieldNames("map{}.field1").resolve(MAP_SCHEMA);
     Schema outputSchema = SelectHelpers.getOutputSchema(MAP_SCHEMA, fieldAccessDescriptor);
 
-    Schema expectedValueSchema = Schema.builder().addStringField("field1").build();
+    Schema.builder().addStringField("field1").build();
     Schema expectedSchema =
         Schema.builder().addMapField("field1", FieldType.INT32, FieldType.STRING).build();
     assertEquals(expectedSchema, outputSchema);

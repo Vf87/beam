@@ -25,7 +25,10 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -65,15 +68,21 @@ import java.nio.channels.Channels;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.stream.Collectors;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.TimeStampMicroTZVector;
+import org.apache.arrow.vector.TimeStampNanoTZVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.VectorUnloader;
 import org.apache.arrow.vector.ipc.WriteChannel;
 import org.apache.arrow.vector.ipc.message.MessageSerializer;
+import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.util.Text;
 import org.apache.avro.Schema;
@@ -82,30 +91,46 @@ import org.apache.avro.generic.GenericDatumWriter;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.io.Encoder;
 import org.apache.avro.io.EncoderFactory;
+import org.apache.avro.util.Utf8;
 import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.coders.KvCoder;
+import org.apache.beam.sdk.extensions.avro.coders.AvroCoder;
 import org.apache.beam.sdk.extensions.protobuf.ByteStringCoder;
 import org.apache.beam.sdk.extensions.protobuf.ProtoCoder;
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.io.BoundedSource.BoundedReader;
+import org.apache.beam.sdk.io.UnboundedSource;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.TableRowParser;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.TypedRead;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.TypedRead.Method;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryServices.StorageClient;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryStorageStreamSource.BigQueryStorageStreamReader;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryUtils.ConversionOptions;
 import org.apache.beam.sdk.io.gcp.testing.FakeBigQueryServices;
 import org.apache.beam.sdk.io.gcp.testing.FakeBigQueryServices.FakeBigQueryServerStream;
 import org.apache.beam.sdk.io.gcp.testing.FakeDatasetService;
 import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.options.ValueProvider.StaticValueProvider;
+import org.apache.beam.sdk.schemas.FieldAccessDescriptor;
+import org.apache.beam.sdk.schemas.SchemaCoder;
+import org.apache.beam.sdk.schemas.transforms.Convert;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
+import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.display.DisplayData;
+import org.apache.beam.sdk.util.construction.UnboundedReadFromBoundedSource;
 import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.sdk.values.Row;
+import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.hamcrest.Matchers;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
@@ -269,9 +294,13 @@ public class BigQueryIOStorageReadTest {
         BigQueryIO.read(new TableRowParser())
             .withCoder(TableRowJsonCoder.of())
             .withMethod(Method.DIRECT_READ)
+            .withSelectedFields(ImmutableList.of("foo", "bar"))
+            .withProjectionPushdownApplied()
             .from(tableSpec);
     DisplayData displayData = DisplayData.from(typedRead);
     assertThat(displayData, hasDisplayItem("table", tableSpec));
+    assertThat(displayData, hasDisplayItem("selectedFields", "foo, bar"));
+    assertThat(displayData, hasDisplayItem("projectionPushdownApplied", true));
   }
 
   @Test
@@ -373,6 +402,25 @@ public class BigQueryIOStorageReadTest {
   }
 
   @Test
+  public void testTableSourceEstimatedSize_WhenNumBytesNull() throws Exception {
+    fakeDatasetService.createDataset("foo.com:project", "dataset", "", "", null);
+    TableReference tableRef = BigQueryHelpers.parseTableSpec("foo.com:project:dataset.table");
+    Table table = new Table().setTableReference(tableRef).setNumBytes(null);
+    fakeDatasetService.createTable(table);
+
+    BigQueryStorageTableSource<TableRow> tableSource =
+        BigQueryStorageTableSource.create(
+            ValueProvider.StaticValueProvider.of(tableRef),
+            null,
+            null,
+            new TableRowParser(),
+            TableRowJsonCoder.of(),
+            new FakeBigQueryServices().withDatasetService(fakeDatasetService));
+
+    assertEquals(0L, tableSource.getEstimatedSizeBytes(options));
+  }
+
+  @Test
   public void testTableSourceInitialSplit() throws Exception {
     doTableSourceInitialSplitTest(1024L, 1024);
   }
@@ -385,6 +433,50 @@ public class BigQueryIOStorageReadTest {
   @Test
   public void testTableSourceInitialSplit_MaxSplitCount() throws Exception {
     doTableSourceInitialSplitTest(10L, 10_000);
+  }
+
+  @Test
+  public void testTableSourceInitialSplit_WhenNumBytesNull() throws Exception {
+    fakeDatasetService.createDataset("foo.com:project", "dataset", "", "", null);
+    TableReference tableRef = BigQueryHelpers.parseTableSpec("foo.com:project:dataset.table");
+
+    Table table = new Table().setTableReference(tableRef).setNumBytes(null).setSchema(TABLE_SCHEMA);
+    fakeDatasetService.createTable(table);
+
+    CreateReadSessionRequest expectedRequest =
+        CreateReadSessionRequest.newBuilder()
+            .setParent("projects/project-id")
+            .setReadSession(
+                ReadSession.newBuilder()
+                    .setTable("projects/foo.com:project/datasets/dataset/tables/table")
+                    .setReadOptions(ReadSession.TableReadOptions.newBuilder()))
+            .setMaxStreamCount(0)
+            .build();
+
+    ReadSession.Builder builder =
+        ReadSession.newBuilder()
+            .setAvroSchema(AvroSchema.newBuilder().setSchema(AVRO_SCHEMA_STRING))
+            .setDataFormat(DataFormat.AVRO);
+    for (int i = 0; i < 5; i++) {
+      builder.addStreams(ReadStream.newBuilder().setName("stream-" + i));
+    }
+
+    StorageClient fakeStorageClient = mock(StorageClient.class);
+    when(fakeStorageClient.createReadSession(expectedRequest)).thenReturn(builder.build());
+
+    BigQueryStorageTableSource<TableRow> tableSource =
+        BigQueryStorageTableSource.create(
+            ValueProvider.StaticValueProvider.of(tableRef),
+            null,
+            null,
+            new TableRowParser(),
+            TableRowJsonCoder.of(),
+            new FakeBigQueryServices()
+                .withDatasetService(fakeDatasetService)
+                .withStorageClient(fakeStorageClient));
+
+    List<? extends BoundedSource<TableRow>> sources = tableSource.split(1024L, options);
+    assertEquals(5, sources.size());
   }
 
   private static final String AVRO_SCHEMA_STRING =
@@ -423,6 +515,63 @@ public class BigQueryIOStorageReadTest {
           asList(
               field("name", new ArrowType.Utf8()), field("number", new ArrowType.Int(64, true))));
 
+  // --- MICROS ---
+  private static final TableSchema TABLE_SCHEMA_TIMESTAMP =
+      new TableSchema()
+          .setFields(
+              ImmutableList.of(
+                  new TableFieldSchema()
+                      .setName("ts")
+                      .setType("TIMESTAMP")
+                      .setMode("REQUIRED")
+                      .setTimestampPrecision(12L)));
+
+  private static final org.apache.arrow.vector.types.pojo.Schema ARROW_SCHEMA_TS_MICROS =
+      new org.apache.arrow.vector.types.pojo.Schema(
+          asList(field("ts", new ArrowType.Timestamp(TimeUnit.MICROSECOND, "UTC"))));
+
+  private static final String AVRO_SCHEMA_TS_MICROS_STRING =
+      "{\"namespace\": \"example.avro\","
+          + " \"type\": \"record\","
+          + " \"name\": \"RowRecord\","
+          + " \"fields\": ["
+          + "     {\"name\": \"ts\", \"type\": {\"type\": \"long\", \"logicalType\": \"timestamp-micros\"}}"
+          + " ]}";
+
+  private static final Schema AVRO_SCHEMA_TS_MICROS =
+      new Schema.Parser().parse(AVRO_SCHEMA_TS_MICROS_STRING);
+
+  // --- NANOS ---
+  private static final org.apache.arrow.vector.types.pojo.Schema ARROW_SCHEMA_TS_NANOS =
+      new org.apache.arrow.vector.types.pojo.Schema(
+          asList(field("ts", new ArrowType.Timestamp(TimeUnit.NANOSECOND, "UTC"))));
+
+  private static final String AVRO_SCHEMA_TS_NANOS_STRING =
+      "{\"namespace\": \"example.avro\","
+          + " \"type\": \"record\","
+          + " \"name\": \"RowRecord\","
+          + " \"fields\": ["
+          + "     {\"name\": \"ts\", \"type\": {\"type\": \"long\", \"logicalType\": \"timestamp-nanos\"}}"
+          + " ]}";
+
+  private static final Schema AVRO_SCHEMA_TS_NANOS =
+      new Schema.Parser().parse(AVRO_SCHEMA_TS_NANOS_STRING);
+
+  // --- PICOS (string) ---
+  private static final org.apache.arrow.vector.types.pojo.Schema ARROW_SCHEMA_TS_PICOS =
+      new org.apache.arrow.vector.types.pojo.Schema(asList(field("ts", new ArrowType.Utf8())));
+
+  private static final String AVRO_SCHEMA_TS_PICOS_STRING =
+      "{\"namespace\": \"example.avro\","
+          + " \"type\": \"record\","
+          + " \"name\": \"RowRecord\","
+          + " \"fields\": ["
+          + "     {\"name\": \"ts\", \"type\": \"string\"}"
+          + " ]}";
+
+  private static final Schema AVRO_SCHEMA_TS_PICOS =
+      new Schema.Parser().parse(AVRO_SCHEMA_TS_PICOS_STRING);
+
   private void doTableSourceInitialSplitTest(long bundleSize, int streamCount) throws Exception {
     fakeDatasetService.createDataset("foo.com:project", "dataset", "", "", null);
     TableReference tableRef = BigQueryHelpers.parseTableSpec("foo.com:project:dataset.table");
@@ -437,7 +586,8 @@ public class BigQueryIOStorageReadTest {
             .setParent("projects/project-id")
             .setReadSession(
                 ReadSession.newBuilder()
-                    .setTable("projects/foo.com:project/datasets/dataset/tables/table"))
+                    .setTable("projects/foo.com:project/datasets/dataset/tables/table")
+                    .setReadOptions(ReadSession.TableReadOptions.newBuilder()))
             .setMaxStreamCount(streamCount)
             .build();
 
@@ -530,7 +680,8 @@ public class BigQueryIOStorageReadTest {
             .setParent("projects/project-id")
             .setReadSession(
                 ReadSession.newBuilder()
-                    .setTable("projects/project-id/datasets/dataset/tables/table"))
+                    .setTable("projects/project-id/datasets/dataset/tables/table")
+                    .setReadOptions(ReadSession.TableReadOptions.newBuilder()))
             .setMaxStreamCount(1024)
             .build();
 
@@ -578,7 +729,8 @@ public class BigQueryIOStorageReadTest {
             .setParent("projects/project-id")
             .setReadSession(
                 ReadSession.newBuilder()
-                    .setTable("projects/foo.com:project/datasets/dataset/tables/table"))
+                    .setTable("projects/foo.com:project/datasets/dataset/tables/table")
+                    .setReadOptions(ReadSession.TableReadOptions.newBuilder()))
             .setMaxStreamCount(1024)
             .build();
 
@@ -616,6 +768,49 @@ public class BigQueryIOStorageReadTest {
     thrown.expect(UnsupportedOperationException.class);
     thrown.expectMessage("BigQuery storage source must be split before reading");
     tableSource.createReader(options);
+  }
+
+  @Test
+  public void testUnboundedReadFromBoundedSourceWithEmptyTable() throws Exception {
+    fakeDatasetService.createDataset("project-id", "dataset", "", "", null);
+    TableReference tableRef = BigQueryHelpers.parseTableSpec("project-id:dataset.table");
+
+    Table table =
+        new Table().setTableReference(tableRef).setNumBytes(0L).setSchema(new TableSchema());
+
+    fakeDatasetService.createTable(table);
+
+    ReadSession emptyReadSession = ReadSession.newBuilder().build();
+    StorageClient fakeStorageClient = mock(StorageClient.class);
+    when(fakeStorageClient.createReadSession(any())).thenReturn(emptyReadSession);
+
+    BigQueryStorageTableSource<TableRow> tableSource =
+        BigQueryStorageTableSource.create(
+            ValueProvider.StaticValueProvider.of(tableRef),
+            null,
+            null,
+            new TableRowParser(),
+            TableRowJsonCoder.of(),
+            new FakeBigQueryServices()
+                .withDatasetService(fakeDatasetService)
+                .withStorageClient(fakeStorageClient));
+
+    // This simulates what happens in a streaming pipeline when BoundedSource is used
+    UnboundedSource<TableRow, ?> unboundedSource =
+        new UnboundedReadFromBoundedSource.BoundedToUnboundedSourceAdapter<>(tableSource);
+
+    // Initial split
+    List<? extends UnboundedSource<TableRow, ?>> splits = unboundedSource.split(1, options);
+    // Because tableSource.split returns empty list, BoundedToUnboundedSourceAdapter falls back to
+    // returning itself
+    assertEquals(1, splits.size());
+    UnboundedSource<TableRow, ?> splitSource = splits.get(0);
+
+    // Create reader
+    UnboundedSource.UnboundedReader<TableRow> reader = splitSource.createReader(options, null);
+
+    // This should NOT throw UnsupportedOperationException
+    assertFalse(reader.start());
   }
 
   private static GenericRecord createRecord(String name, Schema schema) {
@@ -751,6 +946,39 @@ public class BigQueryIOStorageReadTest {
   }
 
   @Test
+  public void testSplitReadStreamAtFraction() throws IOException {
+
+    ReadSession readSession =
+        ReadSession.newBuilder()
+            .setName("readSession")
+            .setAvroSchema(AvroSchema.newBuilder().setSchema(AVRO_SCHEMA_STRING))
+            .build();
+
+    ReadRowsRequest expectedRequest =
+        ReadRowsRequest.newBuilder().setReadStream("readStream").build();
+    List<ReadRowsResponse> responses = ImmutableList.of();
+
+    StorageClient fakeStorageClient = mock(StorageClient.class);
+    when(fakeStorageClient.readRows(expectedRequest, ""))
+        .thenReturn(new FakeBigQueryServerStream<>(responses));
+
+    BigQueryStorageStreamSource<TableRow> streamSource =
+        BigQueryStorageStreamSource.create(
+            readSession,
+            ReadStream.newBuilder().setName("readStream").build(),
+            TABLE_SCHEMA,
+            new TableRowParser(),
+            TableRowJsonCoder.of(),
+            new FakeBigQueryServices().withStorageClient(fakeStorageClient));
+
+    PipelineOptions options = PipelineOptionsFactory.fromArgs("--enableStorageReadApiV2").create();
+    BigQueryStorageStreamReader<TableRow> reader = streamSource.createReader(options);
+    reader.start();
+    // Beam does not split storage read api v2 stream
+    assertNull(reader.splitAtFraction(0.5));
+  }
+
+  @Test
   public void testReadFromStreamSource() throws Exception {
 
     ReadSession readSession =
@@ -842,7 +1070,6 @@ public class BigQueryIOStorageReadTest {
             TableRowJsonCoder.of(),
             new FakeBigQueryServices().withStorageClient(fakeStorageClient));
 
-    List<TableRow> rows = new ArrayList<>();
     BoundedReader<TableRow> reader = streamSource.createReader(options);
 
     // Before call to BoundedReader#start, fraction consumed must be zero.
@@ -928,7 +1155,6 @@ public class BigQueryIOStorageReadTest {
             TableRowJsonCoder.of(),
             new FakeBigQueryServices().withStorageClient(fakeStorageClient));
 
-    List<TableRow> rows = new ArrayList<>();
     BoundedReader<TableRow> reader = streamSource.createReader(options);
 
     // Before call to BoundedReader#start, fraction consumed must be zero.
@@ -1290,7 +1516,7 @@ public class BigQueryIOStorageReadTest {
                 "Given row offset is invalid for stream.",
                 new StatusRuntimeException(Status.FAILED_PRECONDITION),
                 GrpcStatusCode.of(Code.FAILED_PRECONDITION),
-                /* retryable = */ false));
+                /* retryable= */ false));
 
     BigQueryStorageStreamSource<TableRow> streamSource =
         BigQueryStorageStreamSource.create(
@@ -1334,6 +1560,89 @@ public class BigQueryIOStorageReadTest {
     }
   }
 
+  /**
+   * A mock response that stuck indefinitely when the returned iterator's hasNext get called,
+   * intended to simulate server side issue.
+   */
+  static class StuckResponse extends ArrayList<ReadRowsResponse> {
+
+    private CountDownLatch latch;
+
+    public StuckResponse(CountDownLatch latch) {
+      this.latch = latch;
+    }
+
+    @Override
+    public Iterator<ReadRowsResponse> iterator() {
+      return new StuckIterator();
+    }
+
+    private class StuckIterator implements Iterator<ReadRowsResponse> {
+
+      @Override
+      public boolean hasNext() {
+        latch.countDown();
+        try {
+          Thread.sleep(Long.MAX_VALUE);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+        return false;
+      }
+
+      @Override
+      public ReadRowsResponse next() {
+        return null;
+      }
+    }
+  }
+
+  @Test
+  public void testStreamSourceSplitAtFractionFailsWhenReaderRunning() throws Exception {
+    ReadSession readSession =
+        ReadSession.newBuilder()
+            .setName("readSession")
+            .setAvroSchema(AvroSchema.newBuilder().setSchema(AVRO_SCHEMA_STRING))
+            .build();
+
+    ReadRowsRequest expectedRequest =
+        ReadRowsRequest.newBuilder().setReadStream("readStream").build();
+
+    CountDownLatch latch = new CountDownLatch(1);
+    StorageClient fakeStorageClient = mock(StorageClient.class);
+    when(fakeStorageClient.readRows(expectedRequest, ""))
+        .thenReturn(new FakeBigQueryServerStream<>(new StuckResponse(latch)));
+
+    BigQueryStorageStreamSource<TableRow> streamSource =
+        BigQueryStorageStreamSource.create(
+            readSession,
+            ReadStream.newBuilder().setName("readStream").build(),
+            TABLE_SCHEMA,
+            new TableRowParser(),
+            TableRowJsonCoder.of(),
+            new FakeBigQueryServices().withStorageClient(fakeStorageClient));
+
+    BigQueryStorageStreamReader<TableRow> reader = streamSource.createReader(options);
+
+    Thread t =
+        new Thread(
+            () -> {
+              try {
+                reader.start();
+              } catch (IOException e) {
+                throw new RuntimeException(e);
+              }
+            });
+    t.start();
+
+    // wait until thread proceed
+    latch.await();
+
+    // SplitAfFraction rejected while response iterator busy
+    assertNull(reader.splitAtFraction(0.5));
+    t.interrupt();
+  }
+
   @Test
   public void testReadFromBigQueryIO() throws Exception {
     fakeDatasetService.createDataset("foo.com:project", "dataset", "", "", null);
@@ -1347,7 +1656,8 @@ public class BigQueryIOStorageReadTest {
             .setReadSession(
                 ReadSession.newBuilder()
                     .setTable("projects/foo.com:project/datasets/dataset/tables/table")
-                    .setDataFormat(DataFormat.AVRO))
+                    .setDataFormat(DataFormat.AVRO)
+                    .setReadOptions(ReadSession.TableReadOptions.newBuilder()))
             .setMaxStreamCount(10)
             .build();
 
@@ -1394,6 +1704,66 @@ public class BigQueryIOStorageReadTest {
     PAssert.that(output)
         .containsInAnyOrder(
             ImmutableList.of(KV.of("A", 1L), KV.of("B", 2L), KV.of("C", 3L), KV.of("D", 4L)));
+
+    p.run();
+  }
+
+  @Test
+  public void testReadFromBigQueryIOWithFallbackProject() throws Exception {
+    fakeDatasetService.createDataset("fallback-project", "dataset", "", "", null);
+    TableReference tableRef = BigQueryHelpers.parseTableSpec("fallback-project:dataset.table");
+    Table table = new Table().setTableReference(tableRef).setNumBytes(10L).setSchema(TABLE_SCHEMA);
+    fakeDatasetService.createTable(table);
+
+    CreateReadSessionRequest expectedCreateReadSessionRequest =
+        CreateReadSessionRequest.newBuilder()
+            .setParent("projects/fallback-project")
+            .setReadSession(
+                ReadSession.newBuilder()
+                    .setTable("projects/fallback-project/datasets/dataset/tables/table")
+                    .setDataFormat(DataFormat.AVRO)
+                    .setReadOptions(ReadSession.TableReadOptions.newBuilder()))
+            .setMaxStreamCount(10)
+            .build();
+
+    ReadSession readSession =
+        ReadSession.newBuilder()
+            .setName("readSessionName")
+            .setAvroSchema(AvroSchema.newBuilder().setSchema(AVRO_SCHEMA_STRING))
+            .addStreams(ReadStream.newBuilder().setName("streamName"))
+            .setDataFormat(DataFormat.AVRO)
+            .build();
+
+    ReadRowsRequest expectedReadRowsRequest =
+        ReadRowsRequest.newBuilder().setReadStream("streamName").build();
+
+    List<GenericRecord> records = Lists.newArrayList(createRecord("A", 1, AVRO_SCHEMA));
+
+    List<ReadRowsResponse> readRowsResponses =
+        Lists.newArrayList(createResponse(AVRO_SCHEMA, records.subList(0, 1), 0.0, 1.0));
+
+    StorageClient fakeStorageClient = mock(StorageClient.class, withSettings().serializable());
+    when(fakeStorageClient.createReadSession(expectedCreateReadSessionRequest))
+        .thenReturn(readSession);
+    when(fakeStorageClient.readRows(expectedReadRowsRequest, ""))
+        .thenReturn(new FakeBigQueryServerStream<>(readRowsResponses));
+
+    // Explicitly set the pipeline's project option to null to simulate missing
+    // cross-language parameters, and verify it uses the project from the TableReference.
+    options.as(BigQueryOptions.class).setProject(null);
+
+    PCollection<KV<String, Long>> output =
+        p.apply(
+            BigQueryIO.read(new ParseKeyValue())
+                .from("fallback-project:dataset.table")
+                .withMethod(Method.DIRECT_READ)
+                .withFormat(DataFormat.AVRO)
+                .withTestServices(
+                    new FakeBigQueryServices()
+                        .withDatasetService(fakeDatasetService)
+                        .withStorageClient(fakeStorageClient)));
+
+    PAssert.that(output).containsInAnyOrder(ImmutableList.of(KV.of("A", 1L)));
 
     p.run();
   }
@@ -1470,6 +1840,82 @@ public class BigQueryIOStorageReadTest {
   }
 
   @Test
+  public void testReadFromBigQueryIOWithBeamSchema() throws Exception {
+    fakeDatasetService.createDataset("foo.com:project", "dataset", "", "", null);
+    TableReference tableRef = BigQueryHelpers.parseTableSpec("foo.com:project:dataset.table");
+    Table table = new Table().setTableReference(tableRef).setNumBytes(10L).setSchema(TABLE_SCHEMA);
+    fakeDatasetService.createTable(table);
+
+    CreateReadSessionRequest expectedCreateReadSessionRequest =
+        CreateReadSessionRequest.newBuilder()
+            .setParent("projects/project-id")
+            .setReadSession(
+                ReadSession.newBuilder()
+                    .setTable("projects/foo.com:project/datasets/dataset/tables/table")
+                    .setReadOptions(
+                        ReadSession.TableReadOptions.newBuilder().addSelectedFields("name"))
+                    .setDataFormat(DataFormat.AVRO))
+            .setMaxStreamCount(10)
+            .build();
+
+    ReadSession readSession =
+        ReadSession.newBuilder()
+            .setName("readSessionName")
+            .setAvroSchema(AvroSchema.newBuilder().setSchema(TRIMMED_AVRO_SCHEMA_STRING))
+            .addStreams(ReadStream.newBuilder().setName("streamName"))
+            .setDataFormat(DataFormat.AVRO)
+            .build();
+
+    ReadRowsRequest expectedReadRowsRequest =
+        ReadRowsRequest.newBuilder().setReadStream("streamName").build();
+
+    List<GenericRecord> records =
+        Lists.newArrayList(
+            createRecord("A", TRIMMED_AVRO_SCHEMA),
+            createRecord("B", TRIMMED_AVRO_SCHEMA),
+            createRecord("C", TRIMMED_AVRO_SCHEMA),
+            createRecord("D", TRIMMED_AVRO_SCHEMA));
+
+    List<ReadRowsResponse> readRowsResponses =
+        Lists.newArrayList(
+            createResponse(TRIMMED_AVRO_SCHEMA, records.subList(0, 2), 0.0, 0.50),
+            createResponse(TRIMMED_AVRO_SCHEMA, records.subList(2, 4), 0.5, 0.75));
+
+    StorageClient fakeStorageClient = mock(StorageClient.class, withSettings().serializable());
+    when(fakeStorageClient.createReadSession(expectedCreateReadSessionRequest))
+        .thenReturn(readSession);
+    when(fakeStorageClient.readRows(expectedReadRowsRequest, ""))
+        .thenReturn(new FakeBigQueryServerStream<>(readRowsResponses));
+
+    PCollection<Row> output =
+        p.apply(
+                BigQueryIO.readTableRowsWithSchema()
+                    .from("foo.com:project:dataset.table")
+                    .withMethod(Method.DIRECT_READ)
+                    .withSelectedFields(Lists.newArrayList("name"))
+                    .withFormat(DataFormat.AVRO)
+                    .withTestServices(
+                        new FakeBigQueryServices()
+                            .withDatasetService(fakeDatasetService)
+                            .withStorageClient(fakeStorageClient)))
+            .apply(Convert.toRows());
+
+    org.apache.beam.sdk.schemas.Schema beamSchema =
+        org.apache.beam.sdk.schemas.Schema.of(
+            org.apache.beam.sdk.schemas.Schema.Field.of(
+                "name", org.apache.beam.sdk.schemas.Schema.FieldType.STRING));
+    PAssert.that(output)
+        .containsInAnyOrder(
+            ImmutableList.of(
+                Row.withSchema(beamSchema).addValue("A").build(),
+                Row.withSchema(beamSchema).addValue("B").build(),
+                Row.withSchema(beamSchema).addValue("C").build(),
+                Row.withSchema(beamSchema).addValue("D").build()));
+
+    p.run();
+  }
+
+  @Test
   public void testReadFromBigQueryIOArrow() throws Exception {
     fakeDatasetService.createDataset("foo.com:project", "dataset", "", "", null);
     TableReference tableRef = BigQueryHelpers.parseTableSpec("foo.com:project:dataset.table");
@@ -1482,7 +1928,8 @@ public class BigQueryIOStorageReadTest {
             .setReadSession(
                 ReadSession.newBuilder()
                     .setTable("projects/foo.com:project/datasets/dataset/tables/table")
-                    .setDataFormat(DataFormat.ARROW))
+                    .setDataFormat(DataFormat.ARROW)
+                    .setReadOptions(ReadSession.TableReadOptions.newBuilder()))
             .setMaxStreamCount(10)
             .build();
 
@@ -1618,7 +2065,6 @@ public class BigQueryIOStorageReadTest {
             TableRowJsonCoder.of(),
             new FakeBigQueryServices().withStorageClient(fakeStorageClient));
 
-    List<TableRow> rows = new ArrayList<>();
     BoundedReader<TableRow> reader = streamSource.createReader(options);
 
     // Before call to BoundedReader#start, fraction consumed must be zero.
@@ -2029,7 +2475,7 @@ public class BigQueryIOStorageReadTest {
                 "Given row offset is invalid for stream.",
                 new StatusRuntimeException(Status.FAILED_PRECONDITION),
                 GrpcStatusCode.of(Code.FAILED_PRECONDITION),
-                /* retryable = */ false));
+                /* retryable= */ false));
 
     BigQueryStorageStreamSource<TableRow> streamSource =
         BigQueryStorageStreamSource.create(
@@ -2065,6 +2511,689 @@ public class BigQueryIOStorageReadTest {
     assertTrue(parent.advance());
     assertEquals("E", parent.getCurrent().get("name"));
     assertFalse(parent.advance());
+  }
+
+  @Test
+  public void testActuateProjectionPushdown() {
+    org.apache.beam.sdk.schemas.Schema schema =
+        org.apache.beam.sdk.schemas.Schema.builder()
+            .addStringField("foo")
+            .addStringField("bar")
+            .build();
+    TypedRead<Row> read =
+        BigQueryIO.read(
+                record ->
+                    BigQueryUtils.toBeamRow(
+                        record.getRecord(), schema, ConversionOptions.builder().build()))
+            .withMethod(Method.DIRECT_READ)
+            .withCoder(SchemaCoder.of(schema));
+
+    assertTrue(read.supportsProjectionPushdown());
+    PTransform<PBegin, PCollection<Row>> pushdownT =
+        read.actuateProjectionPushdown(
+            ImmutableMap.of(new TupleTag<>("output"), FieldAccessDescriptor.withFieldNames("foo")));
+
+    TypedRead<Row> pushdownRead = (TypedRead<Row>) pushdownT;
+    assertEquals(Method.DIRECT_READ, pushdownRead.getMethod());
+    assertThat(pushdownRead.getSelectedFields().get(), Matchers.containsInAnyOrder("foo"));
+    assertTrue(pushdownRead.getProjectionPushdownApplied());
+  }
+
+  @Test
+  public void testReadFromQueryDoesNotSupportProjectionPushdown() {
+    org.apache.beam.sdk.schemas.Schema schema =
+        org.apache.beam.sdk.schemas.Schema.builder()
+            .addStringField("foo")
+            .addStringField("bar")
+            .build();
+    TypedRead<Row> read =
+        BigQueryIO.read(
+                record ->
+                    BigQueryUtils.toBeamRow(
+                        record.getRecord(), schema, ConversionOptions.builder().build()))
+            .fromQuery("SELECT bar FROM `dataset.table`")
+            .withMethod(Method.DIRECT_READ)
+            .withCoder(SchemaCoder.of(schema));
+
+    assertFalse(read.supportsProjectionPushdown());
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            read.actuateProjectionPushdown(
+                ImmutableMap.of(
+                    new TupleTag<>("output"), FieldAccessDescriptor.withFieldNames("foo"))));
+  }
+
+  @Test
+  public void testReadFromBigQueryAvroObjectsMutation() throws Exception {
+    ReadSession readSession =
+        ReadSession.newBuilder()
+            .setName("readSession")
+            .setAvroSchema(AvroSchema.newBuilder().setSchema(AVRO_SCHEMA_STRING))
+            .build();
+
+    ReadRowsRequest expectedRequest =
+        ReadRowsRequest.newBuilder().setReadStream("readStream").build();
+
+    List<GenericRecord> records =
+        Lists.newArrayList(createRecord("A", 1, AVRO_SCHEMA), createRecord("B", 2, AVRO_SCHEMA));
+
+    List<ReadRowsResponse> responses =
+        Lists.newArrayList(
+            createResponse(AVRO_SCHEMA, records.subList(0, 1), 0.0, 0.5),
+            createResponse(AVRO_SCHEMA, records.subList(1, 2), 0.5, 1.0));
+
+    StorageClient fakeStorageClient = mock(StorageClient.class);
+    when(fakeStorageClient.readRows(expectedRequest, ""))
+        .thenReturn(new FakeBigQueryServerStream<>(responses));
+
+    BigQueryStorageStreamSource<GenericRecord> streamSource =
+        BigQueryStorageStreamSource.create(
+            readSession,
+            ReadStream.newBuilder().setName("readStream").build(),
+            TABLE_SCHEMA,
+            SchemaAndRecord::getRecord,
+            AvroCoder.of(AVRO_SCHEMA),
+            new FakeBigQueryServices().withStorageClient(fakeStorageClient));
+
+    BoundedReader<GenericRecord> reader = streamSource.createReader(options);
+
+    // Reads A.
+    assertTrue(reader.start());
+    GenericRecord rowA = reader.getCurrent();
+    assertEquals(new Utf8("A"), rowA.get("name"));
+
+    // Reads B.
+    assertTrue(reader.advance());
+    GenericRecord rowB = reader.getCurrent();
+    assertEquals(new Utf8("B"), rowB.get("name"));
+
+    // Make sure rowA has not mutated after advance
+    assertEquals(new Utf8("A"), rowA.get("name"));
+  }
+
+  @Test
+  public void testTimestampPrecisionDefaultValue() {
+    BigQueryIO.TypedRead<TableRow> typedRead =
+        BigQueryIO.read(new TableRowParser())
+            .withCoder(TableRowJsonCoder.of())
+            .withMethod(Method.DIRECT_READ)
+            .from("foo.com:project:dataset.table");
+
+    assertNull(typedRead.getDirectReadPicosTimestampPrecision());
+  }
+
+  @Test
+  public void testwithDirectReadPicosTimestampPrecisionNanos() {
+    BigQueryIO.TypedRead<TableRow> typedRead =
+        BigQueryIO.read(new TableRowParser())
+            .withCoder(TableRowJsonCoder.of())
+            .withMethod(Method.DIRECT_READ)
+            .from("foo.com:project:dataset.table")
+            .withDirectReadPicosTimestampPrecision(TimestampPrecision.NANOS);
+
+    assertEquals(TimestampPrecision.NANOS, typedRead.getDirectReadPicosTimestampPrecision());
+  }
+
+  @Test
+  public void testwithDirectReadPicosTimestampPrecisionPicos() {
+    BigQueryIO.TypedRead<TableRow> typedRead =
+        BigQueryIO.read(new TableRowParser())
+            .withCoder(TableRowJsonCoder.of())
+            .withMethod(Method.DIRECT_READ)
+            .from("foo.com:project:dataset.table")
+            .withDirectReadPicosTimestampPrecision(TimestampPrecision.PICOS);
+
+    assertEquals(TimestampPrecision.PICOS, typedRead.getDirectReadPicosTimestampPrecision());
+  }
+
+  @Test
+  public void testTableSourceInitialSplit_withDirectReadPicosTimestampPrecisionNanos_Arrow()
+      throws Exception {
+    fakeDatasetService.createDataset("foo.com:project", "dataset", "", "", null);
+    TableReference tableRef = BigQueryHelpers.parseTableSpec("foo.com:project:dataset.table");
+    Table table = new Table().setTableReference(tableRef).setNumBytes(100L).setSchema(TABLE_SCHEMA);
+    fakeDatasetService.createTable(table);
+
+    CreateReadSessionRequest expectedRequest =
+        CreateReadSessionRequest.newBuilder()
+            .setParent("projects/project-id")
+            .setReadSession(
+                ReadSession.newBuilder()
+                    .setTable("projects/foo.com:project/datasets/dataset/tables/table")
+                    .setDataFormat(DataFormat.ARROW)
+                    .setReadOptions(
+                        ReadSession.TableReadOptions.newBuilder()
+                            .setArrowSerializationOptions(
+                                com.google.cloud.bigquery.storage.v1.ArrowSerializationOptions
+                                    .newBuilder()
+                                    .setPicosTimestampPrecision(
+                                        com.google.cloud.bigquery.storage.v1
+                                            .ArrowSerializationOptions.PicosTimestampPrecision
+                                            .TIMESTAMP_PRECISION_NANOS))))
+            .setMaxStreamCount(10)
+            .build();
+
+    ReadSession.Builder builder =
+        ReadSession.newBuilder()
+            .setArrowSchema(
+                ArrowSchema.newBuilder().setSerializedSchema(serializeArrowSchema(ARROW_SCHEMA)))
+            .setDataFormat(DataFormat.ARROW);
+    for (int i = 0; i < 10; i++) {
+      builder.addStreams(ReadStream.newBuilder().setName("stream-" + i));
+    }
+
+    StorageClient fakeStorageClient = mock(StorageClient.class);
+    when(fakeStorageClient.createReadSession(expectedRequest)).thenReturn(builder.build());
+
+    BigQueryStorageTableSource<TableRow> tableSource =
+        BigQueryStorageTableSource.create(
+            ValueProvider.StaticValueProvider.of(tableRef),
+            DataFormat.ARROW,
+            null, /* selectedFields */
+            null, /* rowRestriction */
+            new TableRowParser(),
+            TableRowJsonCoder.of(),
+            new FakeBigQueryServices()
+                .withDatasetService(fakeDatasetService)
+                .withStorageClient(fakeStorageClient),
+            false, /* projectionPushdownApplied */
+            TimestampPrecision.NANOS);
+
+    List<? extends BoundedSource<TableRow>> sources = tableSource.split(10L, options);
+    assertEquals(10L, sources.size());
+  }
+
+  private org.apache.arrow.vector.types.pojo.Schema getArrowSchemaTs(TimestampPrecision precision) {
+    switch (precision) {
+      case NANOS:
+        return ARROW_SCHEMA_TS_NANOS;
+      case PICOS:
+        return ARROW_SCHEMA_TS_PICOS;
+      case MICROS:
+      default:
+        return ARROW_SCHEMA_TS_MICROS;
+    }
+  }
+
+  private Schema getAvroSchemaTs(TimestampPrecision precision) {
+    switch (precision) {
+      case NANOS:
+        return AVRO_SCHEMA_TS_NANOS;
+      case PICOS:
+        return AVRO_SCHEMA_TS_PICOS;
+      case MICROS:
+      default:
+        return AVRO_SCHEMA_TS_MICROS;
+    }
+  }
+
+  private String getAvroSchemaStringTs(TimestampPrecision precision) {
+    switch (precision) {
+      case NANOS:
+        return AVRO_SCHEMA_TS_NANOS_STRING;
+      case PICOS:
+        return AVRO_SCHEMA_TS_PICOS_STRING;
+      case MICROS:
+      default:
+        return AVRO_SCHEMA_TS_MICROS_STRING;
+    }
+  }
+
+  /**
+   * Converts ISO timestamp strings to the appropriate format for the precision. - MICROS: Long
+   * (epoch microseconds) - NANOS: Long (epoch nanoseconds) - PICOS: String (formatted as
+   * "yyyy-MM-dd HH:mm:ss.SSSSSSSSSSSS UTC")
+   */
+  private List<Object> convertInputsForPrecision(
+      List<String> isoTimestamps, TimestampPrecision precision) {
+    return isoTimestamps.stream()
+        .map(
+            iso -> {
+              if (precision == TimestampPrecision.PICOS) {
+                // For PICOS, input IS the string (already formatted)
+                return iso;
+              }
+              java.time.Instant instant = java.time.Instant.parse(iso);
+              if (precision == TimestampPrecision.NANOS) {
+                return instant.getEpochSecond() * 1_000_000_000L + instant.getNano();
+              } else {
+                // MICROS (default)
+                return instant.getEpochSecond() * 1_000_000L + instant.getNano() / 1000;
+              }
+            })
+        .collect(Collectors.toList());
+  }
+
+  private ReadSession createTsReadSession(
+      DataFormat dataFormat,
+      org.apache.arrow.vector.types.pojo.Schema arrowSchema,
+      String avroSchemaString) {
+    ReadSession.Builder builder =
+        ReadSession.newBuilder()
+            .setName("readSessionName")
+            .addStreams(ReadStream.newBuilder().setName("streamName"))
+            .setDataFormat(dataFormat);
+
+    if (dataFormat == DataFormat.ARROW) {
+      builder.setArrowSchema(
+          ArrowSchema.newBuilder().setSerializedSchema(serializeArrowSchema(arrowSchema)).build());
+    } else {
+      builder.setAvroSchema(AvroSchema.newBuilder().setSchema(avroSchemaString).build());
+    }
+    return builder.build();
+  }
+
+  private ReadRowsResponse createArrowTsResponse(
+      org.apache.arrow.vector.types.pojo.Schema arrowSchema,
+      TimestampPrecision precision,
+      List<Object> inputValues) {
+    ArrowRecordBatch serializedRecord;
+    try (VectorSchemaRoot schemaRoot = VectorSchemaRoot.create(arrowSchema, allocator)) {
+      schemaRoot.allocateNew();
+      schemaRoot.setRowCount(inputValues.size());
+
+      switch (precision) {
+        case NANOS:
+          TimeStampNanoTZVector nanoVector =
+              (TimeStampNanoTZVector) schemaRoot.getFieldVectors().get(0);
+          for (int i = 0; i < inputValues.size(); i++) {
+            nanoVector.set(i, (Long) inputValues.get(i));
+          }
+          break;
+        case PICOS:
+          VarCharVector stringVector = (VarCharVector) schemaRoot.getFieldVectors().get(0);
+          for (int i = 0; i < inputValues.size(); i++) {
+            stringVector.set(i, new Text((String) inputValues.get(i)));
+          }
+          break;
+        case MICROS:
+        default:
+          TimeStampMicroTZVector microVector =
+              (TimeStampMicroTZVector) schemaRoot.getFieldVectors().get(0);
+          for (int i = 0; i < inputValues.size(); i++) {
+            microVector.set(i, (Long) inputValues.get(i));
+          }
+          break;
+      }
+
+      VectorUnloader unLoader = new VectorUnloader(schemaRoot);
+      try (org.apache.arrow.vector.ipc.message.ArrowRecordBatch records =
+          unLoader.getRecordBatch()) {
+        try (ByteArrayOutputStream os = new ByteArrayOutputStream()) {
+          MessageSerializer.serialize(new WriteChannel(Channels.newChannel(os)), records);
+          serializedRecord =
+              ArrowRecordBatch.newBuilder()
+                  .setRowCount(records.getLength())
+                  .setSerializedRecordBatch(ByteString.copyFrom(os.toByteArray()))
+                  .build();
+        }
+      }
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+
+    return ReadRowsResponse.newBuilder()
+        .setArrowRecordBatch(serializedRecord)
+        .setRowCount(inputValues.size())
+        .setStats(
+            StreamStats.newBuilder()
+                .setProgress(Progress.newBuilder().setAtResponseStart(0.0).setAtResponseEnd(1.0)))
+        .build();
+  }
+
+  private ReadRowsResponse createAvroTsResponse(
+      Schema avroSchema,
+      @SuppressWarnings("unused") TimestampPrecision precision,
+      List<Object> inputValues)
+      throws Exception {
+    List<GenericRecord> records = new ArrayList<>();
+    for (Object value : inputValues) {
+      GenericRecord record = new Record(avroSchema);
+      record.put("ts", value);
+      records.add(record);
+    }
+
+    GenericDatumWriter<GenericRecord> writer = new GenericDatumWriter<>(avroSchema);
+    ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+    Encoder binaryEncoder = EncoderFactory.get().binaryEncoder(outputStream, null);
+    for (GenericRecord record : records) {
+      writer.write(record, binaryEncoder);
+    }
+    binaryEncoder.flush();
+
+    return ReadRowsResponse.newBuilder()
+        .setAvroRows(
+            AvroRows.newBuilder()
+                .setSerializedBinaryRows(ByteString.copyFrom(outputStream.toByteArray()))
+                .setRowCount(records.size()))
+        .setRowCount(records.size())
+        .setStats(
+            StreamStats.newBuilder()
+                .setProgress(Progress.newBuilder().setAtResponseStart(0.0).setAtResponseEnd(1.0)))
+        .build();
+  }
+
+  private void runTimestampTest(
+      DataFormat dataFormat,
+      TimestampPrecision precision,
+      boolean useSchema,
+      List<String> inputTimestamps,
+      List<String> expectedOutputs)
+      throws Exception {
+
+    TimestampPrecision effectivePrecision =
+        (precision != null) ? precision : TimestampPrecision.MICROS;
+
+    fakeDatasetService.createDataset("foo.com:project", "dataset", "", "", null);
+    TableReference tableRef = BigQueryHelpers.parseTableSpec("foo.com:project:dataset.table");
+    Table table =
+        new Table().setTableReference(tableRef).setNumBytes(10L).setSchema(TABLE_SCHEMA_TIMESTAMP);
+    fakeDatasetService.createTable(table);
+
+    org.apache.arrow.vector.types.pojo.Schema arrowSchema = getArrowSchemaTs(effectivePrecision);
+    Schema avroSchema = getAvroSchemaTs(effectivePrecision);
+    String avroSchemaString = getAvroSchemaStringTs(effectivePrecision);
+
+    List<Object> inputValues = convertInputsForPrecision(inputTimestamps, effectivePrecision);
+
+    ReadSession readSession = createTsReadSession(dataFormat, arrowSchema, avroSchemaString);
+
+    List<ReadRowsResponse> readRowsResponses;
+    if (dataFormat == DataFormat.ARROW) {
+      readRowsResponses =
+          Lists.newArrayList(createArrowTsResponse(arrowSchema, effectivePrecision, inputValues));
+    } else {
+      readRowsResponses =
+          Lists.newArrayList(createAvroTsResponse(avroSchema, effectivePrecision, inputValues));
+    }
+
+    StorageClient fakeStorageClient = mock(StorageClient.class, withSettings().serializable());
+    when(fakeStorageClient.createReadSession(any(CreateReadSessionRequest.class)))
+        .thenReturn(readSession);
+    when(fakeStorageClient.readRows(any(ReadRowsRequest.class), eq("")))
+        .thenReturn(new FakeBigQueryServerStream<>(readRowsResponses));
+
+    TypedRead<TableRow> read =
+        useSchema ? BigQueryIO.readTableRowsWithSchema() : BigQueryIO.readTableRows();
+
+    read =
+        read.from("foo.com:project:dataset.table")
+            .withMethod(Method.DIRECT_READ)
+            .withFormat(dataFormat)
+            .withTestServices(
+                new FakeBigQueryServices()
+                    .withDatasetService(fakeDatasetService)
+                    .withStorageClient(fakeStorageClient));
+
+    if (precision != null) {
+      read = read.withDirectReadPicosTimestampPrecision(precision);
+    }
+
+    PCollection<TableRow> output = p.apply(read);
+
+    PAssert.that(output)
+        .satisfies(
+            rows -> {
+              List<TableRow> rowList = Lists.newArrayList(rows);
+              assertEquals(expectedOutputs.size(), rowList.size());
+
+              List<String> actualTimestamps =
+                  rowList.stream()
+                      .map(r -> (String) r.get("ts"))
+                      .sorted()
+                      .collect(Collectors.toList());
+
+              List<String> sortedExpected =
+                  expectedOutputs.stream().sorted().collect(Collectors.toList());
+
+              assertEquals(sortedExpected, actualTimestamps);
+              return null;
+            });
+
+    p.run();
+  }
+
+  // ===== Avro + readTableRows =====
+
+  @Test
+  public void testReadTableRows_Avro_DefaultPrecision() throws Exception {
+    runTimestampTest(
+        DataFormat.AVRO,
+        null,
+        false,
+        Arrays.asList("2024-01-01T00:00:00.123456Z", "2024-06-15T12:30:45.987654Z"),
+        Arrays.asList("2024-01-01 00:00:00.123456 UTC", "2024-06-15 12:30:45.987654 UTC"));
+  }
+
+  @Test
+  public void testReadTableRows_Avro_MicrosPrecision() throws Exception {
+    runTimestampTest(
+        DataFormat.AVRO,
+        TimestampPrecision.MICROS,
+        false,
+        Arrays.asList("2024-01-01T00:00:00.123456Z", "2024-06-15T12:30:45.987654Z"),
+        Arrays.asList("2024-01-01 00:00:00.123456 UTC", "2024-06-15 12:30:45.987654 UTC"));
+  }
+
+  @Test
+  public void testReadTableRows_Avro_NanosPrecision() throws Exception {
+    runTimestampTest(
+        DataFormat.AVRO,
+        TimestampPrecision.NANOS,
+        false,
+        Arrays.asList("2024-01-01T00:00:00.123456789Z", "2024-06-15T12:30:45.987654321Z"),
+        Arrays.asList("2024-01-01 00:00:00.123456789 UTC", "2024-06-15 12:30:45.987654321 UTC"));
+  }
+
+  @Test
+  public void testReadTableRows_Avro_PicosPrecision() throws Exception {
+    runTimestampTest(
+        DataFormat.AVRO,
+        TimestampPrecision.PICOS,
+        false,
+        Arrays.asList(
+            "2024-01-01 00:00:00.123456789012 UTC", "2024-06-15 12:30:45.987654321098 UTC"),
+        Arrays.asList(
+            "2024-01-01 00:00:00.123456789012 UTC", "2024-06-15 12:30:45.987654321098 UTC"));
+  }
+
+  // ===== Avro + readTableRowsWithSchema =====
+
+  @Test
+  public void testReadTableRowsWithSchema_Avro_DefaultPrecision() throws Exception {
+    runTimestampTest(
+        DataFormat.AVRO,
+        null,
+        true,
+        Arrays.asList("2024-01-01T00:00:00.123456Z", "2024-06-15T12:30:45.987654Z"),
+        Arrays.asList("2024-01-01 00:00:00.123456 UTC", "2024-06-15 12:30:45.987654 UTC"));
+  }
+
+  @Test
+  public void testReadTableRowsWithSchema_Avro_MicrosPrecision() throws Exception {
+    runTimestampTest(
+        DataFormat.AVRO,
+        TimestampPrecision.MICROS,
+        true,
+        Arrays.asList("2024-01-01T00:00:00.123456Z", "2024-06-15T12:30:45.987654Z"),
+        Arrays.asList("2024-01-01 00:00:00.123456 UTC", "2024-06-15 12:30:45.987654 UTC"));
+  }
+
+  @Test
+  public void testReadTableRowsWithSchema_Avro_NanosPrecision() throws Exception {
+    runTimestampTest(
+        DataFormat.AVRO,
+        TimestampPrecision.NANOS,
+        true,
+        Arrays.asList("2024-01-01T00:00:00.123456789Z", "2024-06-15T12:30:45.987654321Z"),
+        Arrays.asList("2024-01-01 00:00:00.123456789 UTC", "2024-06-15 12:30:45.987654321 UTC"));
+  }
+
+  @Test
+  public void testReadTableRowsWithSchema_Avro_PicosPrecision() throws Exception {
+    runTimestampTest(
+        DataFormat.AVRO,
+        TimestampPrecision.PICOS,
+        true,
+        Arrays.asList(
+            "2024-01-01 00:00:00.123456789012 UTC", "2024-06-15 12:30:45.987654321098 UTC"),
+        Arrays.asList(
+            "2024-01-01 00:00:00.123456789012 UTC", "2024-06-15 12:30:45.987654321098 UTC"));
+  }
+
+  // ===== Arrow + readTableRows =====
+
+  @Test
+  public void testReadTableRows_Arrow_DefaultPrecision() throws Exception {
+    //    Avro records are always converted to beam Row and then to GenericRecord in
+    // ArrowConversion.java
+    //    ArrowConversion.java is a generic utility to convert Arrow records and it does not take
+    // into account
+    //    the BigQuery TableSchema to determine the appropriate beam type. Historically arrow
+    // microsecond timestamps
+    //    are converted to FieldType.DATETIME, which maps to joda Instants, which only supports up
+    // to millisecond precision
+    //    hence precision is lost.
+    runTimestampTest(
+        DataFormat.ARROW,
+        null,
+        false,
+        Arrays.asList("2024-01-01T00:00:00.123456Z", "2024-06-15T12:30:45.987654Z"),
+        Arrays.asList("2024-01-01 00:00:00.123 UTC", "2024-06-15 12:30:45.987 UTC"));
+  }
+
+  @Test
+  public void testReadTableRows_Arrow_MicrosPrecision() throws Exception {
+    runTimestampTest(
+        DataFormat.ARROW,
+        TimestampPrecision.MICROS,
+        false,
+        Arrays.asList("2024-01-01T00:00:00.123456Z", "2024-06-15T12:30:45.987654Z"),
+        Arrays.asList("2024-01-01 00:00:00.123 UTC", "2024-06-15 12:30:45.987 UTC"));
+  }
+
+  @Test
+  public void testReadTableRows_Arrow_NanosPrecision() throws Exception {
+    runTimestampTest(
+        DataFormat.ARROW,
+        TimestampPrecision.NANOS,
+        false,
+        Arrays.asList("2024-01-01T00:00:00.123456789Z", "2024-06-15T12:30:45.987654321Z"),
+        Arrays.asList("2024-01-01 00:00:00.123456789 UTC", "2024-06-15 12:30:45.987654321 UTC"));
+  }
+
+  @Test
+  public void testReadTableRows_Arrow_PicosPrecision() throws Exception {
+    runTimestampTest(
+        DataFormat.ARROW,
+        TimestampPrecision.PICOS,
+        false,
+        Arrays.asList(
+            "2024-01-01 00:00:00.123456789012 UTC", "2024-06-15 12:30:45.987654321098 UTC"),
+        Arrays.asList(
+            "2024-01-01 00:00:00.123456789012 UTC", "2024-06-15 12:30:45.987654321098 UTC"));
+  }
+
+  // ===== Arrow + readTableRowsWithSchema =====
+
+  @Test
+  public void testReadTableRowsWithSchema_Arrow_DefaultPrecision() throws Exception {
+    runTimestampTest(
+        DataFormat.ARROW,
+        null,
+        true,
+        Arrays.asList("2024-01-01T00:00:00.123456Z", "2024-06-15T12:30:45.987654Z"),
+        Arrays.asList("2024-01-01 00:00:00.123 UTC", "2024-06-15 12:30:45.987 UTC"));
+  }
+
+  @Test
+  public void testReadTableRowsWithSchema_Arrow_MicrosPrecision() throws Exception {
+    runTimestampTest(
+        DataFormat.ARROW,
+        TimestampPrecision.MICROS,
+        true,
+        Arrays.asList("2024-01-01T00:00:00.123456Z", "2024-06-15T12:30:45.987654Z"),
+        Arrays.asList("2024-01-01 00:00:00.123 UTC", "2024-06-15 12:30:45.987 UTC"));
+  }
+
+  @Test
+  public void testReadTableRowsWithSchema_Arrow_NanosPrecision() throws Exception {
+    runTimestampTest(
+        DataFormat.ARROW,
+        TimestampPrecision.NANOS,
+        true,
+        Arrays.asList("2024-01-01T00:00:00.123456789Z", "2024-06-15T12:30:45.987654321Z"),
+        Arrays.asList("2024-01-01 00:00:00.123456789 UTC", "2024-06-15 12:30:45.987654321 UTC"));
+  }
+
+  @Test
+  public void testReadTableRowsWithSchema_Arrow_PicosPrecision() throws Exception {
+    runTimestampTest(
+        DataFormat.ARROW,
+        TimestampPrecision.PICOS,
+        true,
+        Arrays.asList(
+            "2024-01-01 00:00:00.123456789012 UTC", "2024-06-15 12:30:45.987654321098 UTC"),
+        Arrays.asList(
+            "2024-01-01 00:00:00.123456789012 UTC", "2024-06-15 12:30:45.987654321098 UTC"));
+  }
+
+  @Test
+  public void testTableSourceInitialSplit_withDirectReadPicosTimestampPrecisionNanos_Avro()
+      throws Exception {
+    fakeDatasetService.createDataset("foo.com:project", "dataset", "", "", null);
+    TableReference tableRef = BigQueryHelpers.parseTableSpec("foo.com:project:dataset.table");
+    Table table = new Table().setTableReference(tableRef).setNumBytes(100L).setSchema(TABLE_SCHEMA);
+    fakeDatasetService.createTable(table);
+
+    // Expected request should include AvroSerializationOptions with NANOS precision
+    CreateReadSessionRequest expectedRequest =
+        CreateReadSessionRequest.newBuilder()
+            .setParent("projects/project-id")
+            .setReadSession(
+                ReadSession.newBuilder()
+                    .setTable("projects/foo.com:project/datasets/dataset/tables/table")
+                    .setDataFormat(DataFormat.AVRO)
+                    .setReadOptions(
+                        ReadSession.TableReadOptions.newBuilder()
+                            .setAvroSerializationOptions(
+                                com.google.cloud.bigquery.storage.v1.AvroSerializationOptions
+                                    .newBuilder()
+                                    .setPicosTimestampPrecision(
+                                        com.google.cloud.bigquery.storage.v1
+                                            .AvroSerializationOptions.PicosTimestampPrecision
+                                            .TIMESTAMP_PRECISION_NANOS))))
+            .setMaxStreamCount(10)
+            .build();
+
+    ReadSession.Builder builder =
+        ReadSession.newBuilder()
+            .setAvroSchema(AvroSchema.newBuilder().setSchema(AVRO_SCHEMA_STRING))
+            .setDataFormat(DataFormat.AVRO);
+    for (int i = 0; i < 10; i++) {
+      builder.addStreams(ReadStream.newBuilder().setName("stream-" + i));
+    }
+
+    StorageClient fakeStorageClient = mock(StorageClient.class);
+    when(fakeStorageClient.createReadSession(expectedRequest)).thenReturn(builder.build());
+
+    BigQueryStorageTableSource<TableRow> tableSource =
+        BigQueryStorageTableSource.create(
+            ValueProvider.StaticValueProvider.of(tableRef),
+            DataFormat.AVRO,
+            null, /* selectedFields */
+            null, /* rowRestriction */
+            new TableRowParser(),
+            TableRowJsonCoder.of(),
+            new FakeBigQueryServices()
+                .withDatasetService(fakeDatasetService)
+                .withStorageClient(fakeStorageClient),
+            false, /* projectionPushdownApplied */
+            TimestampPrecision.NANOS);
+
+    List<? extends BoundedSource<TableRow>> sources = tableSource.split(10L, options);
+    assertEquals(10L, sources.size());
   }
 
   private static org.apache.arrow.vector.types.pojo.Field field(

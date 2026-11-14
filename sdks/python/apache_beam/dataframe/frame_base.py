@@ -15,18 +15,16 @@
 # limitations under the License.
 
 import functools
+import operator
 import re
+from collections.abc import Callable
 from inspect import cleandoc
 from inspect import getfullargspec
 from inspect import isclass
 from inspect import ismodule
 from inspect import unwrap
 from typing import Any
-from typing import Callable
-from typing import Dict
-from typing import List
 from typing import Optional
-from typing import Tuple
 from typing import Union
 
 import pandas as pd
@@ -37,7 +35,7 @@ from apache_beam.dataframe import partitionings
 
 class DeferredBase(object):
 
-  _pandas_type_map = {}  # type: Dict[Union[type, None], type]
+  _pandas_type_map: dict[Union[type, None], type] = {}
 
   def __init__(self, expr):
     self._expr = expr
@@ -115,6 +113,15 @@ class _DeferredScalar(DeferredBase):
               func, [self._expr] + [arg._expr for arg in args],
               requires_partition_by=partitionings.Singleton()))
 
+  def __neg__(self):
+    return self.apply(operator.neg)
+
+  def __pos__(self):
+    return self.apply(operator.pos)
+
+  def __invert__(self):
+    return self.apply(operator.invert)
+
   def __repr__(self):
     return f"DeferredScalar[type={type(self._expr.proxy())}]"
 
@@ -126,10 +133,36 @@ class _DeferredScalar(DeferredBase):
         "deferred operations.")
 
 
+def _scalar_binop(op):
+  def binop(self, other):
+    if not isinstance(other, DeferredBase):
+      return self.apply(lambda left: getattr(left, op)(other), name=op)
+    elif isinstance(other, _DeferredScalar):
+      return self.apply(
+          lambda left, right: getattr(left, op)(right), name=op, args=[other])
+    else:
+      return NotImplemented
+
+  return binop
+
+
+for op in ['__add__',
+           '__sub__',
+           '__mul__',
+           '__div__',
+           '__truediv__',
+           '__floordiv__',
+           '__mod__',
+           '__divmod__',
+           '__pow__',
+           '__and__',
+           '__or__']:
+  setattr(_DeferredScalar, op, _scalar_binop(op))
+
 DeferredBase._pandas_type_map[None] = _DeferredScalar
 
 
-def name_and_func(method: Union[str, Callable]) -> Tuple[str, Callable]:
+def name_and_func(method: Union[str, Callable]) -> tuple[str, Callable]:
   """For the given method name or method, return the method name and the method
   itself.
 
@@ -151,7 +184,7 @@ def _elementwise_method(
       inplace,
       base,
       requires_partition_by=partitionings.Arbitrary(),
-      preserves_partition_by=partitionings.Singleton())
+      preserves_partition_by=partitionings.Arbitrary())
 
 
 def _proxy_method(
@@ -160,8 +193,10 @@ def _proxy_method(
     restrictions=None,
     inplace=False,
     base=None,
-    requires_partition_by=partitionings.Singleton(),
-    preserves_partition_by=partitionings.Arbitrary()):
+    *,
+    requires_partition_by: partitionings.Partitioning,
+    preserves_partition_by: partitionings.Partitioning,
+):
   if name is None:
     name, func = name_and_func(func)
   if base is None:
@@ -172,8 +207,8 @@ def _proxy_method(
       restrictions,
       inplace,
       base,
-      requires_partition_by,
-      preserves_partition_by)
+      requires_partition_by=requires_partition_by,
+      preserves_partition_by=preserves_partition_by)
 
 
 def _elementwise_function(
@@ -185,19 +220,18 @@ def _elementwise_function(
       inplace,
       base,
       requires_partition_by=partitionings.Arbitrary(),
-      preserves_partition_by=partitionings.Singleton())
+      preserves_partition_by=partitionings.Arbitrary())
 
 
 def _proxy_function(
-    func,  # type: Union[Callable, str]
-    name=None,  # type: Optional[str]
-    restrictions=None,  # type: Optional[Dict[str, Union[Any, List[Any]]]]
-    inplace=False,  # type: bool
-    base=None,  # type: Optional[type]
-    requires_partition_by=partitionings.Singleton(
-    ),  # type: partitionings.Partitioning
-    preserves_partition_by=partitionings.Arbitrary(
-    ),  # type: partitionings.Partitioning
+    func: Union[Callable, str],
+    name: Optional[str] = None,
+    restrictions: Optional[dict[str, Union[Any, list[Any]]]] = None,
+    inplace: bool = False,
+    base: Optional[type] = None,
+    *,
+    requires_partition_by: partitionings.Partitioning,
+    preserves_partition_by: partitionings.Partitioning,
 ):
 
   if name is None:
@@ -296,7 +330,7 @@ def _proxy_function(
         sum(isinstance(arg.proxy(), pd.core.generic.NDFrame)
             for arg in deferred_exprs) > 1):
       # Implicit join on index if there is more than one indexed input.
-      actual_requires_partition_by = partitionings.Index()
+      actual_requires_partition_by = partitionings.JoinIndex()
     else:
       actual_requires_partition_by = requires_partition_by
 
@@ -378,11 +412,13 @@ def wont_implement_method(base_type, name, reason=None, explanation=None):
   return wrapper
 
 
-def not_implemented_method(op, jira='BEAM-9547', base_type=None):
+def not_implemented_method(op, issue='20318', base_type=None):
   """Generate a stub method for ``op`` that simply raises a NotImplementedError.
 
   For internal use only. No backwards compatibility guarantees."""
   assert base_type is not None, "base_type must be specified"
+  issue_url = f"https://issues.apache.org/jira/{issue}." if issue.startswith(
+      "BEAM-") else f"https://github.com/apache/beam/issues/{issue}"
 
   def wrapper(*args, **kwargs):
     raise NotImplementedError(
@@ -390,7 +426,7 @@ def not_implemented_method(op, jira='BEAM-9547', base_type=None):
         f"If support for {op!r} is important to you, please let the Beam "
         "community know by writing to user@beam.apache.org "
         "(see https://beam.apache.org/community/contact-us/) or commenting on "
-        f"https://issues.apache.org/jira/{jira}.")
+        f"{issue_url}")
 
   wrapper.__name__ = op
   wrapper.__doc__ = (
@@ -399,7 +435,7 @@ def not_implemented_method(op, jira='BEAM-9547', base_type=None):
       f"If support for {op!r} is important to you, please let the Beam "
       "community know by `writing to user@beam.apache.org "
       "<https://beam.apache.org/community/contact-us/>`_ or commenting on "
-      f"`{jira} <https://issues.apache.org/jira/{jira}>`_.")
+      f"`{issue} <{issue_url}>`_.")
 
   return wrapper
 
@@ -436,7 +472,7 @@ def maybe_inplace(func):
   return wrapper
 
 
-def args_to_kwargs(base_type):
+def args_to_kwargs(base_type, removed_method=False, removed_args=None):
   """Convert all args to kwargs before calling the decorated function.
 
   When applied to a function, this decorator creates a new function
@@ -445,18 +481,52 @@ def args_to_kwargs(base_type):
   determine the name to use for arguments that are converted to keyword
   arguments.
 
-  For internal use only. No backwards compatibility guarantees."""
+  For internal use only. No backwards compatibility guarantees.
+
+  Args:
+      base_type: The pandas type of the method that this is trying to replicate.
+      removed_method: Whether this method has been removed in the running
+           Pandas version.
+      removed_args: If not empty, which arguments have been dropped in the
+           running Pandas version.
+  """
   def wrap(func):
-    arg_names = getfullargspec(unwrap(getattr(base_type, func.__name__))).args
+    if removed_method:
+      # Do no processing, let Beam function itself raise the error if called.
+      return func
+
+    removed_arg_names = removed_args if removed_args is not None else []
+
+    # We would need to add position only arguments if they ever become a thing
+    # in Pandas (as of 2.1 currently they aren't).
+    base_arg_spec = getfullargspec(unwrap(getattr(base_type, func.__name__)))
+    base_arg_names = base_arg_spec.args
+    # Some arguments are keyword only and we still want to check against those.
+    all_possible_base_arg_names = base_arg_names + base_arg_spec.kwonlyargs
+    beam_arg_names = getfullargspec(func).args
+
+    if not_found := (set(beam_arg_names) - set(all_possible_base_arg_names) -
+                     set(removed_arg_names)):
+      raise TypeError(
+          f"Beam definition of {func.__name__} has arguments that are not found"
+          f" in the base version of the function: {not_found}")
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-      for name, value in zip(arg_names, args):
+      if len(args) > len(base_arg_names):
+        raise TypeError(f"{func.__name__} got too many positioned arguments.")
+
+      for name, value in zip(base_arg_names, args):
         if name in kwargs:
           raise TypeError(
               "%s() got multiple values for argument '%s'" %
               (func.__name__, name))
         kwargs[name] = value
+      # Still have to populate these for the Beam function signature.
+      if removed_args:
+        for name in removed_args:
+          if name not in kwargs:
+            kwargs[name] = None
       return func(**kwargs)
 
     return wrapper
@@ -485,14 +555,22 @@ EXAMPLES_DIFFERENCES = EXAMPLES_DISCLAIMER + (
     f"**{BEAM_SPECIFIC!r}** for details.")
 
 
-def with_docs_from(base_type, name=None):
+def with_docs_from(base_type, name=None, removed_method=False):
   """Decorator that updates the documentation from the wrapped function to
   duplicate the documentation from the identically-named method in `base_type`.
 
   Any docstring on the original function will be included in the new function
   under a "Differences from pandas" heading.
+
+  removed_method used in cases where a method has been removed in a later
+  version of Pandas.
   """
   def wrap(func):
+    if removed_method:
+      func.__doc__ = (
+          "This method has been removed in the current version of Pandas.")
+      return func
+
     fn_name = name or func.__name__
     orig_doc = getattr(base_type, fn_name).__doc__
     if orig_doc is None:
@@ -525,6 +603,21 @@ def with_docs_from(base_type, name=None):
              "    :skipif: True"),
             re.sub(r"^", "    ", content, flags=re.MULTILINE),
         ])
+      elif "Examples" in content and ">>>" in content:
+        # some new examples don't have the correct heading
+        # this catches those examples
+        split_content = content.split("Examples")
+        content = '\n\n'.join([
+            split_content[0],
+            "Examples\n",
+            # Indent the code snippet under a doctest heading,
+            # add skipif option. This makes sure our doctest
+            # framework doesn't run these pandas tests.
+            (".. doctest::\n"
+             "    :skipif: True"),
+            re.sub(r"^", "    ", content, flags=re.MULTILINE),
+            split_content[1]
+        ])
       else:
         content = content.replace('DataFrame', 'DeferredDataFrame').replace(
             'Series', 'DeferredSeries')
@@ -549,23 +642,39 @@ def with_docs_from(base_type, name=None):
   return wrap
 
 
-def populate_defaults(base_type):
+def populate_defaults(base_type, removed_method=False, removed_args=None):
   """Populate default values for keyword arguments in decorated function.
 
   When applied to a function, this decorator creates a new function
   with default values for all keyword arguments, based on the default values
   for the identically-named method on `base_type`.
 
-  For internal use only. No backwards compatibility guarantees."""
+  For internal use only. No backwards compatibility guarantees.
+
+  Args:
+      base_type: The pandas type of the method that this is trying to replicate.
+      removed_method: Whether this method has been removed in the running
+           Pandas version.
+      removed_args: If not empty, which arguments have been dropped in the
+           running Pandas version.
+  """
   def wrap(func):
-    base_argspec = getfullargspec(unwrap(getattr(base_type, func.__name__)))
-    if not base_argspec.defaults:
+    if removed_method:
       return func
 
-    arg_to_default = dict(
-        zip(
-            base_argspec.args[-len(base_argspec.defaults):],
-            base_argspec.defaults))
+    base_argspec = getfullargspec(unwrap(getattr(base_type, func.__name__)))
+    if not base_argspec.defaults and not base_argspec.kwonlydefaults:
+      return func
+
+    arg_to_default = {}
+    if base_argspec.defaults:
+      arg_to_default.update(
+          zip(
+              base_argspec.args[-len(base_argspec.defaults):],
+              base_argspec.defaults))
+
+    if base_argspec.kwonlydefaults:
+      arg_to_default.update(base_argspec.kwonlydefaults)
 
     unwrapped_func = unwrap(func)
     # args that do not have defaults in func, but do have defaults in base
@@ -574,12 +683,22 @@ def populate_defaults(base_type):
     defaults_to_populate = set(
         func_argspec.args[:num_non_defaults]).intersection(
             arg_to_default.keys())
+    if removed_args:
+      defaults_to_populate -= set(removed_args)
+
+    # In pandas 2, many methods rely on the default copy=None
+    # to mean that copy is the value of copy_on_write. Since
+    # copy_on_write will always be true for Beam, just fill it
+    # in here. In pandas 1, the default was True anyway.
+    if 'copy' in arg_to_default and arg_to_default['copy'] is None:
+      arg_to_default['copy'] = True
 
     @functools.wraps(func)
     def wrapper(**kwargs):
       for name in defaults_to_populate:
         if name not in kwargs:
           kwargs[name] = arg_to_default[name]
+
       return func(**kwargs)
 
     return wrapper

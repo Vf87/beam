@@ -25,6 +25,8 @@ import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.is;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -39,17 +41,26 @@ import com.google.api.services.dataflow.model.MetricStructuredName;
 import com.google.api.services.dataflow.model.MetricUpdate;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.util.Set;
+import org.apache.beam.model.pipeline.v1.MetricsApi.BoundedTrie;
+import org.apache.beam.runners.core.metrics.BoundedTrieData;
 import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
+import org.apache.beam.runners.dataflow.util.DataflowTemplateJob;
 import org.apache.beam.sdk.PipelineResult.State;
 import org.apache.beam.sdk.extensions.gcp.auth.TestCredential;
 import org.apache.beam.sdk.extensions.gcp.storage.NoopPathValidator;
+import org.apache.beam.sdk.metrics.BoundedTrieResult;
 import org.apache.beam.sdk.metrics.DistributionResult;
 import org.apache.beam.sdk.metrics.MetricQueryResults;
+import org.apache.beam.sdk.metrics.MetricsFilter;
+import org.apache.beam.sdk.metrics.StringSetResult;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.runners.AppliedPTransform;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.HashBiMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.BiMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.HashBiMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -60,7 +71,7 @@ import org.mockito.MockitoAnnotations;
 /** Tests for {@link DataflowMetrics}. */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class DataflowMetricsTest {
   private static final String PROJECT_ID = "some-project";
@@ -100,7 +111,7 @@ public class DataflowMetricsTest {
     when(options.isStreaming()).thenReturn(false);
     when(job.getDataflowOptions()).thenReturn(options);
     when(job.getState()).thenReturn(State.RUNNING);
-    job.jobId = JOB_ID;
+    when(job.getJobId()).thenReturn(JOB_ID);
 
     JobMetrics jobMetrics = new JobMetrics();
     jobMetrics.setMetrics(null /* this is how the APIs represent empty metrics */);
@@ -111,6 +122,8 @@ public class DataflowMetricsTest {
     MetricQueryResults result = dataflowMetrics.allMetrics();
     assertThat(ImmutableList.copyOf(result.getCounters()), is(empty()));
     assertThat(ImmutableList.copyOf(result.getDistributions()), is(empty()));
+    assertThat(ImmutableList.copyOf(result.getStringSets()), is(empty()));
+    assertThat(ImmutableList.copyOf(result.getBoundedTries()), is(empty()));
   }
 
   @Test
@@ -123,7 +136,7 @@ public class DataflowMetricsTest {
     when(options.isStreaming()).thenReturn(false);
     when(job.getDataflowOptions()).thenReturn(options);
     when(job.getState()).thenReturn(State.DONE);
-    job.jobId = JOB_ID;
+    when(job.getJobId()).thenReturn(JOB_ID);
 
     JobMetrics jobMetrics = new JobMetrics();
     jobMetrics.setMetrics(ImmutableList.of());
@@ -180,20 +193,35 @@ public class DataflowMetricsTest {
     return setStructuredName(update, name, namespace, step, tentative);
   }
 
+  private MetricUpdate makeStringSetMetricUpdate(
+      String name, String namespace, String step, Set<String> setValues, boolean tentative) {
+    MetricUpdate update = new MetricUpdate();
+    update.setSet(setValues);
+    return setStructuredName(update, name, namespace, step, tentative);
+  }
+
+  private MetricUpdate makeBoundedTrieMetricUpdate(
+      String name, String namespace, String step, BoundedTrie data, boolean tentative) {
+    MetricUpdate update = new MetricUpdate();
+    update.setBoundedTrie(data);
+    return setStructuredName(update, name, namespace, step, tentative);
+  }
+
   @Test
   public void testSingleCounterUpdates() throws IOException {
+    AppliedPTransform<?, ?, ?> myStep = mock(AppliedPTransform.class);
+    when(myStep.getFullName()).thenReturn("myStepName");
+    BiMap<AppliedPTransform<?, ?, ?>, String> transformStepNames = HashBiMap.create();
+    transformStepNames.put(myStep, "s2");
+
     JobMetrics jobMetrics = new JobMetrics();
     DataflowPipelineJob job = mock(DataflowPipelineJob.class);
     DataflowPipelineOptions options = mock(DataflowPipelineOptions.class);
     when(options.isStreaming()).thenReturn(false);
     when(job.getDataflowOptions()).thenReturn(options);
     when(job.getState()).thenReturn(State.RUNNING);
-    job.jobId = JOB_ID;
-
-    AppliedPTransform<?, ?, ?> myStep = mock(AppliedPTransform.class);
-    when(myStep.getFullName()).thenReturn("myStepName");
-    job.transformStepNames = HashBiMap.create();
-    job.transformStepNames.put(myStep, "s2");
+    when(job.getJobId()).thenReturn(JOB_ID);
+    when(job.getTransformStepNames()).thenReturn(transformStepNames);
 
     MetricUpdate update = new MetricUpdate();
     long stepValue = 1234L;
@@ -222,7 +250,152 @@ public class DataflowMetricsTest {
   }
 
   @Test
+  public void testSingleStringSetUpdates() throws IOException {
+    AppliedPTransform<?, ?, ?> myStep = mock(AppliedPTransform.class);
+    when(myStep.getFullName()).thenReturn("myStepName");
+    BiMap<AppliedPTransform<?, ?, ?>, String> transformStepNames = HashBiMap.create();
+    transformStepNames.put(myStep, "s2");
+
+    JobMetrics jobMetrics = new JobMetrics();
+    DataflowPipelineJob job = mock(DataflowPipelineJob.class);
+    DataflowPipelineOptions options = mock(DataflowPipelineOptions.class);
+    when(options.isStreaming()).thenReturn(false);
+    when(job.getDataflowOptions()).thenReturn(options);
+    when(job.getState()).thenReturn(State.RUNNING);
+    when(job.getJobId()).thenReturn(JOB_ID);
+    when(job.getTransformStepNames()).thenReturn(transformStepNames);
+
+    // The parser relies on the fact that one tentative and one committed metric update exist in
+    // the job metrics results.
+    MetricUpdate mu1 =
+        makeStringSetMetricUpdate(
+            "counterName", "counterNamespace", "s2", ImmutableSet.of("ab", "cd"), false);
+    MetricUpdate mu1Tentative =
+        makeStringSetMetricUpdate(
+            "counterName", "counterNamespace", "s2", ImmutableSet.of("ab", "cd"), true);
+    jobMetrics.setMetrics(ImmutableList.of(mu1, mu1Tentative));
+    DataflowClient dataflowClient = mock(DataflowClient.class);
+    when(dataflowClient.getJobMetrics(JOB_ID)).thenReturn(jobMetrics);
+
+    DataflowMetrics dataflowMetrics = new DataflowMetrics(job, dataflowClient);
+    MetricQueryResults result = dataflowMetrics.allMetrics();
+    assertThat(
+        result.getStringSets(),
+        containsInAnyOrder(
+            attemptedMetricsResult(
+                "counterNamespace",
+                "counterName",
+                "myStepName",
+                StringSetResult.create(ImmutableSet.of("ab", "cd")))));
+    assertThat(
+        result.getStringSets(),
+        containsInAnyOrder(
+            committedMetricsResult(
+                "counterNamespace",
+                "counterName",
+                "myStepName",
+                StringSetResult.create(ImmutableSet.of("ab", "cd")))));
+  }
+
+  @Test
+  public void testParseBoundedTrieWithSingleton() {
+    ArrayMap arrayMap = ArrayMap.create();
+    arrayMap.put("bound", 100);
+    arrayMap.put(
+        "singleton", ImmutableList.of("pubsub:", "topic:", "`google.com:abc`.", "some-topic"));
+
+    BoundedTrieData result =
+        DataflowMetrics.DataflowMetricResultExtractor.trieFromArrayMap(arrayMap);
+    assertEquals(
+        "BoundedTrieData({'pubsub:topic:`google.com:abc`.some-topicfalse'})", result.toString());
+  }
+
+  @Test
+  @SuppressWarnings("unchecked") // assemble ArrayMap from scratch for testing
+  public void testParseBoundedTrieWithRoot() {
+    ArrayMap arrayMap = ArrayMap.create();
+    arrayMap.put("bound", 100);
+    ArrayMap root = ArrayMap.create();
+    root.put("truncated", false);
+    ArrayMap children = ArrayMap.create();
+    ArrayMap leaf = ArrayMap.create();
+    leaf.put("1", ArrayMap.of("truncated", false));
+    leaf.put("2", ArrayMap.of("truncated", false));
+    leaf.put("3", ArrayMap.of("truncated", false));
+    children.put("gcs:some-bucket.some-folder/", leaf);
+    root.put("children", children);
+    arrayMap.put("root", root);
+
+    BoundedTrieData result =
+        DataflowMetrics.DataflowMetricResultExtractor.trieFromArrayMap(arrayMap);
+    assertEquals("BoundedTrieData({'gcs:some-bucket.some-folder/false'})", result.toString());
+  }
+
+  @Test
+  public void testSingleBoundedTrieUpdates() throws IOException {
+    AppliedPTransform<?, ?, ?> myStep = mock(AppliedPTransform.class);
+    when(myStep.getFullName()).thenReturn("myStepName");
+    BiMap<AppliedPTransform<?, ?, ?>, String> transformStepNames = HashBiMap.create();
+    transformStepNames.put(myStep, "s2");
+
+    JobMetrics jobMetrics = new JobMetrics();
+    DataflowPipelineJob job = mock(DataflowPipelineJob.class);
+    DataflowPipelineOptions options = mock(DataflowPipelineOptions.class);
+    when(options.isStreaming()).thenReturn(false);
+    when(job.getDataflowOptions()).thenReturn(options);
+    when(job.getState()).thenReturn(State.RUNNING);
+    when(job.getJobId()).thenReturn(JOB_ID);
+    when(job.getTransformStepNames()).thenReturn(transformStepNames);
+
+    // The parser relies on the fact that one tentative and one committed metric update exist in
+    // the job metrics results.
+    MetricUpdate mu1 =
+        makeBoundedTrieMetricUpdate(
+            "counterName",
+            "counterNamespace",
+            "s2",
+            new BoundedTrieData(ImmutableList.of("ab", "cd")).toProto(),
+            false);
+    MetricUpdate mu1Tentative =
+        makeBoundedTrieMetricUpdate(
+            "counterName",
+            "counterNamespace",
+            "s2",
+            new BoundedTrieData(ImmutableList.of("ab", "cd")).toProto(),
+            true);
+    jobMetrics.setMetrics(ImmutableList.of(mu1, mu1Tentative));
+    DataflowClient dataflowClient = mock(DataflowClient.class);
+    when(dataflowClient.getJobMetrics(JOB_ID)).thenReturn(jobMetrics);
+
+    DataflowMetrics dataflowMetrics = new DataflowMetrics(job, dataflowClient);
+    MetricQueryResults result = dataflowMetrics.allMetrics();
+    assertThat(
+        result.getBoundedTries(),
+        containsInAnyOrder(
+            attemptedMetricsResult(
+                "counterNamespace",
+                "counterName",
+                "myStepName",
+                BoundedTrieResult.create(
+                    ImmutableSet.of(ImmutableList.of("ab", "cd", String.valueOf(false)))))));
+    assertThat(
+        result.getBoundedTries(),
+        containsInAnyOrder(
+            committedMetricsResult(
+                "counterNamespace",
+                "counterName",
+                "myStepName",
+                BoundedTrieResult.create(
+                    ImmutableSet.of(ImmutableList.of("ab", "cd", String.valueOf(false)))))));
+  }
+
+  @Test
   public void testIgnoreDistributionButGetCounterUpdates() throws IOException {
+    AppliedPTransform<?, ?, ?> myStep = mock(AppliedPTransform.class);
+    when(myStep.getFullName()).thenReturn("myStepName");
+    BiMap<AppliedPTransform<?, ?, ?>, String> transformStepNames = HashBiMap.create();
+    transformStepNames.put(myStep, "s2");
+
     JobMetrics jobMetrics = new JobMetrics();
     DataflowClient dataflowClient = mock(DataflowClient.class);
     when(dataflowClient.getJobMetrics(JOB_ID)).thenReturn(jobMetrics);
@@ -231,12 +404,8 @@ public class DataflowMetricsTest {
     when(options.isStreaming()).thenReturn(false);
     when(job.getDataflowOptions()).thenReturn(options);
     when(job.getState()).thenReturn(State.RUNNING);
-    job.jobId = JOB_ID;
-
-    AppliedPTransform<?, ?, ?> myStep = mock(AppliedPTransform.class);
-    when(myStep.getFullName()).thenReturn("myStepName");
-    job.transformStepNames = HashBiMap.create();
-    job.transformStepNames.put(myStep, "s2");
+    when(job.getJobId()).thenReturn(JOB_ID);
+    when(job.getTransformStepNames()).thenReturn(transformStepNames);
 
     // The parser relies on the fact that one tentative and one committed metric update exist in
     // the job metrics results.
@@ -261,6 +430,11 @@ public class DataflowMetricsTest {
 
   @Test
   public void testDistributionUpdates() throws IOException {
+    AppliedPTransform<?, ?, ?> myStep2 = mock(AppliedPTransform.class);
+    when(myStep2.getFullName()).thenReturn("myStepName");
+    BiMap<AppliedPTransform<?, ?, ?>, String> transformStepNames = HashBiMap.create();
+    transformStepNames.put(myStep2, "s2");
+
     JobMetrics jobMetrics = new JobMetrics();
     DataflowClient dataflowClient = mock(DataflowClient.class);
     when(dataflowClient.getJobMetrics(JOB_ID)).thenReturn(jobMetrics);
@@ -269,12 +443,8 @@ public class DataflowMetricsTest {
     when(options.isStreaming()).thenReturn(false);
     when(job.getDataflowOptions()).thenReturn(options);
     when(job.getState()).thenReturn(State.RUNNING);
-    job.jobId = JOB_ID;
-
-    AppliedPTransform<?, ?, ?> myStep2 = mock(AppliedPTransform.class);
-    when(myStep2.getFullName()).thenReturn("myStepName");
-    job.transformStepNames = HashBiMap.create();
-    job.transformStepNames.put(myStep2, "s2");
+    when(job.getJobId()).thenReturn(JOB_ID);
+    when(job.getTransformStepNames()).thenReturn(transformStepNames);
 
     // The parser relies on the fact that one tentative and one committed metric update exist in
     // the job metrics results.
@@ -307,6 +477,11 @@ public class DataflowMetricsTest {
 
   @Test
   public void testDistributionUpdatesStreaming() throws IOException {
+    AppliedPTransform<?, ?, ?> myStep2 = mock(AppliedPTransform.class);
+    when(myStep2.getFullName()).thenReturn("myStepName");
+    BiMap<AppliedPTransform<?, ?, ?>, String> transformStepNames = HashBiMap.create();
+    transformStepNames.put(myStep2, "s2");
+
     JobMetrics jobMetrics = new JobMetrics();
     DataflowClient dataflowClient = mock(DataflowClient.class);
     when(dataflowClient.getJobMetrics(JOB_ID)).thenReturn(jobMetrics);
@@ -315,12 +490,8 @@ public class DataflowMetricsTest {
     when(options.isStreaming()).thenReturn(true);
     when(job.getDataflowOptions()).thenReturn(options);
     when(job.getState()).thenReturn(State.RUNNING);
-    job.jobId = JOB_ID;
-
-    AppliedPTransform<?, ?, ?> myStep2 = mock(AppliedPTransform.class);
-    when(myStep2.getFullName()).thenReturn("myStepName");
-    job.transformStepNames = HashBiMap.create();
-    job.transformStepNames.put(myStep2, "s2");
+    when(job.getJobId()).thenReturn(JOB_ID);
+    when(job.getTransformStepNames()).thenReturn(transformStepNames);
 
     // The parser relies on the fact that one tentative and one committed metric update exist in
     // the job metrics results.
@@ -355,6 +526,17 @@ public class DataflowMetricsTest {
 
   @Test
   public void testMultipleCounterUpdates() throws IOException {
+    AppliedPTransform<?, ?, ?> myStep2 = mock(AppliedPTransform.class);
+    when(myStep2.getFullName()).thenReturn("myStepName");
+    BiMap<AppliedPTransform<?, ?, ?>, String> transformStepNames = HashBiMap.create();
+    transformStepNames.put(myStep2, "s2");
+    AppliedPTransform<?, ?, ?> myStep3 = mock(AppliedPTransform.class);
+    when(myStep3.getFullName()).thenReturn("myStepName3");
+    transformStepNames.put(myStep3, "s3");
+    AppliedPTransform<?, ?, ?> myStep4 = mock(AppliedPTransform.class);
+    when(myStep4.getFullName()).thenReturn("myStepName4");
+    transformStepNames.put(myStep4, "s4");
+
     JobMetrics jobMetrics = new JobMetrics();
     DataflowClient dataflowClient = mock(DataflowClient.class);
     when(dataflowClient.getJobMetrics(JOB_ID)).thenReturn(jobMetrics);
@@ -363,18 +545,8 @@ public class DataflowMetricsTest {
     when(options.isStreaming()).thenReturn(false);
     when(job.getDataflowOptions()).thenReturn(options);
     when(job.getState()).thenReturn(State.RUNNING);
-    job.jobId = JOB_ID;
-
-    AppliedPTransform<?, ?, ?> myStep2 = mock(AppliedPTransform.class);
-    when(myStep2.getFullName()).thenReturn("myStepName");
-    job.transformStepNames = HashBiMap.create();
-    job.transformStepNames.put(myStep2, "s2");
-    AppliedPTransform<?, ?, ?> myStep3 = mock(AppliedPTransform.class);
-    when(myStep3.getFullName()).thenReturn("myStepName3");
-    job.transformStepNames.put(myStep3, "s3");
-    AppliedPTransform<?, ?, ?> myStep4 = mock(AppliedPTransform.class);
-    when(myStep4.getFullName()).thenReturn("myStepName4");
-    job.transformStepNames.put(myStep4, "s4");
+    when(job.getJobId()).thenReturn(JOB_ID);
+    when(job.getTransformStepNames()).thenReturn(transformStepNames);
 
     // The parser relies on the fact that one tentative and one committed metric update exist in
     // the job metrics results.
@@ -408,6 +580,17 @@ public class DataflowMetricsTest {
 
   @Test
   public void testMultipleCounterUpdatesStreaming() throws IOException {
+    AppliedPTransform<?, ?, ?> myStep2 = mock(AppliedPTransform.class);
+    when(myStep2.getFullName()).thenReturn("myStepName");
+    BiMap<AppliedPTransform<?, ?, ?>, String> transformStepNames = HashBiMap.create();
+    transformStepNames.put(myStep2, "s2");
+    AppliedPTransform<?, ?, ?> myStep3 = mock(AppliedPTransform.class);
+    when(myStep3.getFullName()).thenReturn("myStepName3");
+    transformStepNames.put(myStep3, "s3");
+    AppliedPTransform<?, ?, ?> myStep4 = mock(AppliedPTransform.class);
+    when(myStep4.getFullName()).thenReturn("myStepName4");
+    transformStepNames.put(myStep4, "s4");
+
     JobMetrics jobMetrics = new JobMetrics();
     DataflowClient dataflowClient = mock(DataflowClient.class);
     when(dataflowClient.getJobMetrics(JOB_ID)).thenReturn(jobMetrics);
@@ -416,18 +599,8 @@ public class DataflowMetricsTest {
     when(options.isStreaming()).thenReturn(true);
     when(job.getDataflowOptions()).thenReturn(options);
     when(job.getState()).thenReturn(State.RUNNING);
-    job.jobId = JOB_ID;
-
-    AppliedPTransform<?, ?, ?> myStep2 = mock(AppliedPTransform.class);
-    when(myStep2.getFullName()).thenReturn("myStepName");
-    job.transformStepNames = HashBiMap.create();
-    job.transformStepNames.put(myStep2, "s2");
-    AppliedPTransform<?, ?, ?> myStep3 = mock(AppliedPTransform.class);
-    when(myStep3.getFullName()).thenReturn("myStepName3");
-    job.transformStepNames.put(myStep3, "s3");
-    AppliedPTransform<?, ?, ?> myStep4 = mock(AppliedPTransform.class);
-    when(myStep4.getFullName()).thenReturn("myStepName4");
-    job.transformStepNames.put(myStep4, "s4");
+    when(job.getJobId()).thenReturn(JOB_ID);
+    when(job.getTransformStepNames()).thenReturn(transformStepNames);
 
     // The parser relies on the fact that one tentative and one committed metric update exist in
     // the job metrics results.
@@ -458,5 +631,20 @@ public class DataflowMetricsTest {
             attemptedMetricsResult("counterNamespace", "counterName", "myStepName", 1233L),
             attemptedMetricsResult("otherNamespace", "otherCounter", "myStepName3", 12L),
             attemptedMetricsResult("otherNamespace", "counterName", "myStepName4", 1200L)));
+  }
+
+  @Test
+  public void testTemplateJobMetricsThrowsUsefulError() throws Exception {
+    DataflowClient dataflowClient = mock(DataflowClient.class);
+    DataflowMetrics metrics = new DataflowMetrics(new DataflowTemplateJob(), dataflowClient);
+
+    assertThrows(
+        "The result of template creation should not be used.",
+        UnsupportedOperationException.class,
+        () -> metrics.allMetrics());
+    assertThrows(
+        "The result of template creation should not be used.",
+        UnsupportedOperationException.class,
+        () -> metrics.queryMetrics(MetricsFilter.builder().build()));
   }
 }

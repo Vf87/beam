@@ -23,8 +23,9 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertNotNull;
 
 import java.io.IOException;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.Collections;
-import java.util.Date;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.PipelineResult.State;
@@ -41,7 +42,7 @@ import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.testing.TestPipelineOptions;
 import org.apache.beam.sdk.testing.UsesKms;
 import org.apache.beam.sdk.util.NumberedShardedFile;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
@@ -70,13 +71,16 @@ public class GcsKmsKeyIT {
     TestPipelineOptions options =
         TestPipeline.testingPipelineOptions().as(TestPipelineOptions.class);
     assertNotNull(options.getTempRoot());
-    options.setTempLocation(options.getTempRoot() + "/testGcsWriteWithKmsKey");
+    options.setTempLocation(
+        FileSystems.matchNewDirectory(options.getTempRoot(), "testGcsWriteWithKmsKey").toString());
     GcsOptions gcsOptions = options.as(GcsOptions.class);
 
     ResourceId filenamePrefix =
         FileSystems.matchNewResource(gcsOptions.getGcpTempLocation(), true)
             .resolve(
-                String.format("GcsKmsKeyIT-%tF-%<tH-%<tM-%<tS-%<tL.output", new Date()),
+                String.format(
+                    "GcsKmsKeyIT-%tF-%<tH-%<tM-%<tS-%<tL.output",
+                    LocalDateTime.now(ZoneId.of("UTC"))),
                 StandardResolveOptions.RESOLVE_FILE);
 
     Pipeline p = Pipeline.create(options);

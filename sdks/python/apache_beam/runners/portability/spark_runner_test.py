@@ -29,6 +29,8 @@ from apache_beam.options.pipeline_options import PortableOptions
 from apache_beam.runners.portability import job_server
 from apache_beam.runners.portability import portable_runner
 from apache_beam.runners.portability import portable_runner_test
+from apache_beam.runners.portability.spark_runner import SPARK_JAR_JOB_SERVER_JVM_ARGS
+from apache_beam.utils import subprocess_server
 
 # Run as
 #
@@ -84,7 +86,7 @@ class SparkRunnerTest(portable_runner_test.PortableRunnerTest):
     self.set_spark_job_server_jar(
         known_args.spark_job_server_jar or
         job_server.JavaJarJobServer.path_to_beam_jar(
-            ':runners:spark:2:job-server:shadowJar'))
+            ':runners:spark:3:job-server:shadowJar'))
     self.environment_type = known_args.environment_type
     self.environment_options = known_args.environment_options
 
@@ -98,7 +100,8 @@ class SparkRunnerTest(portable_runner_test.PortableRunnerTest):
 
     try:
       return [
-          'java',
+          subprocess_server.JavaHelper.get_java(),
+          *SPARK_JAR_JOB_SERVER_JVM_ARGS,
           '-Dbeam.spark.test.reuseSparkContext=true',
           '-jar',
           cls.spark_job_server_jar,
@@ -139,46 +142,43 @@ class SparkRunnerTest(portable_runner_test.PortableRunnerTest):
 
   def test_metrics(self):
     # Skip until Spark runner supports metrics.
-    raise unittest.SkipTest("BEAM-7219")
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/19496")
 
-  def test_sdf(self):
+  def test_unbounded_source_read(self):
     # Skip until Spark runner supports SDF.
-    raise unittest.SkipTest("BEAM-7222")
-
-  def test_sdf_with_watermark_tracking(self):
-    # Skip until Spark runner supports SDF.
-    raise unittest.SkipTest("BEAM-7222")
-
-  def test_sdf_with_sdf_initiated_checkpointing(self):
-    # Skip until Spark runner supports SDF.
-    raise unittest.SkipTest("BEAM-7222")
-
-  def test_sdf_synthetic_source(self):
-    # Skip until Spark runner supports SDF.
-    raise unittest.SkipTest("BEAM-7222")
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/19468")
 
   def test_callbacks_with_exception(self):
     # Skip until Spark runner supports bundle finalization.
-    raise unittest.SkipTest("BEAM-7233")
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/19517")
 
   def test_register_finalizations(self):
     # Skip until Spark runner supports bundle finalization.
-    raise unittest.SkipTest("BEAM-7233")
-
-  def test_sdf_with_dofn_as_watermark_estimator(self):
-    # Skip until Spark runner supports SDF and self-checkpoint.
-    raise unittest.SkipTest("BEAM-7222")
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/19517")
 
   def test_pardo_dynamic_timer(self):
-    raise unittest.SkipTest("BEAM-9912")
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/20179")
 
   def test_flattened_side_input(self):
     # Blocked on support for transcoding
-    # https://jira.apache.org/jira/browse/BEAM-7236
+    # https://github.com/apache/beam/issues/19504
     super().test_flattened_side_input(with_transcoding=False)
 
+  def test_flatten_and_gbk(self):
+    # Blocked on support for transcoding
+    # https://github.com/apache/beam/issues/19504
+    # Also blocked on support of flatten and groupby sharing the same input
+    # https://github.com/apache/beam/issues/34647
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/34647")
+
   def test_custom_merging_window(self):
-    raise unittest.SkipTest("BEAM-11004")
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/20641")
+
+  def test_custom_window_type(self):
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/20641")
+
+  def test_sliding_windows(self):
+    raise unittest.SkipTest("https://github.com/apache/beam/issues/35429")
 
   # Inherits all other tests from PortableRunnerTest.
 

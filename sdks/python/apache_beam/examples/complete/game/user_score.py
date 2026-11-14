@@ -56,6 +56,25 @@ python user_score.py \
 
 # pytype: skip-file
 
+# beam-playground:
+#   name: UserScore
+#   description: batch processing; reading input from Google Cloud Storage or a
+#     from a local text file, and writing output to a text file; using
+#     standalone DoFns; use of the CombinePerKey transform.
+#   multifile: false
+#   pipeline_options: --output output.txt
+#   context_line: 174
+#   categories:
+#     - Batch
+#     - Combiners
+#     - Options
+#   complexity: ADVANCED
+#   tags:
+#     - batch
+#     - combine
+#     - io
+#     - strings
+
 import argparse
 import csv
 import logging
@@ -78,9 +97,7 @@ class ParseGameEventFn(beam.DoFn):
   The human-readable time string is not used here.
   """
   def __init__(self):
-    # TODO(BEAM-6158): Revert the workaround once we can pickle super() on py3.
-    # super().__init__()
-    beam.DoFn.__init__(self)
+    super().__init__()
     self.num_parse_errors = Metrics.counter(self.__class__, 'num_parse_errors')
 
   def process(self, elem):
@@ -105,9 +122,8 @@ class ExtractAndSumScore(beam.PTransform):
   extracted.
   """
   def __init__(self, field):
-    # TODO(BEAM-6158): Revert the workaround once we can pickle super() on py3.
-    # super().__init__()
-    beam.PTransform.__init__(self)
+    super().__init__()
+
     self.field = field
 
   def expand(self, pcoll):
@@ -139,7 +155,7 @@ def run(argv=None, save_main_session=True):
   parser.add_argument(
       '--input',
       type=str,
-      default='gs://apache-beam-samples/game/gaming_data*.csv',
+      default='gs://apache-beam-samples/game/small/gaming_data.csv',
       help='Path to the data file(s) containing game data.')
   parser.add_argument(
       '--output', type=str, required=True, help='Path to the output file(s).')
@@ -157,6 +173,7 @@ def run(argv=None, save_main_session=True):
     def format_user_score_sums(user_score):
       (user, score) = user_score
       return 'user: %s, total_score: %s' % (user, score)
+
 
     (  # pylint: disable=expression-not-assigned
         p

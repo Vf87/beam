@@ -19,15 +19,15 @@ package org.apache.beam.sdk.io.gcp.pubsub;
 
 import static java.util.stream.Collectors.toList;
 import static org.apache.beam.sdk.io.gcp.pubsub.PubsubSchemaIOProvider.ATTRIBUTE_ARRAY_ENTRY_SCHEMA;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.sdk.util.Preconditions.checkArgumentNotNull;
+import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.auto.value.AutoValue;
 import java.io.Serializable;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
-import javax.annotation.Nullable;
-import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.annotations.Internal;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.TypeName;
@@ -41,16 +41,13 @@ import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
 /** Read side converter for {@link PubsubMessage} with JSON/AVRO payload. */
 @Internal
-@Experimental
 @AutoValue
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 abstract class PubsubMessageToRow extends PTransform<PCollection<PubsubMessage>, PCollectionTuple>
     implements Serializable {
   interface SerializerProvider extends SerializableFunction<Schema, PayloadSerializer> {}
@@ -96,7 +93,10 @@ abstract class PubsubMessageToRow extends PTransform<PCollection<PubsubMessage>,
             ParDo.of(
                     useFlatSchema()
                         ? new FlatSchemaPubsubMessageToRow(
-                            messageSchema(), useDlq(), serializerProvider())
+                            messageSchema(),
+                            useDlq(),
+                            checkArgumentNotNull(
+                                serializerProvider(), "Flat schema requires serializerProvider"))
                         : new NestedSchemaPubsubMessageToRow(
                             messageSchema(), useDlq(), serializerProvider()))
                 .withOutputTags(
@@ -135,7 +135,8 @@ abstract class PubsubMessageToRow extends PTransform<PCollection<PubsubMessage>,
      * Get the value for a field from a given payload in the order they're specified in the flat
      * schema.
      */
-    private Object getValueForFieldFlatSchema(Schema.Field field, Instant timestamp, Row payload) {
+    private @Nullable Object getValueForFieldFlatSchema(
+        Schema.Field field, Instant timestamp, Row payload) {
       String fieldName = field.getName();
       if (TIMESTAMP_FIELD.equals(fieldName)) {
         return timestamp;
@@ -149,9 +150,10 @@ abstract class PubsubMessageToRow extends PTransform<PCollection<PubsubMessage>,
         @Element PubsubMessage element, @Timestamp Instant timestamp, MultiOutputReceiver o) {
       try {
         Row payload = payloadSerializer.deserialize(element.getPayload());
-        List<Object> values =
+        List<@Nullable Object> values =
             messageSchema.getFields().stream()
-                .map(field -> getValueForFieldFlatSchema(field, timestamp, payload))
+                .<@Nullable Object>map(
+                    field -> getValueForFieldFlatSchema(field, timestamp, payload))
                 .collect(toList());
         o.get(MAIN_TAG).output(Row.withSchema(messageSchema).addValues(values).build());
       } catch (Exception e) {
@@ -188,7 +190,8 @@ abstract class PubsubMessageToRow extends PTransform<PCollection<PubsubMessage>,
       } else {
         checkArgument(
             messageSchema.getField(PAYLOAD_FIELD).getType().getTypeName().equals(TypeName.ROW));
-        Schema payloadSchema = messageSchema.getField(PAYLOAD_FIELD).getType().getRowSchema();
+        Schema payloadSchema =
+            checkStateNotNull(messageSchema.getField(PAYLOAD_FIELD).getType().getRowSchema());
         this.payloadSerializer = serializerProvider.apply(payloadSchema);
       }
     }
@@ -200,7 +203,13 @@ abstract class PubsubMessageToRow extends PTransform<PCollection<PubsubMessage>,
       return payloadSerializer.deserialize(payload);
     }
 
-    private Object handleAttributes(Map<String, String> attributeMap) {
+    private @Nullable Object handleAttributes(@Nullable Map<String, String> attributeMap) {
+      if (attributeMap == null) {
+        if (messageSchema.getField(ATTRIBUTES_FIELD).getType().getTypeName().isMapType()) {
+          return null;
+        }
+        return ImmutableList.of();
+      }
       if (messageSchema.getField(ATTRIBUTES_FIELD).getType().getTypeName().isMapType()) {
         return attributeMap;
       }
@@ -211,8 +220,11 @@ abstract class PubsubMessageToRow extends PTransform<PCollection<PubsubMessage>,
     }
 
     /** Get the value for a field int the order they're specified in the nested schema. */
-    private Object getValueForFieldNestedSchema(
-        Schema.Field field, Instant timestamp, Map<String, String> attributeMap, byte[] payload) {
+    private @Nullable Object getValueForFieldNestedSchema(
+        Schema.Field field,
+        Instant timestamp,
+        @Nullable Map<String, String> attributeMap,
+        byte[] payload) {
       switch (field.getName()) {
         case TIMESTAMP_FIELD:
           return timestamp;
@@ -234,9 +246,9 @@ abstract class PubsubMessageToRow extends PTransform<PCollection<PubsubMessage>,
     public void processElement(
         @Element PubsubMessage element, @Timestamp Instant timestamp, MultiOutputReceiver o) {
       try {
-        List<Object> values =
+        List<@Nullable Object> values =
             messageSchema.getFields().stream()
-                .map(
+                .<@Nullable Object>map(
                     field ->
                         getValueForFieldNestedSchema(
                             field, timestamp, element.getAttributeMap(), element.getPayload()))

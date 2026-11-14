@@ -24,8 +24,8 @@ import java.util.ServiceLoader;
 import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsRegistrar;
 import org.apache.beam.sdk.runners.PipelineRunnerRegistrar;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -37,14 +37,14 @@ public class DataflowPipelineRegistrarTest {
   public void testCorrectOptionsAreReturned() {
     assertEquals(
         ImmutableList.of(DataflowPipelineOptions.class),
-        new DataflowPipelineRegistrar.Options().getPipelineOptions());
+        Lists.newArrayList(new DataflowPipelineRegistrar.Options().getPipelineOptions()));
   }
 
   @Test
   public void testCorrectRunnersAreReturned() {
     assertEquals(
         ImmutableList.of(DataflowRunner.class, TestDataflowRunner.class),
-        new DataflowPipelineRegistrar.Runner().getPipelineRunners());
+        Lists.newArrayList(new DataflowPipelineRegistrar.Runner().getPipelineRunners()));
   }
 
   @Test

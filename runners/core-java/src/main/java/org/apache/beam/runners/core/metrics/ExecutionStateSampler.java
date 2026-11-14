@@ -17,43 +17,42 @@
  */
 package org.apache.beam.runners.core.metrics;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.Closeable;
-import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import javax.annotation.concurrent.GuardedBy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.DateTimeUtils.MillisProvider;
 
 /** Monitors the execution of one or more execution threads. */
 public class ExecutionStateSampler {
 
-  // We use a synchronized data structure (as opposed to a concurrent one) since synchronization
-  // is necessary to prevent races between tracker removal and the sampling thread iteration.
-  @GuardedBy("this")
-  private final HashSet<ExecutionStateTracker> activeTrackers = new HashSet<>();
+  private final Set<ExecutionStateTracker> activeTrackers = ConcurrentHashMap.newKeySet();
 
   private static final MillisProvider SYSTEM_MILLIS_PROVIDER = System::currentTimeMillis;
 
   private static final ExecutionStateSampler INSTANCE =
       new ExecutionStateSampler(SYSTEM_MILLIS_PROVIDER);
 
-  private final MillisProvider clock;
-  @VisibleForTesting volatile long lastSampleTimeMillis;
+  protected final MillisProvider clock;
+  @VisibleForTesting protected volatile long lastSampleTimeMillis;
 
-  private ExecutionStateSampler(MillisProvider clock) {
+  protected ExecutionStateSampler(MillisProvider clock) {
     this.clock = clock;
   }
 
+  @SuppressFBWarnings("MS_EXPOSE_REP") // singleton
   public static ExecutionStateSampler instance() {
     return INSTANCE;
   }
@@ -130,6 +129,7 @@ public class ExecutionStateSampler {
   }
 
   public synchronized void stop() {
+    final Future<Void> executionSamplerFuture = this.executionSamplerFuture;
     if (executionSamplerFuture == null) {
       return;
     }
@@ -145,20 +145,18 @@ public class ExecutionStateSampler {
     } catch (ExecutionException e) {
       throw new RuntimeException("Exception in state sampler", e);
     } finally {
-      executionSamplerFuture = null;
+      this.executionSamplerFuture = null;
     }
   }
 
   /** Add the tracker to the sampling set. */
-  synchronized void addTracker(ExecutionStateTracker tracker) {
+  protected void addTracker(ExecutionStateTracker tracker) {
     this.activeTrackers.add(tracker);
   }
 
   /** Remove the tracker from the sampling set. */
-  void removeTracker(ExecutionStateTracker tracker) {
-    synchronized (this) {
-      activeTrackers.remove(tracker);
-    }
+  protected void removeTracker(ExecutionStateTracker tracker) {
+    activeTrackers.remove(tracker);
 
     // Attribute any remaining time since the last sampling while removing the tracker.
     //
@@ -174,7 +172,7 @@ public class ExecutionStateSampler {
 
   /** Attributing sampling time to trackers. */
   @VisibleForTesting
-  public synchronized void doSampling(long millisSinceLastSample) {
+  public void doSampling(long millisSinceLastSample) {
     for (ExecutionStateTracker tracker : activeTrackers) {
       tracker.takeSample(millisSinceLastSample);
     }

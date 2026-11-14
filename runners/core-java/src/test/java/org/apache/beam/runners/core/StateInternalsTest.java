@@ -49,10 +49,8 @@ import org.apache.beam.sdk.state.ValueState;
 import org.apache.beam.sdk.state.WatermarkHoldState;
 import org.apache.beam.sdk.transforms.CombineWithContext;
 import org.apache.beam.sdk.transforms.Sum;
-import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.TimestampCombiner;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.hamcrest.Matchers;
 import org.joda.time.Instant;
@@ -62,7 +60,6 @@ import org.junit.Test;
 /** Tests for {@link StateInternals}. */
 public abstract class StateInternalsTest {
 
-  private static final BoundedWindow WINDOW_1 = new IntervalWindow(new Instant(0), new Instant(10));
   private static final StateNamespace NAMESPACE_1 = new StateNamespaceForTest("ns1");
   private static final StateNamespace NAMESPACE_2 = new StateNamespaceForTest("ns2");
   private static final StateNamespace NAMESPACE_3 = new StateNamespaceForTest("ns3");
@@ -228,6 +225,11 @@ public abstract class StateInternalsTest {
     assertThat(later.read(), hasItems("C", "D"));
     assertFalse(later.contains("A").read());
 
+    value.remove("B");
+    value.remove("C");
+    value.remove("D");
+    assertTrue(value.isEmpty().read());
+
     // clear
     value.clear();
     assertThat(value.read(), Matchers.emptyIterable());
@@ -389,10 +391,21 @@ public abstract class StateInternalsTest {
         value.entries().readLater().read(),
         containsInAnyOrder(MapEntry.of("B", 2), MapEntry.of("D", 4), MapEntry.of("E", 5)));
 
+    // isEmpty
+    assertFalse(value.isEmpty().read());
+
+    value.remove("B");
+    value.remove("D");
+    value.remove("E");
+    assertTrue(value.isEmpty().read());
+
     // clear
     value.clear();
     assertThat(value.entries().read(), Matchers.emptyIterable());
     assertThat(underTest.state(NAMESPACE_1, STRING_MAP_ADDR), equalTo(value));
+
+    // isEmpty
+    assertTrue(value.isEmpty().read());
   }
 
   @Test

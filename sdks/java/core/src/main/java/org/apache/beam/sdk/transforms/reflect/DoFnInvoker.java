@@ -41,8 +41,11 @@ import org.apache.beam.sdk.transforms.splittabledofn.RestrictionTracker.Truncate
 import org.apache.beam.sdk.transforms.splittabledofn.WatermarkEstimator;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
+import org.apache.beam.sdk.values.CausedByDrain;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.sdk.values.ValueKind;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
 /**
@@ -96,7 +99,7 @@ public interface DoFnInvoker<InputT, OutputT> {
   void invokeSplitRestriction(ArgumentProvider<InputT, OutputT> arguments);
 
   /** Invoke the {@link TruncateRestriction} method on the bound {@link DoFn}. */
-  <RestrictionT> TruncateResult<RestrictionT> invokeTruncateRestriction(
+  <RestrictionT> @Nullable TruncateResult<RestrictionT> invokeTruncateRestriction(
       ArgumentProvider<InputT, OutputT> arguments);
 
   /**
@@ -105,7 +108,9 @@ public interface DoFnInvoker<InputT, OutputT> {
    * <ol>
    *   <li>get the work remaining from the {@link RestrictionTracker} if it supports {@link
    *       HasProgress}.
-   *   <li>returning the constant {@link 1.0}.
+   *   <li>returning the constant {@link 0.0}. This is to enable downscaling, as if this default
+   *       were positive, the runner would assume work remaining. A default of 0 instead of 1
+   *       doesn't substantially impact upscaling.
    * </ol>
    */
   double invokeGetSize(ArgumentProvider<InputT, OutputT> arguments);
@@ -115,7 +120,13 @@ public interface DoFnInvoker<InputT, OutputT> {
   <RestrictionT, PositionT> RestrictionTracker<RestrictionT, PositionT> invokeNewTracker(
       ArgumentProvider<InputT, OutputT> arguments);
 
-  /** Invoke the {@link DoFn.NewWatermarkEstimator} method on the bound {@link DoFn}. */
+  /**
+   * Invoke the {@link DoFn.NewWatermarkEstimator} method on the bound {@link DoFn}.
+   *
+   * <p>Note that since {@code WatermarkEstimatorStateT} is permitted to be a nullable type, if this
+   * method returns {@code null} that is interpreted as a valid watermark estimator state, not the
+   * absence of a state.
+   */
   @SuppressWarnings("TypeParameterUnusedInFormals")
   <WatermarkEstimatorStateT>
       WatermarkEstimator<WatermarkEstimatorStateT> invokeNewWatermarkEstimator(
@@ -174,25 +185,55 @@ public interface DoFnInvoker<InputT, OutputT> {
     /** Provide a {@link DoFn.OnTimerContext} to use with the given {@link DoFn}. */
     DoFn<InputT, OutputT>.OnTimerContext onTimerContext(DoFn<InputT, OutputT> doFn);
 
+    /** Provide a {@link DoFn.OnWindowExpirationContext} to use with the given {@link DoFn}. */
+    DoFn<InputT, OutputT>.OnWindowExpirationContext onWindowExpirationContext(
+        DoFn<InputT, OutputT> doFn);
+
     /** Provide a reference to the input element. */
     InputT element(DoFn<InputT, OutputT> doFn);
 
     /**
      * Provide a reference to the input element key in {@link org.apache.beam.sdk.values.KV} pair.
+     *
+     * <p>{@code null} is allowed because user keys may be null. This method may <i>not</i> return
+     * null for any other reason.
      */
-    Object key();
+    @Nullable Object key();
 
-    /** Provide a reference to the input sideInput with the specified tag. */
-    Object sideInput(String tagId);
+    /**
+     * Provide a reference to the input sideInput with the specified tag.
+     *
+     * <p>{@code null} is allowed because side input values may be null. This method may <i>not</i>
+     * return null for any other reason.
+     */
+    @Nullable Object sideInput(String tagId);
 
     /**
      * Provide a reference to the selected schema field corresponding to the input argument
      * specified by index.
+     *
+     * <p>{@code null} is allowed because element fields may be null. This method may <i>not</i>
+     * return null for any other reason.
      */
-    Object schemaElement(int index);
+    @Nullable Object schemaElement(int index);
 
     /** Provide a reference to the input element timestamp. */
     Instant timestamp(DoFn<InputT, OutputT> doFn);
+
+    /** Provide a reference to the record id of the current element. */
+    @Nullable String currentRecordId(DoFn<InputT, OutputT> doFn);
+
+    /** Provide a reference to the record offset of the current element. */
+    @Nullable Long currentRecordOffset(DoFn<InputT, OutputT> doFn);
+
+    /** Provide a reference to the firing timestamp of the current timer. */
+    Instant fireTimestamp(DoFn<InputT, OutputT> doFn);
+
+    /** Provide a reference to the caused by drain. */
+    CausedByDrain causedByDrain(DoFn<InputT, OutputT> doFn);
+
+    /** Provide a reference to the {@link ValueKind}. */
+    ValueKind valueKind(DoFn<InputT, OutputT> doFn);
 
     /** Provide a reference to the time domain for a timer firing. */
     TimeDomain timeDomain(DoFn<InputT, OutputT> doFn);
@@ -273,13 +314,13 @@ public interface DoFnInvoker<InputT, OutputT> {
     }
 
     @Override
-    public Object key() {
+    public @Nullable Object key() {
       throw new UnsupportedOperationException(
           "Cannot access key as parameter outside of @OnTimer method.");
     }
 
     @Override
-    public Object sideInput(String tagId) {
+    public @Nullable Object sideInput(String tagId) {
       throw new UnsupportedOperationException(
           String.format("SideInput unsupported in %s", getErrorContext()));
     }
@@ -291,7 +332,7 @@ public interface DoFnInvoker<InputT, OutputT> {
     }
 
     @Override
-    public Object schemaElement(int index) {
+    public @Nullable Object schemaElement(int index) {
       throw new UnsupportedOperationException(
           String.format("Schema element unsupported in %s", getErrorContext()));
     }
@@ -300,6 +341,36 @@ public interface DoFnInvoker<InputT, OutputT> {
     public Instant timestamp(DoFn<InputT, OutputT> doFn) {
       throw new UnsupportedOperationException(
           String.format("Timestamp unsupported in %s", getErrorContext()));
+    }
+
+    @Override
+    public @Nullable String currentRecordId(DoFn<InputT, OutputT> doFn) {
+      throw new UnsupportedOperationException(
+          String.format("RecordId unsupported in %s", getErrorContext()));
+    }
+
+    @Override
+    public @Nullable Long currentRecordOffset(DoFn<InputT, OutputT> doFn) {
+      throw new UnsupportedOperationException(
+          String.format("RecordOffset unsupported in %s", getErrorContext()));
+    }
+
+    @Override
+    public Instant fireTimestamp(DoFn<InputT, OutputT> doFn) {
+      throw new UnsupportedOperationException(
+          String.format("FireTimestamp unsupported in %s", getErrorContext()));
+    }
+
+    @Override
+    public CausedByDrain causedByDrain(DoFn<InputT, OutputT> doFn) {
+      throw new UnsupportedOperationException(
+          String.format("CausedByDrain unsupported in %s", getErrorContext()));
+    }
+
+    @Override
+    public ValueKind valueKind(DoFn<InputT, OutputT> doFn) {
+      throw new UnsupportedOperationException(
+          String.format("ValueKind unsupported in %s", getErrorContext()));
     }
 
     @Override
@@ -373,6 +444,13 @@ public interface DoFnInvoker<InputT, OutputT> {
     public DoFn<InputT, OutputT>.OnTimerContext onTimerContext(DoFn<InputT, OutputT> doFn) {
       throw new UnsupportedOperationException(
           String.format("OnTimerContext unsupported in %s", getErrorContext()));
+    }
+
+    @Override
+    public DoFn<InputT, OutputT>.OnWindowExpirationContext onWindowExpirationContext(
+        DoFn<InputT, OutputT> doFn) {
+      throw new UnsupportedOperationException(
+          String.format("OnWindowExpirationContext unsupported in %s", getErrorContext()));
     }
 
     @Override
@@ -467,28 +545,59 @@ public interface DoFnInvoker<InputT, OutputT> {
     }
 
     @Override
+    public DoFn<InputT, OutputT>.OnWindowExpirationContext onWindowExpirationContext(
+        DoFn<InputT, OutputT> doFn) {
+      return delegate.onWindowExpirationContext(doFn);
+    }
+
+    @Override
     public InputT element(DoFn<InputT, OutputT> doFn) {
       return delegate.element(doFn);
     }
 
     @Override
-    public Object key() {
+    public @Nullable Object key() {
       return delegate.key();
     }
 
     @Override
-    public Object sideInput(String tagId) {
+    public @Nullable Object sideInput(String tagId) {
       return delegate.sideInput(tagId);
     }
 
     @Override
-    public Object schemaElement(int index) {
+    public @Nullable Object schemaElement(int index) {
       return delegate.schemaElement(index);
     }
 
     @Override
     public Instant timestamp(DoFn<InputT, OutputT> doFn) {
       return delegate.timestamp(doFn);
+    }
+
+    @Override
+    public @Nullable String currentRecordId(DoFn<InputT, OutputT> doFn) {
+      return delegate.currentRecordId(doFn);
+    }
+
+    @Override
+    public @Nullable Long currentRecordOffset(DoFn<InputT, OutputT> doFn) {
+      return delegate.currentRecordOffset(doFn);
+    }
+
+    @Override
+    public Instant fireTimestamp(DoFn<InputT, OutputT> doFn) {
+      return delegate.fireTimestamp(doFn);
+    }
+
+    @Override
+    public CausedByDrain causedByDrain(DoFn<InputT, OutputT> doFn) {
+      return delegate.causedByDrain(doFn);
+    }
+
+    @Override
+    public ValueKind valueKind(DoFn<InputT, OutputT> doFn) {
+      return delegate.valueKind(doFn);
     }
 
     @Override

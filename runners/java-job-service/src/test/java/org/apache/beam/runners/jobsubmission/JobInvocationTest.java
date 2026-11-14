@@ -28,14 +28,14 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.apache.beam.model.jobmanagement.v1.JobApi;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
-import org.apache.beam.runners.core.construction.PipelineTranslation;
 import org.apache.beam.runners.fnexecution.provisioning.JobInfo;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.metrics.MetricResults;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.Struct;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.ListeningExecutorService;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.MoreExecutors;
+import org.apache.beam.sdk.util.construction.PipelineTranslation;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.Struct;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ListeningExecutorService;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.MoreExecutors;
 import org.joda.time.Duration;
 import org.junit.After;
 import org.junit.Before;
@@ -78,6 +78,28 @@ public class JobInvocationTest {
     runner.setResult(pipelineResult);
 
     awaitJobState(jobInvocation, JobApi.JobState.Enum.DONE);
+  }
+
+  @Test(timeout = 10_000)
+  public void testStateAfterDrainCompleted() throws Exception {
+    jobInvocation.start();
+    assertThat(jobInvocation.getState(), is(JobApi.JobState.Enum.RUNNING));
+
+    TestPipelineResult pipelineResult = new TestPipelineResult(PipelineResult.State.DRAINED);
+    runner.setResult(pipelineResult);
+
+    awaitJobState(jobInvocation, JobApi.JobState.Enum.DRAINED);
+  }
+
+  @Test(timeout = 10_000)
+  public void testStateAfterDrainStarted() throws Exception {
+    jobInvocation.start();
+    assertThat(jobInvocation.getState(), is(JobApi.JobState.Enum.RUNNING));
+
+    TestPipelineResult pipelineResult = new TestPipelineResult(PipelineResult.State.DRAINING);
+    runner.setResult(pipelineResult);
+
+    awaitJobState(jobInvocation, JobApi.JobState.Enum.DRAINING);
   }
 
   @Test(timeout = 10_000)
@@ -125,6 +147,20 @@ public class JobInvocationTest {
     jobInvocation.cancel();
     assertThat(jobInvocation.getState(), is(JobApi.JobState.Enum.DONE));
     // Ensure that cancel has not been called
+    assertThat(pipelineResult.cancelLatch.getCount(), is(1L));
+  }
+
+  @Test(timeout = 10_000)
+  public void testNoCancellationWhenDrained() throws Exception {
+    jobInvocation.start();
+    assertThat(jobInvocation.getState(), is(JobApi.JobState.Enum.RUNNING));
+
+    TestPipelineResult pipelineResult = new TestPipelineResult(PipelineResult.State.DRAINED);
+    runner.setResult(pipelineResult);
+    awaitJobState(jobInvocation, JobApi.JobState.Enum.DRAINED);
+
+    jobInvocation.cancel();
+    assertThat(jobInvocation.getState(), is(JobApi.JobState.Enum.DRAINED));
     assertThat(pipelineResult.cancelLatch.getCount(), is(1L));
   }
 

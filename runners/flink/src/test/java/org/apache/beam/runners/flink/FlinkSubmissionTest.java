@@ -19,21 +19,23 @@ package org.apache.beam.runners.flink;
 
 import java.io.File;
 import java.lang.reflect.Field;
-import java.lang.reflect.Modifier;
+import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.Permission;
 import java.util.Collection;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import org.apache.beam.runners.core.construction.resources.PipelineResources;
+import java.util.stream.Collectors;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.io.GenerateSequence;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Charsets;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.sdk.util.construction.resources.PipelineResources;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.apache.flink.client.cli.CliFrontend;
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
@@ -49,12 +51,16 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.junit.rules.Timeout;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** End-to-end submission test of Beam jobs on a Flink cluster. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class FlinkSubmissionTest {
+
+  private static final Logger LOG = LoggerFactory.getLogger(FlinkSubmissionTest.class);
 
   @ClassRule public static final TemporaryFolder TEMP_FOLDER = new TemporaryFolder();
   private static final Map<String, String> ENV = System.getenv();
@@ -65,9 +71,6 @@ public class FlinkSubmissionTest {
 
   /** Each test has a timeout of 60 seconds (for safety). */
   @Rule public Timeout timeout = new Timeout(60, TimeUnit.SECONDS);
-
-  /** Whether to run in streaming or batch translation mode. */
-  private static boolean streaming;
 
   /** Counter which keeps track of the number of jobs submitted. */
   private static int expectedNumberOfJobs;
@@ -101,26 +104,38 @@ public class FlinkSubmissionTest {
 
   @Test
   public void testSubmissionBatch() throws Exception {
-    runSubmission(false, false);
+    runSubmission(false, false, false);
+  }
+
+  @Test
+  public void testSubmissionBatchUseDataStream() throws Exception {
+    runSubmission(false, false, true);
   }
 
   @Test
   public void testSubmissionStreaming() throws Exception {
-    runSubmission(false, true);
+    runSubmission(false, true, false);
   }
 
   @Test
   public void testDetachedSubmissionBatch() throws Exception {
-    runSubmission(true, false);
+    runSubmission(true, false, false);
+  }
+
+  @Test
+  public void testDetachedSubmissionBatchUseDataStream() throws Exception {
+    runSubmission(true, false, true);
   }
 
   @Test
   public void testDetachedSubmissionStreaming() throws Exception {
-    runSubmission(true, true);
+    runSubmission(true, true, false);
   }
 
-  private void runSubmission(boolean isDetached, boolean isStreaming) throws Exception {
+  private void runSubmission(boolean isDetached, boolean isStreaming, boolean useDataStreamForBatch)
+      throws Exception {
     PipelineOptions options = PipelineOptionsFactory.create();
+    options.as(FlinkPipelineOptions.class).setStreaming(isStreaming);
     options.setTempLocation(TEMP_FOLDER.getRoot().getPath());
     String jarPath =
         Iterables.getFirst(
@@ -135,8 +150,16 @@ public class FlinkSubmissionTest {
         argsBuilder.add("-d");
       }
       argsBuilder.add(jarPath);
+      argsBuilder.add("--runner=flink");
 
-      FlinkSubmissionTest.streaming = isStreaming;
+      if (isStreaming) {
+        argsBuilder.add("--streaming");
+      }
+
+      if (useDataStreamForBatch) {
+        argsBuilder.add("--useDataStreamForBatch");
+      }
+
       FlinkSubmissionTest.expectedNumberOfJobs++;
       // Run end-to-end test
       CliFrontend.main(argsBuilder.build().toArray(new String[0]));
@@ -154,7 +177,10 @@ public class FlinkSubmissionTest {
       Collection<JobStatusMessage> allJobsStates = flinkCluster.listJobs().get();
       if (allJobsStates.size() == expectedNumberOfJobs
           && allJobsStates.stream()
-              .allMatch(jobStatus -> jobStatus.getJobState().name().equals("FINISHED"))) {
+              .allMatch(jobStatus -> jobStatus.getJobState().isTerminalState())) {
+        LOG.info(
+            "All job finished with statuses: {}",
+            allJobsStates.stream().map(j -> j.getJobState().name()).collect(Collectors.toList()));
         return;
       }
       Thread.sleep(50);
@@ -163,9 +189,9 @@ public class FlinkSubmissionTest {
 
   /** The Flink program which is executed by the CliFrontend. */
   public static void main(String[] args) {
-    FlinkPipelineOptions options = FlinkPipelineOptions.defaults();
+    FlinkPipelineOptions options =
+        PipelineOptionsFactory.fromArgs(args).withValidation().as(FlinkPipelineOptions.class);
     options.setRunner(FlinkRunner.class);
-    options.setStreaming(streaming);
     options.setParallelism(1);
     Pipeline p = Pipeline.create(options);
     p.apply(GenerateSequence.from(0).to(1));
@@ -184,7 +210,8 @@ public class FlinkSubmissionTest {
             flinkCluster.getClusterPort(),
             RestOptions.PORT.key(),
             flinkCluster.getRestPort());
-    Files.write(file.toPath(), config.getBytes(Charsets.UTF_8));
+
+    Files.write(file.toPath(), config.getBytes(StandardCharsets.UTF_8));
 
     // Create a new environment with the location of the Flink config for CliFrontend
     ImmutableMap<String, String> newEnv =
@@ -204,21 +231,49 @@ public class FlinkSubmissionTest {
    * We modify the JVM's environment variables here. This is necessary for the end-to-end test
    * because Flink's CliFrontend requires a Flink configuration file for which the location can only
    * be set using the {@code ConfigConstants.ENV_FLINK_CONF_DIR} environment variable.
+   *
+   * <p>On Unix, {@code theEnvironment} uses {@code Variable}/{@code Value} keys; {@code putAll}
+   * with {@code String} keys does not work for {@code System.getenv(String)} lookups.
    */
+  @SuppressWarnings("unchecked")
   private static void modifyEnv(Map<String, String> env) throws Exception {
     Class processEnv = Class.forName("java.lang.ProcessEnvironment");
-    Field envField = processEnv.getDeclaredField("theUnmodifiableEnvironment");
+    Field theEnvironmentField = processEnv.getDeclaredField("theEnvironment");
+    theEnvironmentField.setAccessible(true);
+    Map<Object, Object> envMap = (Map<Object, Object>) theEnvironmentField.get(null);
+    envMap.clear();
 
-    Field modifiersField = Field.class.getDeclaredField("modifiers");
-    modifiersField.setAccessible(true);
-    modifiersField.setInt(envField, envField.getModifiers() & ~Modifier.FINAL);
+    Class<?> variableClass = null;
+    Class<?> valueClass = null;
+    try {
+      variableClass = Class.forName("java.lang.ProcessEnvironment$Variable");
+      valueClass = Class.forName("java.lang.ProcessEnvironment$Value");
+    } catch (ClassNotFoundException e) {
+      // Windows: theEnvironment uses String keys.
+    }
+    if (variableClass != null && valueClass != null) {
+      Method valueOfVariable = variableClass.getDeclaredMethod("valueOf", String.class);
+      Method valueOfValue = valueClass.getDeclaredMethod("valueOf", String.class);
+      valueOfVariable.setAccessible(true);
+      valueOfValue.setAccessible(true);
+      for (Map.Entry<String, String> entry : env.entrySet()) {
+        envMap.put(
+            valueOfVariable.invoke(null, entry.getKey()),
+            valueOfValue.invoke(null, entry.getValue()));
+      }
+    } else {
+      envMap.putAll(env);
+    }
 
-    envField.setAccessible(true);
-    envField.set(null, env);
-    envField.setAccessible(false);
-
-    modifiersField.setInt(envField, envField.getModifiers() & Modifier.FINAL);
-    modifiersField.setAccessible(false);
+    if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows")) {
+      Field ciEnvField = processEnv.getDeclaredField("theCaseInsensitiveEnvironment");
+      ciEnvField.setAccessible(true);
+      Map<String, String> ciEnvMap = (Map<String, String>) ciEnvField.get(null);
+      if (ciEnvMap != null) {
+        ciEnvMap.clear();
+        ciEnvMap.putAll(env);
+      }
+    }
   }
 
   /** Prevents the CliFrontend from calling System.exit. */

@@ -33,7 +33,7 @@ import java.util.List;
 import org.apache.beam.runners.dataflow.DataflowClient;
 import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
 import org.apache.beam.sdk.PipelineResult.State;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
@@ -69,6 +69,7 @@ public class MonitoringUtil {
   public static class LoggingHandler implements JobMessagesHandler {
     private static final Logger LOG = LoggerFactory.getLogger(LoggingHandler.class);
 
+    @SuppressWarnings("Slf4jFormatShouldBeConst")
     @Override
     public void process(List<JobMessage> messages) {
       for (JobMessage message : messages) {
@@ -212,6 +213,7 @@ public class MonitoringUtil {
       case "JOB_STATE_UNKNOWN":
         return State.UNKNOWN;
       case "JOB_STATE_STOPPED":
+      case "JOB_STATE_PAUSED": // Job is paused; the closest mapping is STOPPED
         return State.STOPPED;
       case "JOB_STATE_FAILED":
         return State.FAILED;
@@ -219,15 +221,19 @@ public class MonitoringUtil {
         return State.CANCELLED;
       case "JOB_STATE_UPDATED":
         return State.UPDATED;
+      case "JOB_STATE_DRAINING":
+        return State.DRAINING;
+      case "JOB_STATE_DRAINED":
+        return State.DRAINED;
 
       case "JOB_STATE_RUNNING":
       case "JOB_STATE_PENDING": // Job has not yet started; closest mapping is RUNNING
-      case "JOB_STATE_DRAINING": // Job is still active; the closest mapping is RUNNING
       case "JOB_STATE_CANCELLING": // Job is still active; the closest mapping is RUNNING
+      case "JOB_STATE_PAUSING": // Job is still active; the closest mapping is RUNNING
+      case "JOB_STATE_RESOURCE_CLEANING_UP": // Job is still active; the closest mapping is RUNNING
         return State.RUNNING;
 
       case "JOB_STATE_DONE":
-      case "JOB_STATE_DRAINED": // Job has successfully terminated; closest mapping is DONE
         return State.DONE;
       default:
         LOG.warn(

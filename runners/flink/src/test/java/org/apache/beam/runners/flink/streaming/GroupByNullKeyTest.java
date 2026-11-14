@@ -33,13 +33,16 @@ import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Joiner;
 import org.apache.flink.test.util.AbstractTestBase;
+import org.apache.flink.test.util.TestBaseUtils;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.ClassRule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
 /** Test for GroupByNullKey. */
 public class GroupByNullKeyTest extends AbstractTestBase implements Serializable {
@@ -49,6 +52,7 @@ public class GroupByNullKeyTest extends AbstractTestBase implements Serializable
 
   static final String[] EXPECTED_RESULT =
       new String[] {"k: null v: user1 user1 user1 user2 user2 user2 user2 user3"};
+  @ClassRule public static final TemporaryFolder TEMP_RESULT_FOLDER = new TemporaryFolder();
 
   public GroupByNullKeyTest() {}
 
@@ -56,14 +60,16 @@ public class GroupByNullKeyTest extends AbstractTestBase implements Serializable
   public void preSubmit() throws Exception {
     // Beam Write will add shard suffix to fileName, see ShardNameTemplate.
     // So tempFile need have a parent to compare.
-    File resultParent = createAndRegisterTempFile("result");
+    // TODO: Consider move to AbstractTestBase.createAndRegisterTempFile when all tests migrated to
+    // JUnit 5
+    File resultParent = new File(TEMP_RESULT_FOLDER.newFolder(), "result");
     resultDir = resultParent.toURI().toString();
     resultPath = new File(resultParent, "file.txt").getAbsolutePath();
   }
 
   @After
   public void postSubmit() throws Exception {
-    compareResultsByLinesInMemory(Joiner.on('\n').join(EXPECTED_RESULT), resultDir);
+    TestBaseUtils.compareResultsByLinesInMemory(Joiner.on('\n').join(EXPECTED_RESULT), resultDir);
   }
 
   /** DoFn extracting user and timestamp. */

@@ -17,46 +17,66 @@
  */
 package org.apache.beam.sdk.io.kafka;
 
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+
 import com.google.auto.value.AutoValue;
 import java.io.Serializable;
 import java.util.List;
-import javax.annotation.Nullable;
 import org.apache.beam.sdk.schemas.AutoValueSchema;
 import org.apache.beam.sdk.schemas.annotations.DefaultSchema;
 import org.apache.beam.sdk.schemas.annotations.SchemaCreate;
 import org.apache.beam.sdk.schemas.annotations.SchemaFieldName;
+import org.apache.beam.sdk.schemas.annotations.SchemaFieldNumber;
 import org.apache.beam.sdk.schemas.annotations.SchemaIgnore;
 import org.apache.kafka.common.TopicPartition;
+import org.checkerframework.checker.nullness.qual.Nullable;
+import org.checkerframework.dataflow.qual.Deterministic;
+import org.checkerframework.dataflow.qual.Pure;
 import org.joda.time.Instant;
 
 /** Represents a Kafka source description. */
 @DefaultSchema(AutoValueSchema.class)
 @AutoValue
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public abstract class KafkaSourceDescriptor implements Serializable {
   @SchemaFieldName("topic")
+  @SchemaFieldNumber("0")
+  @Pure
   abstract String getTopic();
 
   @SchemaFieldName("partition")
-  abstract Integer getPartition();
+  @SchemaFieldNumber("1")
+  @Pure
+  abstract int getPartition();
 
   @SchemaFieldName("start_read_offset")
-  @Nullable
-  abstract Long getStartReadOffset();
+  @SchemaFieldNumber("2")
+  @Pure
+  abstract @Nullable Long getStartReadOffset();
 
   @SchemaFieldName("start_read_time")
-  @Nullable
-  abstract Instant getStartReadTime();
+  @SchemaFieldNumber("3")
+  @Pure
+  abstract @Nullable Instant getStartReadTime();
+
+  @SchemaFieldName("stop_read_offset")
+  @SchemaFieldNumber("4")
+  @Pure
+  abstract @Nullable Long getStopReadOffset();
+
+  @SchemaFieldName("stop_read_time")
+  @SchemaFieldNumber("5")
+  @Pure
+  abstract @Nullable Instant getStopReadTime();
 
   @SchemaFieldName("bootstrap_servers")
-  @Nullable
-  abstract List<String> getBootStrapServers();
+  @SchemaFieldNumber("6")
+  @Pure
+  abstract @Nullable List<String> getBootStrapServers();
 
-  private TopicPartition topicPartition = null;
+  private @Nullable TopicPartition topicPartition = null;
 
   @SchemaIgnore
+  @Deterministic
   public TopicPartition getTopicPartition() {
     if (topicPartition == null) {
       topicPartition = new TopicPartition(getTopic(), getPartition());
@@ -66,15 +86,33 @@ public abstract class KafkaSourceDescriptor implements Serializable {
 
   public static KafkaSourceDescriptor of(
       TopicPartition topicPartition,
-      Long startReadOffset,
-      Instant startReadTime,
-      List<String> bootstrapServers) {
+      @Nullable Long startReadOffset,
+      @Nullable Instant startReadTime,
+      @Nullable Long stopReadOffset,
+      @Nullable Instant stopReadTime,
+      @Nullable List<String> bootstrapServers) {
+    checkArguments(startReadOffset, startReadTime, stopReadOffset, stopReadTime);
     return new AutoValue_KafkaSourceDescriptor(
         topicPartition.topic(),
         topicPartition.partition(),
         startReadOffset,
         startReadTime,
+        stopReadOffset,
+        stopReadTime,
         bootstrapServers);
+  }
+
+  private static void checkArguments(
+      @Nullable Long startReadOffset,
+      @Nullable Instant startReadTime,
+      @Nullable Long stopReadOffset,
+      @Nullable Instant stopReadTime) {
+    checkArgument(
+        startReadOffset == null || startReadTime == null,
+        "startReadOffset and startReadTime are optional but mutually exclusive. Please set only one of them.");
+    checkArgument(
+        stopReadOffset == null || stopReadTime == null,
+        "stopReadOffset and stopReadTime are optional but mutually exclusive. Please set only one of them.");
   }
 
   @SchemaCreate
@@ -82,11 +120,20 @@ public abstract class KafkaSourceDescriptor implements Serializable {
   // TODO(BEAM-10677): Remove this function after AutoValueSchema is fixed.
   static KafkaSourceDescriptor create(
       String topic,
-      Integer partition,
+      int partition,
       Long start_read_offset,
       Instant start_read_time,
+      Long stop_read_offset,
+      Instant stop_read_time,
       List<String> bootstrap_servers) {
+    checkArguments(start_read_offset, start_read_time, stop_read_offset, stop_read_time);
     return new AutoValue_KafkaSourceDescriptor(
-        topic, partition, start_read_offset, start_read_time, bootstrap_servers);
+        topic,
+        partition,
+        start_read_offset,
+        start_read_time,
+        stop_read_offset,
+        stop_read_time,
+        bootstrap_servers);
   }
 }

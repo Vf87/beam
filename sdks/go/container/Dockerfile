@@ -16,30 +16,21 @@
 # limitations under the License.
 ###############################################################################
 
-FROM debian:buster
-MAINTAINER "Apache Beam <dev@beam.apache.org>"
+FROM gcr.io/distroless/base-nossl-debian13:latest AS base_image
 
-ARG pull_licenses
+# Distroless base image has many layers. Squash into single layer
+FROM scratch
+COPY --from=base_image / /
 
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        ca-certificates \
-        && \
-    rm -rf /var/lib/apt/lists/*
+LABEL Author "Apache Beam <dev@beam.apache.org>"
 
-ADD target/linux_amd64/boot /opt/apache/beam/
+ARG TARGETOS
+ARG TARGETARCH
 
-COPY target/LICENSE /opt/apache/beam/
-COPY target/NOTICE /opt/apache/beam/
+ADD target/${TARGETOS}_${TARGETARCH}/boot /opt/apache/beam/
 
-# Add golang licenses. Because the go-license directory may be empty if
-# pull_licenses is false, and COPY fails if there are no files,
-# copy an extra LICENSE file then remove it.
-COPY target/LICENSE target/go-licenses/* /opt/apache/beam/third_party_licenses/golang/
-RUN rm /opt/apache/beam/third_party_licenses/golang/LICENSE
-RUN if [ "$pull_licenses" = "false" ] ; then \
-    # Remove above golang license and dir if pull licenses false
-    rm -rf /opt/apache/beam/third_party_licenses ; \
-   fi
+COPY target/LICENSE target/NOTICE /opt/apache/beam/
 
+# Add Go licenses.
+COPY target/go-licenses/* /opt/apache/beam/third_party_licenses/golang/
 ENTRYPOINT ["/opt/apache/beam/boot"]

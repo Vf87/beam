@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.values;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -31,6 +31,7 @@ import org.apache.beam.sdk.coders.InstantCoder;
 import org.apache.beam.sdk.coders.StructuredCoder;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.checkerframework.checker.nullness.qual.Nullable;
+import org.checkerframework.framework.qual.Covariant;
 import org.joda.time.Instant;
 
 /**
@@ -41,20 +42,19 @@ import org.joda.time.Instant;
  *
  * @param <V> the type of the value
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
-public class TimestampedValue<V> {
+// Immutable, so the value type may be widened.
+@Covariant(0)
+public class TimestampedValue<V extends @Nullable Object> {
   /**
    * Returns a new {@link TimestampedValue} with the {@link BoundedWindow#TIMESTAMP_MIN_VALUE
    * minimum timestamp}.
    */
-  public static <V> TimestampedValue<V> atMinimumTimestamp(@Nullable V value) {
+  public static <V> TimestampedValue<V> atMinimumTimestamp(V value) {
     return of(value, BoundedWindow.TIMESTAMP_MIN_VALUE);
   }
 
   /** Returns a new {@code TimestampedValue} with the given value and timestamp. */
-  public static <V> TimestampedValue<V> of(@Nullable V value, Instant timestamp) {
+  public static <V> TimestampedValue<V> of(V value, Instant timestamp) {
     return new TimestampedValue<>(value, timestamp);
   }
 
@@ -150,10 +150,10 @@ public class TimestampedValue<V> {
 
   /////////////////////////////////////////////////////////////////////////////
 
-  private final @Nullable V value;
+  private final V value;
   private final Instant timestamp;
 
-  protected TimestampedValue(@Nullable V value, Instant timestamp) {
+  protected TimestampedValue(V value, Instant timestamp) {
     checkNotNull(timestamp, "timestamp must be non-null");
 
     this.value = value;

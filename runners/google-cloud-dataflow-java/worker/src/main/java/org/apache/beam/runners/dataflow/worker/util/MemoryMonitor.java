@@ -21,6 +21,7 @@ import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.PrintWriter;
 import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;
@@ -29,9 +30,16 @@ import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.attribute.PosixFilePermission;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.temporal.ChronoField;
 import java.util.ArrayDeque;
 import java.util.Queue;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.management.InstanceNotFoundException;
@@ -41,16 +49,19 @@ import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
 import javax.management.ReflectionException;
 import org.apache.beam.runners.dataflow.options.DataflowPipelineDebugOptions;
+import org.apache.beam.runners.dataflow.options.DataflowWorkerHarnessOptions;
 import org.apache.beam.runners.dataflow.worker.status.StatusDataProvider;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.fs.CreateOptions.StandardCreateOptions;
 import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.options.PipelineOptions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.ByteStreams;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.AtomicDouble;
+import org.apache.beam.sdk.options.SdkHarnessOptions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.ByteStreams;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Closeables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.AtomicDouble;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -78,7 +89,7 @@ import org.slf4j.LoggerFactory;
  * </ul>
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class MemoryMonitor implements Runnable, StatusDataProvider {
   private static final Logger LOG = LoggerFactory.getLogger(MemoryMonitor.class);
@@ -120,6 +131,20 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
 
   /** Delay between logging the current memory state. */
   private static final int NORMAL_LOGGING_PERIOD_MILLIS = 5 * 60 * 1000; // 5 min.
+
+  /**
+   * A formatter to format a timestamp as yyyyMMddHHmmss, used to format the current time when
+   * generating a filename for heap and jfr dumps.
+   */
+  private static final DateTimeFormatter FILE_NAME_DATETIME_FORMATTER =
+      new DateTimeFormatterBuilder()
+          .appendValue(ChronoField.YEAR, 4)
+          .appendValue(ChronoField.MONTH_OF_YEAR, 2)
+          .appendValue(ChronoField.DAY_OF_MONTH, 2)
+          .appendValue(ChronoField.HOUR_OF_DAY, 2)
+          .appendValue(ChronoField.MINUTE_OF_HOUR, 2)
+          .appendValue(ChronoField.SECOND_OF_MINUTE, 2)
+          .toFormatter();
 
   /** Abstract interface for providing GC stats (for testing). */
   public interface GCStatsProvider {
@@ -164,11 +189,15 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
    * before dumping the heap, this block of memory will be garbage collected, thus giving dumpHeap()
    * enough space to dump the heap.
    */
+  @SuppressWarnings("unused")
   @SuppressFBWarnings("unused")
   private byte[] reservedForDumpingHeap = new byte[HEAP_DUMP_RESERVED_BYTES];
 
   /** If true, dump the heap when thrashing or requested. */
   private final boolean canDumpHeap;
+
+  /** If set, how long to run a JFR profile for. If absent, no profiles are run. */
+  private final @Nullable Duration jfrProfileDuration;
 
   /**
    * The GC thrashing threshold for every period. If the time spent on garbage collection in one
@@ -183,6 +212,7 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
   private final AtomicDouble lastMeasuredGCPercentage = new AtomicDouble(0.0);
   private final AtomicDouble maxGCPercentage = new AtomicDouble(0.0);
   private final AtomicInteger numPushbacks = new AtomicInteger(0);
+  private final AtomicBoolean jfrRunning = new AtomicBoolean(false);
 
   /** Wait point for threads in pushback waiting for gc thrashing to pass. */
   private final Object waitingForResources = new Object();
@@ -197,11 +227,28 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
 
   private final File localDumpFolder;
 
+  private final String workerId;
+
+  private final @Nullable JfrInterop jfrInterop;
+
+  private final Clock clock;
+
   public static MemoryMonitor fromOptions(PipelineOptions options) {
     DataflowPipelineDebugOptions debugOptions = options.as(DataflowPipelineDebugOptions.class);
+    DataflowWorkerHarnessOptions workerHarnessOptions =
+        options.as(DataflowWorkerHarnessOptions.class);
+    SdkHarnessOptions sdkHarnessOptions = options.as(SdkHarnessOptions.class);
     String uploadToGCSPath = debugOptions.getSaveHeapDumpsToGcsPath();
+    String workerId = workerHarnessOptions.getWorkerId();
     boolean canDumpHeap = uploadToGCSPath != null || debugOptions.getDumpHeapOnOOM();
-    double gcThrashingPercentagePerPeriod = debugOptions.getGCThrashingPercentagePerPeriod();
+    double gcThrashingPercentagePerPeriod = sdkHarnessOptions.getGCThrashingPercentagePerPeriod();
+
+    Duration jfrProfileDuration;
+    if (uploadToGCSPath != null && debugOptions.getRecordJfrOnGcThrashing()) {
+      jfrProfileDuration = Duration.ofSeconds(debugOptions.getJfrRecordingDurationSec());
+    } else {
+      jfrProfileDuration = null;
+    }
 
     return new MemoryMonitor(
         new SystemGCStatsProvider(),
@@ -210,7 +257,10 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
         canDumpHeap,
         gcThrashingPercentagePerPeriod,
         uploadToGCSPath,
-        getLoggingDir());
+        getLoggingDir(),
+        workerId,
+        jfrProfileDuration,
+        Clock.systemUTC());
   }
 
   @VisibleForTesting
@@ -221,7 +271,10 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
       boolean canDumpHeap,
       double gcThrashingPercentagePerPeriod,
       @Nullable String uploadToGCSPath,
-      File localDumpFolder) {
+      File localDumpFolder,
+      String workerId,
+      @Nullable Duration jfrProfileDuration,
+      Clock clock) {
     return new MemoryMonitor(
         gcStatsProvider,
         sleepTimeMillis,
@@ -229,7 +282,10 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
         canDumpHeap,
         gcThrashingPercentagePerPeriod,
         uploadToGCSPath,
-        localDumpFolder);
+        localDumpFolder,
+        workerId,
+        jfrProfileDuration,
+        clock);
   }
 
   private MemoryMonitor(
@@ -239,14 +295,21 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
       boolean canDumpHeap,
       double gcThrashingPercentagePerPeriod,
       @Nullable String uploadToGCSPath,
-      File localDumpFolder) {
+      File localDumpFolder,
+      String workerId,
+      @Nullable Duration jfrProfileDuration,
+      Clock clock) {
     this.gcStatsProvider = gcStatsProvider;
     this.sleepTimeMillis = sleepTimeMillis;
     this.shutDownAfterNumGCThrashing = shutDownAfterNumGCThrashing;
     this.canDumpHeap = canDumpHeap;
+    this.jfrProfileDuration = jfrProfileDuration;
     this.gcThrashingPercentagePerPeriod = gcThrashingPercentagePerPeriod;
     this.uploadToGCSPath = uploadToGCSPath;
     this.localDumpFolder = localDumpFolder;
+    this.workerId = workerId;
+    this.clock = clock;
+    this.jfrInterop = new JfrInterop();
   }
 
   /** For testing only: Wait for the monitor to be running. */
@@ -293,6 +356,22 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
     }
   }
 
+  private String getUploadFilename(String dumpType, String extension) {
+    Preconditions.checkNotNull(uploadToGCSPath, "uploadToGCSPath");
+
+    return uploadToGCSPath
+        + "/"
+        + FILE_NAME_DATETIME_FORMATTER.format(clock.instant().atOffset(ZoneOffset.UTC))
+        + "-"
+        + dumpType
+        + "-"
+        + workerId
+        + "-"
+        + UUID.randomUUID()
+        + "."
+        + extension;
+  }
+
   private File getDefaultHeapDumpPath() {
     return new File(localDumpFolder, "heap_dump.hprof");
   }
@@ -308,8 +387,7 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
     LOG.info("Looking for heap dump at {}", localSource);
     if (localSource.exists()) {
       LOG.warn("Heap dump {} detected, attempting to upload to GCS", localSource);
-      String remoteDest =
-          String.format("%s/heap_dump%s.hprof", uploadToGCSPath, UUID.randomUUID().toString());
+      String remoteDest = getUploadFilename("heap_dump", "hprof");
       ResourceId resource = FileSystems.matchNewResource(remoteDest, false);
       try {
         uploadFileToGCS(localSource, resource);
@@ -331,12 +409,17 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
   }
 
   private void uploadFileToGCS(File srcPath, ResourceId destination) throws IOException {
+    try (ReadableByteChannel src = Channels.newChannel(new FileInputStream(srcPath))) {
+      uploadChannelToGCS(src, destination);
+    }
+  }
+
+  private void uploadChannelToGCS(ReadableByteChannel src, ResourceId destination)
+      throws IOException {
     StandardCreateOptions createOptions =
         StandardCreateOptions.builder().setMimeType("application/octet-stream").build();
     try (WritableByteChannel dst = FileSystems.create(destination, createOptions)) {
-      try (ReadableByteChannel src = Channels.newChannel(new FileInputStream(srcPath))) {
-        ByteStreams.copy(src, dst);
-      }
+      ByteStreams.copy(src, dst);
     }
   }
 
@@ -446,7 +529,7 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
 
     // Clearing this list should "release" some memory that will be needed to dump the heap.
     // We could try to reallocate it again if we later notice memory pressure has subsided,
-    // but that is risk. Further, leaving this released may help with the memory pressure.
+    // but that is risky. Further, leaving this released may help with the memory pressure.
     reservedForDumpingHeap = null;
 
     try {
@@ -472,6 +555,7 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
 
   /** Runs this thread. */
   @Override
+  @SuppressWarnings("FutureReturnValueIgnored")
   public void run() {
     synchronized (waitingForStateChange) {
       Preconditions.checkState(!isRunning.getAndSet(true), "already running");
@@ -513,6 +597,10 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
 
         if (isThrashing.get()) {
           currentThrashingCount++;
+
+          if (currentThrashingCount == 1) {
+            runJfrProfileOnHeapThrashing();
+          }
 
           if (shutDownAfterNumGCThrashing > 0
               && (currentThrashingCount >= shutDownAfterNumGCThrashing)) {
@@ -582,9 +670,66 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
    * repeated dumps. These files can be of comparable size to the local disk.
    */
   public File dumpHeap()
-      throws MalformedObjectNameException, InstanceNotFoundException, ReflectionException,
-          MBeanException, IOException {
+      throws MalformedObjectNameException,
+          InstanceNotFoundException,
+          ReflectionException,
+          MBeanException,
+          IOException {
     return dumpHeap(localDumpFolder);
+  }
+
+  /**
+   * Run a JFR profile, returning the profile data as an InputStream when complete.
+   *
+   * @param duration The amount of time to record for.
+   */
+  public CompletableFuture<InputStream> runJfrProfile(Duration duration) {
+    if (jfrInterop == null) {
+      throw new IllegalStateException(
+          "Unable to run JFR profile because JFR was not enabled. You must use Java 9+ to enable JFR.");
+    }
+    return jfrInterop.runProfile(duration);
+  }
+
+  /**
+   * Run a JFR profile using the duration configured by the pipeline options. The profile is
+   * uploaded to GCS when completed.
+   */
+  @VisibleForTesting
+  CompletableFuture<?> runJfrProfileOnHeapThrashing() {
+    if (jfrInterop == null || jfrProfileDuration == null) {
+      return CompletableFuture.completedFuture(null);
+    }
+
+    if (!jfrRunning.compareAndSet(false, true)) {
+      return CompletableFuture.completedFuture(null);
+    }
+
+    return jfrInterop
+        .runProfile(jfrProfileDuration)
+        .thenAccept(this::uploadJfrProfile)
+        .handle(
+            (v, ex) -> {
+              if (ex != null) {
+                LOG.error("Unable to run JFR profile", ex);
+              }
+              jfrRunning.set(false);
+              return null;
+            });
+  }
+
+  private void uploadJfrProfile(InputStream data) {
+    String remoteDest = getUploadFilename("jfr_profile", "jfr");
+    ResourceId resource = FileSystems.matchNewResource(remoteDest, false);
+
+    try {
+      uploadChannelToGCS(Channels.newChannel(data), resource);
+      LOG.info("Uploaded JFR profile to {}", remoteDest);
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    } finally {
+      Closeables.closeQuietly(data);
+    }
   }
 
   /**
@@ -595,8 +740,11 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
    */
   @VisibleForTesting
   static synchronized File dumpHeap(File directory)
-      throws MalformedObjectNameException, InstanceNotFoundException, ReflectionException,
-          MBeanException, IOException {
+      throws MalformedObjectNameException,
+          InstanceNotFoundException,
+          ReflectionException,
+          MBeanException,
+          IOException {
     boolean liveObjectsOnly = false;
     File fileName = new File(directory, "heap_dump.hprof");
     if (fileName.exists() && !fileName.delete()) {
@@ -628,12 +776,13 @@ public class MemoryMonitor implements Runnable, StatusDataProvider {
     long totalMemory = runtime.totalMemory();
     long usedMemory = totalMemory - runtime.freeMemory();
     return String.format(
-        "used/total/max = %d/%d/%d MB, GC last/max = %.2f/%.2f %%, #pushbacks=%d, gc thrashing=%s",
+        "used/total/max = %d/%d/%d MB, GC last/max = %.2f/%.2f %% (configured threshold: %.2f%%), #pushbacks=%d, gc thrashing=%s",
         usedMemory >> 20,
         totalMemory >> 20,
         maxMemory >> 20,
         lastMeasuredGCPercentage.get(),
         maxGCPercentage.get(),
+        gcThrashingPercentagePerPeriod,
         numPushbacks.get(),
         isThrashing.get());
   }

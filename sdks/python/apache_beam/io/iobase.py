@@ -39,9 +39,9 @@ from collections import namedtuple
 from typing import Any
 from typing import Iterator
 from typing import Optional
-from typing import Tuple
 from typing import Union
 
+import apache_beam as beam
 from apache_beam import coders
 from apache_beam import pvalue
 from apache_beam.coders.coders import _MemoizingPickleCoder
@@ -56,6 +56,7 @@ from apache_beam.transforms import PTransform
 from apache_beam.transforms import core
 from apache_beam.transforms import ptransform
 from apache_beam.transforms import window
+from apache_beam.transforms.core import DoFn
 from apache_beam.transforms.display import DisplayDataItem
 from apache_beam.transforms.display import HasDisplayData
 from apache_beam.utils import timestamp
@@ -101,8 +102,10 @@ class SourceBase(HasDisplayData, urns.RunnerApiFn):
   """
   urns.RunnerApiFn.register_pickle_urn(python_urns.PICKLED_SOURCE)
 
-  def is_bounded(self):
-    # type: () -> bool
+  def default_output_coder(self):
+    raise NotImplementedError
+
+  def is_bounded(self) -> bool:
     raise NotImplementedError
 
 
@@ -141,9 +144,7 @@ class BoundedSource(SourceBase):
   implementations may invoke methods of ``BoundedSource`` objects through
   multi-threaded and/or reentrant execution modes.
   """
-  def estimate_size(self):
-    # type: () -> Optional[int]
-
+  def estimate_size(self) -> Optional[int]:
     """Estimates the size of source in bytes.
 
     An estimate of the total size (in bytes) of the data that would be read
@@ -156,13 +157,12 @@ class BoundedSource(SourceBase):
     """
     raise NotImplementedError
 
-  def split(self,
-            desired_bundle_size,  # type: int
-            start_position=None,  # type: Optional[Any]
-            stop_position=None,  # type: Optional[Any]
-           ):
-    # type: (...) -> Iterator[SourceBundle]
-
+  def split(
+      self,
+      desired_bundle_size: int,
+      start_position: Optional[Any] = None,
+      stop_position: Optional[Any] = None,
+  ) -> Iterator[SourceBundle]:
     """Splits the source into a set of bundles.
 
     Bundles should be approximately of size ``desired_bundle_size`` bytes.
@@ -179,12 +179,11 @@ class BoundedSource(SourceBase):
     """
     raise NotImplementedError
 
-  def get_range_tracker(self,
-                        start_position,  # type: Optional[Any]
-                        stop_position,  # type: Optional[Any]
-                       ):
-    # type: (...) -> RangeTracker
-
+  def get_range_tracker(
+      self,
+      start_position: Optional[Any],
+      stop_position: Optional[Any],
+  ) -> 'RangeTracker':
     """Returns a RangeTracker for a given position range.
 
     Framework may invoke ``read()`` method with the RangeTracker object returned
@@ -296,7 +295,7 @@ class RangeTracker(object):
   at or after 'B'".
 
   Some examples of such sources include reading lines or CSV from a text file,
-  reading keys and values from a BigTable, etc.
+  reading keys and values from a Bigtable, etc.
 
   The concept of *split points* allows to extend the definitions for dealing
   with sources where some records cannot be identified by a unique starting
@@ -750,6 +749,12 @@ class Sink(HasDisplayData):
   documentation at
   ``https://beam.apache.org/documentation/sdks/python-custom-io#creating-sinks``
   """
+  # Whether Beam should skip writing any shards if all are empty.
+  skip_if_empty = False
+
+  # the Write triggering frequency in streaming with GlobalWindow
+  triggering_frequency = 0
+
   def initialize_write(self):
     """Initializes the sink before writing begins.
 
@@ -778,7 +783,7 @@ class Sink(HasDisplayData):
     raise NotImplementedError
 
   def pre_finalize(self, init_result, writer_results):
-    """Pre-finalization stage for sink.
+    """Pre-finalization stage for sink for bounded PCollections.
 
     Called after all bundle writes are complete and before finalize_write.
     Used to setup and verify filesystem and sink states.
@@ -796,8 +801,28 @@ class Sink(HasDisplayData):
     """
     raise NotImplementedError
 
+  def pre_finalize_windowed(self, init_result, writer_results, window=None):
+    """Pre-finalization stage for sink for unbounded PCollections.
+
+    Called after all bundle writes are complete and before finalize_write.
+    Used to setup and verify filesystem and sink states.
+
+    Args:
+      init_result: the result of ``initialize_write()`` invocation.
+      writer_results: an iterable containing results of ``Writer.close()``
+        invocations. This will only contain results of successful writes, and
+        will only contain the result of a single successful write for a given
+        bundle.
+      window: DoFn window
+
+    Returns:
+      An object that contains any sink specific state generated.
+      This object will be passed to finalize_windowed_write().
+    """
+    raise NotImplementedError
+
   def finalize_write(self, init_result, writer_results, pre_finalize_result):
-    """Finalizes the sink after all data is written to it.
+    """Finalizes the sink after all data is written to it. (batch)
 
     Given the result of initialization and an iterable of results from bundle
     writes, performs finalization after writing and closes the sink. Called
@@ -832,6 +857,22 @@ class Sink(HasDisplayData):
     """
     raise NotImplementedError
 
+  def finalize_windowed_write(
+      self, init_result, writer_results, pre_finalize_result, window=None):
+    """Finalizes the sink after all data is written to it for a window. Similar
+    to ``finalize_write()``.
+
+    Args:
+      init_result: the result of ``initialize_write()`` invocation.
+      writer_results: an iterable containing results of ``Writer.close()``
+        invocations. This will only contain results of successful writes, and
+        will only contain the result of a single successful write for a given
+        bundle.
+      pre_finalize_result: the result of ``pre_finalize()`` invocation.
+      window: DoFn window
+    """
+    raise NotImplementedError
+
 
 class Writer(object):
   """This class is deprecated, no backwards-compatibility guarantees.
@@ -846,7 +887,8 @@ class Writer(object):
   writing to a sink.
   """
   def write(self, value):
-    """Writes a value to the sink using the current writer."""
+    """Writes a value to the sink using the current writer.
+    """
     raise NotImplementedError
 
   def close(self):
@@ -860,19 +902,26 @@ class Writer(object):
     """
     raise NotImplementedError
 
+  def at_capacity(self) -> bool:
+    """Returns whether this writer should be considered at capacity
+    and a new one should be created.
+    """
+    return False
+
 
 class Read(ptransform.PTransform):
   """A transform that reads a PCollection."""
   # Import runners here to prevent circular imports
   from apache_beam.runners.pipeline_context import PipelineContext
 
-  def __init__(self, source):
-    # type: (SourceBase) -> None
-
+  def __init__(self, source: SourceBase) -> None:
     """Initializes a Read transform.
 
     Args:
-      source: Data source to read from.
+      source: the data source to read from. May be a ``BoundedSource``, an
+        ``UnboundedSource``, or a ``PTransform`` (which is applied directly).
+        For any other source ``Read`` is treated as a primitive and relayed to
+        the runner implementation.
     """
     super().__init__()
     self.source = source
@@ -895,8 +944,14 @@ class Read(ptransform.PTransform):
       return (
           pbegin
           | Impulse()
-          | core.Map(lambda _: self.source).with_output_types(BoundedSource)
+          | 'EmitSource' >>
+          core.Map(lambda _: self.source).with_output_types(BoundedSource)
           | SDFBoundedSourceReader(display_data))
+    # Local import to avoid a circular dependency.
+    from apache_beam.io.unbounded_source import ReadFromUnboundedSource
+    from apache_beam.io.unbounded_source import UnboundedSource
+    if isinstance(self.source, UnboundedSource):
+      return pbegin | ReadFromUnboundedSource(self.source)
     elif isinstance(self.source, ptransform.PTransform):
       # The Read transform can also admit a full PTransform as an input
       # rather than an anctual source. If the input is a PTransform, then
@@ -907,17 +962,14 @@ class Read(ptransform.PTransform):
       return pvalue.PCollection(
           pbegin.pipeline, is_bounded=self.source.is_bounded())
 
-  def get_windowing(self, unused_inputs):
-    # type: (...) -> core.Windowing
+  def get_windowing(self, unused_inputs) -> core.Windowing:
     return core.Windowing(window.GlobalWindows())
 
-  def _infer_output_coder(self, input_type=None, input_coder=None):
-    # type: (...) -> Optional[coders.Coder]
-    from apache_beam.runners.dataflow.native_io import iobase as dataflow_io
-    if isinstance(self.source, BoundedSource):
+  def _infer_output_coder(self,
+                          input_type=None,
+                          input_coder=None) -> Optional[coders.Coder]:
+    if isinstance(self.source, SourceBase):
       return self.source.default_output_coder()
-    elif isinstance(self.source, dataflow_io.NativeSource):
-      return self.source.coder
     else:
       return None
 
@@ -930,19 +982,18 @@ class Read(ptransform.PTransform):
   def to_runner_api_parameter(
       self,
       context: PipelineContext,
-  ) -> Tuple[str, Any]:
-    from apache_beam.runners.dataflow.native_io import iobase as dataflow_io
-    if isinstance(self.source, (BoundedSource, dataflow_io.NativeSource)):
-      from apache_beam.io.gcp.pubsub import _PubSubSource
-      if isinstance(self.source, _PubSubSource):
-        return (
-            common_urns.composites.PUBSUB_READ.urn,
-            beam_runner_api_pb2.PubSubReadPayload(
-                topic=self.source.full_topic,
-                subscription=self.source.full_subscription,
-                timestamp_attribute=self.source.timestamp_attribute,
-                with_attributes=self.source.with_attributes,
-                id_attribute=self.source.id_label))
+  ) -> tuple[str, Any]:
+    from apache_beam.io.gcp.pubsub import _PubSubSource
+    if isinstance(self.source, _PubSubSource):
+      return (
+          common_urns.composites.PUBSUB_READ.urn,
+          beam_runner_api_pb2.PubSubReadPayload(
+              topic=self.source.full_topic,
+              subscription=self.source.full_subscription,
+              timestamp_attribute=self.source.timestamp_attribute,
+              with_attributes=self.source.with_attributes,
+              id_attribute=self.source.id_label))
+    if isinstance(self.source, BoundedSource):
       return (
           common_urns.deprecated_primitives.READ.urn,
           beam_runner_api_pb2.ReadPayload(
@@ -950,6 +1001,10 @@ class Read(ptransform.PTransform):
               is_bounded=beam_runner_api_pb2.IsBounded.BOUNDED
               if self.source.is_bounded() else
               beam_runner_api_pb2.IsBounded.UNBOUNDED))
+    # Local import to avoid a circular dependency.
+    from apache_beam.io.unbounded_source import UnboundedSource
+    if isinstance(self.source, UnboundedSource):
+      return super().to_runner_api_parameter(context)
     elif isinstance(self.source, ptransform.PTransform):
       return self.source.to_runner_api_parameter(context)
     raise NotImplementedError(
@@ -966,6 +1021,7 @@ class Read(ptransform.PTransform):
     if transform.spec.urn == common_urns.composites.PUBSUB_READ.urn:
       assert isinstance(payload, beam_runner_api_pb2.PubSubReadPayload)
       # Importing locally to prevent circular dependencies.
+      # TODO(BEAM-27443): Remove the need for this.
       from apache_beam.io.gcp.pubsub import _PubSubSource
       source = _PubSubSource(
           topic=payload.topic or None,
@@ -1005,6 +1061,7 @@ ptransform.PTransform.register_urn(
     Read._from_runner_api_parameter_read,
 )
 
+# TODO(BEAM-27443): Remove.
 ptransform.PTransform.register_urn(
     common_urns.composites.PUBSUB_READ.urn,
     beam_runner_api_pb2.PubSubReadPayload,
@@ -1055,10 +1112,11 @@ class Write(ptransform.PTransform):
     return {'sink': self.sink.__class__, 'sink_dd': self.sink}
 
   def expand(self, pcoll):
-    from apache_beam.runners.dataflow.native_io import iobase as dataflow_io
-    if isinstance(self.sink, dataflow_io.NativeSink):
-      # A native sink
-      return pcoll | 'NativeWrite' >> dataflow_io._NativeWrite(self.sink)
+    # Importing locally to prevent circular dependencies.
+    from apache_beam.io.gcp.pubsub import _PubSubSink
+    if isinstance(self.sink, _PubSubSink):
+      # TODO(BEAM-27443): Remove the need for special casing here.
+      return pvalue.PDone(pcoll.pipeline)
     elif isinstance(self.sink, Sink):
       # A custom sink
       return pcoll | WriteImpl(self.sink)
@@ -1073,7 +1131,8 @@ class Write(ptransform.PTransform):
   def to_runner_api_parameter(
       self,
       context: PipelineContext,
-  ) -> Tuple[str, Any]:
+  ) -> tuple[str, Any]:
+    # TODO(BEAM-27443): Remove the need for special casing here.
     # Importing locally to prevent circular dependencies.
     from apache_beam.io.gcp.pubsub import _PubSubSink
     if isinstance(self.sink, _PubSubSink):
@@ -1115,39 +1174,45 @@ class Write(ptransform.PTransform):
 
 class WriteImpl(ptransform.PTransform):
   """Implements the writing of custom sinks."""
-  def __init__(self, sink):
-    # type: (Sink) -> None
+  def __init__(self, sink: Sink) -> None:
     super().__init__()
     self.sink = sink
 
-  def expand(self, pcoll):
+  def _expand_bounded(self, pcoll, min_shards):
+    """Handles the expansion logic for a bounded PCollection."""
     do_once = pcoll.pipeline | 'DoOnce' >> core.Create([None])
     init_result_coll = do_once | 'InitializeWrite' >> core.Map(
         lambda _, sink: sink.initialize_write(), self.sink)
-    if getattr(self.sink, 'num_shards', 0):
-      min_shards = self.sink.num_shards
+
+    if (min_shards >= 1):
       if min_shards == 1:
         keyed_pcoll = pcoll | core.Map(lambda x: (None, x))
       else:
         keyed_pcoll = pcoll | core.ParDo(_RoundRobinKeyFn(), count=min_shards)
+      # pcoll.windowing checks pcoll.producer which may be absent when expand()
+      # is called directly (e.g. in tests)
+      if pcoll.producer is None or not keyed_pcoll.windowing.is_default():
+        keyed_pcoll = keyed_pcoll | core.WindowInto(window.GlobalWindows())
       write_result_coll = (
           keyed_pcoll
-          | core.WindowInto(window.GlobalWindows())
           | core.GroupByKey()
           | 'WriteBundles' >> core.ParDo(
               _WriteKeyedBundleDoFn(self.sink), AsSingleton(init_result_coll)))
-    else:
+    else:  # min_shards is 0, num_shards was undef
+      _LOGGER.info(
+          "*** WriteImpl min_shards undef so it's 1, and we write per Bundle")
       min_shards = 1
+
+      if pcoll.producer is None or not pcoll.windowing.is_default():
+        pcoll = pcoll | core.WindowInto(window.GlobalWindows())
       write_result_coll = (
           pcoll
-          | core.WindowInto(window.GlobalWindows())
           | 'WriteBundles' >> core.ParDo(
               _WriteBundleDoFn(self.sink), AsSingleton(init_result_coll))
           | 'Pair' >> core.Map(lambda x: (None, x))
           | core.GroupByKey()
           | 'Extract' >> core.FlatMap(lambda x: x[1]))
-    # PreFinalize should run before FinalizeWrite, and the two should not be
-    # fused.
+
     pre_finalize_coll = (
         do_once
         | 'PreFinalize' >> core.FlatMap(
@@ -1155,13 +1220,101 @@ class WriteImpl(ptransform.PTransform):
             self.sink,
             AsSingleton(init_result_coll),
             AsIter(write_result_coll)))
-    return do_once | 'FinalizeWrite' >> core.FlatMap(
-        _finalize_write,
-        self.sink,
-        AsSingleton(init_result_coll),
-        AsIter(write_result_coll),
-        min_shards,
-        AsSingleton(pre_finalize_coll))
+    return (
+        do_once | 'FinalizeWrite' >> core.FlatMap(
+            _finalize_write,
+            self.sink,
+            AsSingleton(init_result_coll),
+            AsIter(write_result_coll),
+            min_shards,
+            AsSingleton(pre_finalize_coll)).with_output_types(str))
+
+  def _apply_windowing(self, pcoll):
+    """
+    Applies windowing to an unbounded PCollection based on the sink's
+    triggering frequency.
+    """
+    use_fixed_windows = (
+        self.sink.triggering_frequency is not None and
+        self.sink.triggering_frequency > 0)
+
+    if isinstance(pcoll.windowing.windowfn, window.GlobalWindows):
+      if not use_fixed_windows:
+        raise ValueError(
+            'To write a GlobalWindow unbounded PCollection, '
+            'triggering_frequency must be set and be greater than 0')
+      return pcoll | 'ApplyFixedWindows' >> core.WindowInto(
+          window.FixedWindows(self.sink.triggering_frequency),
+          trigger=beam.transforms.trigger.AfterWatermark(),
+          accumulation_mode=beam.transforms.trigger.AccumulationMode.DISCARDING,
+          allowed_lateness=beam.utils.timestamp.Duration(seconds=0))
+
+    # Keep user-defined windowing unless triggering_frequency is specified.
+    if use_fixed_windows:
+      return pcoll | 'ApplyFixedWindows' >> core.WindowInto(
+          window.FixedWindows(self.sink.triggering_frequency),
+          trigger=beam.transforms.trigger.AfterWatermark(),
+          accumulation_mode=beam.transforms.trigger.AccumulationMode.DISCARDING,
+          allowed_lateness=beam.utils.timestamp.Duration(seconds=0))
+
+    return pcoll  # Keep original windowing
+
+  def _expand_unbounded(self, pcoll, min_shards):
+    """Handles the expansion logic for an unbounded PCollection."""
+    windowed_pcoll = self._apply_windowing(pcoll)
+
+    if self.sink.convert_fn is not None:
+      windowed_pcoll = windowed_pcoll | core.ParDo(self.sink.convert_fn)
+
+    init_result_window_coll = (
+        windowed_pcoll
+        | 'PairInit' >> core.Map(lambda x: (None, x))
+        | 'GroupInit' >> core.GroupByKey()
+        | 'InitializeWindowedWrite' >> core.Map(
+            lambda _, sink: sink.initialize_write(), self.sink))
+
+    if min_shards > 1:
+      keyed_pcoll = windowed_pcoll | core.ParDo(
+          _RoundRobinKeyFn(), count=min_shards)
+      grouped_pcoll = keyed_pcoll | 'Group by random key' >> core.GroupByKey()
+    else:  # min_shards is 1
+      min_shards = 1
+      _LOGGER.info("Writing unbounded data with a single shard per window.")
+      keyed_pcoll = windowed_pcoll | core.Map(lambda x: (None, x))
+      grouped_pcoll = keyed_pcoll | 'Group by window' >> core.GroupByKey()
+
+    write_result_coll = (
+        grouped_pcoll
+        | 'WriteWindowedBundles' >> core.ParDo(
+            _WriteWindowedBundleDoFn(sink=self.sink, per_key=True),
+            AsSingleton(init_result_window_coll))
+        | 'PairFinal' >> core.Map(lambda x: (None, x))
+        | 'GroupFinal' >> core.GroupByKey()
+        | 'ExtractFinal' >> core.Map(lambda x: x[1]))
+
+    pre_finalized_write_result_coll = (
+        write_result_coll
+        | 'PreFinalize' >> core.ParDo(
+            _PreFinalizeWindowedBundleDoFn(self.sink),
+            AsSingleton(init_result_window_coll)))
+
+    return (
+        pre_finalized_write_result_coll
+        | 'FinalizeWrite' >> core.FlatMap(
+            _finalize_windowed_write,
+            self.sink,
+            AsSingleton(init_result_window_coll),
+            AsSingleton(write_result_coll),
+            min_shards,
+            AsIter(pre_finalized_write_result_coll)).with_output_types(str))
+
+  def expand(self, pcoll):
+    min_shards = getattr(self.sink, 'num_shards', 0)
+
+    if (pcoll.is_bounded):
+      return self._expand_bounded(pcoll, min_shards)
+    else:
+      return self._expand_unbounded(pcoll, min_shards)
 
 
 class _WriteBundleDoFn(core.DoFn):
@@ -1182,12 +1335,103 @@ class _WriteBundleDoFn(core.DoFn):
       # We ignore UUID collisions here since they are extremely rare.
       self.writer = self.sink.open_writer(init_result, str(uuid.uuid4()))
     self.writer.write(element)
+    if self.writer.at_capacity():
+      yield self.writer.close()
+      self.writer = None
 
   def finish_bundle(self):
     if self.writer is not None:
       yield WindowedValue(
           self.writer.close(),
           window.GlobalWindow().max_timestamp(), [window.GlobalWindow()])
+
+
+class _PreFinalizeWindowedBundleDoFn(core.DoFn):
+  """A DoFn for writing elements to an iobase.Writer.
+  Opens a writer at the first element and closes the writer at finish_bundle().
+  """
+  def __init__(
+      self,
+      sink,
+      destination_fn=None,
+      temp_directory=None,
+  ):
+    self.sink = sink
+    self._temp_directory = temp_directory
+    self.destination_fn = destination_fn
+
+  def display_data(self):
+    return {'sink_dd': self.sink}
+
+  def process(
+      self,
+      element,
+      init_result,
+      w=core.DoFn.WindowParam,
+      pane=core.DoFn.PaneInfoParam):
+    self.sink.pre_finalize_windowed(
+        init_result=init_result, writer_results=element, window=w)
+    yield element
+
+
+class _WriteWindowedBundleDoFn(core.DoFn):
+  """A DoFn for writing elements to an iobase.Writer.
+  Opens a writer at the first element and closes the writer at finish_bundle().
+  """
+  def __init__(self, sink, per_key=False):
+    self.sink = sink
+    self.per_key = per_key
+
+  def display_data(self):
+    return {'sink_dd': self.sink}
+
+  def start_bundle(self):
+    self.writer = {}
+    self.window = {}
+    self.init_result = {}
+
+  def process(
+      self,
+      element,
+      init_result,
+      w=core.DoFn.WindowParam,
+      pane=core.DoFn.PaneInfoParam):
+    if self.per_key:
+      w_key = "%s_%s" % (w, element[0])  # key
+    else:
+      w_key = w
+
+    if not w in self.writer:
+      # We ignore UUID collisions here since they are extremely rare.
+      self.window[w_key] = w
+      self.writer[w_key] = self.sink.open_writer(
+          init_result, '%s_%s' % (w_key, uuid.uuid4()))
+      self.init_result[w_key] = init_result
+
+    if self.per_key:
+      for e in element[1]:  # values
+        self.writer[w_key].write(e)  # value
+    else:
+      self.writer[w_key].write(element)
+    if self.writer[w_key].at_capacity():
+      yield self.writer[w_key].close()
+      self.writer[w_key] = None
+
+  def finish_bundle(self):
+    for w_key, writer in self.writer.items():
+      w = self.window[w_key]
+      if writer is not None:
+        closed = writer.temp_shard_path
+        try:
+          closed = writer.close()  # TODO : improve sink closing for streaming
+        except ValueError as exp:
+          _LOGGER.info(
+              "*** _WriteWindowedBundleDoFn finish_bundle closed ERROR %s", exp)
+        yield WindowedValue(
+            closed,
+            timestamp=w.start,
+            windows=[w]  # TODO(pabloem) HOW DO WE GET THE PANE
+        )
 
 
 class _WriteKeyedBundleDoFn(core.DoFn):
@@ -1219,16 +1463,41 @@ def _finalize_write(
   write_results = list(write_results)
   extra_shards = []
   if len(write_results) < min_shards:
-    _LOGGER.debug(
-        'Creating %s empty shard(s).', min_shards - len(write_results))
-    for _ in range(min_shards - len(write_results)):
-      writer = sink.open_writer(init_result, str(uuid.uuid4()))
-      extra_shards.append(writer.close())
+    if write_results or not sink.skip_if_empty:
+      _LOGGER.debug(
+          'Creating %s empty shard(s).', min_shards - len(write_results))
+      for _ in range(min_shards - len(write_results)):
+        writer = sink.open_writer(init_result, str(uuid.uuid4()))
+        extra_shards.append(writer.close())
   outputs = sink.finalize_write(
       init_result, write_results + extra_shards, pre_finalize_results)
   if outputs:
     return (
         window.TimestampedValue(v, timestamp.MAX_TIMESTAMP) for v in outputs)
+
+
+def _finalize_windowed_write(
+    unused_element,
+    sink,
+    init_result,
+    write_results,
+    min_shards,
+    pre_finalize_results,
+    w=DoFn.WindowParam):
+  write_results = list(write_results)
+  extra_shards = []
+  if len(write_results) < min_shards:
+    if write_results or not sink.skip_if_empty:
+      _LOGGER.debug(
+          'Creating %s empty shard(s).', min_shards - len(write_results))
+      for _ in range(min_shards - len(write_results)):
+        writer = sink.open_writer(init_result, str(uuid.uuid4()))
+        extra_shards.append(writer.close())
+  outputs = sink.finalize_windowed_write(
+      init_result, write_results + extra_shards, pre_finalize_results, w)
+
+  if outputs:
+    return (window.TimestampedValue(v, w.end) for v in outputs)
 
 
 class _RoundRobinKeyFn(core.DoFn):
@@ -1271,9 +1540,7 @@ class RestrictionTracker(object):
     """
     raise NotImplementedError
 
-  def current_progress(self):
-    # type: () -> RestrictionProgress
-
+  def current_progress(self) -> 'RestrictionProgress':
     """Returns a RestrictionProgress object representing the current progress.
 
     This API is recommended to be implemented. The runner can do a better job
@@ -1367,7 +1634,7 @@ class RestrictionTracker(object):
 
     The boundedness of the restriction is used to determine the default behavior
     of how to truncate restrictions when a pipeline is being
-    `drained <https://docs.google.com/document/d/1NExwHlj-2q2WUGhSO4jTu8XGhDPmm3cllSN8IMmWci8/edit#>`_.  # pylint: disable=line-too-long
+    `drained <https://beam.apache.org/documentation/programming-guide/#truncating-during-drain>`_.  # pylint: disable=line-too-long
     If the restriction is bounded, then the entire restriction will be processed
     otherwise the restriction will be processed till a checkpoint is possible.
 
@@ -1398,16 +1665,12 @@ class WatermarkEstimator(object):
     """
     raise NotImplementedError(type(self))
 
-  def current_watermark(self):
-    # type: () -> timestamp.Timestamp
-
+  def current_watermark(self) -> timestamp.Timestamp:
     """Return estimated output_watermark. This function must return
     monotonically increasing watermarks."""
     raise NotImplementedError(type(self))
 
-  def observe_timestamp(self, timestamp):
-    # type: (timestamp.Timestamp) -> None
-
+  def observe_timestamp(self, timestamp: timestamp.Timestamp) -> None:
     """Update tracking  watermark with latest output timestamp.
 
     Args:
@@ -1432,8 +1695,7 @@ class RestrictionProgress(object):
         self._fraction, self._completed, self._remaining)
 
   @property
-  def completed_work(self):
-    # type: () -> float
+  def completed_work(self) -> float:
     if self._completed is not None:
       return self._completed
     elif self._remaining is not None and self._fraction is not None:
@@ -1442,8 +1704,7 @@ class RestrictionProgress(object):
       return self._fraction
 
   @property
-  def remaining_work(self):
-    # type: () -> float
+  def remaining_work(self) -> float:
     if self._remaining is not None:
       return self._remaining
     elif self._completed is not None and self._fraction:
@@ -1452,28 +1713,28 @@ class RestrictionProgress(object):
       return 1 - self._fraction
 
   @property
-  def total_work(self):
-    # type: () -> float
+  def total_work(self) -> float:
     return self.completed_work + self.remaining_work
 
   @property
-  def fraction_completed(self):
-    # type: () -> float
+  def fraction_completed(self) -> float:
     if self._fraction is not None:
       return self._fraction
-    else:
-      return float(self._completed) / self.total_work
+    total_work = self.total_work
+    if total_work == 0.:
+      return 1.0
+    return float(self._completed) / total_work
 
   @property
-  def fraction_remaining(self):
-    # type: () -> float
+  def fraction_remaining(self) -> float:
     if self._fraction is not None:
       return 1 - self._fraction
-    else:
-      return float(self._remaining) / self.total_work
+    total_work = self.total_work
+    if total_work == 0.:
+      return 0.0
+    return float(self._remaining) / total_work
 
-  def with_completed(self, completed):
-    # type: (int) -> RestrictionProgress
+  def with_completed(self, completed: int) -> 'RestrictionProgress':
     return RestrictionProgress(
         fraction=self._fraction, remaining=self._remaining, completed=completed)
 
@@ -1551,8 +1812,7 @@ class _SDFBoundedSourceRestrictionTracker(RestrictionTracker):
           restriction)
     self.restriction = restriction
 
-  def current_progress(self):
-    # type: () -> RestrictionProgress
+  def current_progress(self) -> RestrictionProgress:
     return RestrictionProgress(
         fraction=self.restriction.range_tracker().fraction_consumed())
 
@@ -1667,9 +1927,8 @@ class SDFBoundedSourceReader(PTransform):
         current_restriction = restriction_tracker.current_restriction()
         assert isinstance(current_restriction, _SDFBoundedSourceRestriction)
 
-        result = current_restriction.source().read(
+        return current_restriction.source().read(
             current_restriction.range_tracker())
-        return result
 
     return SDFBoundedSourceDoFn(self._data_to_display)
 

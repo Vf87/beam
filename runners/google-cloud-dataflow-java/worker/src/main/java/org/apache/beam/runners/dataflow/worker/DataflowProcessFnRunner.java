@@ -18,7 +18,7 @@
 package org.apache.beam.runners.dataflow.worker;
 
 import static org.apache.beam.runners.core.SplittableParDoViaKeyedWorkItems.ProcessFn;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.util.Collection;
 import org.apache.beam.runners.core.DoFnRunner;
@@ -30,9 +30,12 @@ import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.CausedByDrain;
 import org.apache.beam.sdk.values.KV;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
 /**
@@ -42,7 +45,7 @@ import org.joda.time.Instant;
  * because the code for handling pushback on streaming side inputs in Dataflow is also divergent
  * from the runner-agnostic code in runners-core. If that code is ever unified, so can this class.
  */
-@SuppressWarnings({"keyfor", "nullness"}) // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+@SuppressWarnings({"keyfor", "nullness"}) // TODO(https://github.com/apache/beam/issues/20497)
 class DataflowProcessFnRunner<InputT, OutputT, RestrictionT>
     implements DoFnRunner<KeyedWorkItem<byte[], KV<InputT, RestrictionT>>, OutputT> {
   private final DoFnRunner<KeyedWorkItem<byte[], KV<InputT, RestrictionT>>, OutputT> simpleRunner;
@@ -67,7 +70,7 @@ class DataflowProcessFnRunner<InputT, OutputT, RestrictionT>
       WindowedValue<KeyedWorkItem<byte[], T>> compressedElem) {
     checkTrivialOuterWindows(compressedElem);
     WindowedValue<KeyedWorkItem<byte[], T>> res =
-        WindowedValue.of(
+        WindowedValues.of(
             compressedElem.getValue(),
             BoundedWindow.TIMESTAMP_MIN_VALUE,
             getUnderlyingWindow(compressedElem.getValue()),
@@ -116,13 +119,19 @@ class DataflowProcessFnRunner<InputT, OutputT, RestrictionT>
       BoundedWindow window,
       Instant timestamp,
       Instant outputTimestamp,
-      TimeDomain timeDomain) {
+      TimeDomain timeDomain,
+      CausedByDrain causedByDrain) {
     throw new UnsupportedOperationException("Unsupported for ProcessFn");
   }
 
   @Override
   public void finishBundle() {
     simpleRunner.finishBundle();
+  }
+
+  @Override
+  public <KeyT extends @Nullable Object> void finishKey(KeyT key) {
+    simpleRunner.finishKey(key);
   }
 
   @Override

@@ -18,7 +18,7 @@
 # This image contains Hugo and dependencies required to build and test the Beam
 # website. It is used by tasks in build.gradle.
 
-FROM debian:stretch-slim
+FROM --platform=linux/amd64 debian:stable-slim
 
 SHELL ["/bin/bash", "-o", "pipefail", "-e", "-u", "-x", "-c"]
 
@@ -28,6 +28,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LC_ALL=C.UTF-8 \
     LC_CTYPE=C.UTF-8 \
     LC_MESSAGES=C.UTF-8
+
+WORKDIR /opt/
 
 # Install deps being used by sh files
 RUN apt-get update \
@@ -42,8 +44,25 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install node environment
-RUN curl -sL https://deb.nodesource.com/setup_10.x | bash - \
+# Install Google Cloud SDK (gcloud storage)
+RUN apt-get update \
+    && apt-get install -y apt-transport-https \
+    # Download the key and save it directly to the keyring file (skipping apt-key)
+    && curl -fsSL --retry 5 --retry-all-errors https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+       | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+    # Add the repo source using the signed-by tag
+    && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+       | tee /etc/apt/sources.list.d/google-cloud-sdk.list \
+    && apt-get update \
+    && apt-get install -y google-cloud-cli \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CLOUDSDK_CONFIG=/opt/gcloud-config
+RUN mkdir -p /opt/gcloud-config && chmod 777 /opt/gcloud-config
+
+# Install node LTS environment
+RUN curl -fsSL --retry 5 --retry-all-errors https://deb.nodesource.com/setup_lts.x | bash - \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         nodejs \
@@ -51,22 +70,26 @@ RUN curl -sL https://deb.nodesource.com/setup_10.x | bash - \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install yarn
-RUN curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add - \
-    && echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends yarn \
-    && apt-get autoremove -yqq --purge \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+RUN npm update -g npm
 
-# Install hugo extended version v0.68.3
+RUN npm install postcss postcss-cli autoprefixer
+
+# Install yarn. Node.js 25+ no longer bundles Corepack.
+ENV COREPACK_HOME=/usr/local/share/corepack \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN mkdir -p "$COREPACK_HOME" \
+ && npm install -g corepack \
+ && corepack enable \
+ && corepack prepare yarn@1.22.22 --activate
+
+# Install hugo extended version v0.117.0
 RUN HUGOHOME="$(mktemp -d)" \
     && export HUGOHOME \
-    && curl -sL https://github.com/gohugoio/hugo/releases/download/v0.68.3/hugo_extended_0.68.3_Linux-64bit.tar.gz > "${HUGOHOME}/hugo.tar.gz" \
+    && curl -fsSL --retry 5 --retry-all-errors https://github.com/gohugoio/hugo/releases/download/v0.117.0/hugo_extended_0.117.0_Linux-64bit.tar.gz > "${HUGOHOME}/hugo.tar.gz" \
     && tar -xzvf "${HUGOHOME}/hugo.tar.gz" hugo \
     && mv hugo /usr/local/bin/hugo \
     && chmod +x /usr/local/bin/hugo \
     && rm -r "${HUGOHOME}"
 
-WORKDIR /opt/
+# Prevent git errors of the form "fatal: detected dubious ownership in repository"
+RUN git config --file=/.gitconfig --add safe.directory /opt && chmod a+r /.gitconfig

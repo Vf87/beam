@@ -23,8 +23,10 @@ import org.apache.beam.sdk.coders.VarIntCoder;
 import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.testing.CoderProperties;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.sdk.values.CausedByDrain;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.joda.time.Instant;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -47,12 +49,13 @@ public class KeyedWorkItemCoderTest {
                 StateNamespaces.global(),
                 new Instant(500L),
                 new Instant(500L),
-                TimeDomain.EVENT_TIME));
+                TimeDomain.EVENT_TIME,
+                CausedByDrain.NORMAL));
     Iterable<WindowedValue<Integer>> elements =
         ImmutableList.of(
-            WindowedValue.valueInGlobalWindow(1),
-            WindowedValue.valueInGlobalWindow(4),
-            WindowedValue.valueInGlobalWindow(8));
+            WindowedValues.valueInGlobalWindow(1),
+            WindowedValues.valueInGlobalWindow(4),
+            WindowedValues.valueInGlobalWindow(8));
 
     KeyedWorkItemCoder<String, Integer> coder =
         KeyedWorkItemCoder.of(StringUtf8Coder.of(), VarIntCoder.of(), GlobalWindow.Coder.INSTANCE);

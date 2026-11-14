@@ -18,14 +18,16 @@
 
 import inspect
 import logging
+import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
+from unittest.mock import MagicMock
 
 import grpc
-import pytest
 
 import apache_beam as beam
 from apache_beam.options.pipeline_options import DebugOptions
@@ -92,7 +94,8 @@ class PortableRunnerTest(fn_runner_test.FnApiRunnerTest):
         GRPCChannelFactory.insecure_channel(address))
     _LOGGER.info('Waiting for server to be ready...')
     start = time.time()
-    timeout = 30
+    # Long timeout based previously flaky test. See issue #22115.
+    timeout = 300
     while True:
       time.sleep(0.1)
       if cls._subprocess.poll() is not None:
@@ -220,8 +223,34 @@ class PortableRunnerTest(fn_runner_test.FnApiRunnerTest):
   def test_draining_sdf_with_sdf_initiated_checkpointing(self):
     raise unittest.SkipTest("Portable runners don't support drain yet.")
 
+  def test_pardo_et_timer_with_no_firing(self):
+    if type(self).__name__ in {
+        'PortableRunnerTest',
+        'PortableRunnerTestWithSubprocesses',
+        'PortableRunnerTestWithSubprocessesAndMultiWorkers',
+        'PortableRunnerTestWithExternalEnv',
+        'PortableRunnerTestWithLocalDocker',
+        'PortableRunnerOptimizedWithoutFusion',
+        'SparkRunnerTest'
+    }:
+      raise unittest.SkipTest("https://github.com/apache/beam/issues/35168")
+    super().test_pardo_et_timer_with_no_firing()
 
-@unittest.skip("BEAM-7248")
+  def test_pardo_et_timer_with_no_reset(self):
+    if type(self).__name__ in {
+        'PortableRunnerTest',
+        'PortableRunnerTestWithSubprocesses',
+        'PortableRunnerTestWithSubprocessesAndMultiWorkers',
+        'PortableRunnerTestWithExternalEnv',
+        'PortableRunnerTestWithLocalDocker',
+        'PortableRunnerOptimizedWithoutFusion',
+        'SparkRunnerTest'
+    }:
+      raise unittest.SkipTest("https://github.com/apache/beam/issues/35168")
+    super().test_pardo_et_timer_with_no_reset()
+
+
+@unittest.skip("https://github.com/apache/beam/issues/19422")
 class PortableRunnerOptimized(PortableRunnerTest):
   def create_options(self):
     options = super().create_options()
@@ -232,8 +261,8 @@ class PortableRunnerOptimized(PortableRunnerTest):
     return options
 
 
-# TODO(BEAM-7248): Delete this test after PortableRunner supports
-# beam:runner:executable_stage:v1.
+# TODO(https://github.com/apache/beam/issues/19422): Delete this test after
+# PortableRunner supports beam:runner:executable_stage:v1.
 class PortableRunnerOptimizedWithoutFusion(PortableRunnerTest):
   def create_options(self):
     options = super().create_options()
@@ -263,9 +292,24 @@ class PortableRunnerTestWithExternalEnv(PortableRunnerTest):
     return options
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="[BEAM-10625]")
 class PortableRunnerTestWithSubprocesses(PortableRunnerTest):
   _use_subprocesses = True
+
+  # TODO(https://github.com/grpc/grpc/issues/37710): Remove once fixed.
+  @classmethod
+  def setUpClass(cls):
+    cls._old_fork_support = os.environ.get('GRPC_ENABLE_FORK_SUPPORT')
+    os.environ['GRPC_ENABLE_FORK_SUPPORT'] = 'false'
+    super().setUpClass()
+
+  # TODO(https://github.com/grpc/grpc/issues/37710): Remove once fixed.
+  @classmethod
+  def tearDownClass(cls):
+    if cls._old_fork_support is None:
+      os.environ.pop('GRPC_ENABLE_FORK_SUPPORT', None)
+    else:
+      os.environ['GRPC_ENABLE_FORK_SUPPORT'] = cls._old_fork_support
+    super().tearDownClass()
 
   def create_options(self):
     options = super().create_options()
@@ -291,6 +335,11 @@ class PortableRunnerTestWithSubprocesses(PortableRunnerTest):
         str(job_port),
     ]
 
+  def test_batch_rebatch_pardos(self):
+    raise unittest.SkipTest(
+        "Portable runners with subprocess can't make "
+        "assertions about warnings raised on the worker.")
+
 
 class PortableRunnerTestWithSubprocessesAndMultiWorkers(
     PortableRunnerTestWithSubprocesses):
@@ -304,12 +353,24 @@ class PortableRunnerTestWithSubprocessesAndMultiWorkers(
 
 
 class PortableRunnerInternalTest(unittest.TestCase):
+  def setUp(self) -> None:
+    self.tmp_dir = tempfile.TemporaryDirectory()
+    self.actual_mkdtemp = tempfile.mkdtemp
+    tempfile.mkdtemp = MagicMock(return_value=self.tmp_dir.name)
+
+  def tearDown(self) -> None:
+    tempfile.mkdtemp = self.actual_mkdtemp
+    self.tmp_dir.cleanup()
+
   def test__create_default_environment(self):
     docker_image = environments.DockerEnvironment.default_docker_image()
     self.assertEqual(
         PortableRunner._create_environment(
-            PipelineOptions.from_dictionary({'sdk_location': 'container'})),
-        environments.DockerEnvironment(container_image=docker_image))
+            options=PipelineOptions.from_dictionary(
+                {'sdk_location': 'container'})),
+        environments.DockerEnvironment(
+            container_image=docker_image,
+            artifacts=environments.python_sdk_dependencies(PipelineOptions())))
 
   def test__create_docker_environment(self):
     docker_image = 'py-docker'
@@ -320,7 +381,9 @@ class PortableRunnerInternalTest(unittest.TestCase):
                 'environment_config': docker_image,
                 'sdk_location': 'container',
             })),
-        environments.DockerEnvironment(container_image=docker_image))
+        environments.DockerEnvironment(
+            container_image=docker_image,
+            artifacts=environments.python_sdk_dependencies(PipelineOptions())))
 
   def test__create_process_environment(self):
     self.assertEqual(
@@ -333,7 +396,11 @@ class PortableRunnerInternalTest(unittest.TestCase):
                 'sdk_location': 'container',
             })),
         environments.ProcessEnvironment(
-            'run.sh', os='linux', arch='amd64', env={'k1': 'v1'}))
+            'run.sh',
+            os='linux',
+            arch='amd64',
+            env={'k1': 'v1'},
+            artifacts=environments.python_sdk_dependencies(PipelineOptions())))
     self.assertEqual(
         PortableRunner._create_environment(
             PipelineOptions.from_dictionary({
@@ -341,7 +408,9 @@ class PortableRunnerInternalTest(unittest.TestCase):
                 'environment_config': '{"command": "run.sh"}',
                 'sdk_location': 'container',
             })),
-        environments.ProcessEnvironment('run.sh'))
+        environments.ProcessEnvironment(
+            'run.sh',
+            artifacts=environments.python_sdk_dependencies(PipelineOptions())))
 
   def test__create_external_environment(self):
     self.assertEqual(
@@ -351,7 +420,9 @@ class PortableRunnerInternalTest(unittest.TestCase):
                 'environment_config': 'localhost:50000',
                 'sdk_location': 'container',
             })),
-        environments.ExternalEnvironment('localhost:50000'))
+        environments.ExternalEnvironment(
+            'localhost:50000',
+            artifacts=environments.python_sdk_dependencies(PipelineOptions())))
     raw_config = ' {"url":"localhost:50000", "params":{"k1":"v1"}} '
     for env_config in (raw_config, raw_config.lstrip(), raw_config.strip()):
       self.assertEqual(
@@ -362,7 +433,10 @@ class PortableRunnerInternalTest(unittest.TestCase):
                   'sdk_location': 'container',
               })),
           environments.ExternalEnvironment(
-              'localhost:50000', params={"k1": "v1"}))
+              'localhost:50000',
+              params={"k1": "v1"},
+              artifacts=environments.python_sdk_dependencies(
+                  PipelineOptions())))
     with self.assertRaises(ValueError):
       PortableRunner._create_environment(
           PipelineOptions.from_dictionary({
@@ -399,6 +473,104 @@ class PortableRunnerTestWithLocalDocker(PortableRunnerTest):
     options = super().create_options()
     options.view_as(PortableOptions).job_endpoint = 'embed'
     return options
+
+
+class PortableRunnerOptimizationTest(unittest.TestCase):
+  """Tests for PortableRunner._optimize_pipeline."""
+  @staticmethod
+  def _transform_urns(proto, options):
+    optimized = PortableRunner._optimize_pipeline(proto, options)
+    return {
+        t.spec.urn
+        for t in optimized.components.transforms.values() if t.spec.urn
+    }
+
+  def test_custom_optimize_expand_sdf(self):
+    """Verify that expand_sdf can be requested explicitly.
+
+    See https://github.com/apache/beam/issues/24422.
+    """
+    from apache_beam.io import restriction_trackers
+    from apache_beam.portability import common_urns
+
+    class ExpandStringsProvider(beam.transforms.core.RestrictionProvider):
+      def initial_restriction(self, element):
+        return restriction_trackers.OffsetRange(0, len(element))
+
+      def create_tracker(self, restriction):
+        return restriction_trackers.OffsetRestrictionTracker(restriction)
+
+      def restriction_size(self, element, restriction):
+        return restriction.size()
+
+    class ExpandingStringsDoFn(beam.DoFn):
+      def process(
+          self,
+          element,
+          restriction_tracker=beam.DoFn.RestrictionParam(
+              ExpandStringsProvider())):
+        cur = restriction_tracker.current_restriction().start
+        while restriction_tracker.try_claim(cur):
+          yield element[cur]
+          cur += 1
+
+    p = beam.Pipeline()
+    _ = (p | beam.Create(['abc']) | beam.ParDo(ExpandingStringsDoFn()))
+    proto = p.to_runner_api()
+
+    transform_urns = self._transform_urns(
+        proto, PipelineOptions(['--experiments=pre_optimize=expand_sdf']))
+
+    self.assertIn(
+        common_urns.sdf_components.PAIR_WITH_RESTRICTION.urn, transform_urns)
+    self.assertIn(
+        common_urns.sdf_components.SPLIT_AND_SIZE_RESTRICTIONS.urn,
+        transform_urns)
+    self.assertIn(
+        common_urns.sdf_components.PROCESS_SIZED_ELEMENTS_AND_RESTRICTIONS.urn,
+        transform_urns)
+
+  def test_custom_optimize_expands_bounded_read(self):
+    """Verify that iobase.Read(BoundedSource) expands with explicit expand_sdf.
+
+    This is the end-to-end scenario from
+    https://github.com/apache/beam/issues/24422: Read transforms like
+    ReadFromParquet use SDFs internally. With explicit expand_sdf, these are
+    expanded before reaching the Spark job server as a single ParDo,
+    executing on one partition with no parallelization.
+    """
+    from apache_beam.io import iobase
+    from apache_beam.portability import common_urns
+
+    class _FakeBoundedSource(iobase.BoundedSource):
+      def get_range_tracker(self, start_position, stop_position):
+        return None
+
+      def read(self, range_tracker):
+        return iter([])
+
+      def estimate_size(self):
+        return 0
+
+    p = beam.Pipeline()
+    _ = p | beam.io.Read(_FakeBoundedSource())
+    proto = p.to_runner_api()
+
+    transform_urns = self._transform_urns(
+        proto, PipelineOptions(['--experiments=pre_optimize=expand_sdf']))
+
+    # The SDFBoundedSourceReader DoFn should have been expanded into
+    # SDF component stages.
+    self.assertIn(
+        common_urns.sdf_components.PAIR_WITH_RESTRICTION.urn, transform_urns)
+    self.assertIn(
+        common_urns.sdf_components.SPLIT_AND_SIZE_RESTRICTIONS.urn,
+        transform_urns)
+    self.assertIn(
+        common_urns.sdf_components.PROCESS_SIZED_ELEMENTS_AND_RESTRICTIONS.urn,
+        transform_urns)
+    # Reshuffle should be present to enable parallelization.
+    self.assertIn(common_urns.composites.RESHUFFLE.urn, transform_urns)
 
 
 if __name__ == '__main__':

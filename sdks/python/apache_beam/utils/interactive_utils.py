@@ -15,10 +15,7 @@
 # limitations under the License.
 #
 
-"""Common interactive utility module.
-
-For experimental usage only; no backwards-compatibility guarantees.
-"""
+"""Common interactive utility module."""
 # pytype: skip-file
 
 import logging
@@ -72,6 +69,7 @@ def alter_label_if_ipython(transform, pvalueish):
   """
   if is_in_ipython():
     from apache_beam.runners.interactive import interactive_environment as ie
+
     # Tracks user defined pipeline instances in watched scopes so that we only
     # alter labels for any transform to pvalueish belonging to those pipeline
     # instances, excluding any transform to be applied in other pipeline

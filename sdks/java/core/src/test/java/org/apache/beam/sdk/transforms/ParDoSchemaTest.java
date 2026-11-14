@@ -43,6 +43,7 @@ import org.apache.beam.sdk.state.MapState;
 import org.apache.beam.sdk.state.SetState;
 import org.apache.beam.sdk.state.StateSpec;
 import org.apache.beam.sdk.state.StateSpecs;
+import org.apache.beam.sdk.testing.BeamParallelJunit4Runner;
 import org.apache.beam.sdk.testing.NeedsRunner;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
@@ -58,21 +59,25 @@ import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
+import org.junit.rules.Timeout;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
 
 /** Test {@link Schema} support. */
-@RunWith(JUnit4.class)
+@RunWith(BeamParallelJunit4Runner.class)
 @Category(UsesSchema.class)
+// TODO(https://github.com/apache/beam/issues/21230): Remove when new version of errorprone is
+// released (2.11.0)
+@SuppressWarnings("unused")
 public class ParDoSchemaTest implements Serializable {
   @Rule public final transient TestPipeline pipeline = TestPipeline.create();
   @Rule public transient ExpectedException thrown = ExpectedException.none();
+  @Rule public transient Timeout globalTimeout = Timeout.seconds(1200);
 
   static class MyPojo implements Serializable {
     MyPojo(String stringField, Integer integerField) {
@@ -397,7 +402,7 @@ public class ParDoSchemaTest implements Serializable {
   abstract static class Inferred {
     abstract String getStringField();
 
-    abstract Integer getIntegerField();
+    abstract int getIntegerField();
   }
 
   @Test
@@ -443,7 +448,7 @@ public class ParDoSchemaTest implements Serializable {
   @DefaultSchema(AutoValueSchema.class)
   @AutoValue
   abstract static class Inferred2 {
-    abstract Integer getIntegerField();
+    abstract int getIntegerField();
 
     abstract String getStringField();
   }
@@ -514,7 +519,7 @@ public class ParDoSchemaTest implements Serializable {
   @DefaultSchema(AutoValueSchema.class)
   @AutoValue
   abstract static class ForExtraction {
-    abstract Integer getIntegerField();
+    abstract int getIntegerField();
 
     abstract String getStringField();
 
@@ -727,6 +732,7 @@ public class ParDoSchemaTest implements Serializable {
         new DoFn<KV<String, TestStateSchemaValue>, TestStateSchemaValues>() {
 
           // This should infer the schema.
+
           @StateId(stateId)
           private final StateSpec<BagState<TestStateSchemaValue>> bufferState = StateSpecs.bag();
 
@@ -777,6 +783,7 @@ public class ParDoSchemaTest implements Serializable {
         new DoFn<KV<String, TestStateSchemaValue>, TestStateSchemaValues>() {
 
           // This should infer the schema.
+
           @StateId(stateId)
           private final StateSpec<SetState<TestStateSchemaValue>> bufferState = StateSpecs.set();
 
@@ -821,7 +828,7 @@ public class ParDoSchemaTest implements Serializable {
   @DefaultSchema(AutoValueSchema.class)
   @AutoValue
   abstract static class TestStateSchemaValue2 {
-    abstract Integer getInteger();
+    abstract int getInteger();
   }
 
   @DefaultSchema(AutoValueSchema.class)

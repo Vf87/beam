@@ -31,8 +31,9 @@ from apache_beam.typehints.decorators import TypeCheckError
 # Protect against environments where video intelligence lib is not available.
 # pylint: disable=ungrouped-imports
 try:
-  from google.cloud.videointelligence import VideoIntelligenceServiceClient
   from google.cloud import videointelligence
+  from google.cloud.videointelligence import VideoIntelligenceServiceClient
+
   from apache_beam.ml.gcp import videointelligenceml
 except ImportError:
   VideoIntelligenceServiceClient = None
@@ -47,11 +48,11 @@ class VideoIntelligenceTest(unittest.TestCase):
     self.m2 = mock.Mock()
     self.m2.result.return_value = None
     self._mock_client.annotate_video.return_value = self.m2
-    self.features = [videointelligence.enums.Feature.LABEL_DETECTION]
+    self.features = [videointelligence.Feature.LABEL_DETECTION]
     self.location_id = 'us-west1'
-    config = videointelligence.types.SpeechTranscriptionConfig(
+    config = videointelligence.SpeechTranscriptionConfig(
         language_code='en-US', enable_automatic_punctuation=True)
-    self.video_ctx = videointelligence.types.VideoContext(
+    self.video_ctx = videointelligence.VideoContext(
         speech_transcription_config=config)
 
   def test_AnnotateVideo_with_side_input_context(self):

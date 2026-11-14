@@ -17,12 +17,11 @@
  */
 package org.apache.beam.sdk.nexmark.queries.sql;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import org.apache.beam.sdk.extensions.sql.SqlTransform;
 import org.apache.beam.sdk.extensions.sql.impl.CalciteQueryPlanner;
 import org.apache.beam.sdk.extensions.sql.impl.QueryPlanner;
-import org.apache.beam.sdk.extensions.sql.zetasql.ZetaSQLQueryPlanner;
 import org.apache.beam.sdk.nexmark.NexmarkConfiguration;
 import org.apache.beam.sdk.nexmark.model.Bid;
 import org.apache.beam.sdk.nexmark.model.Event;
@@ -41,7 +40,7 @@ import org.apache.beam.sdk.values.TypeDescriptors;
 
 /** Basic stream enrichment: join a stream to a bounded side input. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class SqlBoundedSideInputJoin extends NexmarkQueryTransform<Bid> {
   private final String query;
@@ -49,7 +48,6 @@ public class SqlBoundedSideInputJoin extends NexmarkQueryTransform<Bid> {
   private final Class<? extends QueryPlanner> plannerClass;
 
   private SqlBoundedSideInputJoin(
-      String name,
       NexmarkConfiguration configuration,
       Class<? extends QueryPlanner> plannerClass,
       String query) {
@@ -68,37 +66,15 @@ public class SqlBoundedSideInputJoin extends NexmarkQueryTransform<Bid> {
     //  - must have the CAST inside the WITH clause for the same reason, otherwise the cast
     //    occurs in the join condition CAST(side_id AS BIGINT) = side.id
     return new SqlBoundedSideInputJoin(
-        "SqlBoundedSideInputJoin",
         configuration,
         CalciteQueryPlanner.class,
-        "WITH bid_with_side (auction, bidder, price, dateTime, extra, side_id) AS (%n"
+        "WITH bid_with_side (auction, bidder, price, `dateTime`, extra, side_id) AS (%n"
             + "  SELECT *, CAST(MOD(bidder, %d) AS BIGINT) side_id FROM bid%n"
             + ")%n"
             + " SELECT bid_with_side.auction%n"
             + ", bid_with_side.bidder%n"
             + ", bid_with_side.price%n"
-            + ", bid_with_side.dateTime%n"
-            + ", side.extra%n"
-            + " FROM bid_with_side, side%n"
-            + " WHERE bid_with_side.side_id = side.id");
-  }
-
-  public static SqlBoundedSideInputJoin zetaSqlBoundedSideInputJoin(
-      NexmarkConfiguration configuration) {
-    // Differences from Calcite SQL:
-    //   - INT64 instead of BIGINT
-    //   - no column list for WITH table alias
-    return new SqlBoundedSideInputJoin(
-        "ZetaSqlBoundedSideInputJoin",
-        configuration,
-        ZetaSQLQueryPlanner.class,
-        "WITH bid_with_side AS (%n"
-            + "  SELECT *, CAST(MOD(bidder, %d) AS INT64) side_id FROM bid%n"
-            + ")%n"
-            + " SELECT bid_with_side.auction%n"
-            + ", bid_with_side.bidder%n"
-            + ", bid_with_side.price%n"
-            + ", bid_with_side.dateTime%n"
+            + ", bid_with_side.`dateTime`%n"
             + ", side.extra%n"
             + " FROM bid_with_side, side%n"
             + " WHERE bid_with_side.side_id = side.id");

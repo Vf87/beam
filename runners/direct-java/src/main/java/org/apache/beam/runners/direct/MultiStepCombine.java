@@ -17,9 +17,9 @@
  */
 package org.apache.beam.runners.direct;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -27,9 +27,6 @@ import java.util.Map;
 import java.util.Objects;
 import javax.annotation.Nonnull;
 import org.apache.beam.model.pipeline.v1.RunnerApi.FunctionSpec;
-import org.apache.beam.runners.core.construction.PTransformTranslation;
-import org.apache.beam.runners.core.construction.PTransformTranslation.RawPTransform;
-import org.apache.beam.runners.core.construction.SingleInputOutputOverrideFactory;
 import org.apache.beam.runners.local.StructuralKey;
 import org.apache.beam.sdk.coders.CannotProvideCoderException;
 import org.apache.beam.sdk.coders.Coder;
@@ -49,12 +46,15 @@ import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.DefaultTrigger;
 import org.apache.beam.sdk.transforms.windowing.TimestampCombiner;
 import org.apache.beam.sdk.util.UserCodeException;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.construction.PTransformTranslation;
+import org.apache.beam.sdk.util.construction.PTransformTranslation.RawPTransform;
+import org.apache.beam.sdk.util.construction.SingleInputOutputOverrideFactory;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowedValue;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.checkerframework.checker.nullness.qual.EnsuresNonNull;
 import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -64,8 +64,12 @@ import org.joda.time.Instant;
 
 /** A {@link Combine} that performs the combine in multiple steps. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  // The "nullness" suppression is retained deliberately: this class is generic over a nullable
+  // AccumT (e.g. an empty HllCount sketch has a null accumulator), so accumulator values, keys and
+  // combine inputs are legitimately nullable in normal operation. The checker cannot express that
+  // invariant here, and forcing @NonNull bounds converts valid nulls into runtime failures.
+  "nullness"
 })
 class MultiStepCombine<
         K extends @Nullable Object,
@@ -367,6 +371,7 @@ class MultiStepCombine<
 
   static final String DIRECT_MERGE_ACCUMULATORS_EXTRACT_OUTPUT_URN =
       "beam:directrunner:transforms:merge_accumulators_extract_output:v1";
+
   /**
    * A primitive {@link PTransform} that merges iterables of accumulators and extracts the output.
    *
@@ -429,7 +434,7 @@ class MultiStepCombine<
     @Override
     public <InputT> TransformEvaluator<InputT> forApplication(
         AppliedPTransform<?, ?, ?> application, CommittedBundle<?> inputBundle) throws Exception {
-      return createEvaluator((AppliedPTransform) application, (CommittedBundle) inputBundle);
+      return createEvaluator((AppliedPTransform) application);
     }
 
     private <K, AccumT, OutputT> TransformEvaluator<KV<K, Iterable<AccumT>>> createEvaluator(
@@ -437,8 +442,7 @@ class MultiStepCombine<
                 PCollection<KV<K, Iterable<AccumT>>>,
                 PCollection<KV<K, OutputT>>,
                 MergeAndExtractAccumulatorOutput<K, AccumT, OutputT>>
-            application,
-        CommittedBundle<KV<K, Iterable<AccumT>>> inputBundle) {
+            application) {
       return new MergeAccumulatorsAndExtractOutputEvaluator<>(ctxt, application);
     }
 

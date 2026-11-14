@@ -18,8 +18,8 @@
 package org.apache.beam.sdk.options;
 
 import static java.util.Locale.ROOT;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.sdk.util.Preconditions.checkArgumentNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.core.JsonParseException;
@@ -36,11 +36,13 @@ import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import com.fasterxml.jackson.databind.deser.DefaultDeserializationContext;
 import com.fasterxml.jackson.databind.deser.impl.MethodProperty;
+import com.fasterxml.jackson.databind.deser.impl.TypeWrappedDeserializer;
 import com.fasterxml.jackson.databind.introspect.AnnotatedMember;
 import com.fasterxml.jackson.databind.introspect.AnnotatedMethod;
 import com.fasterxml.jackson.databind.introspect.AnnotationCollector;
 import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
 import com.fasterxml.jackson.databind.introspect.TypeResolutionContext;
+import com.fasterxml.jackson.databind.jsontype.TypeDeserializer;
 import com.fasterxml.jackson.databind.node.TreeTraversingParser;
 import com.fasterxml.jackson.databind.ser.DefaultSerializerProvider;
 import com.fasterxml.jackson.databind.type.TypeBindings;
@@ -83,34 +85,34 @@ import javax.annotation.Nonnull;
 import org.apache.beam.model.jobmanagement.v1.JobApi.PipelineOptionDescriptor;
 import org.apache.beam.model.jobmanagement.v1.JobApi.PipelineOptionType;
 import org.apache.beam.sdk.PipelineRunner;
-import org.apache.beam.sdk.annotations.Experimental;
+import org.apache.beam.sdk.annotations.Internal;
 import org.apache.beam.sdk.options.Validation.Required;
 import org.apache.beam.sdk.runners.PipelineRunnerRegistrar;
 import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.util.StringUtils;
 import org.apache.beam.sdk.util.common.ReflectHelpers;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.CaseFormat;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Optional;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Predicate;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Predicates;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableListMultimap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSortedSet;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterators;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ListMultimap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Maps;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Ordering;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.RowSortedTable;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Sets;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.SortedSetMultimap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.TreeBasedTable;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.TreeMultimap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.CaseFormat;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Joiner;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Optional;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Predicate;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Predicates;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableListMultimap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSortedSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterators;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ListMultimap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Maps;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Ordering;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.RowSortedTable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.SortedSetMultimap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.TreeBasedTable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.TreeMultimap;
 import org.checkerframework.checker.nullness.qual.KeyFor;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.slf4j.Logger;
@@ -132,13 +134,13 @@ import org.slf4j.LoggerFactory;
  *       registered with this factory.
  * </ul>
  *
- * <p>See the <a
- * href="http://www.oracle.com/technetwork/java/javase/documentation/spec-136004.html">JavaBeans
+ * <p>See the <a href=
+ * "http://www.oracle.com/technetwork/java/javase/documentation/spec-136004.html">JavaBeans
  * specification</a> for more details as to what constitutes a property.
  */
 @SuppressWarnings({
   "keyfor",
-  "nullness", // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness", // TODO(https://github.com/apache/beam/issues/20497)
   "rawtypes"
 })
 public class PipelineOptionsFactory {
@@ -276,7 +278,7 @@ public class PipelineOptionsFactory {
      * PipelineOptionsFactory#printHelp(PrintStream, Class)}.
      */
     public Builder fromArgs(String... args) {
-      checkNotNull(args, "Arguments should not be null.");
+      checkArgumentNotNull(args, "Arguments should not be null.");
       return new Builder(args, validation, strictParsing, true);
     }
 
@@ -337,7 +339,8 @@ public class PipelineOptionsFactory {
         appNameOptions.setAppName(defaultAppName);
       }
 
-      // Ensure the options id has been populated either by the user using the command line
+      // Ensure the options id has been populated either by the user using the command
+      // line
       // or by the default value factory.
       t.getOptionsId();
 
@@ -432,7 +435,8 @@ public class PipelineOptionsFactory {
         break;
       }
     }
-    // Then find the first instance after that is not the PipelineOptionsFactory/Builder class.
+    // Then find the first instance after that is not the
+    // PipelineOptionsFactory/Builder class.
     while (elements.hasNext()) {
       StackTraceElement next = elements.next();
       if (!PIPELINE_OPTIONS_FACTORY_CLASSES.contains(next.getClassName())) {
@@ -499,13 +503,6 @@ public class PipelineOptionsFactory {
       new ObjectMapper()
           .registerModules(ObjectMapper.findModules(ReflectHelpers.findClassLoader()));
 
-  private static final DefaultDeserializationContext DESERIALIZATION_CONTEXT =
-      new DefaultDeserializationContext.Impl(MAPPER.getDeserializationContext().getFactory())
-          .createInstance(
-              MAPPER.getDeserializationConfig(),
-              new TokenBuffer(MAPPER, false).asParser(),
-              new InjectableValues.Std());
-
   static final DefaultSerializerProvider SERIALIZER_PROVIDER =
       new DefaultSerializerProvider.Impl()
           .createInstance(MAPPER.getSerializationConfig(), MAPPER.getSerializerFactory());
@@ -565,13 +562,12 @@ public class PipelineOptionsFactory {
   /**
    * Resets the set of interfaces registered with this factory to the default state.
    *
-   * <p>IMPORTANT: this is marked as experimental because the correct usage of this method requires
-   * appropriate synchronization beyond the scope of this method.
+   * <p>IMPORTANT: correct usage of this method requires appropriate synchronization beyond the
+   * scope of this method.
    *
    * @see PipelineOptionsFactory#register(Class)
    * @see Cache#Cache()
    */
-  @Experimental
   public static synchronized void resetCache() {
     CACHE.set(new Cache());
   }
@@ -581,13 +577,56 @@ public class PipelineOptionsFactory {
   }
 
   /**
+   * <b><i>For internal use only; no backwards-compatibility guarantees.</i></b>
+   *
+   * <p>Jackson serialization attribute (see {@link
+   * com.fasterxml.jackson.databind.ObjectWriter#withAttribute}) which, when set to {@code true},
+   * makes the serialized form of a {@link PipelineOptions} additionally record which of the
+   * serialized values were lazily bound defaults, so that {@link #explicitlySetProperties} on the
+   * deserialized copy gives the same answer as on the original.
+   *
+   * <p>It is off by default: the serialized form handed to runners and workers is unchanged, and a
+   * {@link PipelineOptions} deserialized from JSON without this marker reports every serialized
+   * property as explicitly set.
+   */
+  @Internal
+  public static final String SERIALIZE_DEFAULTS_ATTRIBUTE =
+      ProxyInvocationHandler.SERIALIZE_DEFAULTS_ATTRIBUTE;
+
+  /**
+   * <b><i>For internal use only; no backwards-compatibility guarantees.</i></b>
+   *
+   * <p>Returns the names of the properties of {@code options} that have been explicitly set
+   * (through a setter, from command-line arguments, or from the JSON the object was deserialized
+   * from), as opposed to defaults that were lazily bound the first time a getter was called.
+   *
+   * <p>Unlike the serialized form of {@code options}, which contains every bound value, this allows
+   * callers to compare two options objects by what was actually configured on them without being
+   * confused by which getters happen to have been invoked on each. Note that a serialization round
+   * trip loses this distinction unless the producer set {@link #SERIALIZE_DEFAULTS_ATTRIBUTE}.
+   *
+   * @throws IllegalArgumentException if {@code options} was not created by this factory
+   */
+  @Internal
+  public static Set<String> explicitlySetProperties(PipelineOptions options) {
+    checkArgumentNotNull(options);
+    checkArgument(
+        Proxy.isProxyClass(options.getClass())
+            && Proxy.getInvocationHandler(options) instanceof ProxyInvocationHandler,
+        "PipelineOptions %s was not created by PipelineOptionsFactory",
+        options.getClass().getName());
+    return Collections.unmodifiableSet(
+        ((ProxyInvocationHandler) Proxy.getInvocationHandler(options)).explicitlySetProperties());
+  }
+
+  /**
    * Outputs the set of registered options with the PipelineOptionsFactory with a description for
    * each one if available to the output stream. This output is pretty printed and meant to be human
    * readable. This method will attempt to format its output to be compatible with a terminal
    * window.
    */
   public static void printHelp(PrintStream out) {
-    checkNotNull(out);
+    checkArgumentNotNull(out);
     out.println("The set of registered options are:");
     Set<Class<? extends PipelineOptions>> sortedOptions =
         new TreeSet<>(ClassNameComparator.INSTANCE);
@@ -622,8 +661,8 @@ public class PipelineOptionsFactory {
    * This method will attempt to format its output to be compatible with a terminal window.
    */
   public static void printHelp(PrintStream out, Class<? extends PipelineOptions> iface) {
-    checkNotNull(out);
-    checkNotNull(iface);
+    checkArgumentNotNull(out);
+    checkArgumentNotNull(iface);
     CACHE.get().validateWellFormed(iface);
 
     Set<PipelineOptionSpec> properties = PipelineOptionsReflector.getOptionSpecs(iface, true);
@@ -697,7 +736,7 @@ public class PipelineOptionsFactory {
    */
   public static List<PipelineOptionDescriptor> describe(
       Set<Class<? extends PipelineOptions>> ifaces) {
-    checkNotNull(ifaces);
+    checkArgumentNotNull(ifaces);
     List<PipelineOptionDescriptor> result = new ArrayList<>();
     Set<Method> seenMethods = Sets.newHashSet();
 
@@ -857,8 +896,7 @@ public class PipelineOptionsFactory {
    *
    * <p>TODO: Swap back to using Introspector once the proxy class issue with AppEngine is resolved.
    */
-  private static List<PropertyDescriptor> getPropertyDescriptors(
-      Set<Method> methods, Class<? extends PipelineOptions> beanClass)
+  private static List<PropertyDescriptor> getPropertyDescriptors(Set<Method> methods)
       throws IntrospectionException {
     SortedMap<String, Method> propertyNamesToGetters = new TreeMap<>();
     for (Map.Entry<String, Method> entry :
@@ -870,7 +908,8 @@ public class PipelineOptionsFactory {
     List<TypeMismatch> mismatches = new ArrayList<>();
     Set<String> usedDescriptors = Sets.newHashSet();
     /*
-     * Add all the getter/setter pairs to the list of descriptors removing the getter once
+     * Add all the getter/setter pairs to the list of descriptors removing the
+     * getter once
      * it has been paired up.
      */
     for (Method method : methods) {
@@ -996,7 +1035,8 @@ public class PipelineOptionsFactory {
             + "PipelineOptions proxy class to implement all of the interfaces.",
         iface.getName());
 
-    // Verify that there are no methods with the same name with two different return types.
+    // Verify that there are no methods with the same name with two different return
+    // types.
     validateReturnType(iface);
 
     SortedSet<Method> allInterfaceMethods =
@@ -1012,7 +1052,7 @@ public class PipelineOptionsFactory {
             .filter(input1 -> !Modifier.isStatic(input1.getModifiers()))
             .collect(ImmutableSortedSet.toImmutableSortedSet(MethodComparator.INSTANCE));
 
-    List<PropertyDescriptor> descriptors = getPropertyDescriptors(allInterfaceMethods, iface);
+    List<PropertyDescriptor> descriptors = getPropertyDescriptors(allInterfaceMethods);
 
     // Verify that all method annotations are valid.
     validateMethodAnnotations(allInterfaceMethods, descriptors);
@@ -1099,7 +1139,8 @@ public class PipelineOptionsFactory {
     validateGettersHaveConsistentAnnotation(
         methodNameToAllMethodMap, descriptors, AnnotationPredicates.JSON_SERIALIZE);
 
-    // Verify that if a method has either @JsonSerialize or @JsonDeserialize then it has both.
+    // Verify that if a method has either @JsonSerialize or @JsonDeserialize then it
+    // has both.
     validateMethodsHaveBothJsonSerializeAndDeserialize(descriptors);
 
     // Verify that no setter has @JsonIgnore.
@@ -1267,6 +1308,7 @@ public class PipelineOptionsFactory {
     try {
       knownMethods.add(iface.getMethod("as", Class.class));
       knownMethods.add(iface.getMethod("outputRuntimeOptions"));
+      knownMethods.add(iface.getMethod("revision"));
       knownMethods.add(iface.getMethod("populateDisplayData", DisplayData.Builder.class));
     } catch (NoSuchMethodException | SecurityException e) {
       throw new RuntimeException(e);
@@ -1280,7 +1322,8 @@ public class PipelineOptionsFactory {
       knownMethodsNames.add(method.getName());
     }
 
-    // Verify that no additional methods are on an interface that aren't a bean property.
+    // Verify that no additional methods are on an interface that aren't a bean
+    // property.
     // Because methods can have multiple declarations, we do a name-based comparison
     // here to prevent false positives.
     SortedSet<Method> unknownMethods = new TreeSet<>(MethodComparator.INSTANCE);
@@ -1685,8 +1728,7 @@ public class PipelineOptionsFactory {
         if (strictParsing) {
           throw e;
         } else {
-          LOG.warn(
-              "Strict parsing is disabled, ignoring option '{}' because {}", arg, e.getMessage());
+          LOG.warn("Strict parsing is disabled, ignoring option '{}'", arg, e);
         }
       }
     }
@@ -1728,20 +1770,37 @@ public class PipelineOptionsFactory {
       BeanProperty prop = createBeanProperty(method);
       AnnotatedMember annotatedMethod = prop.getMember();
 
+      // Initialize a new context that is properly associated with a dummy parser.
+      // Using copy() here would leave the context's transient parser field as null,
+      // causing NullPointerExceptions in Jackson 2.14+ when deserializers try to
+      // query the parser for format constraints or coercion validations.
+      JsonParser dummyParser = new TokenBuffer(MAPPER, false).asParser();
+      DefaultDeserializationContext context = createDeserializationContext(dummyParser);
       Object maybeDeserializerClass =
-          DESERIALIZATION_CONTEXT.getAnnotationIntrospector().findDeserializer(annotatedMethod);
+          context.getAnnotationIntrospector().findDeserializer(annotatedMethod);
 
       JsonDeserializer<Object> jsonDeserializer =
-          DESERIALIZATION_CONTEXT.deserializerInstance(annotatedMethod, maybeDeserializerClass);
+          context.deserializerInstance(annotatedMethod, maybeDeserializerClass);
 
       if (jsonDeserializer == null) {
-        jsonDeserializer =
-            DESERIALIZATION_CONTEXT.findContextualValueDeserializer(prop.getType(), prop);
+        jsonDeserializer = context.findContextualValueDeserializer(prop.getType(), prop);
       }
+
+      TypeDeserializer typeDeserializer =
+          context.getFactory().findTypeDeserializer(context.getConfig(), prop.getType());
+      if (typeDeserializer != null) {
+        jsonDeserializer = new TypeWrappedDeserializer(typeDeserializer, jsonDeserializer);
+      }
+
       return jsonDeserializer;
     } catch (JsonMappingException e) {
       throw new RuntimeException(e);
     }
+  }
+
+  private static DefaultDeserializationContext createDeserializationContext(JsonParser parser) {
+    return ((DefaultDeserializationContext) MAPPER.getDeserializationContext())
+        .createInstance(MAPPER.getDeserializationConfig(), parser, new InjectableValues.Std());
   }
 
   private static Optional<JsonSerializer<Object>> computeCustomSerializerForMethod(Method method) {
@@ -1793,7 +1852,12 @@ public class PipelineOptionsFactory {
     parser.nextToken();
 
     JsonDeserializer<Object> jsonDeserializer = getDeserializerForMethod(method);
-    return jsonDeserializer.deserialize(parser, DESERIALIZATION_CONTEXT);
+    // Create a fresh context that is correctly associated with the active parser.
+    // Using copy() here would leave the context's transient parser field as null,
+    // causing NullPointerExceptions in Jackson 2.14+ deserializers during coercion
+    // validations and length checks.
+    DefaultDeserializationContext context = createDeserializationContext(parser);
+    return jsonDeserializer.deserialize(parser, context);
   }
 
   /**
@@ -1817,7 +1881,8 @@ public class PipelineOptionsFactory {
         try {
           tree = MAPPER.readTree("\"" + value + "\"");
         } catch (JsonParseException inner) {
-          // rethrow the original exception rather the one thrown from the fallback attempt
+          // rethrow the original exception rather the one thrown from the fallback
+          // attempt
           throw e;
         }
       } else {
@@ -1885,7 +1950,8 @@ public class PipelineOptionsFactory {
           }
         }
         Method method = propertyNamesToGetters.get(entry.getKey());
-        // Only allow empty argument values for String, String Array, and Collection<String>.
+        // Only allow empty argument values for String, String Array, and
+        // Collection<String>.
         Class<?> returnType = method.getReturnType();
         JavaType type = MAPPER.getTypeFactory().constructType(method.getGenericReturnType());
 
@@ -1947,10 +2013,10 @@ public class PipelineOptionsFactory {
           throw e;
         } else {
           LOG.warn(
-              "Strict parsing is disabled, ignoring option '{}' with value '{}' because {}",
+              "Strict parsing is disabled, ignoring option '{}' with value '{}'",
               entry.getKey(),
               entry.getValue(),
-              e.getMessage());
+              e);
         }
       }
     }
@@ -2083,7 +2149,7 @@ public class PipelineOptionsFactory {
     }
 
     private synchronized void register(Class<? extends PipelineOptions> iface) {
-      checkNotNull(iface);
+      checkArgumentNotNull(iface);
       checkArgument(iface.isInterface(), "Only interface types are supported.");
 
       if (registeredOptions.contains(iface)) {
@@ -2138,7 +2204,8 @@ public class PipelineOptionsFactory {
         Class<T> iface, Set<Class<? extends PipelineOptions>> validatedPipelineOptionsInterfaces) {
       checkArgument(iface.isInterface(), "Only interface types are supported.");
 
-      // Validate that every inherited interface must extend PipelineOptions except for
+      // Validate that every inherited interface must extend PipelineOptions except
+      // for
       // PipelineOptions itself.
       validateInheritedInterfacesExtendPipelineOptions(iface);
 
@@ -2146,7 +2213,8 @@ public class PipelineOptionsFactory {
       Set<Class<? extends PipelineOptions>> combinedPipelineOptionsInterfaces =
           Stream.concat(validatedPipelineOptionsInterfaces.stream(), Stream.of(iface))
               .collect(Collectors.toSet());
-      // Validate that the view of all currently passed in options classes is well formed.
+      // Validate that the view of all currently passed in options classes is well
+      // formed.
       if (!combinedCache.containsKey(combinedPipelineOptionsInterfaces)) {
         final Class<?>[] interfaces = combinedPipelineOptionsInterfaces.toArray(EMPTY_CLASS_ARRAY);
         @SuppressWarnings("unchecked")
@@ -2166,7 +2234,7 @@ public class PipelineOptionsFactory {
       // Validate that the local view of the class is well formed.
       if (!interfaceCache.containsKey(iface)) {
         @SuppressWarnings({
-          "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+          "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
           "unchecked"
         })
         Class<T> proxyClass =

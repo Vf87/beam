@@ -26,6 +26,7 @@ import org.apache.beam.sdk.extensions.sql.BeamSqlSeekableTable;
 import org.apache.beam.sdk.extensions.sql.impl.utils.SerializableRexFieldAccess;
 import org.apache.beam.sdk.extensions.sql.impl.utils.SerializableRexInputRef;
 import org.apache.beam.sdk.extensions.sql.impl.utils.SerializableRexNode;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.schemas.FieldAccessDescriptor;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -33,14 +34,14 @@ import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexCall;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexInputRef;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexNode;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.util.Pair;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexCall;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexInputRef;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.util.Pair;
 
 /** Collections of {@code PTransform} and {@code DoFn} used to perform JOIN operation. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class BeamJoinTransforms {
 
@@ -152,7 +153,21 @@ public class BeamJoinTransforms {
                   new DoFn<Row, Row>() {
                     @Setup
                     public void setup() {
-                      seekableTable.setUp();
+                      seekableTable.setUp(joinSubsetType);
+                    }
+
+                    @StartBundle
+                    public void startBundle(
+                        DoFn<Row, Row>.StartBundleContext context,
+                        PipelineOptions pipelineOptions) {
+                      seekableTable.startBundle(context, pipelineOptions);
+                    }
+
+                    @FinishBundle
+                    public void finishBundle(
+                        DoFn<Row, Row>.FinishBundleContext context,
+                        PipelineOptions pipelineOptions) {
+                      seekableTable.finishBundle(context, pipelineOptions);
                     }
 
                     @ProcessElement

@@ -28,16 +28,19 @@ import org.apache.beam.sdk.coders.MapCoder;
 import org.apache.beam.sdk.coders.NullableCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.values.TypeDescriptor;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
-/** A coder for PubsubMessage including attributes. */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
+/**
+ * A coder for PubsubMessage including attributes.
+ *
+ * <p>Maintainers should prefer {@link PubsubMessageSchemaCoder} over this coder when adding
+ * features to {@link PubsubIO}.
+ */
 public class PubsubMessageWithAttributesCoder extends CustomCoder<PubsubMessage> {
   // A message's payload can not be null
   private static final Coder<byte[]> PAYLOAD_CODER = ByteArrayCoder.of();
   // A message's attributes can be null.
-  private static final Coder<Map<String, String>> ATTRIBUTES_CODER =
+  private static final Coder<@Nullable Map<String, String>> ATTRIBUTES_CODER =
       NullableCoder.of(MapCoder.of(StringUtf8Coder.of(), StringUtf8Coder.of()));
 
   public static Coder<PubsubMessage> of(TypeDescriptor<PubsubMessage> ignored) {
@@ -53,6 +56,7 @@ public class PubsubMessageWithAttributesCoder extends CustomCoder<PubsubMessage>
     encode(value, outStream, Context.NESTED);
   }
 
+  @Override
   public void encode(PubsubMessage value, OutputStream outStream, Context context)
       throws IOException {
     PAYLOAD_CODER.encode(value.getPayload(), outStream);
@@ -67,7 +71,7 @@ public class PubsubMessageWithAttributesCoder extends CustomCoder<PubsubMessage>
   @Override
   public PubsubMessage decode(InputStream inStream, Context context) throws IOException {
     byte[] payload = PAYLOAD_CODER.decode(inStream);
-    Map<String, String> attributes = ATTRIBUTES_CODER.decode(inStream, context);
+    @Nullable Map<String, String> attributes = ATTRIBUTES_CODER.decode(inStream, context);
     return new PubsubMessage(payload, attributes);
   }
 }

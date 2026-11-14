@@ -24,11 +24,4 @@
  * <p>Runners should look at {@link org.apache.beam.sdk.metrics.MetricsContainer} for details on how
  * to support metrics.
  */
-@DefaultAnnotation(NonNull.class)
-@Experimental(Kind.METRICS)
 package org.apache.beam.sdk.metrics;
-
-import edu.umd.cs.findbugs.annotations.DefaultAnnotation;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
-import org.checkerframework.checker.nullness.qual.NonNull;

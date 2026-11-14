@@ -19,12 +19,16 @@
 
 # pytype: skip-file
 
+# ruff: noqa: UP006
 import functools
 import sys
 import typing
 import unittest
 
+from google.protobuf import descriptor_pb2  # pylint: disable=unused-import
+
 from apache_beam import Map
+from apache_beam.pvalue import TaggedOutput
 from apache_beam.typehints import Any
 from apache_beam.typehints import Dict
 from apache_beam.typehints import List
@@ -34,10 +38,12 @@ from apache_beam.typehints import TypeVariable
 from apache_beam.typehints import WithTypeHints
 from apache_beam.typehints import decorators
 from apache_beam.typehints import typehints
+from apache_beam.typehints.native_type_compatibility import convert_to_beam_type
 
 T = TypeVariable('T')
 # Name is 'T' so it converts to a beam type with the same name.
 # mypy requires that the name of the variable match, so we must ignore this.
+# pylint: disable=typevar-name-mismatch
 T_typing = typing.TypeVar('T')  # type: ignore
 
 
@@ -51,14 +57,8 @@ class IOTypeHintsTest(unittest.TestCase):
     self.assertListEqual(list(s.parameters), ['a', 'b', 'c', 'd'])
 
   def test_get_signature_builtin(self):
-    # Tests a builtin function for 3.7+ and fallback result for older versions.
     s = decorators.get_signature(list)
-    if sys.version_info < (3, 7):
-      self.assertListEqual(
-          list(s.parameters),
-          ['_', '__unknown__varargs', '__unknown__keywords'])
-    else:
-      self.assertListEqual(list(s.parameters), ['iterable'])
+    self.assertListEqual(list(s.parameters), ['iterable'])
     self.assertEqual(s.return_annotation, List[Any])
 
   def test_from_callable_without_annotations(self):
@@ -75,14 +75,7 @@ class IOTypeHintsTest(unittest.TestCase):
   def test_from_callable_method_descriptor(self):
     # from_callable() injects an annotation in this special type of builtin.
     th = decorators.IOTypeHints.from_callable(str.strip)
-    if sys.version_info >= (3, 7):
-      self.assertEqual(th.input_types, ((str, Any), {}))
-    else:
-      self.assertEqual(
-          th.input_types,
-          ((str, decorators._ANY_VAR_POSITIONAL), {
-              '__unknown__keywords': decorators._ANY_VAR_KEYWORD
-          }))
+    self.assertEqual(th.input_types, ((str, Any), {}))
     self.assertEqual(th.output_types, ((Any, ), {}))
 
   def test_strip_iterable_not_simple_output_noop(self):
@@ -97,6 +90,46 @@ class IOTypeHintsTest(unittest.TestCase):
     after = th.strip_iterable()
     self.assertEqual(((expected_after, ), {}), after.output_types)
 
+  def test_with_output_types_from(self):
+    th = decorators.IOTypeHints(
+        input_types=((int), {
+            'foo': str
+        }),
+        output_types=((int, str), {}),
+        origin=[])
+
+    self.assertEqual(
+        th.with_output_types_from(decorators.IOTypeHints.empty()),
+        decorators.IOTypeHints(
+            input_types=((int), {
+                'foo': str
+            }), output_types=None, origin=[]))
+
+    self.assertEqual(
+        decorators.IOTypeHints.empty().with_output_types_from(th),
+        decorators.IOTypeHints(
+            input_types=None, output_types=((int, str), {}), origin=[]))
+
+  def test_with_input_types_from(self):
+    th = decorators.IOTypeHints(
+        input_types=((int), {
+            'foo': str
+        }),
+        output_types=((int, str), {}),
+        origin=[])
+
+    self.assertEqual(
+        th.with_input_types_from(decorators.IOTypeHints.empty()),
+        decorators.IOTypeHints(
+            input_types=None, output_types=((int, str), {}), origin=[]))
+
+    self.assertEqual(
+        decorators.IOTypeHints.empty().with_input_types_from(th),
+        decorators.IOTypeHints(
+            input_types=((int), {
+                'foo': str
+            }), output_types=None, origin=[]))
+
   def _test_strip_iterable_fail(self, before):
     with self.assertRaisesRegex(ValueError, r'not iterable'):
       self._test_strip_iterable(before, None)
@@ -104,6 +137,7 @@ class IOTypeHintsTest(unittest.TestCase):
   def test_strip_iterable(self):
     self._test_strip_iterable(None, None)
     self._test_strip_iterable(typehints.Any, typehints.Any)
+    self._test_strip_iterable(T, typehints.Any)
     self._test_strip_iterable(typehints.Iterable[str], str)
     self._test_strip_iterable(typehints.List[str], str)
     self._test_strip_iterable(typehints.Iterator[str], str)
@@ -225,6 +259,290 @@ class IOTypeHintsTest(unittest.TestCase):
         }))
     self.assertEqual(th.output_types, ((Tuple[Any, ...], ), {}))
 
+  def test_from_callable_resolves_string_annotations(self):
+    def fn(value: 'int') -> 'typehints.List[str]':
+      return [str(value)]
+
+    th = decorators.IOTypeHints.from_callable(fn)
+    self.assertEqual(th.input_types, ((int, ), {}))
+    self.assertEqual(th.output_types, ((List[str], ), {}))
+
+  def test_from_callable_pardo_output_is_an_iterable_of_elements(self):
+    def do_fn(element: 'int') -> 'typehints.List[typehints.List[str]]':
+      return [[str(element)] * 2]
+
+    th = decorators.IOTypeHints.from_callable(do_fn)
+    self.assertEqual(th.input_types, ((int, ), {}))
+    self.assertEqual(th.strip_iterable().output_types, ((List[str], ), {}))
+
+  def test_from_callable_resolves_future_annotations(self):
+    namespace = {'typehints': typehints}
+    exec(
+        'from __future__ import annotations\n'
+        'def fn(value: int) -> typehints.List[str]:\n'
+        '  return [str(value)]\n',
+        namespace)
+
+    th = decorators.IOTypeHints.from_callable(namespace['fn'])
+    self.assertEqual(th.input_types, ((int, ), {}))
+    self.assertEqual(th.output_types, ((List[str], ), {}))
+
+  def test_from_callable_resolves_class_constructor_string_annotations(self):
+    class Class(object):
+      def __init__(self, value: 'int'):
+        self.value = value
+
+    th = decorators.IOTypeHints.from_callable(Class)
+    self.assertEqual(th.input_types, ((int, ), {}))
+    self.assertEqual(th.output_types, ((Class, ), {}))
+
+  def test_from_callable_resolves_method_string_annotations(self):
+    class Class(object):
+      def process(self, value: 'int') -> 'typehints.List[str]':
+        return [str(value)]
+
+    th = decorators.IOTypeHints.from_callable(Class().process)
+    self.assertEqual(th.input_types, ((int, ), {}))
+    self.assertEqual(th.output_types, ((List[str], ), {}))
+
+  def test_from_callable_unresolved_string_annotations_fall_back_to_any(self):
+    def fn(value: 'MissingType') -> 'int':  # noqa: F821
+      return 1
+
+    th = decorators.IOTypeHints.from_callable(fn)
+    self.assertEqual(th.input_types, ((Any, ), {}))
+    self.assertEqual(th.output_types, ((int, ), {}))
+
+  def test_from_callable_resolves_other_hints_after_missing_name(self):
+    namespace = {}
+    exec(
+        'from __future__ import annotations\n'
+        'def fn(missing: MissingType, value: int, *, name: str) -> int:\n'
+        '  return value\n',
+        namespace)
+
+    th = decorators.IOTypeHints.from_callable(namespace['fn'])
+    self.assertEqual(th.input_types, ((Any, int), {'name': str}))
+    self.assertEqual(th.output_types, ((int, ), {}))
+
+  def test_from_callable_resolves_nested_forward_references(self):
+    def fn(
+        values: typing.List['int'],
+        pair: typing.Tuple['str', int],
+        builtin: list['int'],
+        nested: typing.Dict[str, typing.List[typing.ForwardRef('int')]],
+        resolved: typing.List[int]) -> typing.List['str']:
+      return [str(values[0])]
+
+    th = decorators.IOTypeHints.from_callable(fn)
+    self.assertEqual(
+        th.input_types,
+        ((
+            List[int],
+            Tuple[str, int],
+            List[int],
+            Dict[str, List[int]],
+            List[int]), {}))
+    self.assertEqual(th.output_types, ((List[str], ), {}))
+
+  def test_from_callable_unresolved_nested_reference_falls_back_to_any(self):
+    def fn(values: typing.List['MissingType']) -> 'int':  # noqa: F821
+      return len(values)
+
+    th = decorators.IOTypeHints.from_callable(fn)
+    self.assertEqual(th.input_types, ((List[Any], ), {}))
+    self.assertEqual(th.output_types, ((int, ), {}))
+
+  def test_from_callable_string_annotation_naming_non_type_falls_back_to_any(
+      self):
+    # A protobuf enum is an EnumTypeWrapper instance, not a type. Resolving
+    # these annotations must not produce invalid Beam type hints (e.g.
+    # tensorflow_data_validation annotates parameters with
+    # Mapping[..., "schema_pb2.FeatureType"]).
+    def fn(
+        mapping: typing.Mapping[str,
+                                'descriptor_pb2.FieldDescriptorProto.Type'],
+        values: typing.List['descriptor_pb2.FieldDescriptorProto.Type'],
+        value: 'descriptor_pb2.FieldDescriptorProto.Type',
+        resolved: 'int') -> 'descriptor_pb2.FieldDescriptorProto.Type':
+      return value
+
+    th = decorators.IOTypeHints.from_callable(fn)
+    self.assertEqual(
+        th.input_types,
+        ((typehints.Mapping[str, Any], List[Any], Any, int), {}))
+    self.assertEqual(th.output_types, ((Any, ), {}))
+
+  def test_from_callable_future_annotation_naming_non_type_falls_back_to_any(
+      self):
+    namespace = {}
+    exec(
+        'from __future__ import annotations\n'
+        'import typing\n'
+        'from google.protobuf import descriptor_pb2\n'
+        'def fn(mapping: typing.Mapping[\n'
+        '           str, descriptor_pb2.FieldDescriptorProto.Type],\n'
+        '       value: int) -> int:\n'
+        '  return value\n',
+        namespace)
+
+    th = decorators.IOTypeHints.from_callable(namespace['fn'])
+    self.assertEqual(th.input_types, ((Any, int), {}))
+    self.assertEqual(th.output_types, ((int, ), {}))
+
+  def test_map_with_string_annotation_naming_non_type(self):
+    def fn(
+        value: int,
+        mapping: typing.Mapping[str, 'descriptor_pb2.FieldDescriptorProto.Type']
+    ) -> int:
+      return value
+
+    # Previously raised a TypeError while computing the type hints.
+    th = Map(fn, {}).get_type_hints()
+    self.assertEqual(th.input_types, ((int, typehints.Mapping[str, Any]), {}))
+    self.assertEqual(th.output_types, ((int, ), {}))
+
+  def test_from_callable_future_annotation_unconvertible_falls_back_to_any(
+      self):
+    # collections.abc.Generator needs three arguments to convert to a Beam
+    # type hint; with one it falls back to Any instead of raising.
+    namespace = {}
+    exec(
+        'from __future__ import annotations\n'
+        'from collections.abc import Generator\n'
+        'def gen(x: int) -> Generator[int]:\n'
+        '  yield x\n',
+        namespace)
+
+    th = decorators.IOTypeHints.from_callable(namespace['gen'])
+    self.assertEqual(th.input_types, ((int, ), {}))
+    self.assertEqual(th.output_types, ((Any, ), {}))
+
+  def test_from_callable_future_annotations_with_typevar_and_newtype(self):
+    namespace = {}
+    exec(
+        'from __future__ import annotations\n'
+        'import typing\n'
+        'T = typing.TypeVar("T")\n'
+        'UserId = typing.NewType("UserId", int)\n'
+        'def fn(xs: list[T], user: UserId) -> T:\n'
+        '  return xs[0]\n',
+        namespace)
+
+    th = decorators.IOTypeHints.from_callable(namespace['fn'])
+    self.assertEqual(th.input_types, ((List[TypeVariable('T')], Any), {}))
+    self.assertEqual(th.output_types, ((TypeVariable('T'), ), {}))
+
+  @unittest.skipIf(
+      sys.version_info < (3, 12), 'The type statement requires Python 3.12+')
+  def test_from_callable_future_annotations_with_type_alias(self):
+    namespace = {}
+    exec(
+        'from __future__ import annotations\n'
+        'type IntList = list[int]\n'
+        'def fn(xs: IntList) -> int:\n'
+        '  return xs[0]\n',
+        namespace)
+
+    th = decorators.IOTypeHints.from_callable(namespace['fn'])
+    self.assertEqual(th.input_types, ((List[int], ), {}))
+    self.assertEqual(th.output_types, ((int, ), {}))
+
+  def test_from_callable_partial_with_string_annotations(self):
+    def fn(bound: 'int', value: 'str', *, option: 'int') -> 'str':
+      return value
+
+    th = decorators.IOTypeHints.from_callable(functools.partial(fn, 1))
+    self.assertEqual(th.input_types, ((str, ), {
+        'option': int
+    }))
+    self.assertEqual(th.output_types, ((str, ), {}))
+
+  def test_from_callable_bound_and_unbound_methods_with_strings(self):
+    class Processor:
+      def process(self, value: 'int', *, label: 'str') -> 'str':
+        return label
+
+    unbound = decorators.IOTypeHints.from_callable(Processor.process)
+    self.assertEqual(unbound.input_types, ((Any, int), {'label': str}))
+    self.assertEqual(unbound.output_types, ((str, ), {}))
+    bound = decorators.IOTypeHints.from_callable(Processor().process)
+    self.assertEqual(bound.input_types, ((int, ), {
+        'label': str
+    }))
+    self.assertEqual(bound.output_types, ((str, ), {}))
+
+  def test_from_callable_varargs_and_kwargs_with_strings(self):
+    def fn(
+        value: 'int',
+        *args: 'typing.Tuple[str]',
+        required: 'str',
+        **kwargs: 'typing.Dict[str, int]') -> 'int':
+      return value
+
+    th = decorators.IOTypeHints.from_callable(fn)
+    self.assertEqual(
+        th.input_types, ((int, Tuple[str]), {
+            'required': str, 'kwargs': Dict[str, int]
+        }))
+    self.assertEqual(th.output_types, ((int, ), {}))
+
+  def test_from_callable_callable_instance_with_string_annotations(self):
+    class CallableClass:
+      def __call__(self, value: 'int') -> 'str':
+        return str(value)
+
+    th = decorators.IOTypeHints.from_callable(CallableClass())
+    self.assertEqual(th.input_types, ((int, ), {}))
+    self.assertEqual(th.output_types, ((str, ), {}))
+
+  def test_from_callable_wrapped_function_uses_original_namespace(self):
+    namespace = {'Alias': str}
+    exec('def original(value: "Alias") -> "int":\n  return 1\n', namespace)
+
+    @functools.wraps(namespace['original'])
+    def wrapper(*args, **kwargs):
+      return namespace['original'](*args, **kwargs)
+
+    th = decorators.IOTypeHints.from_callable(wrapper)
+    self.assertEqual(th.input_types, ((str, ), {}))
+    self.assertEqual(th.output_types, ((int, ), {}))
+
+  def test_from_callable_class_new_and_inherited_init(self):
+    class WithNew:
+      def __new__(cls, value: 'int'):
+        return super().__new__(cls)
+
+    class NoConstructor:
+      pass
+
+    th = decorators.IOTypeHints.from_callable(WithNew)
+    self.assertEqual(th.input_types, ((int, ), {}))
+    self.assertEqual(th.output_types, ((WithNew, ), {}))
+    th = decorators.IOTypeHints.from_callable(NoConstructor)
+    self.assertEqual(th.input_types, ((), {}))
+    self.assertEqual(th.output_types, ((NoConstructor, ), {}))
+
+  def test_from_callable_resolves_class_local_names(self):
+    class Node:
+      def __init__(self, previous: 'Node'):
+        self.previous = previous
+
+      def link(self, next_node: 'Node') -> 'Node':
+        return next_node
+
+    th = decorators.IOTypeHints.from_callable(Node)
+    self.assertEqual(th.input_types, ((Node, ), {}))
+    self.assertEqual(th.output_types, ((Node, ), {}))
+    th = decorators.IOTypeHints.from_callable(Node(None).link)
+    self.assertEqual(th.input_types, ((Node, ), {}))
+    self.assertEqual(th.output_types, ((Node, ), {}))
+
+  def test_from_callable_annotated_preserves_metadata_during_resolution(self):
+    annotation = typing.Annotated[typing.List['int'], 'metadata']
+    resolved = decorators._resolve_annotation(annotation, globals(), locals())
+    self.assertEqual(resolved, typing.Annotated[typing.List[int], 'metadata'])
+
   def test_from_callable_partial(self):
     def fn(a: int) -> int:
       return a
@@ -233,6 +551,63 @@ class IOTypeHintsTest(unittest.TestCase):
     fn = functools.partial(fn, 1)
     th = decorators.IOTypeHints.from_callable(fn)
     self.assertRegex(th.debug_str(), r'unknown')
+
+  def test_from_callable_no_tagged_output(self):
+    def fn(x: int) -> str:
+      return str(x)
+
+    th = decorators.IOTypeHints.from_callable(fn)
+    self.assertEqual(th.input_types, ((int, ), {}))
+    self.assertEqual(th.output_types, ((str, ), {}))
+
+    def fn2(x: int) -> typing.Iterable[str]:
+      yield str(x)
+
+    th = decorators.IOTypeHints.from_callable(fn2)
+    self.assertEqual(th.input_types, ((int, ), {}))
+    self.assertEqual(th.output_types, ((typehints.Iterable[str], ), {}))
+
+  def test_from_callable_tagged_output_union(self):
+    """Tagged types are NOT extracted in from_callable. They stay embedded
+    in the main type and are extracted later in strip_iterable()."""
+    def fn(
+        x: int
+    ) -> int | str | TaggedOutput[typing.Literal['errors'], float
+                                  | str] | TaggedOutput[
+                                      typing.Literal['warnings'], str]:
+      return x
+
+    th = decorators.IOTypeHints.from_callable(fn)
+    self.assertEqual(th.input_types, ((int, ), {}))
+    # TaggedOutput members are preserved in the union  no extraction yet.
+    output_type = th.output_types[0][0]
+    self.assertIsInstance(output_type, typehints.UnionConstraint)
+    self.assertEqual(th.output_types[1], {})
+
+  def test_from_callable_tagged_output_iterable(self):
+    """Tagged types inside Iterable are preserved until strip_iterable."""
+    def fn(
+        x: int
+    ) -> typing.Iterable[int | TaggedOutput[typing.Literal['errors'], str]]:
+      yield x
+
+    th = decorators.IOTypeHints.from_callable(fn)
+    self.assertEqual(th.input_types, ((int, ), {}))
+    # The full Iterable[Union[int, TaggedOutput[...]]] is preserved.
+    output_type = th.output_types[0][0]
+    self.assertIsInstance(output_type, typehints.IterableTypeConstraint)
+    self.assertEqual(th.output_types[1], {})
+
+  def test_from_callable_tagged_output_only(self):
+    """A standalone TaggedOutput annotation passes through from_callable."""
+    def fn(x: int) -> TaggedOutput[typing.Literal['errors'], str]:
+      pass
+
+    th = decorators.IOTypeHints.from_callable(fn)
+    self.assertEqual(th.input_types, ((int, ), {}))
+    # TaggedOutput[...] passes through convert_to_beam_type unchanged.
+    self.assertIs(typing.get_origin(th.output_types[0][0]), TaggedOutput)
+    self.assertEqual(th.output_types[1], {})
 
   def test_getcallargs_forhints(self):
     def fn(
@@ -279,7 +654,7 @@ class IOTypeHintsTest(unittest.TestCase):
     with self.assertRaisesRegex(decorators.TypeCheckError, "missing.*'foo'"):
       decorators.getcallargs_forhints(fn, 5)
 
-  def test_origin(self):
+  def test_origin_annotated(self):
     def annotated(e: str) -> str:
       return e
 
@@ -369,30 +744,26 @@ class DecoratorsTest(unittest.TestCase):
     decorators.disable_type_annotations()
     self.assertTrue(decorators._disable_from_callable)
 
-
-class DecoratorsTest(unittest.TestCase):
-  def test_no_annotations(self):
+  def test_no_annotations_on_same_function(self):
     def fn(a: int) -> int:
       return a
 
     with self.assertRaisesRegex(TypeCheckError,
-                                r'requires .*int.* but got .*str'):
+                                r'requires .*int.* but was applied .*str'):
       _ = ['a', 'b', 'c'] | Map(fn)
 
     # Same pipeline doesn't raise without annotations on fn.
     fn = decorators.no_annotations(fn)
     _ = ['a', 'b', 'c'] | Map(fn)
 
-
-class DecoratorsTest(unittest.TestCase):
-  def test_no_annotations(self):
+  def test_no_annotations_on_diff_function(self):
     def fn(a: int) -> int:
       return a
 
     _ = [1, 2, 3] | Map(fn)  # Doesn't raise - correct types.
 
     with self.assertRaisesRegex(TypeCheckError,
-                                r'requires .*int.* but got .*str'):
+                                r'requires .*int.* but was applied .*str'):
       _ = ['a', 'b', 'c'] | Map(fn)
 
     @decorators.no_annotations
@@ -400,6 +771,72 @@ class DecoratorsTest(unittest.TestCase):
       return a
 
     _ = ['a', 'b', 'c'] | Map(fn2)  # Doesn't raise - no input type hints.
+
+
+class ExtractTaggedFromTypeTest(unittest.TestCase):
+  """Tests for _extract_tagged_from_type (Beam-level type extraction)."""
+  def test_simple_type_no_extraction(self):
+    main, tagged = decorators._extract_tagged_from_type(int)
+    self.assertEqual(main, int)
+    self.assertEqual(tagged, {})
+
+  def test_beam_union_no_tagged(self):
+    t = typehints.Union[int, str]
+    main, tagged = decorators._extract_tagged_from_type(t)
+    self.assertEqual(main, t)
+    self.assertEqual(tagged, {})
+
+  def test_standalone_tagged_output(self):
+    t = TaggedOutput[typing.Literal['errors'], str]
+    main, tagged = decorators._extract_tagged_from_type(t)
+    self.assertIs(main, decorators._NO_MAIN_TYPE)
+    self.assertEqual(tagged, {'errors': str})
+
+  def test_beam_union_with_tagged(self):
+    t = convert_to_beam_type(int | TaggedOutput[typing.Literal['errors'], str])
+    main, tagged = decorators._extract_tagged_from_type(t)
+    self.assertEqual(main, int)
+    self.assertEqual(tagged, {'errors': str})
+
+  def test_beam_union_multiple_tagged(self):
+    t = convert_to_beam_type(
+        int | TaggedOutput[typing.Literal['errors'], str]
+        | TaggedOutput[typing.Literal['warnings'], str])
+    main, tagged = decorators._extract_tagged_from_type(t)
+    self.assertEqual(main, int)
+    self.assertEqual(tagged, {'errors': str, 'warnings': str})
+
+  def test_beam_union_multiple_main_types(self):
+    t = convert_to_beam_type(
+        int | str | TaggedOutput[typing.Literal['errors'], bytes])
+    main, tagged = decorators._extract_tagged_from_type(t)
+    self.assertIsInstance(main, typehints.UnionConstraint)
+    self.assertIn(int, main.union_types)
+    self.assertIn(str, main.union_types)
+    self.assertEqual(tagged, {'errors': bytes})
+
+  def test_beam_union_tagged_only(self):
+    t = convert_to_beam_type(
+        TaggedOutput[typing.Literal['errors'], str]
+        | TaggedOutput[typing.Literal['warnings'], int])
+    main, tagged = decorators._extract_tagged_from_type(t)
+    self.assertIs(main, decorators._NO_MAIN_TYPE)
+    self.assertEqual(tagged, {'errors': str, 'warnings': int})
+
+  def test_bare_tagged_output_standalone(self):
+    with self.assertLogs(level='WARNING') as cm:
+      main, tagged = decorators._extract_tagged_from_type(TaggedOutput)
+    self.assertIn('Bare TaggedOutput will be ignored', cm.output[0])
+    self.assertIs(main, decorators._NO_MAIN_TYPE)
+    self.assertEqual(tagged, {})
+
+  def test_bare_tagged_output_in_union(self):
+    with self.assertLogs(level='WARNING') as cm:
+      t = convert_to_beam_type(str | TaggedOutput)
+      main, tagged = decorators._extract_tagged_from_type(t)
+    self.assertIn('Bare TaggedOutput will be ignored', cm.output[0])
+    self.assertEqual(main, str)
+    self.assertEqual(tagged, {})
 
 
 if __name__ == '__main__':

@@ -18,13 +18,19 @@
 package org.apache.beam.sdk.extensions.gcp.options;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationContext;
+import com.fasterxml.jackson.databind.JsonDeserializer;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.JsonSerializer;
+import com.fasterxml.jackson.databind.SerializerProvider;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.google.cloud.hadoop.gcsio.GoogleCloudStorageReadOptions;
 import com.google.cloud.hadoop.util.AsyncWriteChannelOptions;
+import java.util.HashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.SynchronousQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.extensions.gcp.storage.GcsPathValidator;
 import org.apache.beam.sdk.extensions.gcp.storage.PathValidator;
 import org.apache.beam.sdk.extensions.gcp.util.GcsUtil;
@@ -32,11 +38,10 @@ import org.apache.beam.sdk.options.ApplicationNameOptions;
 import org.apache.beam.sdk.options.Default;
 import org.apache.beam.sdk.options.DefaultValueFactory;
 import org.apache.beam.sdk.options.Description;
+import org.apache.beam.sdk.options.ExecutorOptions;
 import org.apache.beam.sdk.options.Hidden;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.util.InstanceBuilder;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.MoreExecutors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Options used to configure Google Cloud Storage. */
@@ -50,26 +55,55 @@ public interface GcsOptions extends ApplicationNameOptions, GcpOptions, Pipeline
 
   void setGcsUtil(GcsUtil value);
 
+  class GcsReadOptionsFactory implements DefaultValueFactory<GoogleCloudStorageReadOptions> {
+    @Override
+    public GoogleCloudStorageReadOptions create(PipelineOptions options) {
+      // In gcs-connector v3, GoogleCloudStorageReadOptions.DEFAULT changed fadvise from SEQUENTIAL
+      // to AUTO. Beam workloads default to SEQUENTIAL to preserve expected sequential read
+      // throughput and caching behavior.
+      return GcsReadOptionsSerializer.DEFAULT_OPTIONS;
+    }
+  }
+
+  /**
+   * @deprecated This option will be removed in a future release.
+   */
+  @JsonSerialize(using = GcsReadOptionsSerializer.class)
+  @JsonDeserialize(using = GcsReadOptionsDeserializer.class)
+  @Description(
+      "The GoogleCloudStorageReadOptions instance that should be used to read from Google Cloud Storage.")
+  @Default.InstanceFactory(GcsReadOptionsFactory.class)
+  @Hidden
+  @Deprecated
+  GoogleCloudStorageReadOptions getGoogleCloudStorageReadOptions();
+
+  /**
+   * @deprecated This option will be removed in a future release.
+   */
+  @Deprecated
+  void setGoogleCloudStorageReadOptions(GoogleCloudStorageReadOptions value);
+
   /**
    * The ExecutorService instance to use to create threads, can be overridden to specify an
-   * ExecutorService that is compatible with the user's environment. If unset, the default is to
-   * create an ExecutorService with an unbounded number of threads; this is compatible with Google
-   * AppEngine.
+   * ExecutorService that is compatible with the user's environment. If unset, the default is to use
+   * {@link ExecutorOptions#getScheduledExecutorService()}.
+   *
+   * @deprecated use {@link ExecutorOptions#getScheduledExecutorService()} instead
    */
   @JsonIgnore
-  @Description(
-      "The ExecutorService instance to use to create multiple threads. Can be overridden "
-          + "to specify an ExecutorService that is compatible with the user's environment. If unset, "
-          + "the default is to create an ExecutorService with an unbounded number of threads; this "
-          + "is compatible with Google AppEngine.")
   @Default.InstanceFactory(ExecutorServiceFactory.class)
   @Hidden
+  @Deprecated
   ExecutorService getExecutorService();
 
+  /**
+   * @deprecated use {@link ExecutorOptions#setScheduledExecutorService} instead. If set, it may
+   *     result in multiple ExecutorServices, and therefore thread pools, in the runtime.
+   */
+  @Deprecated
   void setExecutorService(ExecutorService value);
 
   /** GCS endpoint to use. If unspecified, uses the default endpoint. */
-  @JsonIgnore
   @Hidden
   @Description("The URL for the GCS API.")
   String getGcsEndpoint();
@@ -87,8 +121,7 @@ public interface GcsOptions extends ApplicationNameOptions, GcpOptions, Pipeline
           + "information on the restrictions and performance implications of this value.\n\n"
           + "https://github.com/GoogleCloudPlatform/bigdata-interop/blob/master/util/src/main/java/"
           + "com/google/cloud/hadoop/util/AsyncWriteChannelOptions.java")
-  @Nullable
-  Integer getGcsUploadBufferSizeBytes();
+  @Nullable Integer getGcsUploadBufferSizeBytes();
 
   void setGcsUploadBufferSizeBytes(@Nullable Integer bytes);
 
@@ -122,38 +155,104 @@ public interface GcsOptions extends ApplicationNameOptions, GcpOptions, Pipeline
   void setPathValidator(PathValidator validator);
 
   /** If true, reports metrics of certain operations, such as batch copies. */
-  @Description("Experimental. Whether to report performance metrics of certain GCS operations.")
+  @Description("Whether to report performance metrics of certain GCS operations.")
   @Default.Boolean(false)
-  @Experimental(Kind.FILESYSTEM)
   Boolean getGcsPerformanceMetrics();
 
   void setGcsPerformanceMetrics(Boolean reportPerformanceMetrics);
+
+  @Description("Read timeout for gcs http requests")
+  @Nullable Integer getGcsHttpRequestReadTimeout();
+
+  void setGcsHttpRequestReadTimeout(@Nullable Integer timeoutMs);
+
+  @Description("Write timeout for gcs http requests.")
+  @Nullable Integer getGcsHttpRequestWriteTimeout();
+
+  void setGcsHttpRequestWriteTimeout(@Nullable Integer timeoutMs);
+
+  /**
+   * Batching limit for rewrite ops which will copy data.
+   *
+   * @deprecated Only applicable to GcsUtil V1 (selected with the {@code disable_gcsutil_v2}
+   *     experiment). Not applicable to GcsUtil V2 (the default), which does not batch rewrites; use
+   *     {@link #getGcsMaxConcurrentRewrites} to tune copy/move concurrency there instead.
+   */
+  @Deprecated
+  @Description(
+      "Batching limit for rewrite ops which will copy data. Deprecated: only applicable to"
+          + " GcsUtil V1 (selected with the disable_gcsutil_v2 experiment), NOT to GcsUtil V2 (the"
+          + " default); use gcsMaxConcurrentRewrites instead.")
+  @Nullable Integer getGcsRewriteDataOpBatchLimit();
+
+  /**
+   * @deprecated Only applicable to GcsUtil V1. See {@link #getGcsRewriteDataOpBatchLimit}.
+   */
+  @Deprecated
+  void setGcsRewriteDataOpBatchLimit(@Nullable Integer timeoutMs);
+
+  /**
+   * Maximum number of files rewritten concurrently when copying or moving files. If unset, a
+   * default of 128 is used.
+   *
+   * <p>Only applicable to GcsUtil V2, which is the default. Ignored when falling back to GcsUtil V1
+   * with the {@code disable_gcsutil_v2} experiment.
+   */
+  @Description(
+      "Maximum number of files rewritten concurrently when copying or moving files in GCS."
+          + " If unset, defaults to 128. Only applicable to GcsUtil V2 (the default); ignored"
+          + " with the disable_gcsutil_v2 experiment.")
+  @Nullable Integer getGcsMaxConcurrentRewrites();
+
+  void setGcsMaxConcurrentRewrites(@Nullable Integer maxConcurrentRewrites);
+
+  /** If true, reports number of bytes written to each gcs bucket. */
+  @Description("Whether to report number of bytes written per GCS bucket.")
+  @Default.Boolean(false)
+  Boolean getEnableBucketWriteMetricCounter();
+
+  void setEnableBucketWriteMetricCounter(Boolean enableBucketWriteMetricCounter);
+
+  /** If true, reports number of bytes read from each gcs bucket. */
+  @Description("Whether to report number of bytes read per GCS bucket.")
+  @Default.Boolean(false)
+  Boolean getEnableBucketReadMetricCounter();
+
+  void setEnableBucketReadMetricCounter(Boolean enableBucketReadMetricCounter);
+
+  @Description(
+      "Prefix for the metric that counts the number of bytes read per GCS bucket. The resulting"
+          + " metric name will be formatted according to this template: <prefix>_<bucket_name>.")
+  @Default.String("GCS_read_bytes_counter")
+  String getGcsReadCounterPrefix();
+
+  void setGcsReadCounterPrefix(String gcsReadCounterPrefix);
+
+  @Description(
+      "Prefix for the metric that counts the number of bytes written per GCS bucket. The resulting"
+          + " metric name will be formatted according to this template: <prefix>_<bucket_name>.")
+  @Default.String("GCS_write_bytes_counter")
+  String getGcsWriteCounterPrefix();
+
+  void setGcsWriteCounterPrefix(String gcsReadCounterPrefix);
+
+  @Description("Get key-value pairs to be stored as custom information in GCS audit logs")
+  GcsCustomAuditEntries getGcsCustomAuditEntries();
+
+  @Description(
+      "Set key-value pairs to be stored as custom information in GCS audit logs. To"
+          + " specify these entries via command line, use"
+          + " `--gcsCustomAuditEntries={\"user\":\"test-user\", \"work\":\"test-work\", \"job\":\"test-job\", \"id\":\"1234\"}`")
+  void setGcsCustomAuditEntries(GcsCustomAuditEntries entries);
 
   /**
    * Returns the default {@link ExecutorService} to use within the Apache Beam SDK. The {@link
    * ExecutorService} is compatible with AppEngine.
    */
   class ExecutorServiceFactory implements DefaultValueFactory<ExecutorService> {
-    @SuppressWarnings("deprecation") // IS_APP_ENGINE is deprecated for internal use only.
     @Override
     public ExecutorService create(PipelineOptions options) {
-      ThreadFactoryBuilder threadFactoryBuilder = new ThreadFactoryBuilder();
-      threadFactoryBuilder.setThreadFactory(MoreExecutors.platformThreadFactory());
-      threadFactoryBuilder.setDaemon(true);
-      /* The SDK requires an unbounded thread pool because a step may create X writers
-       * each requiring their own thread to perform the writes otherwise a writer may
-       * block causing deadlock for the step because the writers buffer is full.
-       * Also, the MapTaskExecutor launches the steps in reverse order and completes
-       * them in forward order thus requiring enough threads so that each step's writers
-       * can be active.
-       */
-      return new ThreadPoolExecutor(
-          0,
-          Integer.MAX_VALUE, // Allow an unlimited number of re-usable threads.
-          Long.MAX_VALUE,
-          TimeUnit.NANOSECONDS, // Keep non-core threads alive forever.
-          new SynchronousQueue<>(),
-          threadFactoryBuilder.build());
+      return options.as(ExecutorOptions.class).getScheduledExecutorService();
     }
   }
 
@@ -171,5 +270,129 @@ public interface GcsOptions extends ApplicationNameOptions, GcpOptions, Pipeline
           .withArg(PipelineOptions.class, options)
           .build();
     }
+  }
+
+  /**
+   * Creates a {@link GcsCustomAuditEntries} that key-value pairs to be stored as custom information
+   * in GCS audit logs. According to Google Cloud Storage audit logging documentation
+   * (https://cloud.google.com/storage/docs/audit-logging#add-custom-metadata), the following
+   * limitations apply: - keys must be 64 characters or less, - values 1,200 characters or less, and
+   * - a maximum of four custom metadata entries are permitted per request.
+   */
+  class GcsCustomAuditEntries extends HashMap<String, String> {
+    private static final int MAX_KEY_LENGTH = 64;
+    private static final int MAX_VALUE_LENGTH = 1200;
+    private static final int MAX_ENTRIES = 4;
+
+    private static final String CUSTOM_AUDIT_ENTRY_TMPL = "x-goog-custom-audit-%s";
+
+    public static final String CUSTOM_AUDIT_JOB_ENTRY_KEY =
+        String.format(CUSTOM_AUDIT_ENTRY_TMPL, "job");
+
+    boolean exceedsEntryLimit() {
+      if (this.containsKey(CUSTOM_AUDIT_JOB_ENTRY_KEY)) {
+        return this.size() > MAX_ENTRIES;
+      }
+
+      return this.size() > MAX_ENTRIES - 1;
+    }
+
+    @Override
+    public @Nullable String put(String key, String value) {
+      if (key.length() > MAX_KEY_LENGTH) {
+        throw new IllegalArgumentException(
+            String.format(
+                "The key '%s' in GCS custom audit entries exceeds the %d-character limit.",
+                key, MAX_KEY_LENGTH));
+      }
+
+      if (value.length() > MAX_VALUE_LENGTH) {
+        throw new IllegalArgumentException(
+            String.format(
+                "The value '%s' in GCS custom audit entries exceeds the %d-character limit.",
+                value, MAX_VALUE_LENGTH));
+      }
+
+      String prefix = CUSTOM_AUDIT_ENTRY_TMPL.substring(0, CUSTOM_AUDIT_ENTRY_TMPL.indexOf('%'));
+      String formattedKey =
+          key.startsWith(prefix) ? key : String.format(CUSTOM_AUDIT_ENTRY_TMPL, key);
+      String oldValue = super.put(formattedKey, value);
+
+      if (exceedsEntryLimit()) {
+        throw new IllegalArgumentException(
+            String.format(
+                "The maximum allowed number of GCS custom audit entries (including the default x-goo-custom-audit-job) is %d.",
+                MAX_ENTRIES));
+      }
+
+      return oldValue;
+    }
+  }
+}
+
+class GcsReadOptionsSerializer extends JsonSerializer<GoogleCloudStorageReadOptions> {
+  static final GoogleCloudStorageReadOptions DEFAULT_OPTIONS =
+      GoogleCloudStorageReadOptions.DEFAULT.toBuilder()
+          .setFadvise(GoogleCloudStorageReadOptions.Fadvise.SEQUENTIAL)
+          .build();
+
+  @Override
+  public void serialize(
+      GoogleCloudStorageReadOptions value, JsonGenerator gen, SerializerProvider serializers)
+      throws java.io.IOException {
+    // Note: We only support a partial set of options to propagate to remote
+    // workers. Setting the unsupported ones will not have any effect and will fall
+    // back to default in remote workers. Support for additional options can be
+    // added on a need basis. The full list of options can be seen in
+    // com.google.cloud.hadoop.gcsio.GoogleCloudStorageReadOptions.
+    gen.writeStartObject();
+    if (value.getFadvise() != null && value.getFadvise() != DEFAULT_OPTIONS.getFadvise()) {
+      gen.writeStringField("fadvise", value.getFadvise().name());
+    }
+    if (value.isFastFailOnNotFoundEnabled() != DEFAULT_OPTIONS.isFastFailOnNotFoundEnabled()) {
+      gen.writeBooleanField("fastFailOnNotFoundEnabled", value.isFastFailOnNotFoundEnabled());
+    }
+    if (value.getMinRangeRequestSize() != DEFAULT_OPTIONS.getMinRangeRequestSize()) {
+      gen.writeNumberField("minRangeRequestSize", value.getMinRangeRequestSize());
+    }
+    if (value.getInplaceSeekLimit() != DEFAULT_OPTIONS.getInplaceSeekLimit()) {
+      gen.writeNumberField("inplaceSeekLimit", value.getInplaceSeekLimit());
+    }
+    if (value.isGrpcReadZeroCopyEnabled() != DEFAULT_OPTIONS.isGrpcReadZeroCopyEnabled()) {
+      gen.writeBooleanField("grpcReadZeroCopyEnabled", value.isGrpcReadZeroCopyEnabled());
+    }
+    gen.writeEndObject();
+  }
+}
+
+class GcsReadOptionsDeserializer extends JsonDeserializer<GoogleCloudStorageReadOptions> {
+  @Override
+  public GoogleCloudStorageReadOptions deserialize(JsonParser p, DeserializationContext ctxt)
+      throws java.io.IOException {
+    JsonNode root = p.readValueAsTree();
+    GoogleCloudStorageReadOptions.Builder builder =
+        GcsReadOptionsSerializer.DEFAULT_OPTIONS.toBuilder();
+
+    if (root != null && root.isObject()) {
+      if (root.hasNonNull("fadvise")) {
+        builder.setFadvise(
+            GoogleCloudStorageReadOptions.Fadvise.valueOf(root.get("fadvise").asText()));
+      }
+      if (root.hasNonNull("fastFailOnNotFoundEnabled")) {
+        builder.setFastFailOnNotFoundEnabled(root.get("fastFailOnNotFoundEnabled").asBoolean());
+      } else if (root.hasNonNull("fastFailOnNotFound")) {
+        builder.setFastFailOnNotFoundEnabled(root.get("fastFailOnNotFound").asBoolean());
+      }
+      if (root.hasNonNull("minRangeRequestSize")) {
+        builder.setMinRangeRequestSize(root.get("minRangeRequestSize").asLong());
+      }
+      if (root.hasNonNull("inplaceSeekLimit")) {
+        builder.setInplaceSeekLimit(root.get("inplaceSeekLimit").asLong());
+      }
+      if (root.hasNonNull("grpcReadZeroCopyEnabled")) {
+        builder.setGrpcReadZeroCopyEnabled(root.get("grpcReadZeroCopyEnabled").asBoolean());
+      }
+    }
+    return builder.build();
   }
 }

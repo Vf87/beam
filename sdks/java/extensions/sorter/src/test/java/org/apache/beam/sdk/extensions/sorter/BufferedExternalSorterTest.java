@@ -19,7 +19,7 @@ package org.apache.beam.sdk.extensions.sorter;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -33,6 +33,7 @@ import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Arrays;
+import org.apache.beam.sdk.testing.BeamParallelJunit4Runner;
 import org.apache.beam.sdk.values.KV;
 import org.checkerframework.checker.nullness.qual.EnsuresNonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -42,12 +43,11 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
 
 /** Tests for {@link BufferedExternalSorter}. */
-@RunWith(JUnit4.class)
+@RunWith(BeamParallelJunit4Runner.class)
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class BufferedExternalSorterTest {
   @Rule public ExpectedException thrown = ExpectedException.none();
@@ -110,7 +110,7 @@ public class BufferedExternalSorterTest {
     testSorter.add(kvs[1]);
     testSorter.add(kvs[2]);
 
-    assertEquals(Arrays.asList(kvs[0], kvs[1], kvs[2]), testSorter.sort());
+    assertEquals(Arrays.asList(kvs[0], kvs[1], kvs[2]), (java.util.List) testSorter.sort());
 
     // Verify external sorter was never called
     verify(mockExternalSorter, never()).add(any(KV.class));
@@ -142,7 +142,7 @@ public class BufferedExternalSorterTest {
     testSorter.add(kvs[1]);
     testSorter.add(kvs[2]);
 
-    assertEquals(Arrays.asList(kvs[0], kvs[1], kvs[2]), testSorter.sort());
+    assertEquals(Arrays.asList(kvs[0], kvs[1], kvs[2]), (java.util.List) testSorter.sort());
 
     verify(mockExternalSorter, times(1)).add(kvs[0]);
     verify(mockExternalSorter, times(1)).add(kvs[1]);

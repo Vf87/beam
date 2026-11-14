@@ -21,18 +21,17 @@ import java.util.ArrayList;
 import java.util.List;
 import org.apache.beam.runners.direct.CommittedResult.OutputType;
 import org.apache.beam.runners.direct.DirectWriteViewVisitor.WriteView;
-import org.apache.beam.runners.direct.StepTransformResult.Builder;
 import org.apache.beam.sdk.runners.AppliedPTransform;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 
 /**
  * The {@link DirectRunner} {@link TransformEvaluatorFactory} for the {@link DirectRunner-specific}
  * {@link WriteView} step.
  */
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 class ViewEvaluatorFactory implements TransformEvaluatorFactory {
   private final EvaluationContext context;
@@ -73,7 +72,7 @@ class ViewEvaluatorFactory implements TransformEvaluatorFactory {
       @Override
       public TransformResult<Iterable<InT>> finishBundle() {
         writer.add(elements);
-        Builder resultBuilder = StepTransformResult.withoutHold(application);
+        StepTransformResult.Builder resultBuilder = StepTransformResult.withoutHold(application);
         if (!elements.isEmpty()) {
           resultBuilder = resultBuilder.withAdditionalOutput(OutputType.PCOLLECTION_VIEW);
         }

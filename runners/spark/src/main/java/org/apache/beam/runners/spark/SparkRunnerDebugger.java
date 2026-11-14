@@ -19,8 +19,8 @@ package org.apache.beam.runners.spark;
 
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
-import org.apache.beam.runners.core.construction.SplittableParDo;
 import org.apache.beam.runners.spark.translation.EvaluationContext;
+import org.apache.beam.runners.spark.translation.SparkContextFactory;
 import org.apache.beam.runners.spark.translation.SparkPipelineTranslator;
 import org.apache.beam.runners.spark.translation.TransformTranslator;
 import org.apache.beam.runners.spark.translation.streaming.StreamingTransformTranslator;
@@ -29,6 +29,7 @@ import org.apache.beam.sdk.PipelineRunner;
 import org.apache.beam.sdk.options.ExperimentalOptions;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsValidator;
+import org.apache.beam.sdk.util.construction.SplittableParDo;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.streaming.api.java.JavaStreamingContext;
 import org.joda.time.Duration;
@@ -51,7 +52,7 @@ import org.slf4j.LoggerFactory;
  * }</pre>
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public final class SparkRunnerDebugger extends PipelineRunner<SparkPipelineResult> {
 
@@ -81,12 +82,14 @@ public final class SparkRunnerDebugger extends PipelineRunner<SparkPipelineResul
         options.isStreaming() || options.as(TestSparkPipelineOptions.class).isForceStreaming();
 
     // Default to using the primitive versions of Read.Bounded and Read.Unbounded.
-    // TODO(BEAM-10670): Use SDF read as default when we address performance issue.
+    // TODO(https://github.com/apache/beam/issues/20530): Use SDF read as default when we address
+    // performance issue.
     if (!ExperimentalOptions.hasExperiment(pipeline.getOptions(), "beam_fn_api")) {
       SplittableParDo.convertReadBasedSplittableDoFnsToPrimitiveReadsIfNecessary(pipeline);
     }
 
-    JavaSparkContext jsc = new JavaSparkContext("local[1]", "Debug_Pipeline");
+    JavaSparkContext jsc =
+        SparkContextFactory.getSparkContext(pipeline.getOptions().as(SparkPipelineOptions.class));
     JavaStreamingContext jssc =
         new JavaStreamingContext(jsc, new org.apache.spark.streaming.Duration(1000));
 
@@ -107,10 +110,10 @@ public final class SparkRunnerDebugger extends PipelineRunner<SparkPipelineResul
 
     pipeline.traverseTopologically(visitor);
 
-    jsc.stop();
+    SparkContextFactory.stopSparkContext(jsc);
 
     String debugString = visitor.getDebugString();
-    LOG.info("Translated Native Spark pipeline:\n" + debugString);
+    LOG.info("Translated Native Spark pipeline:\n{}", debugString);
     return new DebugSparkPipelineResult(debugString);
   }
 

@@ -37,6 +37,9 @@ import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.Field;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.DoFn.Element;
+import org.apache.beam.sdk.transforms.DoFn.MultiOutputReceiver;
+import org.apache.beam.sdk.transforms.DoFn.OutputReceiver;
 import org.apache.beam.sdk.transforms.GroupIntoBatches;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -48,10 +51,10 @@ import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.gson.Gson;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.gson.JsonArray;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.gson.JsonObject;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Throwables;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.gson.Gson;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.gson.JsonArray;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.gson.JsonObject;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Throwables;
 import org.apache.commons.io.IOUtils;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpStatus;
@@ -144,7 +147,10 @@ public class DataProtectors {
   }
 
   /** Class implements stateful doFn for data tokenization using remote RPC. */
-  @SuppressWarnings("initialization.static.fields.uninitialized")
+  @SuppressWarnings({
+    "initialization.static.fields.uninitialized",
+    "initialization.static.field.uninitialized"
+  })
   public static class TokenizationFn extends DoFn<KV<Integer, Iterable<Row>>, Row> {
 
     private static Schema schemaToRpc;
@@ -195,21 +201,25 @@ public class DataProtectors {
     }
 
     @ProcessElement
-    @SuppressWarnings("argument.type.incompatible")
-    public void process(@Element KV<Integer, Iterable<Row>> element, ProcessContext context) {
+    @SuppressWarnings("argument")
+    public void process(
+        @Element KV<Integer, Iterable<Row>> element,
+        OutputReceiver<Row> mainReceiver,
+        MultiOutputReceiver multiReceiver) {
       Iterable<Row> rows = element.getValue();
 
       try {
         for (Row outputRow : getTokenizedRow(rows)) {
-          context.output(outputRow);
+          mainReceiver.output(outputRow);
         }
       } catch (Exception e) {
         for (Row outputRow : rows) {
-          context.output(
-              failureTag,
-              FailsafeElement.of(outputRow, outputRow)
-                  .setErrorMessage(e.getMessage())
-                  .setStacktrace(Throwables.getStackTraceAsString(e)));
+          multiReceiver
+              .get(failureTag)
+              .output(
+                  FailsafeElement.of(outputRow, outputRow)
+                      .setErrorMessage(e.getMessage())
+                      .setStacktrace(Throwables.getStackTraceAsString(e)));
         }
       }
     }
@@ -243,7 +253,7 @@ public class DataProtectors {
       return stringBuilder.toString();
     }
 
-    @SuppressWarnings("argument.type.incompatible")
+    @SuppressWarnings("argument")
     private ArrayList<Row> getTokenizedRow(Iterable<Row> inputRows) throws IOException {
       ArrayList<Row> outputRows = new ArrayList<>();
 

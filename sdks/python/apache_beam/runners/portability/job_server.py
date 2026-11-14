@@ -18,6 +18,7 @@
 # pytype: skip-file
 
 import atexit
+import logging
 import shutil
 import signal
 import tempfile
@@ -48,8 +49,7 @@ class ExternalJobServer(JobServer):
     self._endpoint = endpoint
     self._timeout = timeout
 
-  def start(self):
-    # type: () -> beam_job_api_pb2_grpc.JobServiceStub
+  def start(self) -> beam_job_api_pb2_grpc.JobServiceStub:
     channel = grpc.insecure_channel(self._endpoint)
     grpc.channel_ready_future(channel).result(timeout=self._timeout)
     return beam_job_api_pb2_grpc.JobServiceStub(channel)
@@ -59,8 +59,7 @@ class ExternalJobServer(JobServer):
 
 
 class EmbeddedJobServer(JobServer):
-  def start(self):
-    # type: () -> local_job_service.LocalJobServicer
+  def start(self) -> 'local_job_service.LocalJobServicer':
     return local_job_service.LocalJobServicer()
 
   def stop(self):
@@ -74,6 +73,14 @@ class StopOnExitJobServer(JobServer):
     self._lock = threading.Lock()
     self._job_server = job_server
     self._started = False
+    # save original signal handler
+    self._original_sigint_handler = signal.getsignal(signal.SIGINT)
+
+  def _sigint_handler(self, sig, frame):
+    self.stop()
+    if callable(self._original_sigint_handler):
+      # call original signal handler to handle sigint gracefully
+      self._original_sigint_handler(sig, frame)
 
   def start(self):
     with self._lock:
@@ -81,14 +88,19 @@ class StopOnExitJobServer(JobServer):
         self._endpoint = self._job_server.start()
         self._started = True
         atexit.register(self.stop)
-        signal.signal(signal.SIGINT, self.stop)
+        signal.signal(signal.SIGINT, self._sigint_handler)
     return self._endpoint
 
   def stop(self):
     with self._lock:
       if self._started:
-        self._job_server.stop()
-        self._started = False
+        try:
+          self._job_server.stop()
+        finally:
+          self._started = False
+          # Unregister the atexit handler to prevent duplicate
+          # registrations when the server is restarted/reused.
+          atexit.unregister(self.stop)
 
 
 class SubprocessJobServer(JobServer):
@@ -96,6 +108,7 @@ class SubprocessJobServer(JobServer):
   def __init__(self):
     self._local_temp_root = None
     self._server = None
+    self._log_filter = None
 
   def subprocess_cmd_and_endpoint(self):
     raise NotImplementedError(type(self))
@@ -105,8 +118,16 @@ class SubprocessJobServer(JobServer):
       self._local_temp_root = tempfile.mkdtemp(prefix='beam-temp')
       cmd, endpoint = self.subprocess_cmd_and_endpoint()
       port = int(endpoint.split(':')[-1])
+      logger = logging.getLogger(f"{self.__class__.__name__}")
+      if self._log_filter is not None:
+        logger.addFilter(self._log_filter)
+        # Explicitly set logger level to INFO so logger.info(...) calls in
+        # SubprocessServer._really_start_process's log_stdout pass the initial
+        # isEnabledFor check, allowing the filter to dynamically elevate log
+        # levels to WARNING or ERROR.
+        logger.setLevel(logging.INFO)
       self._server = subprocess_server.SubprocessServer(
-          beam_job_api_pb2_grpc.JobServiceStub, cmd, port=port)
+          beam_job_api_pb2_grpc.JobServiceStub, cmd, port=port, logger=logger)
     return self._server.start()
 
   def stop(self):
@@ -129,6 +150,7 @@ class JavaJarJobServer(SubprocessJobServer):
     self._artifacts_dir = options.artifacts_dir
     self._java_launcher = options.job_server_java_launcher
     self._jvm_properties = options.job_server_jvm_properties
+    self._jar_cache_dir = options.jar_cache_dir
 
   def java_arguments(
       self, job_port, artifact_port, expansion_port, artifacts_dir):
@@ -143,17 +165,18 @@ class JavaJarJobServer(SubprocessJobServer):
         gradle_target, artifact_id=artifact_id)
 
   @staticmethod
-  def local_jar(url):
-    return subprocess_server.JavaJarServer.local_jar(url)
+  def local_jar(url, jar_cache_dir=None, user_agent=None):
+    return subprocess_server.JavaJarServer.local_jar(
+        url, jar_cache_dir, user_agent)
 
   def subprocess_cmd_and_endpoint(self):
-    jar_path = self.local_jar(self.path_to_jar())
+    jar_path = self.local_jar(self.path_to_jar(), self._jar_cache_dir)
     artifacts_dir = (
         self._artifacts_dir if self._artifacts_dir else self.local_temp_dir(
             prefix='artifacts'))
     job_port, = subprocess_server.pick_port(self._job_port)
-    subprocess_cmd = [self._java_launcher, '-jar'] + self._jvm_properties + [
-        jar_path
+    subprocess_cmd = [self._java_launcher] + list(self._jvm_properties) + [
+        '-jar', jar_path
     ] + list(
         self.java_arguments(
             job_port, self._artifact_port, self._expansion_port, artifacts_dir))

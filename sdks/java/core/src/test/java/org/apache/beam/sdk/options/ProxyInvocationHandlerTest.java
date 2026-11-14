@@ -39,33 +39,50 @@ import com.fasterxml.jackson.annotation.JsonValue;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationContext;
 import com.fasterxml.jackson.databind.JsonMappingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializerProvider;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import com.fasterxml.jackson.databind.deser.std.StdDeserializer;
 import com.fasterxml.jackson.databind.ser.std.StdSerializer;
+import com.fasterxml.jackson.databind.util.TokenBuffer;
 import com.google.common.testing.EqualsTester;
 import java.io.IOException;
 import java.io.NotSerializableException;
 import java.io.Serializable;
+import java.lang.reflect.Method;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import net.bytebuddy.ByteBuddy;
+import net.bytebuddy.description.modifier.Visibility;
+import net.bytebuddy.description.type.TypeDescription;
+import net.bytebuddy.dynamic.DynamicType;
 import org.apache.beam.sdk.testing.NeedsRunner;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.util.SerializableUtils;
 import org.apache.beam.sdk.util.common.ReflectHelpers;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Maps;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Maps;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.ByteStreams;
 import org.apache.commons.lang3.SystemUtils;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.hamcrest.Matchers;
@@ -310,7 +327,7 @@ public class ProxyInvocationHandlerTest {
 
   @Test
   public void testToString() throws Exception {
-    // TODO: Java core test failing on windows, https://issues.apache.org/jira/browse/BEAM-10725
+    // TODO: Java core test failing on windows, https://github.com/apache/beam/issues/20485
     assumeFalse(SystemUtils.IS_OS_WINDOWS);
     ProxyInvocationHandler handler = new ProxyInvocationHandler(Maps.newHashMap());
     StringWithDefault proxy = handler.as(StringWithDefault.class);
@@ -324,7 +341,7 @@ public class ProxyInvocationHandlerTest {
 
   @Test
   public void testToStringAfterDeserializationContainsJsonEntries() throws Exception {
-    // TODO: Java core test failing on windows, https://issues.apache.org/jira/browse/BEAM-10726
+    // TODO: Java core test failing on windows, https://github.com/apache/beam/issues/20474
     assumeFalse(SystemUtils.IS_OS_WINDOWS);
     ProxyInvocationHandler handler = new ProxyInvocationHandler(Maps.newHashMap());
     StringWithDefault proxy = handler.as(StringWithDefault.class);
@@ -344,7 +361,7 @@ public class ProxyInvocationHandlerTest {
 
   @Test
   public void testToStringAfterDeserializationContainsOverriddenEntries() throws Exception {
-    // TODO: Java core test failing on windows, https://issues.apache.org/jira/browse/BEAM-10727
+    // TODO: Java core test failing on windows, https://github.com/apache/beam/issues/20473
     assumeFalse(SystemUtils.IS_OS_WINDOWS);
     ProxyInvocationHandler handler = new ProxyInvocationHandler(Maps.newHashMap());
     StringWithDefault proxy = handler.as(StringWithDefault.class);
@@ -667,9 +684,7 @@ public class ProxyInvocationHandlerTest {
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj != null
-          && getClass().equals(obj.getClass())
-          && Objects.equals(doubleField, ((InnerType) obj).doubleField);
+      return obj instanceof InnerType && doubleField == ((InnerType) obj).doubleField;
     }
   }
 
@@ -687,8 +702,7 @@ public class ProxyInvocationHandlerTest {
 
     @Override
     public boolean equals(@Nullable Object obj) {
-      return obj != null
-          && getClass().equals(obj.getClass())
+      return obj instanceof ComplexType
           && Objects.equals(stringField, ((ComplexType) obj).stringField)
           && Objects.equals(intField, ((ComplexType) obj).intField)
           && Objects.equals(genericType, ((ComplexType) obj).genericType)
@@ -1099,6 +1113,76 @@ public class ProxyInvocationHandlerTest {
   }
 
   @Test
+  public void testExplicitlySetPropertiesIgnoresLazilyBoundDefaults() {
+    HasDefaults options = PipelineOptionsFactory.as(HasDefaults.class);
+    assertThat(PipelineOptionsFactory.explicitlySetProperties(options), not(hasItem("foo")));
+
+    // Reading a default binds it, but does not make it explicitly set.
+    assertEquals("bar", options.getFoo());
+    assertThat(PipelineOptionsFactory.explicitlySetProperties(options), not(hasItem("foo")));
+
+    // Setting it, even to the default value, does.
+    options.setFoo("bar");
+    assertThat(PipelineOptionsFactory.explicitlySetProperties(options), hasItem("foo"));
+  }
+
+  @Test
+  public void testExplicitlySetPropertiesIncludesArgumentsAndJsonOptions() throws Exception {
+    FooOptions options = PipelineOptionsFactory.fromArgs("--foo=baz").as(FooOptions.class);
+    assertThat(PipelineOptionsFactory.explicitlySetProperties(options), hasItem("foo"));
+
+    FooOptions deserialized = serializeDeserialize(FooOptions.class, options);
+    assertThat(PipelineOptionsFactory.explicitlySetProperties(deserialized), hasItem("foo"));
+  }
+
+  @Test
+  public void testSerializationWithoutDefaultsMarkerIsUnchangedAndCountsAllAsExplicit()
+      throws Exception {
+    HasDefaults options = PipelineOptionsFactory.as(HasDefaults.class);
+    assertEquals("bar", options.getFoo()); // binds the default
+
+    JsonNode serialized = MAPPER.readTree(MAPPER.writeValueAsString(options));
+    assertTrue(serialized.has("options"));
+    assertTrue(serialized.has("display_data"));
+    assertTrue(serialized.has("revision"));
+    assertFalse("defaults marker must be opt-in", serialized.has("defaults"));
+
+    HasDefaults deserialized = serializeDeserialize(HasDefaults.class, options);
+    assertThat(PipelineOptionsFactory.explicitlySetProperties(deserialized), hasItem("foo"));
+  }
+
+  @Test
+  public void testSerializationWithDefaultsMarkerPreservesExplicitness() throws Exception {
+    HasDefaults options = PipelineOptionsFactory.fromArgs("--foo=explicit").as(HasDefaults.class);
+    options.as(ObjectPipelineOptions.class).getValue(); // binds a default
+
+    byte[] serialized =
+        MAPPER
+            .writer()
+            .withAttribute(PipelineOptionsFactory.SERIALIZE_DEFAULTS_ATTRIBUTE, true)
+            .writeValueAsBytes(options);
+    JsonNode tree = MAPPER.readTree(serialized);
+    assertTrue(tree.get("options").has("value"));
+    assertThat(
+        MAPPER.convertValue(tree.get("defaults"), new TypeReference<List<String>>() {}),
+        hasItem("value"));
+
+    PipelineOptions deserialized = MAPPER.readValue(serialized, PipelineOptions.class);
+    assertThat(PipelineOptionsFactory.explicitlySetProperties(deserialized), hasItem("foo"));
+    assertThat(PipelineOptionsFactory.explicitlySetProperties(deserialized), not(hasItem("value")));
+    // The marked default is still served from the JSON.
+    assertNull(deserialized.as(ObjectPipelineOptions.class).getValue());
+
+    // Setting the property on the copy makes it explicit.
+    deserialized.as(ObjectPipelineOptions.class).setValue("set");
+    assertThat(PipelineOptionsFactory.explicitlySetProperties(deserialized), hasItem("value"));
+
+    // A further serialization without the attribute drops the marker again.
+    JsonNode reserialized = MAPPER.readTree(MAPPER.writeValueAsString(deserialized));
+    assertFalse(reserialized.has("defaults"));
+  }
+
+  @Test
   public void testDisplayDataNullValuesConvertedToEmptyString() throws Exception {
     FooOptions options = PipelineOptionsFactory.as(FooOptions.class);
     options.setFoo(null);
@@ -1231,6 +1315,7 @@ public class ProxyInvocationHandlerTest {
   }
 
   private static class CapturesOptions implements Serializable {
+    @SuppressWarnings("unused")
     PipelineOptions options = PipelineOptionsFactory.create();
   }
 
@@ -1245,5 +1330,112 @@ public class ProxyInvocationHandlerTest {
     ProxyInvocationHandler handler = new ProxyInvocationHandler(Maps.newHashMap());
     handler.as(BaseOptions.class);
     assertEquals("foo", handler.getOptionName(BaseOptions.class.getMethod("getFoo")));
+  }
+
+  private DynamicType.Unloaded<? extends PipelineOptions> spinNewInterface(int methodNumber) {
+    return new ByteBuddy()
+        .makeInterface(PipelineOptions.class)
+        .defineMethod("getDynamicMethod" + methodNumber, String.class, Visibility.PUBLIC)
+        .withoutCode()
+        .defineMethod("setDynamicMethod" + methodNumber, Void.TYPE, Visibility.PUBLIC)
+        .withParameters(String.class)
+        .withoutCode()
+        .make();
+  }
+
+  private Map<Integer, Class<? extends PipelineOptions>> loadAllInterfaces(
+      int numInterfaces, ClassLoader classLoader) {
+    List<DynamicType.Unloaded<? extends PipelineOptions>> dynamicInterfaces =
+        IntStream.range(0, numInterfaces)
+            .mapToObj(this::spinNewInterface)
+            .collect(Collectors.toList());
+
+    DynamicType.Loaded<Object> root =
+        new ByteBuddy().subclass(Object.class).make().include(dynamicInterfaces).load(classLoader);
+
+    Map<TypeDescription, Class<?>> loadedInterfaces = root.getLoadedAuxiliaryTypes();
+    Map<Integer, Class<? extends PipelineOptions>> result = Maps.newHashMap();
+
+    IntStream.range(0, numInterfaces)
+        .forEach(
+            i -> {
+              DynamicType.Unloaded<? extends PipelineOptions> iface = dynamicInterfaces.get(i);
+              Class<?> clazz = loadedInterfaces.get(iface.getTypeDescription());
+              result.put(i, (Class<? extends PipelineOptions>) clazz);
+            });
+
+    return result;
+  }
+
+  @Test
+  public void testConcurrency() throws Exception {
+    int numInterfaces = 100;
+    int numWorkers = 10;
+    int numReaders = 10;
+    int step = numInterfaces / numWorkers;
+
+    ProxyInvocationHandler handler = new ProxyInvocationHandler(Maps.newHashMap());
+    ClassLoader cl = Thread.currentThread().getContextClassLoader();
+    Map<Integer, Class<? extends PipelineOptions>> ifaces = loadAllInterfaces(numInterfaces, cl);
+    CountDownLatch startWaiter = new CountDownLatch(1);
+    CountDownLatch done = new CountDownLatch(numWorkers);
+
+    ExecutorService executor = Executors.newFixedThreadPool(numWorkers + numReaders);
+    List<Future<?>> futs = Lists.newArrayList();
+
+    // launch `numWorkers` concurrent "writers" that will try to cast the proxy handler to various
+    // interfaces and set a value on them.
+    for (int start = 0; start < numInterfaces; start += step) {
+      final int s = start;
+      final int end = start + step;
+      Callable<Void> worker =
+          () -> {
+            startWaiter.await();
+            for (int i = s; i < end; i++) {
+              Class<? extends PipelineOptions> iface = ifaces.get(i);
+              Method setter = iface.getDeclaredMethod("setDynamicMethod" + i, String.class);
+              PipelineOptions opt1 = handler.as(iface);
+              setter.invoke(opt1, "test-" + i);
+            }
+            done.countDown();
+            return null;
+          };
+      futs.add(executor.submit(worker));
+    }
+
+    // launch concurrent readers that call `toString` and serializes the options, making sure they
+    // don't fail.
+    for (int i = 0; i < 10; i++) {
+      Callable<Void> worker =
+          () -> {
+            while (true) {
+              if (done.getCount() == 0) {
+                return null;
+              }
+              assertNotNull(handler.toString());
+              PipelineOptionsFactory.MAPPER.writeValue(
+                  ByteStreams.nullOutputStream(), handler.as(PipelineOptions.class));
+            }
+          };
+      futs.add(executor.submit(worker));
+    }
+
+    // wait for everything to finish
+    startWaiter.countDown();
+    for (Future<?> fut : futs) {
+      fut.get();
+    }
+
+    // ensure that the serialized json contains every value we set.
+    TokenBuffer tokenBuffer = new TokenBuffer(PipelineOptionsFactory.MAPPER, false);
+    PipelineOptionsFactory.MAPPER.writeValue(tokenBuffer, handler.as(PipelineOptions.class));
+
+    JsonNode tree = PipelineOptionsFactory.MAPPER.readTree(tokenBuffer.asParser());
+    JsonNode optionsNode = tree.get("options");
+    for (int i = 0; i < numInterfaces; i++) {
+      JsonNode methodNode = optionsNode.get("dynamicMethod" + i);
+      assertNotNull(methodNode);
+      assertEquals("test-" + i, methodNode.asText());
+    }
   }
 }

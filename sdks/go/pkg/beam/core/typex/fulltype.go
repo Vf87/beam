@@ -87,6 +87,10 @@ func printShortComposite(t reflect.Type) string {
 		return "CoGBK"
 	case KVType:
 		return "KV"
+	case NullableType:
+		return "Nullable"
+	case ShardedKeyType:
+		return "SK"
 	default:
 		return fmt.Sprintf("invalid(%v)", t)
 	}
@@ -106,8 +110,13 @@ func New(t reflect.Type, components ...FullType) FullType {
 	case Container:
 		switch t.Kind() {
 		case reflect.Slice:
-			// We include the child type as a component for convenience.
-			return &tree{class, t, []FullType{New(t.Elem())}}
+			if len(components) == 0 {
+				// For elements without sub components, we just create with the type, this handles vanilla slices.
+				// We include the child type as a component for convenience.
+				return &tree{class, t, []FullType{New(t.Elem())}}
+			}
+			// For elements which themselves have components, we need to go deeper.
+			return &tree{class, t, []FullType{New(t.Elem(), components[0].Components()...)}}
 		default:
 			panic(fmt.Sprintf("Unexpected aggregate type: %v", t))
 		}
@@ -115,10 +124,10 @@ func New(t reflect.Type, components ...FullType) FullType {
 		switch t {
 		case KVType:
 			if len(components) != 2 {
-				panic("Invalid number of components for KV")
+				panic(fmt.Sprintf("Invalid number of components for KV: %v, %v", t, components))
 			}
-			if isAnyNonKVComposite(components) {
-				panic("Invalid to nest composites inside KV")
+			if isAnyNonKVAndNonWindowedComposite(components) {
+				panic(fmt.Sprintf("Invalid to nest composite composites inside KV: %v, %v", t, components))
 			}
 			return &tree{class, t, components}
 		case WindowedValueType:
@@ -131,10 +140,20 @@ func New(t reflect.Type, components ...FullType) FullType {
 			return &tree{class, t, components}
 		case CoGBKType:
 			if len(components) < 2 {
-				panic("Invalid number of components for CoGBK")
+				panic(fmt.Sprintf("Invalid number of components for CoGBK: %v", t))
 			}
 			if isAnyNonKVComposite(components) {
-				panic("Invalid to nest composites inside CoGBK")
+				panic(fmt.Sprintf("Invalid to nest composites inside CoGBK: %v", t))
+			}
+			return &tree{class, t, components}
+		case TimersType:
+			return &tree{class, t, components}
+		case ShardedKeyType:
+			if len(components) != 1 {
+				panic(fmt.Sprintf("Invalid number of components for ShardedKey: %v, %v", t, components))
+			}
+			if components[0].Class() == Composite {
+				panic(fmt.Sprintf("Invalid to nest composite inside ShardedKey: %v, %v", t, components))
 			}
 			return &tree{class, t, components}
 		default:
@@ -154,6 +173,15 @@ func New(t reflect.Type, components ...FullType) FullType {
 func isAnyNonKVComposite(list []FullType) bool {
 	for _, t := range list {
 		if t.Class() == Composite && t.Type() != KVType {
+			return true
+		}
+	}
+	return false
+}
+
+func isAnyNonKVAndNonWindowedComposite(list []FullType) bool {
+	for _, t := range list {
+		if t.Class() == Composite && t.Type() != KVType && t.Type() != WindowedValueType {
 			return true
 		}
 	}
@@ -208,6 +236,19 @@ func NewCoGBK(components ...FullType) FullType {
 	return New(CoGBKType, components...)
 }
 
+// IsShardedKey returns true iff the type is a ShardedKey.
+func IsShardedKey(t FullType) bool {
+	return t.Type() == ShardedKeyType
+}
+
+// NewShardedKey constructs a new ShardedKey FullType wrapping the given
+// key component. The ShardedKey has exactly one component — the user key
+// type — because the ShardID byte-string has a fixed representation and
+// is not a user-configurable type.
+func NewShardedKey(keyType FullType) FullType {
+	return New(ShardedKeyType, keyType)
+}
+
 // IsStructurallyAssignable returns true iff a from value is structurally
 // assignable to the to value of the given types. Types that are
 // "structurally assignable" (SA) are assignable if type variables are
@@ -217,15 +258,14 @@ func NewCoGBK(components ...FullType) FullType {
 //
 // For example:
 //
-//   SA:  KV<int,int>    := KV<int,int>
-//   SA:  KV<int,X>      := KV<int,string>  // X bound to string by assignment
-//   SA:  KV<int,string> := KV<int,X>       // Assignable only if X is already bound to string
-//   SA:  KV<int,string> := KV<X,X>         // Not assignable under any binding
+//	SA:  KV<int,int>    := KV<int,int>
+//	SA:  KV<int,X>      := KV<int,string>  // X bound to string by assignment
+//	SA:  KV<int,string> := KV<int,X>       // Assignable only if X is already bound to string
+//	SA:  KV<int,string> := KV<X,X>         // Not assignable under any binding
 //
-//   Not SA:  KV<int,string> := KV<string,X>
-//   Not SA:  X              := KV<int,string>
-//   Not SA:  GBK(X,Y)       := KV<int,string>
-//
+//	Not SA:  KV<int,string> := KV<string,X>
+//	Not SA:  X              := KV<int,string>
+//	Not SA:  GBK(X,Y)       := KV<int,string>
 func IsStructurallyAssignable(from, to FullType) bool {
 	switch from.Class() {
 	case Concrete:
@@ -419,6 +459,5 @@ func checkTypesNotNil(list []FullType) {
 
 // NoFiringPane return PaneInfo assigned as NoFiringPane(0x0f)
 func NoFiringPane() PaneInfo {
-	pn := PaneInfo{IsFirst: true, IsLast: true, Timing: PaneUnknown}
-	return pn
+	return PaneInfo{IsFirst: true, IsLast: true, Timing: PaneUnknown}
 }

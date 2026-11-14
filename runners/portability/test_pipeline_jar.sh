@@ -72,8 +72,9 @@ echo "Checking for Docker image ${PYTHON_CONTAINER_IMAGE}"
 docker images --format "{{.Repository}}:{{.Tag}}" | grep $PYTHON_CONTAINER_IMAGE
 
 # Set up Python environment
-virtualenv -p python$PYTHON_VERSION $ENV_DIR
+python$PYTHON_VERSION -m venv $ENV_DIR
 . $ENV_DIR/bin/activate
+pip install --retries 10 --upgrade pip setuptools wheel
 pip install --retries 10 -e $PYTHON_ROOT_DIR
 
 PIPELINE_PY="
@@ -122,7 +123,16 @@ OUTPUT_JAR="test-pipeline-${RUNNER}-$(date +%Y%m%d-%H%M%S).jar"
 
 if [[ "$TEST_EXIT_CODE" -eq 0 ]]; then
   # Execute the jar
-  java -jar $OUTPUT_JAR || TEST_EXIT_CODE=$?
+  JAVA_ARGS=()
+  if [[ "$RUNNER" = "SparkRunner" ]]; then
+    JAVA_ARGS+=(
+      "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"
+      "--add-opens=java.base/java.nio=ALL-UNNAMED"
+      "--add-opens=java.base/java.util=ALL-UNNAMED"
+      "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED"
+    )
+  fi
+  java "${JAVA_ARGS[@]}" -jar $OUTPUT_JAR || TEST_EXIT_CODE=$?
 fi
 
 rm -rf $ENV_DIR

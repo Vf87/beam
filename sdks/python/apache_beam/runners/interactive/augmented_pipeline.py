@@ -22,14 +22,12 @@ For internal use only; no backward-compatibility guarantees.
 # pytype: skip-file
 
 import copy
-from typing import Dict
 from typing import Optional
-from typing import Set
 
 import apache_beam as beam
 from apache_beam.portability.api import beam_runner_api_pb2
-from apache_beam.runners.interactive import interactive_environment as ie
 from apache_beam.runners.interactive import background_caching_job
+from apache_beam.runners.interactive import interactive_environment as ie
 from apache_beam.runners.interactive.caching.cacheable import Cacheable
 from apache_beam.runners.interactive.caching.read_cache import ReadCache
 from apache_beam.runners.interactive.caching.write_cache import WriteCache
@@ -43,7 +41,7 @@ class AugmentedPipeline:
   def __init__(
       self,
       user_pipeline: beam.Pipeline,
-      pcolls: Optional[Set[beam.pvalue.PCollection]] = None):
+      pcolls: Optional[set[beam.pvalue.PCollection]] = None):
     """
     Initializes a pipelilne for augmenting interactive flavor.
 
@@ -70,13 +68,14 @@ class AugmentedPipeline:
   def augmented_pipeline(self) -> beam_runner_api_pb2.Pipeline:
     return self.augment()
 
-  # TODO(BEAM-10708): Support generating a background recording job that
-  # contains unbound source recording transforms only.
+  # TODO(https://github.com/apache/beam/issues/20526): Support generating a
+  # background recording job that contains unbound source recording transforms
+  # only.
   @property
   def background_recording_pipeline(self) -> beam_runner_api_pb2.Pipeline:
     raise NotImplementedError
 
-  def cacheables(self) -> Dict[beam.pvalue.PCollection, Cacheable]:
+  def cacheables(self) -> dict[beam.pvalue.PCollection, Cacheable]:
     """Finds all the cacheable intermediate PCollections in the pipeline with
     their metadata.
     """
@@ -123,6 +122,6 @@ class AugmentedPipeline:
           self._context,
           self._cache_manager,
           self._cacheables[writecache_pcoll]).write_cache()
-    # TODO(BEAM-10708): Support streaming, add pruning logic, and integrate
-    # pipeline fragment logic.
+    # TODO(https://github.com/apache/beam/issues/20526): Support streaming, add
+    # pruning logic, and integrate pipeline fragment logic.
     return pipeline

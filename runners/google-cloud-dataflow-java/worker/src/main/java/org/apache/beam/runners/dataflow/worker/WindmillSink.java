@@ -18,40 +18,49 @@
 package org.apache.beam.runners.dataflow.worker;
 
 import static org.apache.beam.runners.dataflow.util.Structs.getString;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.auto.service.AutoService;
+import io.opentelemetry.context.Context;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
+import org.apache.beam.model.fnexecution.v1.BeamFnApi;
 import org.apache.beam.runners.dataflow.util.CloudObject;
 import org.apache.beam.runners.dataflow.worker.util.common.worker.Sink;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill;
+import org.apache.beam.sdk.coders.ByteArrayCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo.PaneInfoCoder;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.sdk.util.WindowedValue.FullWindowedValueCoder;
+import org.apache.beam.sdk.util.ByteStringOutputStream;
+import org.apache.beam.sdk.values.CausedByDrain;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.ValueWithRecordId;
 import org.apache.beam.sdk.values.ValueWithRecordId.ValueWithRecordIdCoder;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.ByteString;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.sdk.values.WindowedValues.FullWindowedValueCoder;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.primitives.Longs;
 import org.checkerframework.checker.nullness.qual.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-@SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 class WindmillSink<T> extends Sink<WindowedValue<T>> {
-  private WindmillStreamWriter writer;
+
+  private final WindmillStreamWriter writer;
   private final Coder<T> valueCoder;
   private final Coder<Collection<? extends BoundedWindow>> windowsCoder;
-  private StreamingModeExecutionContext context;
+  private final StreamingModeExecutionContext context;
+  private static final Logger LOG = LoggerFactory.getLogger(WindmillSink.class);
 
   WindmillSink(
       String destinationName,
@@ -64,15 +73,43 @@ class WindmillSink<T> extends Sink<WindowedValue<T>> {
     this.context = context;
   }
 
+  private static ByteString encodeMetadata(
+      ByteStringOutputStream stream,
+      Coder<Collection<? extends BoundedWindow>> windowsCoder,
+      Collection<? extends BoundedWindow> windows,
+      PaneInfo paneInfo,
+      BeamFnApi.Elements.ElementMetadata metadata)
+      throws IOException {
+    boolean resetNeeded = true;
+    try {
+      // element metadata is behind the experiment
+      boolean elementMetadata = WindowedValues.WindowedValueCoder.isMetadataSupported();
+      if (elementMetadata) {
+        PaneInfoCoder.INSTANCE.encode(paneInfo.withElementMetadata(true), stream);
+        windowsCoder.encode(windows, stream);
+        ByteArrayCoder.of().encode(metadata.toByteArray(), stream, Coder.Context.OUTER);
+      } else {
+        PaneInfoCoder.INSTANCE.encode(paneInfo, stream);
+        windowsCoder.encode(windows, stream, Coder.Context.OUTER);
+      }
+      ByteString result = stream.toByteStringAndReset();
+      resetNeeded = false;
+      return result;
+    } finally {
+      if (resetNeeded) {
+        stream.reset();
+      }
+    }
+  }
+
   public static ByteString encodeMetadata(
       Coder<Collection<? extends BoundedWindow>> windowsCoder,
       Collection<? extends BoundedWindow> windows,
-      PaneInfo pane)
+      PaneInfo paneInfo,
+      BeamFnApi.Elements.ElementMetadata metadata)
       throws IOException {
-    ByteString.Output stream = ByteString.newOutput();
-    PaneInfoCoder.INSTANCE.encode(pane, stream);
-    windowsCoder.encode(windows, stream, Coder.Context.OUTER);
-    return stream.toByteString();
+    ByteStringOutputStream stream = new ByteStringOutputStream();
+    return encodeMetadata(stream, windowsCoder, windows, paneInfo, metadata);
   }
 
   public static PaneInfo decodeMetadataPane(ByteString metadata) throws IOException {
@@ -80,12 +117,27 @@ class WindmillSink<T> extends Sink<WindowedValue<T>> {
     return PaneInfoCoder.INSTANCE.decode(inStream);
   }
 
+  public static BeamFnApi.Elements.ElementMetadata decodeAdditionalMetadata(
+      Coder<Collection<? extends BoundedWindow>> windowsCoder, ByteString metadata)
+      throws IOException {
+    InputStream inStream = metadata.newInput();
+    PaneInfo paneInfo = PaneInfoCoder.INSTANCE.decode(inStream);
+    windowsCoder.decode(inStream);
+    if (paneInfo.isElementMetadata()) {
+      return BeamFnApi.Elements.ElementMetadata.parseFrom(
+          ByteArrayCoder.of().decode(inStream, Coder.Context.OUTER));
+    } else {
+      // empty
+      return BeamFnApi.Elements.ElementMetadata.newBuilder().build();
+    }
+  }
+
   public static Collection<? extends BoundedWindow> decodeMetadataWindows(
       Coder<Collection<? extends BoundedWindow>> windowsCoder, ByteString metadata)
       throws IOException {
     InputStream inStream = metadata.newInput();
     PaneInfoCoder.INSTANCE.decode(inStream);
-    return windowsCoder.decode(inStream, Coder.Context.OUTER);
+    return windowsCoder.decode(inStream);
   }
 
   /** A {@link SinkFactory.Registrar} for windmill sinks. */
@@ -101,7 +153,9 @@ class WindmillSink<T> extends Sink<WindowedValue<T>> {
     }
   }
 
+  @SuppressWarnings("rawtypes")
   public static class Factory implements SinkFactory {
+
     @Override
     public WindmillSink<?> create(
         CloudObject spec,
@@ -116,7 +170,7 @@ class WindmillSink<T> extends Sink<WindowedValue<T>> {
       return new WindmillSink<>(
           getString(spec, "stream_id"),
           typedCoder,
-          (StreamingModeExecutionContext) executionContext);
+          checkNotNull((StreamingModeExecutionContext) executionContext));
     }
   }
 
@@ -126,79 +180,213 @@ class WindmillSink<T> extends Sink<WindowedValue<T>> {
   }
 
   class WindmillStreamWriter implements SinkWriter<WindowedValue<T>> {
+
     private Map<ByteString, Windmill.KeyedMessageBundle.Builder> productionMap;
     private final String destinationName;
+    private final ByteStringOutputStream stream; // Kept across encodes for buffer reuse.
+
+    // Builders are reused to reduce GC overhead.
+    private final Windmill.Message.Builder messageBuilder;
+    private final Windmill.OutputMessageBundle.Builder outputBuilder;
 
     private WindmillStreamWriter(String destinationName) {
       this.destinationName = destinationName;
       productionMap = new HashMap<>();
+      stream = new ByteStringOutputStream();
+      messageBuilder = Windmill.Message.newBuilder();
+      outputBuilder = Windmill.OutputMessageBundle.newBuilder();
     }
 
     private <EncodeT> ByteString encode(Coder<EncodeT> coder, EncodeT object) throws IOException {
-      ByteString.Output stream = ByteString.newOutput();
-      coder.encode(object, stream, Coder.Context.OUTER);
-      return stream.toByteString();
+      if (!stream.isEmpty()) {
+        throw new IllegalStateException(
+            "Expected output stream to be empty but had " + stream.toByteString());
+      }
+      boolean resetNeeded = true;
+      try {
+        coder.encode(object, stream, Coder.Context.OUTER);
+        ByteString result = stream.toByteStringAndReset();
+        resetNeeded = false;
+        return result;
+      } finally {
+        if (resetNeeded) {
+          stream.reset();
+        }
+      }
     }
 
     @Override
-    @SuppressWarnings("NestedInstanceOfConditions")
+    @SuppressWarnings("rawtypes")
     public long add(WindowedValue<T> data) throws IOException {
       ByteString key, value;
       ByteString id = ByteString.EMPTY;
-      ByteString metadata = encodeMetadata(windowsCoder, data.getWindows(), data.getPane());
+      // todo #33176 specify additional metadata in the future
+      BeamFnApi.Elements.ElementMetadata.Builder additionalMetadataBuilder =
+          BeamFnApi.Elements.ElementMetadata.newBuilder();
+      additionalMetadataBuilder
+          .setDrain(
+              data.causedByDrain() == CausedByDrain.CAUSED_BY_DRAIN
+                  ? BeamFnApi.Elements.DrainMode.Enum.DRAINING
+                  : BeamFnApi.Elements.DrainMode.Enum.NOT_DRAINING)
+          .setValueKind(WindmillValueKindHelper.toProto(data.getValueKind()));
+      Context openTelemetryContext = data.getOpenTelemetryContext();
+      if (openTelemetryContext != null) {
+        // TODO replace with OpenTelemetryContextPropagator
+        WindmillOpenTelemetryContextPropagator.set(openTelemetryContext, additionalMetadataBuilder);
+      }
+
+      ByteString metadata =
+          encodeMetadata(
+              stream,
+              windowsCoder,
+              data.getWindows(),
+              data.getPaneInfo(),
+              additionalMetadataBuilder.build());
       if (valueCoder instanceof KvCoder) {
         KvCoder kvCoder = (KvCoder) valueCoder;
-        KV kv = (KV) data.getValue();
+        KV kv = checkNotNull((KV) data.getValue());
         key = encode(kvCoder.getKeyCoder(), kv.getKey());
-        Coder valueCoder = kvCoder.getValueCoder();
+        Coder nestedValueCoder = kvCoder.getValueCoder();
         // If ids are explicitly provided, use that instead of the windmill-generated id.
         // This is used when reading an UnboundedSource to deduplicate records.
-        if (valueCoder instanceof ValueWithRecordId.ValueWithRecordIdCoder) {
-          ValueWithRecordId valueAndId = (ValueWithRecordId) kv.getValue();
+        if (nestedValueCoder instanceof ValueWithRecordId.ValueWithRecordIdCoder) {
+          ValueWithRecordId valueAndId = checkNotNull((ValueWithRecordId) kv.getValue());
           value =
-              encode(((ValueWithRecordIdCoder) valueCoder).getValueCoder(), valueAndId.getValue());
+              encode(
+                  ((ValueWithRecordIdCoder) nestedValueCoder).getValueCoder(),
+                  valueAndId.getValue());
           id = ByteString.copyFrom(valueAndId.getId());
         } else {
-          value = encode(valueCoder, kv.getValue());
+          value = encode(nestedValueCoder, kv.getValue());
         }
       } else {
-        key = context.getSerializedKey();
+        key = checkNotNull(context.getSerializedKey());
         value = encode(valueCoder, data.getValue());
       }
-
-      Windmill.KeyedMessageBundle.Builder keyedOutput = productionMap.get(key);
-      if (keyedOutput == null) {
-        keyedOutput = Windmill.KeyedMessageBundle.newBuilder().setKey(key);
-        productionMap.put(key, keyedOutput);
+      if (key.size() > context.getMaxOutputKeyBytes()) {
+        if (context.throwExceptionsForLargeOutput()) {
+          throw new OutputTooLargeException(
+              String.format(
+                  "Key for fused stage %s too large: %s", context.getSystemName(), key.size()));
+        } else {
+          LOG.error(
+              "Trying to output too large key for fused stage {} with size {}. Limit is {}. See https://cloud.google.com/dataflow/docs/guides/common-errors#key-commit-too-large-exception. Running with --experiments=throw_exceptions_on_large_output will instead throw an OutputTooLargeException which may be caught in user code.",
+              context.getSystemName(),
+              key.size(),
+              context.getMaxOutputKeyBytes());
+        }
+      }
+      if (value.size() > context.getMaxOutputValueBytes()) {
+        if (context.throwExceptionsForLargeOutput()) {
+          throw new OutputTooLargeException(
+              String.format(
+                  "Value for fused stage %s too large: %s", context.getSystemName(), value.size()));
+        } else {
+          LOG.error(
+              "Trying to output too large value for fused stage {} with size {}. Limit is {}. See https://cloud.google.com/dataflow/docs/guides/common-errors#key-commit-too-large-exception. Running with --experiments=throw_exceptions_on_large_output will instead throw an OutputTooLargeException which may be caught in user code.",
+              context.getSystemName(),
+              value.size(),
+              context.getMaxOutputValueBytes());
+        }
       }
 
-      Windmill.Message.Builder builder =
-          Windmill.Message.newBuilder()
-              .setTimestamp(WindmillTimeUtils.harnessToWindmillTimestamp(data.getTimestamp()))
-              .setData(value)
-              .setMetadata(metadata);
-      keyedOutput.addMessages(builder.build());
+      Windmill.KeyedMessageBundle.Builder keyedOutput =
+          productionMap.computeIfAbsent(
+              key,
+              (k) -> {
+                Windmill.KeyedMessageBundle.Builder builder =
+                    Windmill.KeyedMessageBundle.newBuilder();
+                builder.setKey(k);
+                return builder;
+              });
+
+      try {
+        messageBuilder
+            .setTimestamp(WindmillTimeUtils.harnessToWindmillTimestamp(data.getTimestamp()))
+            .setData(value)
+            .setMetadata(metadata);
+        keyedOutput.addMessages(messageBuilder.build());
+      } finally {
+        messageBuilder.clear();
+      }
+      long offsetSize = 0;
+      if (context.offsetBasedDeduplicationSupported()) {
+        if (id.size() > 0) {
+          throw new RuntimeException(
+              "Unexpected record ID via ValueWithRecordIdCoder while offset-based deduplication enabled.");
+        }
+        byte[] rawId = null;
+
+        @Nullable String recordId = data.getRecordId();
+        if (recordId != null) {
+          rawId = recordId.getBytes(StandardCharsets.UTF_8);
+        } else {
+          rawId = context.getCurrentRecordId();
+        }
+        if (rawId == null || rawId.length == 0) {
+          throw new RuntimeException(
+              "Unexpected empty record ID while offset-based deduplication enabled.");
+        }
+        id = ByteString.copyFrom(rawId);
+
+        byte[] rawOffset = null;
+        @Nullable Long recordOffset = data.getRecordOffset();
+        if (recordOffset != null) {
+          rawOffset = Longs.toByteArray(recordOffset);
+        } else {
+          rawOffset = context.getCurrentRecordOffset();
+        }
+        if (rawOffset == null || rawOffset.length == 0) {
+          throw new RuntimeException(
+              "Unexpected empty record offset while offset-based deduplication enabled.");
+        }
+        ByteString offset = ByteString.copyFrom(rawOffset);
+        offsetSize = offset.size();
+        keyedOutput.addMessageOffsets(offset);
+      }
+
       keyedOutput.addMessagesIds(id);
-      return (long) key.size() + value.size() + metadata.size() + id.size();
+
+      return (long) key.size() + value.size() + metadata.size() + id.size() + offsetSize;
+    }
+
+    private void flush(boolean bundleLevel) {
+      try {
+        outputBuilder.setDestinationStreamId(destinationName);
+
+        for (Windmill.KeyedMessageBundle.Builder keyedOutput : productionMap.values()) {
+          outputBuilder.addBundles(keyedOutput.build());
+        }
+        if (outputBuilder.getBundlesCount() > 0) {
+          Windmill.OutputMessageBundle bundle = outputBuilder.build();
+          if (bundleLevel) {
+            context.addBundleOutputMessages(bundle);
+          } else {
+            context.getKeyOutputBuilder().addOutputMessages(bundle);
+          }
+        }
+      } finally {
+        outputBuilder.clear();
+        productionMap.clear();
+      }
+    }
+
+    @Override
+    public void finishKey(@Nullable Object key) throws IOException {
+      if (context.multiKeyBundleEnabled()) {
+        flush(/* bundleLevel= */ false);
+      }
     }
 
     @Override
     public void close() throws IOException {
-      Windmill.OutputMessageBundle.Builder outputBuilder =
-          Windmill.OutputMessageBundle.newBuilder().setDestinationStreamId(destinationName);
-
-      for (Windmill.KeyedMessageBundle.Builder keyedOutput : productionMap.values()) {
-        outputBuilder.addBundles(keyedOutput.build());
-      }
-      if (outputBuilder.getBundlesCount() > 0) {
-        context.getOutputBuilder().addOutputMessages(outputBuilder.build());
-      }
-      productionMap.clear();
+      flush(/* bundleLevel= */ context.multiKeyBundleEnabled());
     }
 
     @Override
     public void abort() throws IOException {
-      close();
+      outputBuilder.clear();
+      productionMap.clear();
     }
   }
 

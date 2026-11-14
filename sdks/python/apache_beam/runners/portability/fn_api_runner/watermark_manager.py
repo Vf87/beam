@@ -19,9 +19,6 @@
 
 from __future__ import absolute_import
 
-from typing import Dict
-from typing import List
-from typing import Set
 from typing import Union
 
 from apache_beam.portability.api import beam_runner_api_pb2
@@ -40,16 +37,28 @@ class WatermarkManager(object):
     def __init__(self, name):
       self.name = name
       self._watermark = timestamp.MIN_TIMESTAMP
-      self.producers: Set[WatermarkManager.StageNode] = set()
+      self.producers: set[WatermarkManager.StageNode] = set()
+      self.consumers = 0
+      self._fully_consumed_by = 0
+      self._produced_watermark = timestamp.MIN_TIMESTAMP
 
     def __str__(self):
-      return 'PCollectionNode<producers=%s>' % list(self.producers)
+      return 'PCollectionNode<name=%s producers=%s>' % (
+          self.name, list(self.producers))
 
     def set_watermark(self, wm: timestamp.Timestamp):
-      self._watermark = min(self.upstream_watermark(), wm)
+      self._fully_consumed_by += 1
+      if self._fully_consumed_by >= self.consumers:
+        self._watermark = min(self.upstream_watermark(), wm)
+
+    def set_produced_watermark(self, wm: timestamp.Timestamp):
+      # TODO(pabloem): Consider case where there are various producers
+      self._produced_watermark = wm
 
     def upstream_watermark(self):
-      if self.producers:
+      if len(self.producers) == 1:
+        return self._produced_watermark
+      elif self.producers:
         return min(p.output_watermark() for p in self.producers)
       else:
         return timestamp.MAX_TIMESTAMP
@@ -65,9 +74,9 @@ class WatermarkManager(object):
       # the output watermark of the stage, because only the main input
       # can actually advance that watermark.
       self.name = name
-      self.inputs: Set[WatermarkManager.PCollectionNode] = set()
-      self.side_inputs: Set[WatermarkManager.PCollectionNode] = set()
-      self.outputs: Set[WatermarkManager.PCollectionNode] = set()
+      self.inputs: set[WatermarkManager.PCollectionNode] = set()
+      self.side_inputs: set[WatermarkManager.PCollectionNode] = set()
+      self.outputs: set[WatermarkManager.PCollectionNode] = set()
 
     def __str__(self):
       return 'StageNode<inputs=%s,side_inputs=%s' % (
@@ -86,16 +95,14 @@ class WatermarkManager(object):
       if not self.inputs:
         return timestamp.MAX_TIMESTAMP
       w = min(i.upstream_watermark() for i in self.inputs)
-
       if self.side_inputs:
-        w = min(w, min(i.upstream_watermark() for i in self.side_inputs))
+        w = min(w, min(i._produced_watermark for i in self.side_inputs))
       return w
 
-  def __init__(self, stages):
-    # type: (List[translations.Stage]) -> None
-    self._pcollections_by_name: Dict[Union[str, translations.TimerFamilyId],
+  def __init__(self, stages: list[translations.Stage]) -> None:
+    self._pcollections_by_name: dict[Union[str, translations.TimerFamilyId],
                                      WatermarkManager.PCollectionNode] = {}
-    self._stages_by_name: Dict[str, WatermarkManager.StageNode] = {}
+    self._stages_by_name: dict[str, WatermarkManager.StageNode] = {}
 
     def add_pcollection(
         pcname: str,
@@ -104,6 +111,7 @@ class WatermarkManager(object):
         self._pcollections_by_name[pcname] = WatermarkManager.PCollectionNode(
             pcname)
       pcnode = self._pcollections_by_name[pcname]
+      pcnode.consumers += 1
       assert isinstance(pcnode, WatermarkManager.PCollectionNode)
       snode.inputs.add(pcnode)
       return pcnode
@@ -140,6 +148,7 @@ class WatermarkManager(object):
             assert isinstance(
                 timer_pcoll_node, WatermarkManager.PCollectionNode)
             stage_node.inputs.add(timer_pcoll_node)
+            timer_pcoll_node.consumers += 1
 
       # 3. Get stage outputs, create nodes for them, add to
       # _pcollections_by_name, and add stage as their producer
@@ -165,9 +174,24 @@ class WatermarkManager(object):
         assert isinstance(pcoll_node, WatermarkManager.PCollectionNode)
         stage_node.side_inputs.add(pcoll_node)
 
-  def get_stage_node(self, name):
-    # type: (str) -> StageNode
+    self._verify(stages)
+
+  def _verify(self, stages: list[translations.Stage]):
+    for s in stages:
+      if len(self._stages_by_name[s.name].inputs) == 0:
+        from apache_beam.runners.portability.fn_api_runner import visualization_tools
+        visualization_tools.show_stage(s)
+        raise ValueError(
+            'Stage %s has no main inputs. '
+            'At least one main input is necessary.' % s.name)
+
+  def get_stage_node(self, name: str) -> StageNode:
+    # noqa: F821
     return self._stages_by_name[name]
+
+  def get_pcoll_node(self, name: str) -> PCollectionNode:
+    # noqa: F821
+    return self._pcollections_by_name[name]
 
   def set_pcoll_watermark(self, name, watermark):
     element = self._pcollections_by_name[name]

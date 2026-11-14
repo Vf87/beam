@@ -20,8 +20,8 @@ package org.apache.beam.runners.dataflow.worker.util.common.worker;
 import static org.apache.beam.runners.dataflow.worker.util.common.worker.TestOutputReceiver.TestOutputCounter.getMeanByteCounterName;
 import static org.apache.beam.runners.dataflow.worker.util.common.worker.TestOutputReceiver.TestOutputCounter.getObjectCounterName;
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Matchers.eq;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -32,6 +32,8 @@ import org.apache.beam.runners.dataflow.worker.counters.Counter.CounterUpdateExt
 import org.apache.beam.runners.dataflow.worker.counters.CounterFactory.LongCounterMean;
 import org.apache.beam.runners.dataflow.worker.counters.CounterSet;
 import org.apache.beam.runners.dataflow.worker.counters.NameContext;
+import org.apache.beam.sdk.util.DoFnInfo;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.hamcrest.CoreMatchers;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -44,7 +46,6 @@ import org.mockito.Mockito;
 @SuppressWarnings("unchecked")
 public class ParDoOperationTest {
 
-  private static final String COUNTER_PREFIX = "test-";
   private CounterSet counterSet = new CounterSet();
   private OperationContext context =
       TestOperationContext.create(
@@ -86,6 +87,14 @@ public class ParDoOperationTest {
     public void abort() throws Exception {
       outputReceiver.process("a-aborted");
     }
+
+    @Override
+    public void finishKey(Object key) throws Exception {}
+
+    @Override
+    public @Nullable DoFnInfo<?, ?> getDoFnInfo() {
+      return null;
+    }
   }
 
   @Test
@@ -105,6 +114,7 @@ public class ParDoOperationTest {
     parDoOperation.process("");
     parDoOperation.process("bob");
 
+    parDoOperation.finishKey("key");
     parDoOperation.finish();
 
     parDoOperation.abort();
@@ -148,6 +158,7 @@ public class ParDoOperationTest {
 
     operation.start();
     operation.process("hello");
+    operation.finishKey("key");
     operation.finish();
 
     InOrder inOrder =
@@ -162,6 +173,7 @@ public class ParDoOperationTest {
     inOrder.verify(processCloseable).close();
     inOrder.verify(context).enterProcessTimers();
     inOrder.verify(fn).processTimers();
+    inOrder.verify(fn).finishKey("key");
     inOrder.verify(processTimersCloseable).close();
     inOrder.verify(context).enterFinish();
     inOrder.verify(fn).finishBundle();

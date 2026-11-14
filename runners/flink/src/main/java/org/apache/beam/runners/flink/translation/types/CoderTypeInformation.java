@@ -17,7 +17,7 @@
  */
 package org.apache.beam.runners.flink.translation.types;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
 import org.apache.beam.runners.core.construction.SerializablePipelineOptions;
 import org.apache.beam.sdk.coders.Coder;
@@ -34,18 +34,39 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * org.apache.beam.sdk.coders.Coder}s.
  */
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class CoderTypeInformation<T> extends TypeInformation<T> implements AtomicType<T> {
 
   private final Coder<T> coder;
   private final SerializablePipelineOptions pipelineOptions;
+  private final boolean lazyKvValues;
 
   public CoderTypeInformation(Coder<T> coder, PipelineOptions pipelineOptions) {
+    this(coder, new SerializablePipelineOptions(pipelineOptions));
+  }
+
+  public CoderTypeInformation(Coder<T> coder, SerializablePipelineOptions pipelineOptions) {
+    this(coder, pipelineOptions, false);
+  }
+
+  private CoderTypeInformation(
+      Coder<T> coder, SerializablePipelineOptions pipelineOptions, boolean lazyKvValues) {
     checkNotNull(coder);
     checkNotNull(pipelineOptions);
     this.coder = coder;
-    this.pipelineOptions = new SerializablePipelineOptions(pipelineOptions);
+    this.pipelineOptions = pipelineOptions;
+    this.lazyKvValues = lazyKvValues;
+  }
+
+  /**
+   * Returns a copy of this type information whose serializer decodes {@link
+   * org.apache.beam.sdk.values.KV} values lazily in batch mode, see {@link LazyKvWindowedValue}.
+   * Only use this for streams whose records are mostly moved around by Flink without their value
+   * being accessed, e.g. the input of a grouping operator.
+   */
+  public CoderTypeInformation<T> withLazyKvValues() {
+    return new CoderTypeInformation<>(coder, pipelineOptions, true);
   }
 
   public Coder<T> getCoder() {
@@ -80,7 +101,7 @@ public class CoderTypeInformation<T> extends TypeInformation<T> implements Atomi
 
   @Override
   public TypeSerializer<T> createSerializer(ExecutionConfig config) {
-    return new CoderTypeSerializer<>(coder, pipelineOptions);
+    return CoderTypeSerializer.forTypeInformation(coder, pipelineOptions, lazyKvValues);
   }
 
   @Override
@@ -97,7 +118,8 @@ public class CoderTypeInformation<T> extends TypeInformation<T> implements Atomi
    * @return New type information.
    */
   public CoderTypeInformation<T> withPipelineOptions(PipelineOptions pipelineOptions) {
-    return new CoderTypeInformation<>(getCoder(), pipelineOptions);
+    return new CoderTypeInformation<>(
+        getCoder(), new SerializablePipelineOptions(pipelineOptions), lazyKvValues);
   }
 
   @Override
@@ -105,13 +127,13 @@ public class CoderTypeInformation<T> extends TypeInformation<T> implements Atomi
     if (this == o) {
       return true;
     }
-    if (o == null || getClass() != o.getClass()) {
+    if (!(o instanceof CoderTypeInformation)) {
       return false;
     }
 
     CoderTypeInformation that = (CoderTypeInformation) o;
 
-    return coder.equals(that.coder);
+    return lazyKvValues == that.lazyKvValues && coder.equals(that.coder);
   }
 
   @Override

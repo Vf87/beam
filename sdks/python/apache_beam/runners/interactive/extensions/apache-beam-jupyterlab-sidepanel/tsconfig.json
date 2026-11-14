@@ -25,9 +25,11 @@
   },
   "include": [
     "src/*",
+    "src/clusters/*",
     "src/common/*",
     "src/kernel/*",
     "src/inspector/*",
+    "src/yaml/*",
     "src/__tests__/**/*"
   ]
 }

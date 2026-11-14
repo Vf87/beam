@@ -20,7 +20,7 @@ package org.apache.beam.runners.direct;
 import org.apache.beam.sdk.runners.AppliedPTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.View;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValue;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -35,12 +35,12 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * org.apache.beam.sdk.transforms.View.CreatePCollectionView} it will remain in the expansion for
  * side input producing transforms.
  *
- * <p>See https://issues.apache.org/jira/browse/BEAM-11049
+ * <p>See https://github.com/apache/beam/issues/20590
  */
-// TODO(https://issues.apache.org/jira/browse/BEAM-11049): remove this when CreatePCollectionView is
+// TODO(https://github.com/apache/beam/issues/20590): remove this when CreatePCollectionView is
 // finally removed
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 class CreateViewNoopEvaluatorFactory implements TransformEvaluatorFactory {
   @Override

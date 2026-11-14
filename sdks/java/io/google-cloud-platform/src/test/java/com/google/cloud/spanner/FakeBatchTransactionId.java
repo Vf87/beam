@@ -19,7 +19,7 @@ package com.google.cloud.spanner;
 
 import com.google.cloud.Timestamp;
 import com.google.protobuf.ByteString;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Objects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Objects;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -42,7 +42,7 @@ public class FakeBatchTransactionId extends BatchTransactionId {
     if (this == o) {
       return true;
     }
-    if (o == null || getClass() != o.getClass()) {
+    if (!(o instanceof FakeBatchTransactionId)) {
       return false;
     }
     FakeBatchTransactionId that = (FakeBatchTransactionId) o;

@@ -19,7 +19,7 @@ package org.apache.beam.sdk.transforms.windowing;
 
 import java.util.List;
 import org.apache.beam.sdk.transforms.windowing.Trigger.OnceTrigger;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Objects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Objects;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
@@ -32,7 +32,7 @@ import org.joda.time.Instant;
  * clocks have caught up to the moment that input arrived.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class AfterSynchronizedProcessingTime extends OnceTrigger {
 
@@ -47,6 +47,11 @@ public class AfterSynchronizedProcessingTime extends OnceTrigger {
   @Override
   public Instant getWatermarkThatGuaranteesFiring(BoundedWindow window) {
     return BoundedWindow.TIMESTAMP_MAX_VALUE;
+  }
+
+  @Override
+  public <OutputT> OutputT accept(TriggerVisitor<OutputT> visitor) {
+    return visitor.visit(this);
   }
 
   @Override

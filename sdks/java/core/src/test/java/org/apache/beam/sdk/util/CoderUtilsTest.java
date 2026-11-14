@@ -17,18 +17,25 @@
  */
 package org.apache.beam.sdk.util;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import org.apache.beam.sdk.coders.AtomicCoder;
+import org.apache.beam.sdk.coders.ByteArrayCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.Coder.Context;
 import org.apache.beam.sdk.coders.CoderException;
+import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.testing.CoderPropertiesTest.ClosingCoder;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
@@ -116,5 +123,33 @@ public class CoderUtilsTest {
     expectedException.expect(UnsupportedOperationException.class);
     expectedException.expectMessage("Caller does not own the underlying");
     CoderUtils.encodeToByteArray(new ClosingCoder(), "test-value", Context.NESTED);
+  }
+
+  @Test
+  public void testDecodeFromByteString() throws Exception {
+    String expected = "test string";
+    byte[] data = CoderUtils.encodeToByteArray(StringUtf8Coder.of(), expected);
+    ByteString byteString = ByteString.copyFrom(data);
+    String result = CoderUtils.decodeFromByteString(StringUtf8Coder.of(), byteString);
+    assertEquals(expected, result);
+  }
+
+  @Test
+  public void testDecodeFromByteStringWithExtraDataThrows() throws Exception {
+    String expected = "test string";
+    byte[] data = CoderUtils.encodeToByteArray(StringUtf8Coder.of(), expected, Context.NESTED);
+    ByteString byteString = ByteString.copyFrom(data).concat(ByteString.copyFromUtf8("more text"));
+
+    assertThrows(
+        "9 unexpected extra bytes after decoding test string",
+        CoderException.class,
+        () -> CoderUtils.decodeFromByteString(StringUtf8Coder.of(), byteString, Context.NESTED));
+  }
+
+  @Test
+  public void testDecodeByteArrayWithoutCopy() throws Exception {
+    byte[] data = "test data".getBytes(StandardCharsets.UTF_8);
+    byte[] result = CoderUtils.decodeFromByteArray(ByteArrayCoder.of(), data);
+    assertSame(data, result);
   }
 }

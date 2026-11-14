@@ -34,7 +34,7 @@ import org.slf4j.LoggerFactory;
  * This is the process kernel which deals with exec of the subprocess. It also deals with all I/O.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class SubProcessKernel {
 
@@ -167,9 +167,9 @@ public class SubProcessKernel {
     } catch (Exception ex) {
 
       LOG.error(
-          String.format(
-              "Error running process with parameters %s error was %s ",
-              createLogEntryFromInputs(builder.command()), ex.getMessage()));
+          "Error running process with parameters {}",
+          createLogEntryFromInputs(builder.command()),
+          ex);
       throw new Exception(ex);
     }
   }
@@ -190,7 +190,7 @@ public class SubProcessKernel {
 
     try {
 
-      LOG.debug(String.format("Executing process %s", createLogEntryFromInputs(builder.command())));
+      LOG.debug("Executing process {}", createLogEntryFromInputs(builder.command()));
 
       // If process exit value is not 0 then subprocess failed, record logs
       if (process.exitValue() != 0) {
@@ -235,11 +235,9 @@ public class SubProcessKernel {
   private byte[] collectProcessResultsBytes(
       Process process, ProcessBuilder builder, SubProcessIOFiles outPutFiles) throws Exception {
 
-    Byte[] results;
-
     try {
 
-      LOG.debug(String.format("Executing process %s", createLogEntryFromInputs(builder.command())));
+      LOG.debug("Executing process {}", createLogEntryFromInputs(builder.command()));
 
       // If process exit value is not 0 then subprocess failed, record logs
       if (process.exitValue() != 0) {

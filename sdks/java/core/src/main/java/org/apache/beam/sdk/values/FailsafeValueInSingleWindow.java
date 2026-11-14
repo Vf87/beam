@@ -27,8 +27,7 @@ import org.apache.beam.sdk.coders.InstantCoder;
 import org.apache.beam.sdk.coders.StructuredCoder;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.joda.time.Instant;
 
 /**
@@ -38,12 +37,9 @@ import org.joda.time.Instant;
  */
 @AutoValue
 @Internal
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public abstract class FailsafeValueInSingleWindow<T, ErrorT> {
   /** Returns the value of this {@code FailsafeValueInSingleWindow}. */
-  public abstract @Nullable T getValue();
+  public abstract T getValue();
 
   /** Returns the timestamp of this {@code FailsafeValueInSingleWindow}. */
   public abstract Instant getTimestamp();
@@ -52,10 +48,10 @@ public abstract class FailsafeValueInSingleWindow<T, ErrorT> {
   public abstract BoundedWindow getWindow();
 
   /** Returns the pane of this {@code FailsafeValueInSingleWindow} in its window. */
-  public abstract PaneInfo getPane();
+  public abstract PaneInfo getPaneInfo();
 
   /** Returns the failsafe value of this {@code FailsafeValueInSingleWindow}. */
-  public abstract @Nullable ErrorT getFailsafeValue();
+  public abstract ErrorT getFailsafeValue();
 
   public static <T, ErrorT> FailsafeValueInSingleWindow<T, ErrorT> of(
       T value, Instant timestamp, BoundedWindow window, PaneInfo paneInfo, ErrorT failsafeValue) {
@@ -101,7 +97,7 @@ public abstract class FailsafeValueInSingleWindow<T, ErrorT> {
         throws IOException {
       InstantCoder.of().encode(windowedElem.getTimestamp(), outStream);
       windowCoder.encode(windowedElem.getWindow(), outStream);
-      PaneInfo.PaneInfoCoder.INSTANCE.encode(windowedElem.getPane(), outStream);
+      PaneInfo.PaneInfoCoder.INSTANCE.encode(windowedElem.getPaneInfo(), outStream);
       valueCoder.encode(windowedElem.getValue(), outStream);
       failsafeValueCoder.encode(windowedElem.getFailsafeValue(), outStream);
     }

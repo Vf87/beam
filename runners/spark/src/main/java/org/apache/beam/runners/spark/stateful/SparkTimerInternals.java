@@ -17,33 +17,33 @@
  */
 package org.apache.beam.runners.spark.stateful;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import org.apache.beam.runners.core.StateNamespace;
 import org.apache.beam.runners.core.TimerInternals;
 import org.apache.beam.runners.spark.coders.CoderHelpers;
 import org.apache.beam.runners.spark.util.GlobalWatermarkHolder.SparkWatermarks;
 import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Sets;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
 /** An implementation of {@link TimerInternals} for the SparkRunner. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class SparkTimerInternals implements TimerInternals {
   private final Instant highWatermark;
   private final Instant synchronizedProcessingTime;
-  private final Set<TimerData> timers = Sets.newHashSet();
+  // Timers keyed by namespace, id and family, so a later setting replaces the prior one.
+  private final Map<List<Object>, TimerData> timers = new ConcurrentHashMap<>();
 
   private Instant inputWatermark;
 
@@ -52,6 +52,11 @@ public class SparkTimerInternals implements TimerInternals {
     this.inputWatermark = lowWatermark;
     this.highWatermark = highWatermark;
     this.synchronizedProcessingTime = synchronizedProcessingTime;
+  }
+
+  /** Build a {@link TimerInternals} initialized with low and high watermarks. */
+  public static SparkTimerInternals forWatermarks(Instant low, Instant high) {
+    return new SparkTimerInternals(low, high, new Instant(0));
   }
 
   /** Build the {@link TimerInternals} according to the feeding streams. */
@@ -81,14 +86,13 @@ public class SparkTimerInternals implements TimerInternals {
             slowestHighWatermark.isBefore(sparkWatermarks.getHighWatermark())
                 ? slowestHighWatermark
                 : sparkWatermarks.getHighWatermark();
-        if (synchronizedProcessingTime == null) {
-          // firstime set.
+        // an idle source keeps its last reported time, so sources can disagree here; the
+        // synchronized processing time is the one every source has reached.
+        if (synchronizedProcessingTime == null
+            || sparkWatermarks
+                .getSynchronizedProcessingTime()
+                .isBefore(synchronizedProcessingTime)) {
           synchronizedProcessingTime = sparkWatermarks.getSynchronizedProcessingTime();
-        } else {
-          // assert on following.
-          checkArgument(
-              sparkWatermarks.getSynchronizedProcessingTime().equals(synchronizedProcessingTime),
-              "Synchronized time is expected to keep synchronized across sources.");
         }
       }
     }
@@ -104,29 +108,46 @@ public class SparkTimerInternals implements TimerInternals {
   }
 
   public Collection<TimerData> getTimers() {
-    return timers;
+    return timers.values();
   }
 
-  void addTimers(Iterator<TimerData> timers) {
+  public void addTimers(Iterator<TimerData> timers) {
     while (timers.hasNext()) {
       TimerData timer = timers.next();
-      this.timers.add(timer);
+      // State written before setTimer replaced prior settings can carry several settings of
+      // one timer; collapse them to the setting with the latest target.
+      this.timers.merge(
+          logicalKey(timer),
+          timer,
+          (existing, restored) ->
+              restored.getTimestamp().isAfter(existing.getTimestamp()) ? restored : existing);
     }
   }
 
   @Override
   public void setTimer(TimerData timer) {
-    this.timers.add(timer);
+    // A later setting of the same timer clears the prior one, per the TimerInternals contract.
+    this.timers.put(logicalKey(timer), timer);
   }
 
   @Override
-  public void deleteTimer(StateNamespace namespace, String timerId, String timerFamilyId, TimeDomain timeDomain) {
-    throw new UnsupportedOperationException("Deleting a timer by ID is not yet supported.");
+  public void deleteTimer(
+      StateNamespace namespace, String timerId, String timerFamilyId, TimeDomain timeDomain) {
+    List<Object> key = ImmutableList.of(namespace, timerId, timerFamilyId);
+    TimerData existing = this.timers.get(key);
+    if (existing != null && timeDomain.equals(existing.getDomain())) {
+      this.timers.remove(key, existing);
+    }
   }
 
   @Override
   public void deleteTimer(TimerData timer) {
-    this.timers.remove(timer);
+    // Deletes this setting only, so a setting made by the fired callback survives.
+    this.timers.remove(logicalKey(timer), timer);
+  }
+
+  private static List<Object> logicalKey(TimerData timer) {
+    return ImmutableList.of(timer.getNamespace(), timer.getTimerId(), timer.getTimerFamilyId());
   }
 
   @Override
@@ -162,7 +183,8 @@ public class SparkTimerInternals implements TimerInternals {
       Instant target,
       Instant outputTimestamp,
       TimeDomain timeDomain) {
-    throw new UnsupportedOperationException("Setting a timer by ID not yet supported.");
+    this.setTimer(
+        TimerData.of(timerId, timerFamilyId, namespace, target, outputTimestamp, timeDomain));
   }
 
   @Override
@@ -178,6 +200,43 @@ public class SparkTimerInternals implements TimerInternals {
   public static Iterator<TimerData> deserializeTimers(
       Collection<byte[]> serTimers, TimerDataCoderV2 timerDataCoder) {
     return CoderHelpers.fromByteArrays(serTimers, timerDataCoder).iterator();
+  }
+
+  /**
+   * Checks if there are any expired timers in the {@link TimeDomain#PROCESSING_TIME} domain.
+   *
+   * <p>A timer is considered expired when its timestamp is less than the current processing time.
+   *
+   * @return {@code true} if at least one expired processing timer exists, {@code false} otherwise.
+   */
+  public boolean hasNextProcessingTimer() {
+    final Instant currentProcessingTime = this.currentProcessingTime();
+    return this.timers.values().stream()
+        .anyMatch(
+            (TimerData timerData) ->
+                timerData.getDomain().equals(TimeDomain.PROCESSING_TIME)
+                    && currentProcessingTime.isAfter(timerData.getTimestamp()));
+  }
+
+  /**
+   * Finds the earliest timer in {@link TimeDomain#PROCESSING_TIME} domain that has expired based on
+   * the current processing time.
+   *
+   * <p>A timer is considered expired when its timestamp is less than the current processing time.
+   * Expired timers fire in timestamp order.
+   *
+   * @return The expired processing timer with the earliest timestamp if one exists, or {@code null}
+   *     if no processing timers are ready to fire.
+   */
+  public @Nullable TimerData getNextProcessingTimer() {
+    final Instant currentProcessingTime = this.currentProcessingTime();
+    return this.timers.values().stream()
+        .filter(
+            (TimerData timerData) ->
+                timerData.getDomain().equals(TimeDomain.PROCESSING_TIME)
+                    && currentProcessingTime.isAfter(timerData.getTimestamp()))
+        .min(Comparator.comparing(TimerData::getTimestamp))
+        .orElse(null);
   }
 
   @Override

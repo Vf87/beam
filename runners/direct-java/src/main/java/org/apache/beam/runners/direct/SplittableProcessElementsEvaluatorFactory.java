@@ -17,42 +17,35 @@
  */
 package org.apache.beam.runners.direct;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
-import java.util.Collection;
-import java.util.Collections;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.beam.runners.core.DoFnRunners;
-import org.apache.beam.runners.core.DoFnRunners.OutputManager;
 import org.apache.beam.runners.core.KeyedWorkItem;
 import org.apache.beam.runners.core.OutputAndTimeBoundedSplittableProcessElementInvoker;
-import org.apache.beam.runners.core.OutputWindowedValue;
 import org.apache.beam.runners.core.ProcessFnRunner;
+import org.apache.beam.runners.core.SideInputReader;
 import org.apache.beam.runners.core.SplittableParDoViaKeyedWorkItems.ProcessElements;
 import org.apache.beam.runners.core.SplittableParDoViaKeyedWorkItems.ProcessFn;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.runners.AppliedPTransform;
 import org.apache.beam.sdk.transforms.DoFnSchemaInformation;
-import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.sdk.transforms.windowing.PaneInfo;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
-import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.CacheLoader;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.MoreExecutors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheLoader;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.MoreExecutors;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.joda.time.Duration;
-import org.joda.time.Instant;
 
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 class SplittableProcessElementsEvaluatorFactory<
         InputT, OutputT, RestrictionT, PositionT, WatermarkEstimatorStateT>
     implements TransformEvaluatorFactory {
+  private static final AtomicInteger FACTORY_INSTANCE_IDS = new AtomicInteger();
+
   private final ParDoEvaluatorFactory<KeyedWorkItem<byte[], KV<InputT, RestrictionT>>, OutputT>
       delegateFactory;
   private final ScheduledExecutorService ses;
@@ -73,7 +66,8 @@ class SplittableProcessElementsEvaluatorFactory<
               public DoFnLifecycleManager load(final AppliedPTransform<?, ?, ?> application) {
                 checkArgument(
                     ProcessElements.class.isInstance(application.getTransform()),
-                    "No know extraction of the fn from " + application);
+                    "No know extraction of the fn from %s",
+                    application);
                 final ProcessElements<
                         InputT, OutputT, RestrictionT, PositionT, WatermarkEstimatorStateT>
                     transform =
@@ -89,7 +83,8 @@ class SplittableProcessElementsEvaluatorFactory<
             new ThreadFactoryBuilder()
                 .setThreadFactory(MoreExecutors.platformThreadFactory())
                 .setNameFormat(
-                    "direct-splittable-process-element-checkpoint-executor_" + hashCode())
+                    "direct-splittable-process-element-checkpoint-executor_"
+                        + FACTORY_INSTANCE_IDS.getAndIncrement())
                 .build());
   }
 
@@ -127,13 +122,13 @@ class SplittableProcessElementsEvaluatorFactory<
             delegateFactory.createEvaluator(
                 (AppliedPTransform) application,
                 (PCollection<KeyedWorkItem<byte[], KV<InputT, RestrictionT>>>)
-                    inputBundle.getPCollection(),
+                    checkStateNotNull(inputBundle.getPCollection()),
                 inputBundle.getKey(),
                 application.getTransform().getSideInputs(),
                 application.getTransform().getMainOutputTag(),
                 application.getTransform().getAdditionalOutputTags().getAll(),
                 DoFnSchemaInformation.create(),
-                Collections.emptyMap());
+                application.getTransform().getSideInputMapping());
     final ParDoEvaluator<KeyedWorkItem<byte[], KV<InputT, RestrictionT>>> pde =
         evaluator.getParDoEvaluator();
     final ProcessFn<InputT, OutputT, RestrictionT, PositionT, WatermarkEstimatorStateT> processFn =
@@ -144,36 +139,16 @@ class SplittableProcessElementsEvaluatorFactory<
     processFn.setStateInternalsFactory(key -> stepContext.stateInternals());
     processFn.setTimerInternalsFactory(key -> stepContext.timerInternals());
 
-    OutputWindowedValue<OutputT> outputWindowedValue =
-        new OutputWindowedValue<OutputT>() {
-          private final OutputManager outputManager = pde.getOutputManager();
-
-          @Override
-          public void outputWindowedValue(
-              OutputT output,
-              Instant timestamp,
-              Collection<? extends BoundedWindow> windows,
-              PaneInfo pane) {
-            outputManager.output(
-                transform.getMainOutputTag(), WindowedValue.of(output, timestamp, windows, pane));
-          }
-
-          @Override
-          public <AdditionalOutputT> void outputWindowedValue(
-              TupleTag<AdditionalOutputT> tag,
-              AdditionalOutputT output,
-              Instant timestamp,
-              Collection<? extends BoundedWindow> windows,
-              PaneInfo pane) {
-            outputManager.output(tag, WindowedValue.of(output, timestamp, windows, pane));
-          }
-        };
+    SideInputReader sideInputReader =
+        evaluationContext.createSideInputReader(transform.getSideInputs());
+    processFn.setSideInputReader(sideInputReader);
     processFn.setProcessElementInvoker(
         new OutputAndTimeBoundedSplittableProcessElementInvoker<>(
             transform.getFn(),
             options,
-            outputWindowedValue,
-            evaluationContext.createSideInputReader(transform.getSideInputs()),
+            pde.getOutputManager(),
+            transform.getMainOutputTag(),
+            sideInputReader,
             ses,
             // Setting small values here to stimulate frequent checkpointing and better exercise
             // splittable DoFn's in that respect.

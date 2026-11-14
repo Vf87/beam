@@ -18,25 +18,20 @@
 package org.apache.beam.runners.dataflow.util;
 
 import java.io.IOException;
-import java.util.UUID;
-import javax.annotation.Nullable;
 import org.apache.beam.model.pipeline.v1.SchemaApi;
-import org.apache.beam.runners.core.construction.SdkComponents;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.SchemaCoder;
 import org.apache.beam.sdk.schemas.SchemaTranslation;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.util.SerializableUtils;
 import org.apache.beam.sdk.util.StringUtils;
+import org.apache.beam.sdk.util.construction.SdkComponents;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.util.JsonFormat;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.util.JsonFormat;
 
 /** Translator for Schema coders. */
-@Experimental(Kind.SCHEMAS)
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class SchemaCoderCloudObjectTranslator implements CloudObjectTranslator<SchemaCoder> {
   private static final String SCHEMA = "schema";
@@ -69,7 +64,9 @@ public class SchemaCoderCloudObjectTranslator implements CloudObjectTranslator<S
       Structs.addString(
           base,
           SCHEMA,
-          JsonFormat.printer().print(SchemaTranslation.schemaToProto(target.getSchema(), true)));
+          JsonFormat.printer()
+              .omittingInsignificantWhitespace()
+              .print(SchemaTranslation.schemaToProto(target.getSchema(), true)));
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
@@ -101,10 +98,6 @@ public class SchemaCoderCloudObjectTranslator implements CloudObjectTranslator<S
       SchemaApi.Schema.Builder schemaBuilder = SchemaApi.Schema.newBuilder();
       JsonFormat.parser().merge(Structs.getString(cloudObject, SCHEMA), schemaBuilder);
       Schema schema = SchemaTranslation.schemaFromProto(schemaBuilder.build());
-      @Nullable UUID uuid = schema.getUUID();
-      if (schema.isEncodingPositionsOverridden() && uuid != null) {
-        SchemaCoder.overrideEncodingPositions(uuid, schema.getEncodingPositions());
-      }
       return SchemaCoder.of(schema, typeDescriptor, toRowFunction, fromRowFunction);
     } catch (IOException e) {
       throw new RuntimeException(e);

@@ -20,22 +20,21 @@
 For internal use only; no backwards-compatibility guarantees.
 """
 
+import datetime
 import threading
+from typing import Any
 
 import pandas as pd
 
-from apache_beam.portability.api.beam_interactive_api_pb2 import TestStreamFileHeader
-from apache_beam.portability.api.beam_interactive_api_pb2 import TestStreamFileRecord
-from apache_beam.portability.api.beam_runner_api_pb2 import TestStreamPayload
+from apache_beam.portability.api import beam_interactive_api_pb2
+from apache_beam.portability.api import beam_runner_api_pb2
 from apache_beam.runners.interactive import interactive_environment as ie
 from apache_beam.utils.windowed_value import WindowedValue
 
 
 class Limiter:
   """Limits an aspect of the caching layer."""
-  def is_triggered(self):
-    # type: () -> bool
-
+  def is_triggered(self) -> bool:
     """Returns True if the limiter has triggered, and caching should stop."""
     raise NotImplementedError
 
@@ -44,8 +43,8 @@ class ElementLimiter(Limiter):
   """A `Limiter` that limits reading from cache based on some property of an
   element.
   """
-  def update(self, e):
-    # type: (Any) -> None
+  def update(self, e: Any) -> None:
+    # noqa: F821
 
     """Update the internal state based on some property of an element.
 
@@ -56,10 +55,7 @@ class ElementLimiter(Limiter):
 
 class SizeLimiter(Limiter):
   """Limits the cache size to a specified byte limit."""
-  def __init__(
-      self,
-      size_limit  # type: int
-  ):
+  def __init__(self, size_limit: int):
     self._size_limit = size_limit
 
   def is_triggered(self):
@@ -76,7 +72,7 @@ class DurationLimiter(Limiter):
   """Limits the duration of the capture."""
   def __init__(
       self,
-      duration_limit  # type: datetime.timedelta
+      duration_limit: datetime.timedelta  # noqa: F821
   ):
     self._duration_limit = duration_limit
     self._timer = threading.Timer(duration_limit.total_seconds(), self._trigger)
@@ -100,14 +96,14 @@ class CountLimiter(ElementLimiter):
   def update(self, e):
     # A TestStreamFileRecord can contain many elements at once. If e is a file
     # record, then count the number of elements in the bundle.
-    if isinstance(e, TestStreamFileRecord):
+    if isinstance(e, beam_interactive_api_pb2.TestStreamFileRecord):
       if not e.recorded_event.element_event:
         return
       self._count += len(e.recorded_event.element_event.elements)
 
     # Otherwise, count everything else but the header of the file since it is
     # not an element.
-    elif not isinstance(e, TestStreamFileHeader):
+    elif not isinstance(e, beam_interactive_api_pb2.TestStreamFileHeader):
       # When elements are DataFrames, we want the output to be constrained by
       # how many rows we have read, not how many DataFrames we have read.
       if isinstance(e, WindowedValue) and isinstance(e.value, pd.DataFrame):
@@ -137,7 +133,7 @@ class ProcessingTimeLimiter(ElementLimiter):
 
   def update(self, e):
     # Only look at TestStreamFileRecords which hold the processing time.
-    if not isinstance(e, TestStreamPayload.Event):
+    if not isinstance(e, beam_runner_api_pb2.TestStreamPayload.Event):
       return
 
     if not e.HasField('processing_time_event'):

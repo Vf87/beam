@@ -36,14 +36,15 @@ import java.util.Set;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.util.CoderUtils;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollectionView;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 
 /** Utility class for wiring up Jet DAGs based on Beam pipelines. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class DAGBuilder {
 
@@ -205,12 +206,12 @@ public class DAGBuilder {
   }
 
   private static class PartitionedKeyExtractor<K, V> implements FunctionEx<byte[], Object> {
-    private final WindowedValue.WindowedValueCoder<KV<K, V>> coder;
+    private final WindowedValues.WindowedValueCoder<KV<K, V>> coder;
 
     PartitionedKeyExtractor(Coder coder) {
       this.coder =
           Utils.isKeyedValueCoder(coder)
-              ? (WindowedValue.WindowedValueCoder<KV<K, V>>) coder
+              ? (WindowedValues.WindowedValueCoder<KV<K, V>>) coder
               : null;
     }
 

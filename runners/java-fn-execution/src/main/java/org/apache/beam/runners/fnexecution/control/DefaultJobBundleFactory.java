@@ -34,11 +34,7 @@ import javax.annotation.concurrent.ThreadSafe;
 import org.apache.beam.model.fnexecution.v1.ProvisionApi;
 import org.apache.beam.model.pipeline.v1.RunnerApi.Environment;
 import org.apache.beam.model.pipeline.v1.RunnerApi.StandardEnvironments;
-import org.apache.beam.runners.core.construction.BeamUrns;
-import org.apache.beam.runners.core.construction.Environments;
-import org.apache.beam.runners.core.construction.PipelineOptionsTranslation;
-import org.apache.beam.runners.core.construction.Timer;
-import org.apache.beam.runners.core.construction.graph.ExecutableStage;
+import org.apache.beam.model.pipeline.v1.RunnerApi.StandardRunnerProtocols;
 import org.apache.beam.runners.fnexecution.artifact.ArtifactRetrievalService;
 import org.apache.beam.runners.fnexecution.control.ProcessBundleDescriptors.ExecutableProcessBundleDescriptor;
 import org.apache.beam.runners.fnexecution.control.ProcessBundleDescriptors.TimerSpec;
@@ -69,17 +65,22 @@ import org.apache.beam.sdk.options.ExperimentalOptions;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PortablePipelineOptions;
 import org.apache.beam.sdk.util.NoopLock;
+import org.apache.beam.sdk.util.construction.BeamUrns;
+import org.apache.beam.sdk.util.construction.Environments;
+import org.apache.beam.sdk.util.construction.PipelineOptionsTranslation;
+import org.apache.beam.sdk.util.construction.Timer;
+import org.apache.beam.sdk.util.construction.graph.ExecutableStage;
 import org.apache.beam.sdk.values.KV;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.CacheBuilder;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.CacheLoader;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.LoadingCache;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Sets;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheBuilder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheLoader;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.LoadingCache;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -92,10 +93,10 @@ import org.slf4j.LoggerFactory;
  */
 @ThreadSafe
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
-public class DefaultJobBundleFactory implements JobBundleFactory {
+public final class DefaultJobBundleFactory implements JobBundleFactory {
   private static final Logger LOG = LoggerFactory.getLogger(DefaultJobBundleFactory.class);
   private static final IdGenerator factoryIdGenerator = IdGenerators.incrementingLongs();
 
@@ -110,6 +111,7 @@ public class DefaultJobBundleFactory implements JobBundleFactory {
   private final Semaphore availableCachesSemaphore;
   private final LinkedBlockingDeque<EnvironmentCacheAndLock> availableCaches;
   private final boolean loadBalanceBundles;
+
   /** Clients which were evicted due to environment expiration but still had pending references. */
   private final Set<WrappedSdkHarnessClient> evictedActiveClients;
 
@@ -204,11 +206,11 @@ public class DefaultJobBundleFactory implements JobBundleFactory {
                   notification -> {
                     WrappedSdkHarnessClient client = notification.getValue();
                     final int refCount;
+                    // We need to use a lock here to ensure we are not causing the environment to
+                    // be removed if beforehand a StageBundleFactory has retrieved it but not yet
+                    // issued ref() on it.
+                    refLock.lock();
                     try {
-                      // We need to use a lock here to ensure we are not causing the environment to
-                      // be removed if beforehand a StageBundleFactory has retrieved it but not yet
-                      // issued ref() on it.
-                      refLock.lock();
                       refCount = client.unref();
                     } finally {
                       refLock.unlock();
@@ -231,6 +233,12 @@ public class DefaultJobBundleFactory implements JobBundleFactory {
               new CacheLoader<Environment, WrappedSdkHarnessClient>() {
                 @Override
                 public WrappedSdkHarnessClient load(Environment environment) throws Exception {
+                  // TODO(robertwb): Docker is the the safest fallback (if we are distributed)
+                  // but it would be good to have the ability to make a more intellegent choice
+                  // (e.g. in-process or loopback workers, especially if running locally).
+                  environment =
+                      Environments.resolveAnyOfEnvironment(
+                          environment, BeamUrns.getUrn(StandardEnvironments.Environments.DOCKER));
                   EnvironmentFactory.Provider environmentFactoryProvider =
                       environmentFactoryProviderMap.get(environment.getUrn());
                   ServerFactory serverFactory = environmentFactoryProvider.getServerFactory();
@@ -437,7 +445,7 @@ public class DefaultJobBundleFactory implements JobBundleFactory {
 
     private final ExecutableStage executableStage;
     private final int environmentIndex;
-    private final Map<WrappedSdkHarnessClient, PreparedClient> preparedClients =
+    private final IdentityHashMap<WrappedSdkHarnessClient, PreparedClient> preparedClients =
         new IdentityHashMap<>();
     private volatile PreparedClient currentClient;
 
@@ -474,8 +482,8 @@ public class DefaultJobBundleFactory implements JobBundleFactory {
         currentCache = availableCaches.take();
         // Lock because the environment expiration can remove the ref for the client
         // which would close the underlying environment before we can ref it.
+        currentCache.lock.lock();
         try {
-          currentCache.lock.lock();
           client = currentCache.cache.getUnchecked(executableStage.getEnvironment());
           client.ref();
         } finally {
@@ -494,8 +502,8 @@ public class DefaultJobBundleFactory implements JobBundleFactory {
         currentCache = environmentCaches.get(environmentIndex);
         // Lock because the environment expiration can remove the ref for the client which would
         // close the underlying environment before we can ref it.
+        currentCache.lock.lock();
         try {
-          currentCache.lock.lock();
           client = currentCache.cache.getUnchecked(executableStage.getEnvironment());
           client.ref();
         } finally {
@@ -683,6 +691,8 @@ public class DefaultJobBundleFactory implements JobBundleFactory {
     provisionInfo.setLoggingEndpoint(loggingServer.getApiServiceDescriptor());
     provisionInfo.setArtifactEndpoint(retrievalServer.getApiServiceDescriptor());
     provisionInfo.setControlEndpoint(controlServer.getApiServiceDescriptor());
+    provisionInfo.addRunnerCapabilities(
+        BeamUrns.getUrn(StandardRunnerProtocols.Enum.CONTROL_RESPONSE_ELEMENTS_EMBEDDING));
     GrpcFnServer<StaticGrpcProvisionService> provisioningServer =
         GrpcFnServer.allocatePortAndCreateFor(
             StaticGrpcProvisionService.create(
@@ -724,6 +734,10 @@ public class DefaultJobBundleFactory implements JobBundleFactory {
     abstract GrpcFnServer<GrpcStateService> getStateServer();
 
     abstract Builder toBuilder();
+
+    public static Builder builder() {
+      return new AutoValue_DefaultJobBundleFactory_ServerInfo.Builder();
+    }
 
     @AutoValue.Builder
     abstract static class Builder {

@@ -34,9 +34,13 @@ import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.Create;
-import org.apache.beam.sdk.transforms.DoFnTester;
+import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.GroupByKey;
+import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.Values;
+import org.apache.beam.sdk.transforms.WithKeys;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.BaseEncoding;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.BaseEncoding;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.client.solrj.SolrQuery;
 import org.apache.solr.client.solrj.SolrServerException;
@@ -67,7 +71,7 @@ import org.slf4j.LoggerFactory;
 @SolrTestCaseJ4.SuppressSSL
 @RunWith(RandomizedRunner.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class SolrIOTest extends SolrCloudTestCase {
   private static final Logger LOG = LoggerFactory.getLogger(SolrIOTest.class);
@@ -205,46 +209,43 @@ public class SolrIOTest extends SolrCloudTestCase {
     assertEquals(NUM_DOCS / NUM_SCIENTISTS, response.getResults().getNumFound());
   }
 
+  private static class EmitDocumentsFn
+      extends DoFn<Iterable<SolrInputDocument>, SolrInputDocument> {
+    @ProcessElement
+    public void processElement(ProcessContext c) {
+      for (SolrInputDocument doc : c.element()) {
+        c.output(doc);
+      }
+    }
+  }
+
   @Test
   public void testWriteWithMaxBatchSize() throws Exception {
+    int maxBatchSize = 1;
+    List<SolrInputDocument> data = SolrIOTestUtils.createDocuments(NUM_DOCS);
     SolrIO.Write write =
         SolrIO.write()
             .withConnectionConfiguration(connectionConfiguration)
             .to(SOLR_COLLECTION)
-            .withMaxBatchSize(BATCH_SIZE);
-    // write bundles size is the runner decision, we cannot force a bundle size,
-    // so we test the Writer as a DoFn outside of a runner.
-    try (DoFnTester<SolrInputDocument, Void> fnTester =
-        DoFnTester.of(new SolrIO.Write.WriteFn(write))) {
-      List<SolrInputDocument> input = SolrIOTestUtils.createDocuments(NUM_DOCS);
-      long numDocsProcessed = 0;
-      long numDocsInserted = 0;
-      for (SolrInputDocument document : input) {
-        fnTester.processElement(document);
-        numDocsProcessed++;
-        // test every 100 docs to avoid overloading Solr
-        if ((numDocsProcessed % 100) == 0) {
-          // force the index to upgrade after inserting for the inserted docs
-          // to be searchable immediately
-          long currentNumDocs =
-              SolrIOTestUtils.commitAndGetCurrentNumDocs(SOLR_COLLECTION, solrClient);
-          if ((numDocsProcessed % BATCH_SIZE) == 0) {
-            /* bundle end */
-            assertEquals(
-                "we are at the end of a bundle, we should have inserted all processed documents",
-                numDocsProcessed,
-                currentNumDocs);
-            numDocsInserted = currentNumDocs;
-          } else {
-            /* not bundle end */
-            assertEquals(
-                "we are not at the end of a bundle, we should have inserted no more documents",
-                numDocsInserted,
-                currentNumDocs);
-          }
-        }
-      }
-    }
+            .withMaxBatchSize(maxBatchSize);
+
+    // Force all elements into a single bundle via GroupByKey and use a maxBatchSize of 1
+    // to guarantee that batch.size() >= spec.getMaxBatchSize() is triggered and flushes
+    // mid-bundle during @ProcessElement, rather than only flushing at @FinishBundle.
+    pipeline
+        .apply(Create.of(data))
+        .apply(WithKeys.of(0))
+        .apply(GroupByKey.create())
+        .apply(Values.create())
+        .apply(ParDo.of(new EmitDocumentsFn()))
+        .apply(write);
+    pipeline.run();
+
+    long currentNumDocs = SolrIOTestUtils.commitAndGetCurrentNumDocs(SOLR_COLLECTION, solrClient);
+    assertEquals(NUM_DOCS, currentNumDocs);
+
+    QueryResponse response = solrClient.query(SOLR_COLLECTION, new SolrQuery("scientist:Lovelace"));
+    assertEquals(NUM_DOCS / NUM_SCIENTISTS, response.getResults().getNumFound());
   }
 
   /**
@@ -275,7 +276,7 @@ public class SolrIOTest extends SolrCloudTestCase {
     try {
       pipeline.run();
     } catch (final Pipeline.PipelineExecutionException e) {
-      // Hack: await all worker threads completing (BEAM-4040)
+      // Hack: await all worker threads completing (https://github.com/apache/beam/issues/18893)
       int waitAttempts = 30; // defensive coding
       while (namedThreadIsAlive("direct-runner-worker") && waitAttempts-- >= 0) {
         LOG.info("Pausing to allow direct-runner-worker threads to finish");

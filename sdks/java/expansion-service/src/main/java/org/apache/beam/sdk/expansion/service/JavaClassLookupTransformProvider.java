@@ -17,13 +17,12 @@
  */
 package org.apache.beam.sdk.expansion.service;
 
-import static org.apache.beam.runners.core.construction.BeamUrns.getUrn;
+import static org.apache.beam.sdk.util.construction.BeamUrns.getUrn;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.auto.value.AutoValue;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
@@ -34,7 +33,9 @@ import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.apache.beam.model.pipeline.v1.ExternalTransforms.BuilderMethod;
@@ -44,7 +45,7 @@ import org.apache.beam.model.pipeline.v1.RunnerApi.FunctionSpec;
 import org.apache.beam.model.pipeline.v1.SchemaApi;
 import org.apache.beam.repackaged.core.org.apache.commons.lang3.ClassUtils;
 import org.apache.beam.sdk.coders.RowCoder;
-import org.apache.beam.sdk.expansion.service.ExpansionService.TransformProvider;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.schemas.JavaFieldSchema;
 import org.apache.beam.sdk.schemas.NoSuchSchemaException;
 import org.apache.beam.sdk.schemas.Schema;
@@ -58,9 +59,10 @@ import org.apache.beam.sdk.util.common.ReflectHelpers;
 import org.apache.beam.sdk.values.PInput;
 import org.apache.beam.sdk.values.POutput;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.ByteString;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.InvalidProtocolBufferException;
 import org.checkerframework.checker.nullness.qual.Nullable;
+import org.yaml.snakeyaml.Yaml;
 
 /**
  * A transform provider that can be used to directly instantiate a transform using Java class name
@@ -69,9 +71,8 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * @param <InputT> input {@link PInput} type of the transform
  * @param <OutputT> output {@link POutput} type of the transform
  */
-@SuppressWarnings({"argument.type.incompatible", "assignment.type.incompatible"})
 @SuppressFBWarnings("UWF_UNWRITTEN_PUBLIC_OR_PROTECTED_FIELD")
-class JavaClassLookupTransformProvider<InputT extends PInput, OutputT extends POutput>
+final class JavaClassLookupTransformProvider<InputT extends PInput, OutputT extends POutput>
     implements TransformProvider<PInput, POutput> {
 
   public static final String ALLOW_LIST_VERSION = "v1";
@@ -88,8 +89,9 @@ class JavaClassLookupTransformProvider<InputT extends PInput, OutputT extends PO
     this.allowList = allowList;
   }
 
+  @SuppressWarnings("argument")
   @Override
-  public PTransform<PInput, POutput> getTransform(FunctionSpec spec) {
+  public PTransform<PInput, POutput> getTransform(FunctionSpec spec, PipelineOptions options) {
     JavaClassLookupPayload payload;
     try {
       payload = JavaClassLookupPayload.parseFrom(spec.getPayload());
@@ -100,24 +102,7 @@ class JavaClassLookupTransformProvider<InputT extends PInput, OutputT extends PO
 
     String className = payload.getClassName();
     try {
-      AllowedClass allowlistClass = null;
-      if (this.allowList != null) {
-        for (AllowedClass cls : this.allowList.getAllowedClasses()) {
-          if (cls.getClassName().equals(className)) {
-            if (allowlistClass != null) {
-              throw new IllegalArgumentException(
-                  "Found two matching allowlist classes " + allowlistClass + " and " + cls);
-            }
-            allowlistClass = cls;
-          }
-        }
-      }
-      if (allowlistClass == null) {
-        throw new UnsupportedOperationException(
-            "The provided allow list does not enable expanding a transform class by the name "
-                + className
-                + ".");
-      }
+      AllowedClass allowlistClass = allowList.getAllowedClass(className);
       Class<PTransform<InputT, OutputT>> transformClass =
           (Class<PTransform<InputT, OutputT>>)
               ReflectHelpers.findClassLoader().loadClass(className);
@@ -153,6 +138,7 @@ class JavaClassLookupTransformProvider<InputT extends PInput, OutputT extends PO
     }
   }
 
+  @SuppressWarnings("assignment")
   private PTransform<PInput, POutput> applyBuilderMethods(
       PTransform<PInput, POutput> transform,
       JavaClassLookupPayload payload,
@@ -190,7 +176,7 @@ class JavaClassLookupTransformProvider<InputT extends PInput, OutputT extends PO
     for (Annotation annotation : method.getAnnotations()) {
       if (annotation instanceof MultiLanguageBuilderMethod) {
         if (nameFromPayload.equals(((MultiLanguageBuilderMethod) annotation).name())) {
-          if (allowListClass.getAllowedBuilderMethods().contains(nameFromPayload)) {
+          if (allowListClass.isAllowedBuilderMethod(nameFromPayload)) {
             return true;
           } else {
             throw new RuntimeException(
@@ -213,7 +199,7 @@ class JavaClassLookupTransformProvider<InputT extends PInput, OutputT extends PO
           consideredMethodName.substring(4, 5).toLowerCase() + consideredMethodName.substring(5);
       match = consideredMethodName.equals(nameFromPayload);
     }
-    if (match && !allowListClass.getAllowedBuilderMethods().contains(consideredMethodName)) {
+    if (match && !allowListClass.isAllowedBuilderMethod(consideredMethodName)) {
       throw new RuntimeException(
           "Builder method name " + consideredMethodName + " has to be explicitly allowed");
     }
@@ -325,7 +311,7 @@ class JavaClassLookupTransformProvider<InputT extends PInput, OutputT extends PO
           }
           if (values != null) {
             @Nullable Row firstItem = values.iterator().next();
-            if (firstItem != null && !(firstItem.getSchema().assignableTo(arrayFieldSchema))) {
+            if (firstItem != null && !firstItem.getSchema().assignableTo(arrayFieldSchema)) {
               return false;
             }
           }
@@ -344,6 +330,7 @@ class JavaClassLookupTransformProvider<InputT extends PInput, OutputT extends PO
     return true;
   }
 
+  @SuppressWarnings("argument")
   private @Nullable Object getDecodedValueFromRow(
       Class<?> type, Object valueFromRow, @Nullable Type genericType) {
     if (isPrimitiveOrWrapperOrString(type)) {
@@ -382,6 +369,7 @@ class JavaClassLookupTransformProvider<InputT extends PInput, OutputT extends PO
     throw new RuntimeException("Could not decode the value from Row " + valueFromRow);
   }
 
+  @SuppressWarnings("argument")
   private Object[] getParameterValues(
       java.lang.reflect.Parameter[] parameters, Row constrtuctorRow, Type[] genericTypes) {
     ArrayList<Object> parameterValues = new ArrayList<>();
@@ -396,6 +384,7 @@ class JavaClassLookupTransformProvider<InputT extends PInput, OutputT extends PO
     return parameterValues.toArray();
   }
 
+  @SuppressWarnings("argument")
   private Object[] getDecodedArrayValueFromRow(Class<?> arrayComponentType, Object valueFromRow) {
     List<Object> originalValues = (List<Object>) valueFromRow;
     List<Object> decodedValues = new ArrayList<>();
@@ -439,7 +428,7 @@ class JavaClassLookupTransformProvider<InputT extends PInput, OutputT extends PO
     for (Annotation annotation : method.getAnnotations()) {
       if (annotation instanceof MultiLanguageConstructorMethod) {
         if (nameFromPayload.equals(((MultiLanguageConstructorMethod) annotation).name())) {
-          if (allowListClass.getAllowedConstructorMethods().contains(nameFromPayload)) {
+          if (allowListClass.isAllowedConstructorMethod(nameFromPayload)) {
             return true;
           } else {
             throw new RuntimeException(
@@ -449,7 +438,7 @@ class JavaClassLookupTransformProvider<InputT extends PInput, OutputT extends PO
       }
     }
     if (method.getName().equals(nameFromPayload)) {
-      if (allowListClass.getAllowedConstructorMethods().contains(nameFromPayload)) {
+      if (allowListClass.isAllowedConstructorMethod(nameFromPayload)) {
         return true;
       } else {
         throw new RuntimeException(
@@ -489,15 +478,82 @@ class JavaClassLookupTransformProvider<InputT extends PInput, OutputT extends PO
   @AutoValue
   public abstract static class AllowList {
 
+    public static AllowList nothing() {
+      return create(ALLOW_LIST_VERSION, Collections.emptyList());
+    }
+
+    public static AllowList everything() {
+      return create(
+          ALLOW_LIST_VERSION,
+          Collections.singletonList(
+              AllowedClass.create("*", AllowedClass.WILDCARD, AllowedClass.WILDCARD)));
+    }
+
+    static AllowList parseFromYamlStream(InputStream inputStream) {
+      Yaml yaml = new Yaml();
+      Map<Object, Object> config = yaml.load(inputStream);
+
+      if (config == null) {
+        throw new IllegalArgumentException(
+            "Could not parse the provided YAML stream into a non-trivial AllowList");
+      }
+
+      String version = config.get("version") != null ? (String) config.get("version") : "";
+      List<AllowedClass> allowedClasses = new ArrayList<>();
+      if (config.get("allowedClasses") != null) {
+        allowedClasses =
+            ((List<Map<Object, Object>>) config.get("allowedClasses"))
+                .stream()
+                    .map(
+                        data -> {
+                          String className = (String) data.get("className");
+                          if (className == null) {
+                            throw new IllegalArgumentException(
+                                "Expected each entry in the allowlist to include the 'className'");
+                          }
+                          List<String> allowedBuilderMethods =
+                              (List<String>) data.get("allowedBuilderMethods");
+                          List<String> allowedConstructorMethods =
+                              (List<String>) data.get("allowedConstructorMethods");
+                          if (allowedBuilderMethods == null) {
+                            allowedBuilderMethods = new ArrayList<>();
+                          }
+                          if (allowedConstructorMethods == null) {
+                            allowedConstructorMethods = new ArrayList<>();
+                          }
+                          return AllowedClass.create(
+                              className, allowedBuilderMethods, allowedConstructorMethods);
+                        })
+                    .collect(Collectors.toList());
+      }
+      return AllowList.create(version, allowedClasses);
+    }
+
     public abstract String getVersion();
 
     public abstract List<AllowedClass> getAllowedClasses();
 
-    @JsonCreator
-    static AllowList create(
-        @JsonProperty("version") String version,
-        @JsonProperty("allowedClasses") @javax.annotation.Nullable
-            List<AllowedClass> allowedClasses) {
+    public AllowedClass getAllowedClass(String className) {
+      AllowedClass allowlistClass = null;
+      for (AllowedClass cls : getAllowedClasses()) {
+        if (cls.isAllowedClass(className)) {
+          if (allowlistClass != null) {
+            throw new IllegalArgumentException(
+                "Found two matching allowlist classes " + allowlistClass + " and " + cls);
+          }
+          allowlistClass = cls;
+        }
+      }
+      if (allowlistClass == null) {
+        throw new UnsupportedOperationException(
+            "The provided allow list does not enable expanding a transform class by the name "
+                + className
+                + ".");
+      }
+      return allowlistClass;
+    }
+
+    static AllowList create(String version, List<AllowedClass> allowedClasses) {
       if (allowedClasses == null) {
         allowedClasses = new ArrayList<>();
       }
@@ -508,24 +564,45 @@ class JavaClassLookupTransformProvider<InputT extends PInput, OutputT extends PO
   @AutoValue
   public abstract static class AllowedClass {
 
+    public static final List<String> WILDCARD = Collections.singletonList("*");
+
     public abstract String getClassName();
 
     public abstract List<String> getAllowedBuilderMethods();
 
     public abstract List<String> getAllowedConstructorMethods();
 
-    @JsonCreator
+    public boolean isAllowedClass(String className) {
+      String pattern = getClassName();
+      return pattern.equals(className)
+          || pattern.equals("*")
+          || (pattern.endsWith(".*")
+              && className.startsWith(pattern.substring(0, pattern.length() - 2)));
+    }
+
+    public boolean isAllowedBuilderMethod(String methodName) {
+      return getAllowedBuilderMethods().contains(methodName)
+          || getAllowedBuilderMethods().equals(WILDCARD);
+    }
+
+    public boolean isAllowedConstructorMethod(String methodName) {
+      return getAllowedConstructorMethods().contains(methodName)
+          || getAllowedConstructorMethods().equals(WILDCARD);
+    }
+
     static AllowedClass create(
-        @JsonProperty("className") String className,
-        @JsonProperty("allowedBuilderMethods") @javax.annotation.Nullable
-            List<String> allowedBuilderMethods,
-        @JsonProperty("allowedConstructorMethods") @javax.annotation.Nullable
-            List<String> allowedConstructorMethods) {
+        String className,
+        List<String> allowedBuilderMethods,
+        List<String> allowedConstructorMethods) {
       if (allowedBuilderMethods == null) {
         allowedBuilderMethods = new ArrayList<>();
       }
       if (allowedConstructorMethods == null) {
         allowedConstructorMethods = new ArrayList<>();
+      }
+      if (allowedBuilderMethods.equals(WILDCARD) && !className.equals("*")) {
+        // If we allow getClass().forName(), we allow essentially anything.
+        throw new IllegalArgumentException("Wildcard builder not allowed for non-wildcard class.");
       }
       return new AutoValue_JavaClassLookupTransformProvider_AllowedClass(
           className, allowedBuilderMethods, allowedConstructorMethods);

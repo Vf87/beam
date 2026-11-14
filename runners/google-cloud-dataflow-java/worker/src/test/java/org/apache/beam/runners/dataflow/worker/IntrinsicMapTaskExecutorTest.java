@@ -32,8 +32,8 @@ import static org.hamcrest.Matchers.arrayWithSize;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Matchers.eq;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
@@ -69,7 +69,9 @@ import org.apache.beam.runners.dataflow.worker.util.common.worker.TestOutputRece
 import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.sdk.util.DoFnInfo;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
@@ -104,6 +106,9 @@ public class IntrinsicMapTaskExecutorTest {
       aborted = true;
       super.abort();
     }
+
+    @Override
+    public void finishKey(Object key) throws Exception {}
   }
 
   // A mock ReadOperation fed to a MapTaskExecutor in test.
@@ -139,7 +144,6 @@ public class IntrinsicMapTaskExecutorTest {
 
   @Test
   public void testExecuteMapTaskExecutor() throws Exception {
-    List<String> log = new ArrayList<>();
 
     Operation o1 = Mockito.mock(Operation.class);
     Operation o2 = Mockito.mock(Operation.class);
@@ -218,6 +222,14 @@ public class IntrinsicMapTaskExecutorTest {
 
     @Override
     public void abort() {}
+
+    @Override
+    public void finishKey(Object key) throws Exception {}
+
+    @Override
+    public @Nullable DoFnInfo<?, ?> getDoFnInfo() {
+      return null;
+    }
   }
 
   /** Verify counts for the per-element-output-time counter are correct. */
@@ -313,6 +325,9 @@ public class IntrinsicMapTaskExecutorTest {
                   Metrics.counter("TestMetric", "MetricCounter").inc(1L);
                 }
               }
+
+              @Override
+              public void finishKey(Object key) throws Exception {}
             },
             new Operation(new OutputReceiver[] {}, context2) {
               @Override
@@ -322,6 +337,9 @@ public class IntrinsicMapTaskExecutorTest {
                   Metrics.counter("TestMetric", "MetricCounter").inc(2L);
                 }
               }
+
+              @Override
+              public void finishKey(Object key) throws Exception {}
             },
             new Operation(new OutputReceiver[] {}, context3) {
               @Override
@@ -331,6 +349,9 @@ public class IntrinsicMapTaskExecutorTest {
                   Metrics.counter("TestMetric", "MetricCounter").inc(3L);
                 }
               }
+
+              @Override
+              public void finishKey(Object key) throws Exception {}
             });
 
     try (IntrinsicMapTaskExecutor executor =

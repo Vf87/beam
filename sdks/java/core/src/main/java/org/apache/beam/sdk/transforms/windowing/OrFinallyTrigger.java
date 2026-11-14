@@ -19,7 +19,7 @@ package org.apache.beam.sdk.transforms.windowing;
 
 import java.util.Arrays;
 import java.util.List;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.joda.time.Instant;
 
 /**
@@ -62,6 +62,11 @@ public class OrFinallyTrigger extends Trigger {
   @Override
   public boolean mayFinish() {
     return subTriggers.get(ACTUAL).mayFinish() || subTriggers.get(UNTIL).mayFinish();
+  }
+
+  @Override
+  public <OutputT> OutputT accept(TriggerVisitor<OutputT> visitor) {
+    return visitor.visit(this);
   }
 
   @Override

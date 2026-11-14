@@ -17,26 +17,37 @@
  */
 package org.apache.beam.sdk.extensions.sql;
 
+import static org.junit.Assert.assertEquals;
+
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.apache.beam.sdk.extensions.sql.impl.BeamSqlEnv;
 import org.apache.beam.sdk.extensions.sql.impl.rel.BeamSqlRelUtils;
+import org.apache.beam.sdk.extensions.sql.meta.BeamSqlTable;
 import org.apache.beam.sdk.extensions.sql.meta.provider.ReadOnlyTableProvider;
 import org.apache.beam.sdk.extensions.sql.meta.provider.test.TestBoundedTable;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
+import org.apache.beam.sdk.schemas.logicaltypes.FixedBytes;
+import org.apache.beam.sdk.schemas.logicaltypes.FixedString;
 import org.apache.beam.sdk.schemas.logicaltypes.SqlTypes;
+import org.apache.beam.sdk.schemas.logicaltypes.Timestamp;
+import org.apache.beam.sdk.schemas.logicaltypes.VariableBytes;
+import org.apache.beam.sdk.schemas.logicaltypes.VariableString;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Ignore;
@@ -82,36 +93,66 @@ public class BeamComplexTypeTest {
           .addArrayField("field3", FieldType.INT64)
           .build();
 
+  private static final Schema rowWithLogicalTypeSchema =
+      Schema.builder()
+          .addLogicalTypeField("field1", FixedString.of(10))
+          .addLogicalTypeField("field2", VariableString.of(10))
+          .addLogicalTypeField("field3", FixedBytes.of(10))
+          .addLogicalTypeField("field4", VariableBytes.of(10))
+          .build();
+
   private static final ReadOnlyTableProvider readOnlyTableProvider =
       new ReadOnlyTableProvider(
           "test_provider",
-          ImmutableMap.of(
-              "arrayWithRowTestTable",
-              TestBoundedTable.of(FieldType.array(FieldType.row(innerRowSchema)), "col")
-                  .addRows(
-                      Arrays.asList(Row.withSchema(innerRowSchema).addValues("str", 1L).build())),
-              "nestedArrayTestTable",
-              TestBoundedTable.of(FieldType.array(FieldType.array(FieldType.INT64)), "col")
-                  .addRows(Arrays.asList(Arrays.asList(1L, 2L, 3L), Arrays.asList(4L, 5L))),
-              "nestedRowTestTable",
-              TestBoundedTable.of(Schema.FieldType.row(nestedRowSchema), "col")
-                  .addRows(
-                      Row.withSchema(nestedRowSchema)
-                          .addValues(
-                              "str",
-                              Row.withSchema(innerRowSchema).addValues("inner_str_one", 1L).build(),
-                              2L,
-                              Row.withSchema(innerRowSchema).addValues("inner_str_two", 3L).build())
-                          .build()),
-              "basicRowTestTable",
-              TestBoundedTable.of(Schema.FieldType.row(innerRowSchema), "col")
-                  .addRows(Row.withSchema(innerRowSchema).addValues("innerStr", 1L).build()),
-              "rowWithArrayTestTable",
-              TestBoundedTable.of(Schema.FieldType.row(rowWithArraySchema), "col")
-                  .addRows(
-                      Row.withSchema(rowWithArraySchema)
-                          .addValues("str", 4L, Arrays.asList(5L, 6L))
-                          .build())));
+          ImmutableMap.<String, BeamSqlTable>builder()
+              .put(
+                  "arrayWithRowTestTable",
+                  TestBoundedTable.of(FieldType.array(FieldType.row(innerRowSchema)), "col")
+                      .addRows(
+                          Arrays.asList(
+                              Row.withSchema(innerRowSchema).addValues("str", 1L).build())))
+              .put(
+                  "nestedArrayTestTable",
+                  TestBoundedTable.of(FieldType.array(FieldType.array(FieldType.INT64)), "col")
+                      .addRows(Arrays.asList(Arrays.asList(1L, 2L, 3L), Arrays.asList(4L, 5L))))
+              .put(
+                  "nestedRowTestTable",
+                  TestBoundedTable.of(FieldType.row(nestedRowSchema), "col")
+                      .addRows(
+                          Row.withSchema(nestedRowSchema)
+                              .addValues(
+                                  "str",
+                                  Row.withSchema(innerRowSchema)
+                                      .addValues("inner_str_one", 1L)
+                                      .build(),
+                                  2L,
+                                  Row.withSchema(innerRowSchema)
+                                      .addValues("inner_str_two", 3L)
+                                      .build())
+                              .build()))
+              .put(
+                  "basicRowTestTable",
+                  TestBoundedTable.of(FieldType.row(innerRowSchema), "col")
+                      .addRows(Row.withSchema(innerRowSchema).addValues("innerStr", 1L).build()))
+              .put(
+                  "rowWithArrayTestTable",
+                  TestBoundedTable.of(FieldType.row(rowWithArraySchema), "col")
+                      .addRows(
+                          Row.withSchema(rowWithArraySchema)
+                              .addValues("str", 4L, Arrays.asList(5L, 6L))
+                              .build()))
+              .put(
+                  "rowWithLogicalTypeSchema",
+                  TestBoundedTable.of(FieldType.row(rowWithLogicalTypeSchema), "col")
+                      .addRows(
+                          Row.withSchema(rowWithLogicalTypeSchema)
+                              .addValues(
+                                  "1234567890",
+                                  "1",
+                                  "1234567890".getBytes(StandardCharsets.UTF_8),
+                                  "1".getBytes(StandardCharsets.UTF_8))
+                              .build()))
+              .build());
 
   @Rule public transient TestPipeline pipeline = TestPipeline.create();
 
@@ -212,6 +253,23 @@ public class BeamComplexTypeTest {
   }
 
   @Test
+  public void testRowWithLogicalTypeSchema() {
+    BeamSqlEnv sqlEnv = BeamSqlEnv.inMemory(readOnlyTableProvider);
+    PCollection<Row> stream =
+        BeamSqlRelUtils.toPCollection(
+            pipeline,
+            sqlEnv.parseQuery(
+                "SELECT rowWithLogicalTypeSchema.col.field1, rowWithLogicalTypeSchema.col.field4 FROM rowWithLogicalTypeSchema"));
+    PAssert.that(stream)
+        .containsInAnyOrder(
+            Row.withSchema(
+                    Schema.builder().addStringField("field1").addByteArrayField("field2").build())
+                .addValues("1234567890", "1".getBytes(StandardCharsets.UTF_8))
+                .build());
+    pipeline.run().waitUntilFinish(Duration.standardMinutes(2));
+  }
+
+  @Test
   public void testFieldAccessToNestedRow() {
     BeamSqlEnv sqlEnv = BeamSqlEnv.inMemory(readOnlyTableProvider);
     PCollection<Row> stream =
@@ -228,7 +286,7 @@ public class BeamComplexTypeTest {
     pipeline.run().waitUntilFinish(Duration.standardMinutes(2));
   }
 
-  @Ignore("https://issues.apache.org/jira/browse/BEAM-5189")
+  @Ignore("https://github.com/apache/beam/issues/19011")
   @Test
   public void testSelectInnerRowOfNestedRow() {
     BeamSqlEnv sqlEnv = BeamSqlEnv.inMemory(readOnlyTableProvider);
@@ -245,7 +303,6 @@ public class BeamComplexTypeTest {
     pipeline.run().waitUntilFinish(Duration.standardMinutes(2));
   }
 
-  @Ignore("https://issues.apache.org/jira/browse/BEAM-12782")
   @Test
   public void testNestedBytes() {
     byte[] bytes = new byte[] {-70, -83, -54, -2};
@@ -270,7 +327,6 @@ public class BeamComplexTypeTest {
     pipeline.run();
   }
 
-  @Ignore("https://issues.apache.org/jira/browse/BEAM-12782")
   @Test
   public void testNestedArrayOfBytes() {
     byte[] bytes = new byte[] {-70, -83, -54, -2};
@@ -290,6 +346,44 @@ public class BeamComplexTypeTest {
         pipeline
             .apply(Create.of(row).withRowSchema(inputSchema))
             .apply(SqlTransform.query("SELECT t.nested.c_bytes[1] AS f0 FROM PCOLLECTION t"));
+
+    PAssert.that(result).containsInAnyOrder(expected);
+
+    pipeline.run();
+  }
+
+  @Test
+  public void testNestedDatetime() {
+    List<Instant> dateTimes =
+        ImmutableList.of(Instant.EPOCH, Instant.ofEpochSecond(10000), Instant.now());
+    List<Instant> nullDateTimes = Lists.newArrayList(Instant.EPOCH, null, Instant.now());
+
+    Schema nestedInputSchema =
+        Schema.of(
+            Schema.Field.of("c_dts", Schema.FieldType.array(Schema.FieldType.DATETIME)),
+            Schema.Field.of(
+                "c_null_dts",
+                Schema.FieldType.array(Schema.FieldType.DATETIME.withNullable(true))));
+    Schema inputSchema =
+        Schema.of(Schema.Field.of("nested", Schema.FieldType.row(nestedInputSchema)));
+
+    Schema outputSchema =
+        Schema.of(
+            Schema.Field.of("f0", Schema.FieldType.DATETIME),
+            Schema.Field.of("f1", Schema.FieldType.DATETIME.withNullable(true)));
+
+    Row nestedRow =
+        Row.withSchema(nestedInputSchema).addValue(dateTimes).addValue(nullDateTimes).build();
+    Row row = Row.withSchema(inputSchema).addValue(nestedRow).build();
+    Row expected =
+        Row.withSchema(outputSchema).addValues(dateTimes.get(1), nullDateTimes.get(1)).build();
+
+    PCollection<Row> result =
+        pipeline
+            .apply(Create.of(row).withRowSchema(inputSchema))
+            .apply(
+                SqlTransform.query(
+                    "SELECT t.nested.c_dts[2], t.nested.c_null_dts[2] AS f0 FROM PCOLLECTION t"));
 
     PAssert.that(result).containsInAnyOrder(expected);
 
@@ -679,5 +773,60 @@ public class BeamComplexTypeTest {
             .build();
     PAssert.that(outputRow).containsInAnyOrder(expectedRow);
     pipeline.run().waitUntilFinish(Duration.standardMinutes(1));
+  }
+
+  @Test
+  public void testUnknownLogicalType() {
+    Schema.FieldType rowType = Schema.FieldType.row(innerRowSchema);
+
+    Schema.LogicalType<Row, Row> logicalType =
+        new org.apache.beam.sdk.schemas.logicaltypes.UnknownLogicalType<Row>(
+            "RowBackedLogicalType", new byte[] {}, Schema.FieldType.STRING, "", rowType);
+
+    Schema inputSchema = Schema.builder().addLogicalTypeField("logical_field", logicalType).build();
+
+    Row nestedRow = Row.withSchema(innerRowSchema).addValue("abc").addValue(42L).build();
+    Row inputRow = Row.withSchema(inputSchema).addValue(nestedRow).build();
+
+    PCollection<Row> outputRow =
+        pipeline
+            .apply(Create.of(inputRow))
+            .setRowSchema(inputSchema)
+            .apply(SqlTransform.query("select * from PCOLLECTION"));
+
+    PAssert.that(outputRow).containsInAnyOrder(inputRow);
+    assertEquals(inputRow.getSchema(), outputRow.getSchema());
+    pipeline.run().waitUntilFinish(Duration.standardMinutes(1));
+  }
+
+  @Test
+  public void testSqlTimestampLogicalType() {
+    // Calcite TIMESTAMP is millis-based; SQL projection of Timestamp.MICROS uses
+    // FieldType.DATETIME.
+    Schema inputSchema =
+        Schema.builder()
+            .addField("ts", FieldType.logicalType(Timestamp.MICROS))
+            .addNullableField("nullable_ts", FieldType.logicalType(Timestamp.MICROS))
+            .build();
+
+    java.time.Instant ts = java.time.Instant.parse("2025-07-31T20:17:40.123Z");
+    Row inputRow = Row.withSchema(inputSchema).addValues(ts, null).build();
+
+    PCollection<Row> outputRow =
+        pipeline
+            .apply(Create.of(inputRow))
+            .setRowSchema(inputSchema)
+            .apply(SqlTransform.query("SELECT ts, nullable_ts FROM PCOLLECTION"));
+
+    Schema outputSchema =
+        Schema.builder()
+            .addDateTimeField("ts")
+            .addNullableField("nullable_ts", FieldType.DATETIME)
+            .build();
+    Row expectedRow =
+        Row.withSchema(outputSchema).addValues(new Instant(ts.toEpochMilli()), null).build();
+
+    PAssert.that(outputRow).containsInAnyOrder(expectedRow);
+    pipeline.run().waitUntilFinish(Duration.standardMinutes(2));
   }
 }

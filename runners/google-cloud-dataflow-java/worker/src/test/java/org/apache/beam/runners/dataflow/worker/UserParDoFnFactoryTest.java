@@ -18,12 +18,13 @@
 package org.apache.beam.runners.dataflow.worker;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.theInstance;
 import static org.hamcrest.core.AnyOf.anyOf;
 import static org.hamcrest.core.IsEqual.equalTo;
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -64,11 +65,12 @@ import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.util.DoFnInfo;
 import org.apache.beam.sdk.util.SerializableUtils;
 import org.apache.beam.sdk.util.StringUtils;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.CausedByDrain;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Test;
@@ -77,6 +79,9 @@ import org.junit.runners.JUnit4;
 
 /** Tests for {@link UserParDoFnFactory}. */
 @RunWith(JUnit4.class)
+// TODO(https://github.com/apache/beam/issues/21230): Remove when new version of errorprone is
+// released (2.11.0)
+@SuppressWarnings("unused")
 public class UserParDoFnFactoryTest {
   static class TestDoFn extends DoFn<Integer, String> {
     enum State {
@@ -150,6 +155,21 @@ public class UserParDoFnFactoryTest {
     public void processElement(ProcessContext c) {}
   }
 
+  private static class TestStatefulDoFnWithWindowExpiration
+      extends DoFn<KV<String, Integer>, Void> {
+
+    public static final String STATE_ID = "state-id";
+
+    @StateId(STATE_ID)
+    private final StateSpec<ValueState<String>> spec = StateSpecs.value(StringUtf8Coder.of());
+
+    @ProcessElement
+    public void processElement(ProcessContext c) {}
+
+    @OnWindowExpiration
+    public void onWindowExpiration() {}
+  }
+
   private static final TupleTag<String> MAIN_OUTPUT = new TupleTag<>("1");
 
   private UserParDoFnFactory factory = UserParDoFnFactory.createDefault();
@@ -174,9 +194,9 @@ public class UserParDoFnFactoryTest {
     Receiver rcvr = new OutputReceiver();
 
     parDoFn.startBundle(rcvr);
-    parDoFn.processElement(WindowedValue.valueInGlobalWindow("foo"));
+    parDoFn.processElement(WindowedValues.valueInGlobalWindow("foo"));
 
-    TestDoFn fn = (TestDoFn) ((SimpleParDoFn) parDoFn).getDoFnInfo().getDoFn();
+    TestDoFn fn = (TestDoFn) parDoFn.getDoFnInfo().getDoFn();
     assertThat(fn, not(theInstance(initialFn)));
 
     parDoFn.finishBundle();
@@ -196,8 +216,8 @@ public class UserParDoFnFactoryTest {
     assertThat(fn.state, equalTo(TestDoFn.State.FINISHED));
 
     secondParDoFn.startBundle(rcvr);
-    secondParDoFn.processElement(WindowedValue.valueInGlobalWindow("spam"));
-    TestDoFn reobtainedFn = (TestDoFn) ((SimpleParDoFn) secondParDoFn).getDoFnInfo().getDoFn();
+    secondParDoFn.processElement(WindowedValues.valueInGlobalWindow("spam"));
+    TestDoFn reobtainedFn = (TestDoFn) secondParDoFn.getDoFnInfo().getDoFn();
     secondParDoFn.finishBundle();
     assertThat(reobtainedFn.state, equalTo(TestDoFn.State.FINISHED));
 
@@ -233,16 +253,16 @@ public class UserParDoFnFactoryTest {
 
     Receiver rcvr = new OutputReceiver();
     parDoFn.startBundle(rcvr);
-    parDoFn.processElement(WindowedValue.valueInGlobalWindow("foo"));
+    parDoFn.processElement(WindowedValues.valueInGlobalWindow("foo"));
 
     // Must be after the first call to process element for reallyStartBundle to have been called
-    TestDoFn firstDoFn = (TestDoFn) ((SimpleParDoFn) parDoFn).getDoFnInfo().getDoFn();
+    TestDoFn firstDoFn = (TestDoFn) parDoFn.getDoFnInfo().getDoFn();
 
     secondParDoFn.startBundle(rcvr);
-    secondParDoFn.processElement(WindowedValue.valueInGlobalWindow("spam"));
+    secondParDoFn.processElement(WindowedValues.valueInGlobalWindow("spam"));
 
     // Must be after the first call to process element for reallyStartBundle to have been called
-    TestDoFn secondDoFn = (TestDoFn) ((SimpleParDoFn) secondParDoFn).getDoFnInfo().getDoFn();
+    TestDoFn secondDoFn = (TestDoFn) secondParDoFn.getDoFnInfo().getDoFn();
 
     parDoFn.finishBundle();
     secondParDoFn.finishBundle();
@@ -271,8 +291,8 @@ public class UserParDoFnFactoryTest {
     Receiver rcvr = new OutputReceiver();
 
     parDoFn.startBundle(rcvr);
-    parDoFn.processElement(WindowedValue.valueInGlobalWindow("foo"));
-    TestDoFn fn = (TestDoFn) ((SimpleParDoFn) parDoFn).getDoFnInfo().getDoFn();
+    parDoFn.processElement(WindowedValues.valueInGlobalWindow("foo"));
+    TestDoFn fn = (TestDoFn) parDoFn.getDoFnInfo().getDoFn();
 
     parDoFn.abort();
     assertThat(fn.state, equalTo(TestDoFn.State.TORN_DOWN));
@@ -289,8 +309,8 @@ public class UserParDoFnFactoryTest {
             TestOperationContext.create(counters));
 
     secondParDoFn.startBundle(rcvr);
-    secondParDoFn.processElement(WindowedValue.valueInGlobalWindow("foo"));
-    TestDoFn secondFn = (TestDoFn) ((SimpleParDoFn) secondParDoFn).getDoFnInfo().getDoFn();
+    secondParDoFn.processElement(WindowedValues.valueInGlobalWindow("foo"));
+    TestDoFn secondFn = (TestDoFn) secondParDoFn.getDoFnInfo().getDoFn();
 
     assertThat(secondFn, not(theInstance(fn)));
     assertThat(fn.state, equalTo(TestDoFn.State.TORN_DOWN));
@@ -303,10 +323,6 @@ public class UserParDoFnFactoryTest {
 
   private CloudObject getCloudObject(DoFn<?, ?> fn, WindowingStrategy<?, ?> windowingStrategy) {
     CloudObject object = CloudObject.forClassName("DoFn");
-    @SuppressWarnings({
-      "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-      "unchecked"
-    })
     DoFnInfo<?, ?> info =
         DoFnInfo.forFn(
             fn,
@@ -357,17 +373,105 @@ public class UserParDoFnFactoryTest {
     Receiver rcvr = new OutputReceiver();
     parDoFn.startBundle(rcvr);
 
-    IntervalWindow firstWindow = new IntervalWindow(new Instant(0), new Instant(10));
+    IntervalWindow firstWindow =
+        new IntervalWindow(Instant.ofEpochMilli(0), Instant.ofEpochMilli(10));
     parDoFn.processElement(
-        WindowedValue.of("foo", new Instant(1), firstWindow, PaneInfo.NO_FIRING));
+        WindowedValues.of("foo", Instant.ofEpochMilli(1), firstWindow, PaneInfo.NO_FIRING));
 
     verify(stepContext)
         .setStateCleanupTimer(
-            SimpleParDoFn.CLEANUP_TIMER_ID,
+            SimpleParDoFnHelpers.CLEANUP_TIMER_ID,
             firstWindow,
             IntervalWindow.getCoder(),
-            firstWindow.maxTimestamp().plus(1L),
-            firstWindow.maxTimestamp().plus(1L));
+            firstWindow.maxTimestamp().plus(Duration.millis(1L)),
+            firstWindow.maxTimestamp().plus(Duration.millis(1L)));
+  }
+
+  /**
+   * Regression test for global window + OnWindowExpiration + allowed lateness > max allowed time
+   */
+  @Test
+  public void testCleanupTimerForGlobalWindowWithAllowedLateness() throws Exception {
+    PipelineOptions options = PipelineOptionsFactory.create();
+    CounterSet counters = new CounterSet();
+    DoFn<?, ?> initialFn = new TestStatefulDoFnWithWindowExpiration();
+    Duration allowedLateness = Duration.standardDays(2);
+    CloudObject cloudObject =
+        getCloudObject(
+            initialFn, WindowingStrategy.globalDefault().withAllowedLateness(allowedLateness));
+
+    StateInternals stateInternals = InMemoryStateInternals.forKey("dummy");
+
+    TimerInternals timerInternals = mock(TimerInternals.class);
+
+    DataflowStepContext stepContext = mock(DataflowStepContext.class);
+    when(stepContext.timerInternals()).thenReturn(timerInternals);
+    DataflowStepContext userStepContext = mock(DataflowStepContext.class);
+    when(stepContext.namespacedToUser()).thenReturn(userStepContext);
+    when(stepContext.stateInternals()).thenReturn(stateInternals);
+    when(userStepContext.stateInternals()).thenReturn((StateInternals) stateInternals);
+
+    DataflowExecutionContext<DataflowStepContext> executionContext =
+        mock(DataflowExecutionContext.class);
+    TestOperationContext operationContext = TestOperationContext.create(counters);
+    when(executionContext.getStepContext(operationContext)).thenReturn(stepContext);
+    when(executionContext.getSideInputReader(any(), any(), any()))
+        .thenReturn(NullSideInputReader.empty());
+
+    ParDoFn parDoFn =
+        factory.create(
+            options,
+            cloudObject,
+            Collections.emptyList(),
+            MAIN_OUTPUT,
+            ImmutableMap.of(MAIN_OUTPUT, 0),
+            executionContext,
+            operationContext);
+
+    Receiver rcvr = new OutputReceiver();
+    parDoFn.startBundle(rcvr);
+
+    GlobalWindow globalWindow = GlobalWindow.INSTANCE;
+    parDoFn.processElement(
+        WindowedValues.of("foo", Instant.ofEpochMilli(1), globalWindow, PaneInfo.NO_FIRING));
+
+    assertThat(
+        globalWindow.maxTimestamp().plus(allowedLateness),
+        greaterThan(BoundedWindow.TIMESTAMP_MAX_VALUE));
+    verify(stepContext)
+        .setStateCleanupTimer(
+            SimpleParDoFnHelpers.CLEANUP_TIMER_ID,
+            globalWindow,
+            GlobalWindow.Coder.INSTANCE,
+            BoundedWindow.TIMESTAMP_MAX_VALUE,
+            BoundedWindow.TIMESTAMP_MAX_VALUE.minus(Duration.millis(1)));
+
+    StateNamespace globalWindowNamespace =
+        StateNamespaces.window(GlobalWindow.Coder.INSTANCE, globalWindow);
+    StateTag<ValueState<String>> tag =
+        StateTags.tagForSpec(
+            TestStatefulDoFnWithWindowExpiration.STATE_ID, StateSpecs.value(StringUtf8Coder.of()));
+
+    when(userStepContext.getNextFiredTimer((Coder) GlobalWindow.Coder.INSTANCE)).thenReturn(null);
+    when(stepContext.getNextFiredTimer((Coder) GlobalWindow.Coder.INSTANCE))
+        .thenReturn(
+            TimerData.of(
+                SimpleParDoFnHelpers.CLEANUP_TIMER_ID,
+                globalWindowNamespace,
+                BoundedWindow.TIMESTAMP_MAX_VALUE,
+                BoundedWindow.TIMESTAMP_MAX_VALUE.minus(Duration.millis(1)),
+                TimeDomain.EVENT_TIME,
+                CausedByDrain.NORMAL))
+        .thenReturn(null);
+
+    // Set up non-empty state. We don't mock + verify calls to clear() but instead
+    // check that state is actually empty. We mustn't care how it is accomplished.
+    stateInternals.state(globalWindowNamespace, tag).write("first");
+
+    // And this should clean up the second window
+    parDoFn.processTimers();
+
+    assertThat(stateInternals.state(globalWindowNamespace, tag).read(), nullValue());
   }
 
   @Test
@@ -409,8 +513,10 @@ public class UserParDoFnFactoryTest {
     Receiver rcvr = new OutputReceiver();
     parDoFn.startBundle(rcvr);
 
-    IntervalWindow firstWindow = new IntervalWindow(new Instant(0), new Instant(9));
-    IntervalWindow secondWindow = new IntervalWindow(new Instant(10), new Instant(19));
+    IntervalWindow firstWindow =
+        new IntervalWindow(Instant.ofEpochMilli(0), Instant.ofEpochMilli(9));
+    IntervalWindow secondWindow =
+        new IntervalWindow(Instant.ofEpochMilli(10), Instant.ofEpochMilli(19));
 
     Coder<IntervalWindow> windowCoder = IntervalWindow.getCoder();
     StateNamespace firstWindowNamespace = StateNamespaces.window(windowCoder, firstWindow);
@@ -428,11 +534,12 @@ public class UserParDoFnFactoryTest {
     when(stepContext.getNextFiredTimer(windowCoder))
         .thenReturn(
             TimerData.of(
-                SimpleParDoFn.CLEANUP_TIMER_ID,
+                SimpleParDoFnHelpers.CLEANUP_TIMER_ID,
                 firstWindowNamespace,
-                firstWindow.maxTimestamp().plus(1L),
-                firstWindow.maxTimestamp().plus(1L),
-                TimeDomain.EVENT_TIME))
+                firstWindow.maxTimestamp().plus(Duration.millis(1L)),
+                firstWindow.maxTimestamp().plus(Duration.millis(1L)),
+                TimeDomain.EVENT_TIME,
+                CausedByDrain.NORMAL))
         .thenReturn(null);
 
     // This should fire the timer to clean up the first window
@@ -444,11 +551,12 @@ public class UserParDoFnFactoryTest {
     when(stepContext.getNextFiredTimer((Coder) windowCoder))
         .thenReturn(
             TimerData.of(
-                SimpleParDoFn.CLEANUP_TIMER_ID,
+                SimpleParDoFnHelpers.CLEANUP_TIMER_ID,
                 secondWindowNamespace,
-                secondWindow.maxTimestamp().plus(1L),
-                secondWindow.maxTimestamp().plus(1L),
-                TimeDomain.EVENT_TIME))
+                secondWindow.maxTimestamp().plus(Duration.millis(1L)),
+                secondWindow.maxTimestamp().plus(Duration.millis(1L)),
+                TimeDomain.EVENT_TIME,
+                CausedByDrain.NORMAL))
         .thenReturn(null);
 
     // And this should clean up the second window

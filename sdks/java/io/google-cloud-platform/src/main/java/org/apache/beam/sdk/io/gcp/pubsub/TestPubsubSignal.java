@@ -17,10 +17,12 @@
  */
 package org.apache.beam.sdk.io.gcp.pubsub;
 
+import static org.apache.beam.sdk.io.gcp.pubsub.TestPubsub.createSubscriptionWithRetry;
 import static org.apache.beam.sdk.io.gcp.pubsub.TestPubsub.createTopicName;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.sdk.io.gcp.pubsub.TestPubsub.createTopicWithRetry;
+import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
-import com.google.api.gax.rpc.ApiException;
 import com.google.cloud.pubsub.v1.AckReplyConsumer;
 import com.google.cloud.pubsub.v1.MessageReceiver;
 import com.google.cloud.pubsub.v1.Subscriber;
@@ -28,12 +30,12 @@ import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
 import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
 import com.google.cloud.pubsub.v1.TopicAdminClient;
 import com.google.cloud.pubsub.v1.TopicAdminSettings;
-import com.google.pubsub.v1.PushConfig;
 import java.io.IOException;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.function.ThrowingRunnable;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubClient.SubscriptionPath;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubClient.TopicPath;
 import org.apache.beam.sdk.state.BagState;
@@ -54,9 +56,9 @@ import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.POutput;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Supplier;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Suppliers;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Supplier;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Suppliers;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.DateTime;
 import org.joda.time.Duration;
@@ -74,7 +76,9 @@ import org.slf4j.LoggerFactory;
  * <p>Uses a random temporary Pubsub topic for synchronization.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  // TODO(https://github.com/apache/beam/issues/21230): Remove when new version of
+  // errorprone is released (2.11.0)
+  "unused"
 })
 public class TestPubsubSignal implements TestRule {
   private static final Logger LOG = LoggerFactory.getLogger(TestPubsubSignal.class);
@@ -82,10 +86,6 @@ public class TestPubsubSignal implements TestRule {
   private static final String RESULT_SUCCESS_MESSAGE = "SUCCESS";
   private static final String START_TOPIC_NAME = "start";
   private static final String START_SIGNAL_MESSAGE = "START SIGNAL";
-  private static final Integer DEFAULT_ACK_DEADLINE_SECONDS = 60;
-
-  private static final String NO_ID_ATTRIBUTE = null;
-  private static final String NO_TIMESTAMP_ATTRIBUTE = null;
 
   private final TestPubsubOptions pipelineOptions;
   private final String pubsubEndpoint;
@@ -94,6 +94,8 @@ public class TestPubsubSignal implements TestRule {
   private @Nullable SubscriptionAdminClient subscriptionAdmin = null;
   private @Nullable TopicPath resultTopicPath = null;
   private @Nullable TopicPath startTopicPath = null;
+  private @Nullable SubscriptionPath resultSubscriptionPath = null;
+  private @Nullable SubscriptionPath startSubscriptionPath = null;
 
   /**
    * Creates an instance of this rule.
@@ -136,18 +138,20 @@ public class TestPubsubSignal implements TestRule {
   }
 
   private void initializePubsub(Description description) throws IOException {
-    topicAdmin =
+    TopicAdminClient topAdmin =
         TopicAdminClient.create(
             TopicAdminSettings.newBuilder()
                 .setCredentialsProvider(pipelineOptions::getGcpCredential)
                 .setEndpoint(pubsubEndpoint)
                 .build());
-    subscriptionAdmin =
+    topicAdmin = topAdmin;
+    SubscriptionAdminClient subAdmin =
         SubscriptionAdminClient.create(
             SubscriptionAdminSettings.newBuilder()
                 .setCredentialsProvider(pipelineOptions::getGcpCredential)
                 .setEndpoint(pubsubEndpoint)
                 .build());
+    subscriptionAdmin = subAdmin;
 
     // Example topic name:
     //    integ-test-TestClassName-testMethodName-2018-12-11-23-32-333-<random-long>-result
@@ -157,50 +161,76 @@ public class TestPubsubSignal implements TestRule {
     TopicPath startTopicPathTmp =
         PubsubClient.topicPathFromName(
             pipelineOptions.getProject(), createTopicName(description, START_TOPIC_NAME));
+    SubscriptionPath resultSubscriptionPathTmp =
+        PubsubClient.subscriptionPathFromName(
+            pipelineOptions.getProject(),
+            "result-subscription-" + ThreadLocalRandom.current().nextLong());
+    SubscriptionPath startSubscriptionPathTmp =
+        PubsubClient.subscriptionPathFromName(
+            pipelineOptions.getProject(),
+            "start-subscription-" + ThreadLocalRandom.current().nextLong());
 
-    topicAdmin.createTopic(resultTopicPathTmp.getPath());
-    topicAdmin.createTopic(startTopicPathTmp.getPath());
-
-    // Set these after successful creation; this signals that they need teardown
+    // Set variables after successful creation; this signals that they need teardown
+    createTopicWithRetry(topAdmin, resultTopicPathTmp.getPath());
     resultTopicPath = resultTopicPathTmp;
+    createTopicWithRetry(topAdmin, startTopicPathTmp.getPath());
     startTopicPath = startTopicPathTmp;
+    createSubscriptionWithRetry(
+        subAdmin, resultSubscriptionPathTmp.getPath(), resultTopicPathTmp.getPath(), 600);
+    resultSubscriptionPath = resultSubscriptionPathTmp;
+    createSubscriptionWithRetry(
+        subAdmin, startSubscriptionPathTmp.getPath(), startTopicPathTmp.getPath(), 600);
+    startSubscriptionPath = startSubscriptionPathTmp;
   }
 
-  private void tearDown() throws IOException {
-    if (subscriptionAdmin == null || topicAdmin == null) {
+  private static void logIfThrows(ThrowingRunnable runnable) {
+    try {
+      runnable.run();
+    } catch (Exception e) {
+      LOG.error("Failed to clean up resource.", e);
+    }
+  }
+
+  private void tearDown() {
+    SubscriptionAdminClient subAdmin = subscriptionAdmin;
+    TopicAdminClient topAdmin = topicAdmin;
+    if (subAdmin == null || topAdmin == null) {
       return;
     }
 
-    try {
-      if (resultTopicPath != null) {
-        for (String subscriptionPath :
-            topicAdmin.listTopicSubscriptions(resultTopicPath.getPath()).iterateAll()) {
-          subscriptionAdmin.deleteSubscription(subscriptionPath);
-        }
-        topicAdmin.deleteTopic(resultTopicPath.getPath());
-      }
-      if (startTopicPath != null) {
-        for (String subscriptionPath :
-            topicAdmin.listTopicSubscriptions(startTopicPath.getPath()).iterateAll()) {
-          subscriptionAdmin.deleteSubscription(subscriptionPath);
-        }
-        topicAdmin.deleteTopic(startTopicPath.getPath());
-      }
-    } finally {
-      subscriptionAdmin.close();
-      topicAdmin.close();
-
-      subscriptionAdmin = null;
-      topicAdmin = null;
-
-      resultTopicPath = null;
-      startTopicPath = null;
+    SubscriptionPath resSubPath = resultSubscriptionPath;
+    if (resSubPath != null) {
+      logIfThrows(() -> subAdmin.deleteSubscription(resSubPath.getPath()));
     }
+    SubscriptionPath startSubPath = startSubscriptionPath;
+    if (startSubPath != null) {
+      logIfThrows(() -> subAdmin.deleteSubscription(startSubPath.getPath()));
+    }
+    TopicPath resTopPath = resultTopicPath;
+    if (resTopPath != null) {
+      logIfThrows(() -> topAdmin.deleteTopic(resTopPath.getPath()));
+    }
+    TopicPath startTopPathVal = startTopicPath;
+    if (startTopPathVal != null) {
+      logIfThrows(() -> topAdmin.deleteTopic(startTopPathVal.getPath()));
+    }
+
+    logIfThrows(subAdmin::close);
+    logIfThrows(topAdmin::close);
+
+    subscriptionAdmin = null;
+    topicAdmin = null;
+
+    resultTopicPath = null;
+    startTopicPath = null;
+
+    resultSubscriptionPath = null;
+    startSubscriptionPath = null;
   }
 
   /** Outputs a message that the pipeline has started. */
   public PTransform<PBegin, PDone> signalStart() {
-    return new PublishStart(startTopicPath);
+    return new PublishStart(checkStateNotNull(startTopicPath, "startTopicPath is not initialized"));
   }
 
   /**
@@ -223,7 +253,11 @@ public class TestPubsubSignal implements TestRule {
       SerializableFunction<T, String> formatter,
       SerializableFunction<Set<T>, Boolean> successPredicate) {
 
-    return new PublishSuccessWhen<>(coder, formatter, successPredicate, resultTopicPath);
+    return new PublishSuccessWhen<>(
+        coder,
+        formatter,
+        successPredicate,
+        checkStateNotNull(resultTopicPath, "resultTopicPath is not initialized"));
   }
 
   /**
@@ -233,7 +267,7 @@ public class TestPubsubSignal implements TestRule {
   public <T> PTransform<PCollection<? extends T>, POutput> signalSuccessWhen(
       Coder<T> coder, SerializableFunction<Set<T>, Boolean> successPredicate) {
 
-    return signalSuccessWhen(coder, T::toString, successPredicate);
+    return signalSuccessWhen(coder, String::valueOf, successPredicate);
   }
 
   /**
@@ -242,57 +276,26 @@ public class TestPubsubSignal implements TestRule {
    * <p>This future must be created before running the pipeline. A subscription must exist prior to
    * the start signal being published, which occurs immediately upon pipeline startup.
    */
-  public Supplier<Void> waitForStart(Duration duration) throws IOException {
-    SubscriptionPath startSubscriptionPath =
-        PubsubClient.subscriptionPathFromName(
-            pipelineOptions.getProject(),
-            "start-subscription-" + String.valueOf(ThreadLocalRandom.current().nextLong()));
-
-    subscriptionAdmin.createSubscription(
-        startSubscriptionPath.getPath(),
-        startTopicPath.getPath(),
-        PushConfig.getDefaultInstance(),
-        (int) duration.getStandardSeconds());
-
+  public Supplier<Void> waitForStart(Duration duration) {
+    SubscriptionPath subPath =
+        checkStateNotNull(startSubscriptionPath, "startSubscriptionPath is not initialized");
     return Suppliers.memoize(
         () -> {
           try {
-            String result = pollForResultForDuration(startSubscriptionPath, duration);
+            String result = pollForResultForDuration(subPath, duration);
             checkState(START_SIGNAL_MESSAGE.equals(result));
             return null;
           } catch (IOException e) {
             throw new RuntimeException(e);
-          } finally {
-            try {
-              subscriptionAdmin.deleteSubscription(startSubscriptionPath.getPath());
-            } catch (ApiException e) {
-              LOG.error(String.format("Leaked PubSub subscription '%s'", startSubscriptionPath));
-            }
           }
         });
   }
 
   /** Wait for a success signal for {@code duration}. */
   public void waitForSuccess(Duration duration) throws IOException {
-    SubscriptionPath resultSubscriptionPath =
-        PubsubClient.subscriptionPathFromName(
-            pipelineOptions.getProject(),
-            "result-subscription-" + String.valueOf(ThreadLocalRandom.current().nextLong()));
-
-    subscriptionAdmin.createSubscription(
-        resultSubscriptionPath.getPath(),
-        resultTopicPath.getPath(),
-        PushConfig.getDefaultInstance(),
-        (int) duration.getStandardSeconds());
-
-    String result = pollForResultForDuration(resultSubscriptionPath, duration);
-
-    try {
-      subscriptionAdmin.deleteSubscription(resultSubscriptionPath.getPath());
-    } catch (ApiException e) {
-      LOG.error(String.format("Leaked PubSub subscription '%s'", resultSubscriptionPath));
-    }
-
+    SubscriptionPath subPath =
+        checkStateNotNull(resultSubscriptionPath, "resultSubscriptionPath is not initialized");
+    String result = pollForResultForDuration(subPath, duration);
     if (!RESULT_SUCCESS_MESSAGE.equals(result)) {
       throw new AssertionError(result);
     }
@@ -301,7 +304,7 @@ public class TestPubsubSignal implements TestRule {
   private String pollForResultForDuration(
       SubscriptionPath signalSubscriptionPath, Duration timeoutDuration) throws IOException {
 
-    AtomicReference<String> result = new AtomicReference<>(null);
+    AtomicReference<@Nullable String> result = new AtomicReference<>(null);
 
     MessageReceiver receiver =
         (com.google.pubsub.v1.PubsubMessage message, AckReplyConsumer replyConsumer) -> {
@@ -331,27 +334,21 @@ public class TestPubsubSignal implements TestRule {
       try {
         Thread.sleep(1000);
       } catch (InterruptedException ignored) {
+        // Ignore interrupt and continue polling.
       }
     }
 
     subscriber.stopAsync();
     subscriber.awaitTerminated();
 
-    if (result.get() == null) {
+    String resultVal = result.get();
+    if (resultVal == null) {
       throw new AssertionError(
           String.format(
               "Did not receive signal on %s in %ss",
               signalSubscriptionPath, timeoutDuration.getStandardSeconds()));
     }
-    return result.get();
-  }
-
-  private void sleep(long t) {
-    try {
-      Thread.sleep(t);
-    } catch (InterruptedException ex) {
-      throw new RuntimeException(ex);
-    }
+    return resultVal;
   }
 
   /** {@link PTransform} that signals once when the pipeline has started. */
@@ -412,8 +409,7 @@ public class TestPubsubSignal implements TestRule {
    * "FAILURE".
    */
   static class StatefulPredicateCheck<T> extends DoFn<KV<String, ? extends T>, String> {
-    private final SerializableFunction<T, String> formatter;
-    private SerializableFunction<Set<T>, Boolean> successPredicate;
+    private final SerializableFunction<Set<T>, Boolean> successPredicate;
     // keep all events seen so far in the state cell
 
     private static final String SEEN_EVENTS = "seenEvents";
@@ -426,7 +422,6 @@ public class TestPubsubSignal implements TestRule {
         SerializableFunction<T, String> formatter,
         SerializableFunction<Set<T>, Boolean> successPredicate) {
       this.seenEvents = StateSpecs.bag(coder);
-      this.formatter = formatter;
       this.successPredicate = successPredicate;
     }
 

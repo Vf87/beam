@@ -39,23 +39,24 @@ import org.apache.beam.runners.dataflow.worker.profiler.ScopedProfiler;
 import org.apache.beam.runners.dataflow.worker.profiler.ScopedProfiler.ProfileScope;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.metrics.MetricName;
+import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.metrics.MetricsContainer;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.util.WeightedValue;
 import org.apache.beam.sdk.values.PCollectionView;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.Cache;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.CacheBuilder;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.FluentIterable;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.Cache;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheBuilder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.FluentIterable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
 /** {@link DataflowExecutionContext} for use in batch mode. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class BatchModeExecutionContext
     extends DataflowExecutionContext<BatchModeExecutionContext.StepContext> {
@@ -67,8 +68,6 @@ public class BatchModeExecutionContext
   private Object key;
 
   private final MetricsContainerRegistry<MetricsContainerImpl> containerRegistry;
-
-  // TODO(BEAM-7863): Move throttle time Metric to a dedicated namespace.
   protected static final String DATASTORE_THROTTLE_TIME_NAMESPACE =
       "org.apache.beam.sdk.io.gcp.datastore.DatastoreV1$DatastoreWriterFn";
   protected static final String HTTP_CLIENT_API_THROTTLE_TIME_NAMESPACE =
@@ -77,7 +76,6 @@ public class BatchModeExecutionContext
       "org.apache.beam.sdk.io.gcp.bigquery.BigQueryServicesImpl$DatasetServiceImpl";
   protected static final String BIGQUERY_READ_THROTTLE_TIME_NAMESPACE =
       "org.apache.beam.sdk.io.gcp.bigquery.BigQueryServicesImpl$StorageClientImpl";
-  protected static final String THROTTLE_TIME_COUNTER_NAME = "throttling-msecs";
 
   private BatchModeExecutionContext(
       CounterFactory counterFactory,
@@ -265,7 +263,11 @@ public class BatchModeExecutionContext
     this.key = key;
   }
 
-  /** @param newKey the key being switched to */
+  /**
+   * Switches the state key.
+   *
+   * @param newKey the key being switched to
+   */
   protected void switchStateKey(Object newKey) {
     for (StepContext stepContext : getAllStepContexts()) {
       stepContext.setKey(newKey);
@@ -320,7 +322,7 @@ public class BatchModeExecutionContext
 
   public <K, V> Cache<K, V> getLogicalReferenceCache() {
     @SuppressWarnings({
-      "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+      "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
       "unchecked"
     })
     Cache<K, V> rval = (Cache) logicalReferenceCache;
@@ -516,6 +518,16 @@ public class BatchModeExecutionContext
                       .transform(
                           update ->
                               MetricsToCounterUpdateConverter.fromDistribution(
+                                  update.getKey(), true, update.getUpdate())),
+                  FluentIterable.from(updates.stringSetUpdates())
+                      .transform(
+                          update ->
+                              MetricsToCounterUpdateConverter.fromStringSet(
+                                  update.getKey(), true, update.getUpdate())),
+                  FluentIterable.from(updates.boundedTrieUpdates())
+                      .transform(
+                          update ->
+                              MetricsToCounterUpdateConverter.fromBoundedTrie(
                                   update.getKey(), true, update.getUpdate())));
             });
   }
@@ -533,10 +545,18 @@ public class BatchModeExecutionContext
   public Long extractThrottleTime() {
     long totalThrottleMsecs = 0L;
     for (MetricsContainerImpl container : containerRegistry.getContainers()) {
-      // TODO(BEAM-7863): Update throttling counters to use generic throttling-msecs metric.
+      CounterCell userThrottlingTime =
+          container.tryGetCounter(
+              MetricName.named(
+                  Metrics.THROTTLE_TIME_NAMESPACE, Metrics.THROTTLE_TIME_COUNTER_NAME));
+      if (userThrottlingTime != null) {
+        totalThrottleMsecs += userThrottlingTime.getCumulative();
+      }
+
       CounterCell dataStoreThrottlingTime =
           container.tryGetCounter(
-              MetricName.named(DATASTORE_THROTTLE_TIME_NAMESPACE, THROTTLE_TIME_COUNTER_NAME));
+              MetricName.named(
+                  DATASTORE_THROTTLE_TIME_NAMESPACE, Metrics.THROTTLE_TIME_COUNTER_NAME));
       if (dataStoreThrottlingTime != null) {
         totalThrottleMsecs += dataStoreThrottlingTime.getCumulative();
       }
@@ -544,7 +564,7 @@ public class BatchModeExecutionContext
       CounterCell httpClientApiThrottlingTime =
           container.tryGetCounter(
               MetricName.named(
-                  HTTP_CLIENT_API_THROTTLE_TIME_NAMESPACE, THROTTLE_TIME_COUNTER_NAME));
+                  HTTP_CLIENT_API_THROTTLE_TIME_NAMESPACE, Metrics.THROTTLE_TIME_COUNTER_NAME));
       if (httpClientApiThrottlingTime != null) {
         totalThrottleMsecs += httpClientApiThrottlingTime.getCumulative();
       }
@@ -552,14 +572,16 @@ public class BatchModeExecutionContext
       CounterCell bigqueryStreamingInsertThrottleTime =
           container.tryGetCounter(
               MetricName.named(
-                  BIGQUERY_STREAMING_INSERT_THROTTLE_TIME_NAMESPACE, THROTTLE_TIME_COUNTER_NAME));
+                  BIGQUERY_STREAMING_INSERT_THROTTLE_TIME_NAMESPACE,
+                  Metrics.THROTTLE_TIME_COUNTER_NAME));
       if (bigqueryStreamingInsertThrottleTime != null) {
         totalThrottleMsecs += bigqueryStreamingInsertThrottleTime.getCumulative();
       }
 
       CounterCell bigqueryReadThrottleTime =
           container.tryGetCounter(
-              MetricName.named(BIGQUERY_READ_THROTTLE_TIME_NAMESPACE, THROTTLE_TIME_COUNTER_NAME));
+              MetricName.named(
+                  BIGQUERY_READ_THROTTLE_TIME_NAMESPACE, Metrics.THROTTLE_TIME_COUNTER_NAME));
       if (bigqueryReadThrottleTime != null) {
         totalThrottleMsecs += bigqueryReadThrottleTime.getCumulative();
       }

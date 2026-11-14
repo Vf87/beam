@@ -30,7 +30,8 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.hamcrest.CoreMatchers;
 import org.hamcrest.core.IsInstanceOf;
@@ -42,7 +43,7 @@ import org.junit.runners.JUnit4;
 /** Tests for ReaderFactory. */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class ReaderFactoryTest {
 
@@ -115,7 +116,7 @@ public class ReaderFactoryTest {
 
       @Override
       public WindowedValue<String> getCurrent() {
-        return WindowedValue.valueInGlobalWindow("something");
+        return WindowedValues.valueInGlobalWindow("something");
       }
     }
   }
@@ -127,7 +128,7 @@ public class ReaderFactoryTest {
     Source cloudSource = new Source();
     cloudSource.setSpec(spec);
     cloudSource.setCodec(
-        CloudObjects.asCloudObject(BigEndianIntegerCoder.of(), /*sdkComponents=*/ null));
+        CloudObjects.asCloudObject(BigEndianIntegerCoder.of(), /* sdkComponents= */ null));
 
     PipelineOptions options = PipelineOptionsFactory.create();
     ReaderRegistry registry =
@@ -147,7 +148,8 @@ public class ReaderFactoryTest {
     CloudObject spec = CloudObject.forClassName("UnknownSource");
     Source cloudSource = new Source();
     cloudSource.setSpec(spec);
-    cloudSource.setCodec(CloudObjects.asCloudObject(StringUtf8Coder.of(), /*sdkComponents=*/ null));
+    cloudSource.setCodec(
+        CloudObjects.asCloudObject(StringUtf8Coder.of(), /* sdkComponents= */ null));
     try {
       PipelineOptions options = PipelineOptionsFactory.create();
       ReaderRegistry.defaultRegistry()

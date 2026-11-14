@@ -27,9 +27,11 @@ from apache_beam.testing.util import equal_to
 
 # Protect against environments where Google Cloud Vision client is not
 # available.
+# pylint: disable=ungrouped-imports
 try:
-  from apache_beam.ml.gcp.visionml import AnnotateImage
   from google.cloud import vision
+
+  from apache_beam.ml.gcp.visionml import AnnotateImage
 except ImportError:
   vision = None
 
@@ -47,7 +49,8 @@ class VisionMlTestIT(unittest.TestCase):
     IMAGES_TO_ANNOTATE = [
         'gs://apache-beam-samples/advanced_analytics/vision/sign.jpg'
     ]
-    IMAGE_CONTEXT = [vision.types.ImageContext(language_hints=['en'])]
+
+    IMAGE_CONTEXT = [vision.ImageContext({'language_hints': ['en']})]
 
     with TestPipeline(is_integration_test=True) as p:
       contexts = p | 'Create context' >> beam.Create(
@@ -57,21 +60,24 @@ class VisionMlTestIT(unittest.TestCase):
           p
           | beam.Create(IMAGES_TO_ANNOTATE)
           | AnnotateImage(
-              features=[vision.types.Feature(type='TEXT_DETECTION')],
+              features=[
+                  vision.Feature({'type_': vision.Feature.Type.TEXT_DETECTION})
+              ],
               context_side_input=beam.pvalue.AsDict(contexts))
           | beam.ParDo(extract))
 
-    assert_that(
-        output,
-        equal_to([
-            'WAITING?\nPLEASE\nTURN OFF\nYOUR\nENGINE',
-            'WAITING?',
-            'PLEASE',
-            'TURN',
-            'OFF',
-            'YOUR',
-            'ENGINE'
-        ]))
+      assert_that(
+          output,
+          equal_to([
+              'WAITING?\nPLEASE\nTURN OFF\nYOUR\nENGINE',
+              'WAITING',
+              '?',
+              'PLEASE',
+              'TURN',
+              'OFF',
+              'YOUR',
+              'ENGINE'
+          ]))
 
 
 if __name__ == '__main__':

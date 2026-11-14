@@ -17,22 +17,24 @@
  */
 package org.apache.beam.runners.dataflow.worker;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import org.apache.beam.runners.dataflow.worker.util.common.worker.ParDoFn;
 import org.apache.beam.runners.dataflow.worker.util.common.worker.Receiver;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.IterableCoder;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.DoFnInfo;
 import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
  * A {@link ParDoFn} that writes side input data using {@link
  * StreamingModeExecutionContext.StreamingModeStepContext#writePCollectionViewData}.
  */
-@SuppressWarnings({"keyfor", "nullness"}) // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+@SuppressWarnings({"keyfor", "nullness"}) // TODO(https://github.com/apache/beam/issues/20497)
 public class StreamingPCollectionViewWriterParDoFn implements ParDoFn {
 
   private final StreamingModeExecutionContext.StreamingModeStepContext stepContext;
@@ -74,10 +76,18 @@ public class StreamingPCollectionViewWriterParDoFn implements ParDoFn {
   public void processTimers() {}
 
   @Override
+  public void finishKey(Object key) throws Exception {}
+
+  @Override
   public void finishBundle() throws Exception {}
 
   @Override
   public void abort() throws Exception {
     // no-op as long as it remains stateless
+  }
+
+  @Override
+  public @Nullable DoFnInfo<?, ?> getDoFnInfo() {
+    return null;
   }
 }

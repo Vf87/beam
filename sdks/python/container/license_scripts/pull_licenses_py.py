@@ -30,7 +30,7 @@ import tempfile
 import traceback
 import yaml
 
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
 from urllib.parse import urlparse
 from urllib.parse import urljoin
 from tenacity import retry
@@ -75,7 +75,7 @@ def copy_license_files(dep):
 @retry(
     reraise=True,
     wait=wait_exponential(multiplier=2),
-    stop=stop_after_attempt(5))
+    stop=stop_after_attempt(8))
 def pull_from_url(dep, configs):
   '''
   :param dep: name of a dependency
@@ -94,7 +94,8 @@ def pull_from_url(dep, configs):
       if config['license'] == 'skip':
         print('Skip pulling license for ', dep)
       else:
-        url_read = urlopen(config['license'])
+        url_read = urlopen(Request(config['license'],
+                                   headers={'User-Agent': 'Apache Beam'}))
         with open(cur_temp_dir + '/LICENSE', 'wb') as temp_write:
           shutil.copyfileobj(url_read, temp_write)
         logging.debug(

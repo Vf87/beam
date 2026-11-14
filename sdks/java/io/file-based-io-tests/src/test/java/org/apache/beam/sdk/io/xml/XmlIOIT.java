@@ -19,10 +19,11 @@ package org.apache.beam.sdk.io.xml;
 
 import static org.apache.beam.sdk.io.common.FileBasedIOITHelper.appendTimestampSuffix;
 import static org.apache.beam.sdk.io.common.IOITHelper.readIOTestPipelineOptions;
+import static org.junit.Assert.assertNotEquals;
 
-import com.google.cloud.Timestamp;
 import java.io.Serializable;
 import java.nio.charset.Charset;
+import java.time.Instant;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
@@ -93,8 +94,6 @@ public class XmlIOIT {
   }
 
   private static String filenamePrefix;
-  private static String bigQueryDataset;
-  private static String bigQueryTable;
   private static Integer numberOfTextLines;
   private static Integer datasetSize;
   private static String expectedHash;
@@ -111,8 +110,6 @@ public class XmlIOIT {
     XmlIOITPipelineOptions options = readIOTestPipelineOptions(XmlIOITPipelineOptions.class);
     filenamePrefix = appendTimestampSuffix(options.getFilenamePrefix());
     charset = Charset.forName(options.getCharset());
-    bigQueryDataset = options.getBigQueryDataset();
-    bigQueryTable = options.getBigQueryTable();
     datasetSize = options.getDatasetSize();
     expectedHash = options.getExpectedHash();
     numberOfTextLines = options.getNumberOfRecords();
@@ -175,19 +172,20 @@ public class XmlIOIT {
             .withSideInputs(consolidatedHashcode.apply(View.asSingleton())));
 
     PipelineResult result = pipeline.run();
-    result.waitUntilFinish();
+    PipelineResult.State pipelineState = result.waitUntilFinish();
     collectAndPublishResults(result);
+    // Fail the test if pipeline failed.
+    assertNotEquals(pipelineState, PipelineResult.State.FAILED);
   }
 
   private void collectAndPublishResults(PipelineResult result) {
     String uuid = UUID.randomUUID().toString();
-    String timestamp = Timestamp.now().toString();
+    String timestamp = Instant.now().toString();
 
     Set<Function<MetricsReader, NamedTestResult>> metricSuppliers =
         fillMetricSuppliers(uuid, timestamp);
     final IOITMetrics metrics =
         new IOITMetrics(metricSuppliers, result, XMLIOIT_NAMESPACE, uuid, timestamp);
-    metrics.publish(bigQueryDataset, bigQueryTable);
     metrics.publishToInflux(settings);
   }
 

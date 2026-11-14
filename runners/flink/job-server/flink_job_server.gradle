@@ -29,6 +29,11 @@ apply plugin: 'application'
 // we need to set mainClassName before applying shadow plugin
 mainClassName = "org.apache.beam.runners.flink.FlinkJobServerDriver"
 
+// Resolve the Flink project name (and version) the job-server is based on
+def flinkRunnerProject = "${project.path.replace(":job-server", "")}"
+evaluationDependsOn(flinkRunnerProject)
+boolean isFlink2 = project(flinkRunnerProject).ext.flink_major.startsWith('2')
+
 applyJavaNature(
   automaticModuleName: 'org.apache.beam.runners.flink.jobserver',
   archivesBaseName: project.hasProperty('archives_base_name') ? archives_base_name : archivesBaseName,
@@ -37,10 +42,8 @@ applyJavaNature(
   shadowClosure: {
     append "reference.conf"
   },
+  requireJavaVersion: isFlink2 ? JavaVersion.VERSION_11 : null
 )
-
-// Resolve the Flink project name (and version) the job-server is based on
-def flinkRunnerProject = "${project.path.replace(":job-server", "")}"
 
 description = project(flinkRunnerProject).description + " :: Job Server"
 
@@ -77,17 +80,17 @@ configurations.all {
 }
 
 dependencies {
-  compile project(flinkRunnerProject)
+  implementation project(flinkRunnerProject)
   permitUnusedDeclared project(flinkRunnerProject) // BEAM-11761
-  runtime group: "org.slf4j", name: "jcl-over-slf4j", version: dependencies.create(project.library.java.slf4j_api).getVersion()
-  validatesPortableRunner project(path: flinkRunnerProject, configuration: "testRuntime")
+  runtimeOnly group: "org.slf4j", name: "jcl-over-slf4j", version: dependencies.create(project.library.java.slf4j_api).getVersion()
+  validatesPortableRunner project(path: flinkRunnerProject, configuration: "testRuntimeMigration")
   validatesPortableRunner project(path: ":sdks:java:core", configuration: "shadowTest")
-  validatesPortableRunner project(path: ":runners:core-java", configuration: "testRuntime")
-  validatesPortableRunner project(path: ":runners:portability:java", configuration: "testRuntime")
-  runtime project(":sdks:java:extensions:google-cloud-platform-core")
-  runtime library.java.slf4j_simple
+  validatesPortableRunner project(path: ":runners:core-java", configuration: "testRuntimeMigration")
+  validatesPortableRunner project(path: ":runners:portability:java", configuration: "testRuntimeMigration")
+  runtimeOnly project(":sdks:java:extensions:google-cloud-platform-core")
+  runtimeOnly library.java.slf4j_simple
   //  TODO: Enable HDFS file system.
-  runtime project(":sdks:java:io:amazon-web-services2")
+  runtimeOnly project(":sdks:java:io:amazon-web-services2")
   // External transform expansion
   // Kafka
   runtimeOnly project(":sdks:java:io:kafka")
@@ -118,23 +121,30 @@ runShadow {
   if (project.hasProperty('sdkWorkerParallelism'))
     args += ["--sdk-worker-parallelism=${project.property('sdkWorkerParallelism')}"]
 
+  logger.info('Will start flink job server with args {}', args)
+
   // Enable remote debugging.
   jvmArgs = ["-Xdebug", "-Xrunjdwp:transport=dt_socket,server=y,suspend=n,address=5005"]
   if (project.hasProperty("logLevel"))
     jvmArgs += ["-Dorg.slf4j.simpleLogger.defaultLogLevel=${project.property('logLevel')}"]
 }
 
-def portableValidatesRunnerTask(String name, Boolean streaming, Boolean checkpointing) {
+
+def portableValidatesRunnerTask(String name, String mode, boolean checkpointing, boolean docker) {
   def pipelineOptions = [
       // Limit resource consumption via parallelism
       "--parallelism=2",
   ]
+  boolean streaming = (mode == "streaming")
   if (streaming) {
     pipelineOptions += "--streaming"
     if (checkpointing) {
       pipelineOptions += "--checkpointingInterval=3000"
       pipelineOptions += "--shutdownSourcesAfterIdleMs=60000"
     }
+  }
+  if (mode == "batch") {
+    pipelineOptions += "--useDataStreamForBatch=true"
   }
   createPortableValidatesRunnerTask(
     name: "validatesPortableRunner${name}",
@@ -143,81 +153,152 @@ def portableValidatesRunnerTask(String name, Boolean streaming, Boolean checkpoi
     testClasspathConfiguration: configurations.validatesPortableRunner,
     numParallelTests: 1,
     pipelineOpts: pipelineOptions,
-    environment: BeamModulePlugin.PortableValidatesRunnerConfiguration.Environment.EMBEDDED,
+    environment: docker ? BeamModulePlugin.PortableValidatesRunnerConfiguration.Environment.DOCKER : BeamModulePlugin.PortableValidatesRunnerConfiguration.Environment.EMBEDDED,
     testCategories: {
-      if (streaming && checkpointing) {
-        includeCategories 'org.apache.beam.sdk.testing.UsesBundleFinalizer'
-        excludeCategories 'org.apache.beam.sdk.testing.UsesBoundedSplittableParDo'
-        // TestStreamSource does not support checkpointing
-        excludeCategories 'org.apache.beam.sdk.testing.UsesTestStream'
-      } else {
+        if (docker) {
+          includeCategories 'org.apache.beam.sdk.testing.UsesSdkHarnessEnvironment'
+          return
+        }
+
+        if (streaming && checkpointing) {
+          includeCategories 'org.apache.beam.sdk.testing.UsesBundleFinalizer'
+          excludeCategories 'org.apache.beam.sdk.testing.UsesBoundedSplittableParDo'
+          // TestStreamSource does not support checkpointing
+          excludeCategories 'org.apache.beam.sdk.testing.UsesTestStream'
+          return
+        }
+
         includeCategories 'org.apache.beam.sdk.testing.ValidatesRunner'
+        // Should be run only in a properly configured SDK harness environment
+        excludeCategories 'org.apache.beam.sdk.testing.UsesSdkHarnessEnvironment'
         excludeCategories 'org.apache.beam.sdk.testing.FlattenWithHeterogeneousCoders'
         // Larger keys are possible, but they require more memory.
         excludeCategories 'org.apache.beam.sdk.testing.LargeKeys$Above10MB'
         excludeCategories 'org.apache.beam.sdk.testing.UsesCommittedMetrics'
-        excludeCategories 'org.apache.beam.sdk.testing.UsesCrossLanguageTransforms'
-        excludeCategories 'org.apache.beam.sdk.testing.UsesPythonExpansionService'
+        excludeCategories 'org.apache.beam.sdk.testing.UsesExternalService'
         excludeCategories 'org.apache.beam.sdk.testing.UsesCustomWindowMerging'
         excludeCategories 'org.apache.beam.sdk.testing.UsesFailureMessage'
         excludeCategories 'org.apache.beam.sdk.testing.UsesGaugeMetrics'
-        excludeCategories 'org.apache.beam.sdk.testing.UsesParDoLifecycle'
         excludeCategories 'org.apache.beam.sdk.testing.UsesMapState'
+        excludeCategories 'org.apache.beam.sdk.testing.UsesMultimapState'
         excludeCategories 'org.apache.beam.sdk.testing.UsesSetState'
         excludeCategories 'org.apache.beam.sdk.testing.UsesOrderedListState'
         excludeCategories 'org.apache.beam.sdk.testing.UsesStrictTimerOrdering'
         excludeCategories 'org.apache.beam.sdk.testing.UsesOnWindowExpiration'
         excludeCategories 'org.apache.beam.sdk.testing.UsesBundleFinalizer'
-        excludeCategories 'org.apache.beam.sdk.testing.UsesOrderedListState'
         if (streaming) {
           excludeCategories 'org.apache.beam.sdk.testing.UsesBoundedSplittableParDo'
           excludeCategories 'org.apache.beam.sdk.testing.UsesTestStreamWithProcessingTime'
           excludeCategories 'org.apache.beam.sdk.testing.UsesTestStreamWithMultipleStages'
           excludeCategories 'org.apache.beam.sdk.testing.UsesTestStreamWithOutputTimestamp'
-        } else {
-          excludeCategories 'org.apache.beam.sdk.testing.UsesUnboundedSplittableParDo'
-          excludeCategories 'org.apache.beam.sdk.testing.UsesSplittableParDoWithWindowedSideInputs'
-          excludeCategories 'org.apache.beam.sdk.testing.UsesUnboundedPCollections'
-          excludeCategories 'org.apache.beam.sdk.testing.UsesTestStream'
+          excludeCategories 'org.apache.beam.sdk.testing.UsesTriggeredSideInputs'
+          return
         }
-      }
+        if (mode == "batch" || mode == "batch-dataset") {
+            excludeCategories 'org.apache.beam.sdk.testing.UsesTriggeredSideInputs'
+        }
+        excludeCategories 'org.apache.beam.sdk.testing.UsesUnboundedSplittableParDo'
+        excludeCategories 'org.apache.beam.sdk.testing.UsesUnboundedPCollections'
+        excludeCategories 'org.apache.beam.sdk.testing.UsesTestStream'
+        excludeCategories 'org.apache.beam.sdk.testing.UsesPerKeyOrderedDelivery'
+        excludeCategories 'org.apache.beam.sdk.testing.UsesPerKeyOrderInBundle'
     },
     testFilter: {
-      // TODO(BEAM-10016)
+      // Flink reshuffle override does not preserve all metadata
+      excludeTestsMatching 'org.apache.beam.sdk.transforms.ReshuffleTest.testReshufflePreservesMetadata'
+      // TODO(https://github.com/apache/beam/issues/31231)
+      excludeTestsMatching 'org.apache.beam.sdk.transforms.RedistributeTest.testRedistributePreservesMetadata'
+      // TODO(https://github.com/apache/beam/issues/20269)
       excludeTestsMatching 'org.apache.beam.sdk.transforms.FlattenTest.testFlattenWithDifferentInputAndOutputCoders2'
-      // TODO(BEAM-12039)
+      // TODO(https://github.com/apache/beam/issues/20843)
       excludeTestsMatching 'org.apache.beam.sdk.testing.TestStreamTest.testDiscardingMode'
-      // TODO(BEAM-12038)
+      // TODO(https://github.com/apache/beam/issues/20844)
       excludeTestsMatching 'org.apache.beam.sdk.testing.TestStreamTest.testLateDataAccumulating'
       // TODO(BEAM-12710)
       excludeTestsMatching 'org.apache.beam.sdk.testing.TestStreamTest.testFirstElementLate'
+      // TODO(BEAM-13498)
+      excludeTestsMatching 'org.apache.beam.sdk.transforms.ParDoTest$TimestampTests.testProcessElementSkew'
+      // TODO(https://github.com/apache/beam/issues/21472)
+      excludeTestsMatching 'org.apache.beam.sdk.transforms.GroupByKeyTest$BasicTests.testAfterProcessingTimeContinuationTriggerUsingState'
     },
   )
 }
 
-project.ext.validatesPortableRunnerBatch = portableValidatesRunnerTask("Batch", false, false)
-project.ext.validatesPortableRunnerStreaming = portableValidatesRunnerTask("Streaming", true, false)
-project.ext.validatesPortableRunnerStreamingCheckpoint = portableValidatesRunnerTask("StreamingCheckpointing", true, true)
+project.ext.validatesPortableRunnerDocker = portableValidatesRunnerTask("Docker", "batch", false, true)
+project.ext.validatesPortableRunnerBatchDataSet = portableValidatesRunnerTask("BatchDataSet", "batch-dataset", false, false)
+project.ext.validatesPortableRunnerBatch = portableValidatesRunnerTask("Batch", "batch", false, false)
+project.ext.validatesPortableRunnerStreaming = portableValidatesRunnerTask("Streaming", "streaming", false, false)
+project.ext.validatesPortableRunnerStreamingCheckpoint = portableValidatesRunnerTask("StreamingCheckpointing", "streaming", true, false)
 
-task validatesPortableRunner() {
+tasks.register("validatesPortableRunner") {
+  dependsOn validatesPortableRunnerDocker
+  if (!isFlink2) {
+    dependsOn validatesPortableRunnerBatchDataSet
+  }
   dependsOn validatesPortableRunnerBatch
   dependsOn validatesPortableRunnerStreaming
   dependsOn validatesPortableRunnerStreamingCheckpoint
 }
 
+def flinkJobServerJvmArgs() {
+  def testJavaVer = project.findProperty('testJavaVersion') ? (project.property('testJavaVersion') as int) : JavaVersion.current().majorVersion.toInteger()
+  if (testJavaVer >= 17) {
+    return [
+      "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+      "--add-opens=java.base/java.nio=ALL-UNNAMED",
+      "--add-opens=java.base/java.util=ALL-UNNAMED",
+      "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+      "--add-opens=java.base/java.lang=ALL-UNNAMED",
+      "-Djava.security.manager=allow",
+    ]
+  }
+  return []
+}
+
+[validatesPortableRunnerDocker, validatesPortableRunnerBatchDataSet, validatesPortableRunnerBatch, validatesPortableRunnerStreaming, validatesPortableRunnerStreamingCheckpoint].each { task ->
+  task.configure {
+    jvmArgs += flinkJobServerJvmArgs()
+    systemProperty "beam.validatesRunner.parallelThreads", "1"
+  }
+}
+
 def jobPort = BeamModulePlugin.getRandomPort()
 def artifactPort = BeamModulePlugin.getRandomPort()
 
-def setupTask = project.tasks.create(name: "flinkJobServerSetup", type: Exec) {
+def setupTask = project.tasks.register("flinkJobServerSetup", Exec) {
   dependsOn shadowJar
   def pythonDir = project.project(":sdks:python").projectDir
   def flinkJobServerJar = shadowJar.archivePath
+  def flinkDir = project.project(":runners:flink").projectDir
+  def additionalArgs = ""
+
+  if (project.hasProperty('flinkConfDir')) {
+    additionalArgs += " --flink-conf-dir=${project.property('flinkConfDir')}"
+  }
+  else if (isFlink2) {
+    def flinkConfDir = "$flinkDir/2.0/src/test/resources"
+    additionalArgs += "--flink-conf-dir=${project.buildDir}/flink-conf"
+
+    doFirst {
+      copy {
+        from "$flinkDir/2.0/src/test/resources/flink-test-config.yaml"
+        into "${project.buildDir}/flink-conf"
+
+        // Rename the file during the copy process
+        rename 'flink-test-config.yaml', 'config.yaml'
+      }
+    }
+  } else {
+    additionalArgs += "--flink-conf-dir=$flinkDir/src/test/resources"
+  }
 
   executable 'sh'
-  args '-c', "$pythonDir/scripts/run_job_server.sh stop --group_id ${project.name} && $pythonDir/scripts/run_job_server.sh start --group_id ${project.name} --job_port ${jobPort} --artifact_port ${artifactPort} --job_server_jar ${flinkJobServerJar}"
+  def jvmArgs = flinkJobServerJvmArgs().join(' ')
+  def jvmArgsOpt = jvmArgs ? "--jvm_args \"${jvmArgs}\"" : ""
+  args '-c', "$pythonDir/scripts/run_job_server.sh stop --group_id ${project.name} && $pythonDir/scripts/run_job_server.sh start --group_id ${project.name} --job_port ${jobPort} --artifact_port ${artifactPort} --job_server_jar ${flinkJobServerJar} --additional_args \"${additionalArgs}\" ${jvmArgsOpt}"
 }
 
-def cleanupTask = project.tasks.create(name: "flinkJobServerCleanup", type: Exec) {
+def cleanupTask = project.tasks.register("flinkJobServerCleanup", Exec) {
   def pythonDir = project.project(":sdks:python").projectDir
 
   executable 'sh'
@@ -242,6 +323,7 @@ createCrossLanguageValidatesRunnerTask(
     "--environmentCacheMillis=10000",
     "--experiments=beam_fn_api",
     "--parallelism=2",
+    "--customBeamRequirement=${project.project(":sdks:python").projectDir}/build/apache-beam.tar.gz",
   ],
   goScriptOptions: [
     "--runner flink",
@@ -250,11 +332,18 @@ createCrossLanguageValidatesRunnerTask(
   ],
 )
 
+shadowJar {
+    manifest {
+        attributes(["Multi-Release": true])
+    }
+}
+
 // miniCluster jar starts an embedded Flink cluster intended for use in testing.
-task miniCluster(type: Jar, dependsOn: shadowJar) {
+tasks.register("miniCluster", Jar) {
+  dependsOn shadowJar
   archiveBaseName = "${project.archivesBaseName}-mini-cluster"
   dependencies {
-    runtime project(path: flinkRunnerProject, configuration: "miniCluster")
+    runtimeOnly project(path: flinkRunnerProject, configuration: "miniCluster")
   }
   from zipTree(shadowJar.archivePath).matching {
     // If these classes aren't excluded from the mini cluster jar, they will be loaded instead of
@@ -263,8 +352,14 @@ task miniCluster(type: Jar, dependsOn: shadowJar) {
     exclude "**/FlinkPipelineRunner*"
     exclude "**/PortablePipelineJarUtils*"
   }
+  shadowJar {
+    exclude 'META-INF/services/java.net.spi.InetAddressResolverProvider'
+  }
   manifest {
-    attributes('Main-Class': 'org.apache.beam.runners.flink.FlinkMiniClusterEntryPoint')
+    attributes([
+        'Main-Class': 'org.apache.beam.runners.flink.FlinkMiniClusterEntryPoint',
+        'Multi-Release': 'true'
+    ])
   }
   zip64 true // jar needs to contain more than 65535 files
 }

@@ -15,8 +15,6 @@
 # limitations under the License.
 #
 
-# cython: language_level=3
-
 """A library of basic cythonized CombineFn subclasses.
 
 For internal use only; no backwards-compatibility guarantees.
@@ -24,6 +22,7 @@ For internal use only; no backwards-compatibility guarantees.
 
 # pytype: skip-file
 
+# ruff: noqa: UP006
 import operator
 
 from apache_beam.transforms import core
@@ -74,6 +73,9 @@ class CountAccumulator(object):
   def add_input(self, unused_element):
     self.value += 1
 
+  def add_input_n(self, unused_element, n):
+    self.value += n
+
   def merge(self, accumulators):
     for accumulator in accumulators:
       self.value += accumulator.value
@@ -92,6 +94,13 @@ class SumInt64Accumulator(object):
     if not INT64_MIN <= element <= INT64_MAX:
       raise OverflowError(element)
     self.value += element
+
+  def add_input_n(self, element, n):
+    global INT64_MAX, INT64_MIN  # pylint: disable=global-variable-not-assigned
+    element = int(element)
+    if not INT64_MIN <= element <= INT64_MAX:
+      raise OverflowError(element)
+    self.value += element * n
 
   def merge(self, accumulators):
     for accumulator in accumulators:
@@ -116,6 +125,9 @@ class MinInt64Accumulator(object):
     if element < self.value:
       self.value = element
 
+  def add_input_n(self, element, unused_n):
+    self.add_input(element)
+
   def merge(self, accumulators):
     for accumulator in accumulators:
       if accumulator.value < self.value:
@@ -135,6 +147,9 @@ class MaxInt64Accumulator(object):
       raise OverflowError(element)
     if element > self.value:
       self.value = element
+
+  def add_input_n(self, element, unused_n):
+    self.add_input(element)
 
   def merge(self, accumulators):
     for accumulator in accumulators:
@@ -156,6 +171,13 @@ class MeanInt64Accumulator(object):
       raise OverflowError(element)
     self.sum += element
     self.count += 1
+
+  def add_input_n(self, element, n):
+    element = int(element)
+    if not INT64_MIN <= element <= INT64_MAX:
+      raise OverflowError(element)
+    self.sum += element * n
+    self.count += n
 
   def merge(self, accumulators):
     for accumulator in accumulators:
@@ -183,6 +205,15 @@ class DistributionInt64Accumulator(object):
       raise OverflowError(element)
     self.sum += element
     self.count += 1
+    self.min = min(self.min, element)
+    self.max = max(self.max, element)
+
+  def add_input_n(self, element, n):
+    element = int(element)
+    if not INT64_MIN <= element <= INT64_MAX:
+      raise OverflowError(element)
+    self.sum += element * n
+    self.count += n
     self.min = min(self.min, element)
     self.max = max(self.max, element)
 

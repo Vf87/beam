@@ -20,6 +20,11 @@ package org.apache.beam.sdk.io.aws2.kinesis;
 import java.io.Serializable;
 import java.util.List;
 import java.util.function.Supplier;
+import org.apache.beam.sdk.util.BackOff;
+import org.apache.beam.sdk.util.BackOffUtils;
+import org.apache.beam.sdk.util.FluentBackoff;
+import org.apache.beam.sdk.util.Sleeper;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.joda.time.Duration;
 
 /**
@@ -36,6 +41,16 @@ public interface RateLimitPolicyFactory extends Serializable {
     return () -> new RateLimitPolicy() {};
   }
 
+  static RateLimitPolicyFactory withDefaultRateLimiter() {
+    return withDefaultRateLimiter(
+        Duration.millis(100), Duration.millis(500), Duration.standardSeconds(1));
+  }
+
+  static RateLimitPolicyFactory withDefaultRateLimiter(
+      Duration emptySuccessBaseDelay, Duration throttledBaseDelay, Duration maxDelay) {
+    return () -> new DefaultRateLimiter(emptySuccessBaseDelay, throttledBaseDelay, maxDelay);
+  }
+
   static RateLimitPolicyFactory withFixedDelay() {
     return DelayIntervalRateLimiter::new;
   }
@@ -50,12 +65,14 @@ public interface RateLimitPolicyFactory extends Serializable {
 
   class DelayIntervalRateLimiter implements RateLimitPolicy {
 
-    private static final Supplier<Duration> DEFAULT_DELAY = () -> Duration.standardSeconds(1);
+    private static Duration defaultDelay() {
+      return Duration.standardSeconds(1);
+    }
 
     private final Supplier<Duration> delay;
 
     public DelayIntervalRateLimiter() {
-      this(DEFAULT_DELAY);
+      this(DelayIntervalRateLimiter::defaultDelay);
     }
 
     public DelayIntervalRateLimiter(Supplier<Duration> delay) {
@@ -65,6 +82,55 @@ public interface RateLimitPolicyFactory extends Serializable {
     @Override
     public void onSuccess(List<KinesisRecord> records) throws InterruptedException {
       Thread.sleep(delay.get().getMillis());
+    }
+  }
+
+  /**
+   * Default rate limiter that throttles reading from a shard using an exponential backoff if the
+   * response is empty or if the consumer is throttled by AWS.
+   */
+  class DefaultRateLimiter implements RateLimitPolicy {
+    private final Sleeper sleeper;
+    private final BackOff emptySuccess;
+    private final BackOff throttled;
+
+    @VisibleForTesting
+    DefaultRateLimiter(BackOff emptySuccess, BackOff throttled, Sleeper sleeper) {
+      this.emptySuccess = emptySuccess;
+      this.throttled = throttled;
+      this.sleeper = sleeper;
+    }
+
+    public DefaultRateLimiter(BackOff emptySuccess, BackOff throttled) {
+      this(emptySuccess, throttled, Sleeper.DEFAULT);
+    }
+
+    public DefaultRateLimiter(
+        Duration emptySuccessBaseDelay, Duration throttledBaseDelay, Duration maxDelay) {
+      this(
+          FluentBackoff.DEFAULT
+              .withInitialBackoff(emptySuccessBaseDelay)
+              .withMaxBackoff(maxDelay)
+              .backoff(),
+          FluentBackoff.DEFAULT
+              .withInitialBackoff(throttledBaseDelay)
+              .withMaxBackoff(maxDelay)
+              .backoff());
+    }
+
+    @Override
+    public void onSuccess(List<KinesisRecord> records) throws InterruptedException {
+      if (records.isEmpty()) {
+        BackOffUtils.next(sleeper, emptySuccess);
+      } else {
+        emptySuccess.reset();
+      }
+      throttled.reset();
+    }
+
+    @Override
+    public void onThrottle(KinesisClientThrottledException e) throws InterruptedException {
+      BackOffUtils.next(sleeper, throttled);
     }
   }
 }

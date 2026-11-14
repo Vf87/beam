@@ -21,7 +21,9 @@
 # pytype: skip-file
 
 import logging
+import tempfile
 import unittest
+from unittest.mock import MagicMock
 
 from apache_beam.options.pipeline_options import PortableOptions
 from apache_beam.portability import common_urns
@@ -53,7 +55,7 @@ class RunnerApiTest(unittest.TestCase):
                         EmbeddedPythonGrpcEnvironment(),
                         EmbeddedPythonGrpcEnvironment(
                             state_cache_size=0, data_buffer_time_limit_ms=0),
-                        SubprocessSDKEnvironment(command_string=u'foö')):
+                        SubprocessSDKEnvironment(command_string='foö')):
       context = pipeline_context.PipelineContext()
       proto = environment.to_runner_api(context)
       reconstructed = Environment.from_runner_api(proto, context)
@@ -70,6 +72,8 @@ class RunnerApiTest(unittest.TestCase):
         common_urns.sdf_components.TRUNCATE_SIZED_RESTRICTION.urn,
         sdk_capabilities)
     self.assertIn(common_urns.primitives.TO_STRING.urn, sdk_capabilities)
+    self.assertIn(
+        common_urns.protocols.NAMED_DATA_STREAMS.urn, sdk_capabilities)
 
   def test_default_capabilities(self):
     environment = DockerEnvironment.from_options(
@@ -77,10 +81,20 @@ class RunnerApiTest(unittest.TestCase):
     context = pipeline_context.PipelineContext()
     proto = environment.to_runner_api(context)
     self.assertEqual(
-        set(proto.capabilities), set(environments.python_sdk_capabilities()))
+        set(proto.capabilities),
+        set(environments.python_sdk_docker_capabilities()))
 
 
 class EnvironmentOptionsTest(unittest.TestCase):
+  def setUp(self) -> None:
+    self.tmp_dir = tempfile.TemporaryDirectory()
+    self.actual_mkdtemp = tempfile.mkdtemp
+    tempfile.mkdtemp = MagicMock(return_value=self.tmp_dir.name)
+
+  def tearDown(self) -> None:
+    tempfile.mkdtemp = self.actual_mkdtemp
+    self.tmp_dir.cleanup()
+
   def test_process_variables_empty(self):
     options = PortableOptions([
         '--environment_type=PROCESS',

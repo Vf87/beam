@@ -31,6 +31,7 @@ import static org.junit.Assume.assumeTrue;
 
 import java.net.Inet4Address;
 import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.concurrent.CountDownLatch;
@@ -44,21 +45,22 @@ import org.apache.beam.model.pipeline.v1.Endpoints.ApiServiceDescriptor;
 import org.apache.beam.sdk.fn.channel.ManagedChannelFactory;
 import org.apache.beam.sdk.fn.server.ServerFactory;
 import org.apache.beam.sdk.fn.test.TestStreams;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.ManagedChannel;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.Server;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.CallStreamObserver;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.StreamObserver;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.testing.GrpcCleanupRule;
-import org.apache.beam.vendor.grpc.v1p36p0.io.netty.channel.epoll.Epoll;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.net.HostAndPort;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.Uninterruptibles;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.ManagedChannel;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Server;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.CallStreamObserver;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.testing.GrpcCleanupRule;
+import org.apache.beam.vendor.grpc.v1p69p0.io.netty.channel.epoll.Epoll;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.net.HostAndPort;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.Uninterruptibles;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.Timeout;
 
 /** Tests for {@link ServerFactory}. */
 public class ServerFactoryTest {
-
+  @Rule public transient Timeout globalTimeout = Timeout.seconds(600);
   private static final BeamFnApi.Elements CLIENT_DATA =
       BeamFnApi.Elements.newBuilder()
           .addData(BeamFnApi.Elements.Data.newBuilder().setInstructionId("1"))
@@ -98,9 +100,14 @@ public class ServerFactoryTest {
 
   @Test
   public void defaultServerWithPortSupplier() throws Exception {
+    int port;
+    try (ServerSocket socket = new ServerSocket(0)) {
+      port = socket.getLocalPort();
+    }
+    int staticPort = port;
     Endpoints.ApiServiceDescriptor apiServiceDescriptor =
         runTestUsing(
-            ServerFactory.createWithPortSupplier(() -> 65535),
+            ServerFactory.createWithPortSupplier(() -> staticPort),
             ManagedChannelFactory.createDefault());
     HostAndPort hostAndPort = HostAndPort.fromString(apiServiceDescriptor.getUrl());
     assertThat(
@@ -108,21 +115,26 @@ public class ServerFactoryTest {
         anyOf(
             equalTo(InetAddress.getLoopbackAddress().getHostName()),
             equalTo(InetAddress.getLoopbackAddress().getHostAddress())));
-    assertThat(hostAndPort.getPort(), is(65535));
+    assertThat(hostAndPort.getPort(), is(staticPort));
   }
 
   @Test
   public void urlFactoryWithPortSupplier() throws Exception {
+    int port;
+    try (ServerSocket socket = new ServerSocket(0)) {
+      port = socket.getLocalPort();
+    }
+    int staticPort = port;
     ServerFactory serverFactory =
         ServerFactory.createWithUrlFactoryAndPortSupplier(
-            (host, port) -> "foo" + ":" + port, () -> 65535);
+            (host, p) -> "foo" + ":" + p, () -> staticPort);
     CallStreamObserver<Elements> observer =
         TestStreams.withOnNext((Elements unused) -> {}).withOnCompleted(() -> {}).build();
     TestDataService service = new TestDataService(observer);
     ApiServiceDescriptor.Builder descriptorBuilder = ApiServiceDescriptor.newBuilder();
     grpcCleanupRule.register(
         serverFactory.allocateAddressAndCreate(ImmutableList.of(service), descriptorBuilder));
-    assertThat(descriptorBuilder.getUrl(), is("foo:65535"));
+    assertThat(descriptorBuilder.getUrl(), is("foo:" + staticPort));
   }
 
   @Test

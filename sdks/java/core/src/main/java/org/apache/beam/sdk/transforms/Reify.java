@@ -17,11 +17,13 @@
  */
 package org.apache.beam.sdk.transforms;
 
+import io.opentelemetry.context.Context;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
+import org.apache.beam.sdk.values.CausedByDrain;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
@@ -29,6 +31,8 @@ import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.TimestampedValue.TimestampedValueCoder;
 import org.apache.beam.sdk.values.ValueInSingleWindow;
+import org.apache.beam.sdk.values.ValueKind;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 
@@ -36,9 +40,6 @@ import org.joda.time.Instant;
  * {@link PTransform PTransforms} for converting between explicit and implicit form of various Beam
  * values.
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class Reify {
   private static class ReifyView<K, V> extends PTransform<PCollection<K>, PCollection<KV<K, V>>> {
     private final PCollectionView<V> view;
@@ -77,7 +78,7 @@ public class Reify {
     @Override
     public PCollection<V> expand(PBegin input) {
       return input
-          .apply(Create.of((Void) null).withCoder(VoidCoder.of()))
+          .apply(Create.<@Nullable Void>of((@Nullable Void) null).withCoder(VoidCoder.of()))
           .apply(Reify.viewAsValues(view, coder))
           .apply(Values.create());
     }
@@ -95,12 +96,12 @@ public class Reify {
                     @ProcessElement
                     public void processElement(
                         @Element T element,
-                        @Timestamp Instant timestamp,
+                        @DoFn.Timestamp Instant timestamp,
                         BoundedWindow window,
-                        PaneInfo pane,
+                        PaneInfo paneInfo,
                         OutputReceiver<ValueInSingleWindow<T>> r) {
                       r.outputWithTimestamp(
-                          ValueInSingleWindow.of(element, timestamp, window, pane), timestamp);
+                          ValueInSingleWindow.of(element, timestamp, window, paneInfo), timestamp);
                     }
                   }))
           .setCoder(
@@ -120,7 +121,7 @@ public class Reify {
                     @ProcessElement
                     public void processElement(
                         @Element T element,
-                        @Timestamp Instant timestamp,
+                        @DoFn.Timestamp Instant timestamp,
                         OutputReceiver<TimestampedValue<T>> r) {
                       r.output(TimestampedValue.of(element, timestamp));
                     }
@@ -136,19 +137,33 @@ public class Reify {
       KvCoder<K, V> coder = (KvCoder<K, V>) input.getCoder();
       return input
           .apply(
+              // todo #33176 specify additional metadata in the future
               ParDo.of(
                   new DoFn<KV<K, V>, KV<K, ValueInSingleWindow<V>>>() {
                     @ProcessElement
                     public void processElement(
+                        ProcessContext pc,
                         @Element KV<K, V> element,
-                        @Timestamp Instant timestamp,
+                        @DoFn.Timestamp Instant timestamp,
                         BoundedWindow window,
-                        PaneInfo pane,
+                        PaneInfo paneInfo,
+                        CausedByDrain causedByDrain,
+                        ValueKind valueKind,
                         OutputReceiver<KV<K, ValueInSingleWindow<V>>> r) {
                       r.output(
                           KV.of(
                               element.getKey(),
-                              ValueInSingleWindow.of(element.getValue(), timestamp, window, pane)));
+                              ValueInSingleWindow.of(
+                                  element.getValue(),
+                                  timestamp,
+                                  window,
+                                  paneInfo,
+                                  pc.currentRecordId(),
+                                  pc.currentRecordOffset(),
+                                  causedByDrain,
+                                  Context
+                                      .current(), // Otel context is not exposed via process context
+                                  valueKind)));
                     }
                   }))
           .setCoder(
@@ -172,7 +187,7 @@ public class Reify {
                     @ProcessElement
                     public void processElement(
                         @Element KV<K, V> element,
-                        @Timestamp Instant timestamp,
+                        @DoFn.Timestamp Instant timestamp,
                         OutputReceiver<KV<K, TimestampedValue<V>>> r) {
                       r.output(
                           KV.of(
@@ -271,7 +286,7 @@ public class Reify {
    * Returns a {@link PCollection} consisting of a single element, containing the value of the given
    * view in the global window.
    */
-  public static <K, V> PTransform<PBegin, PCollection<V>> viewInGlobalWindow(
+  public static <V> PTransform<PBegin, PCollection<V>> viewInGlobalWindow(
       PCollectionView<V> view, Coder<V> coder) {
     return new ReifyViewInGlobalWindow<>(view, coder);
   }

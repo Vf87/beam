@@ -19,8 +19,9 @@ package org.apache.beam.sdk.nexmark;
 
 import static org.apache.beam.sdk.nexmark.NexmarkQueryName.PORTABILITY_BATCH;
 import static org.apache.beam.sdk.nexmark.NexmarkUtils.PubSubMode.COMBINED;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.sdk.nexmark.queries.sql.SqlQueryUtils.createSqlQueries;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableRow;
@@ -36,7 +37,7 @@ import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
-import org.apache.beam.sdk.io.AvroIO;
+import org.apache.beam.sdk.extensions.avro.io.AvroIO;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
@@ -62,6 +63,7 @@ import org.apache.beam.sdk.nexmark.queries.Query10;
 import org.apache.beam.sdk.nexmark.queries.Query11;
 import org.apache.beam.sdk.nexmark.queries.Query12;
 import org.apache.beam.sdk.nexmark.queries.Query13;
+import org.apache.beam.sdk.nexmark.queries.Query14;
 import org.apache.beam.sdk.nexmark.queries.Query1Model;
 import org.apache.beam.sdk.nexmark.queries.Query2;
 import org.apache.beam.sdk.nexmark.queries.Query2Model;
@@ -81,12 +83,6 @@ import org.apache.beam.sdk.nexmark.queries.Query9;
 import org.apache.beam.sdk.nexmark.queries.Query9Model;
 import org.apache.beam.sdk.nexmark.queries.SessionSideInputJoin;
 import org.apache.beam.sdk.nexmark.queries.SessionSideInputJoinModel;
-import org.apache.beam.sdk.nexmark.queries.sql.SqlBoundedSideInputJoin;
-import org.apache.beam.sdk.nexmark.queries.sql.SqlQuery0;
-import org.apache.beam.sdk.nexmark.queries.sql.SqlQuery1;
-import org.apache.beam.sdk.nexmark.queries.sql.SqlQuery2;
-import org.apache.beam.sdk.nexmark.queries.sql.SqlQuery3;
-import org.apache.beam.sdk.nexmark.queries.sql.SqlQuery7;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testutils.metrics.MetricsReader;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -100,12 +96,12 @@ import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.sdk.values.TypeDescriptors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Splitter;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Maps;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Splitter;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Maps;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
@@ -113,36 +109,35 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
-import org.slf4j.LoggerFactory;
 
 /** Run a single Nexmark query using a given configuration. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class NexmarkLauncher<OptionT extends NexmarkOptions> {
-
-  private static final org.slf4j.Logger LOG = LoggerFactory.getLogger(NexmarkLauncher.class);
 
   /** Command line parameter value for query language. */
   private static final String SQL = "sql";
 
-  /** Command line parameter value for zetasql language. */
-  private static final String ZETA_SQL = "zetasql";
-
   /** Minimum number of samples needed for 'stead-state' rate calculation. */
   private static final int MIN_SAMPLES = 9;
+
   /** Minimum length of time over which to consider samples for 'steady-state' rate calculation. */
   private static final Duration MIN_WINDOW = Duration.standardMinutes(2);
+
   /** Delay between perf samples. */
   private static final Duration PERF_DELAY = Duration.standardSeconds(15);
+
   /**
    * How long to let streaming pipeline run after all events have been generated and we've seen no
    * activity.
    */
   private static final Duration DONE_DELAY = Duration.standardMinutes(1);
+
   /** How long to allow no activity at sources and sinks without warning. */
   private static final Duration STUCK_WARNING_DELAY = Duration.standardMinutes(10);
+
   /**
    * How long to let streaming pipeline run after we've seen no activity at sources or sinks, even
    * if all events have not been generated.
@@ -525,9 +520,11 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
         case UNRECOGNIZED:
         case STOPPED:
         case RUNNING:
+        case DRAINING:
           // Keep going.
           break;
         case DONE:
+        case DRAINED:
           // All done.
           running = false;
           break;
@@ -1256,10 +1253,6 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
     return SQL.equalsIgnoreCase(options.getQueryLanguage());
   }
 
-  private boolean isZetaSql() {
-    return ZETA_SQL.equalsIgnoreCase(options.getQueryLanguage());
-  }
-
   private NexmarkQueryModel getNexmarkQueryModel() {
     return models.get(configuration.query);
   }
@@ -1269,7 +1262,7 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
   }
 
   private Map<NexmarkQueryName, NexmarkQueryModel> createQueryModels() {
-    return (isSql() || isZetaSql()) ? createSqlQueryModels() : createJavaQueryModels();
+    return isSql() ? createSqlQueryModels() : createJavaQueryModels();
   }
 
   private Map<NexmarkQueryName, NexmarkQueryModel> createSqlQueryModels() {
@@ -1296,9 +1289,7 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
   private Map<NexmarkQueryName, NexmarkQuery> createQueries() {
     Map<NexmarkQueryName, NexmarkQuery> defaultQueries;
     if (isSql()) {
-      defaultQueries = createSqlQueries();
-    } else if (isZetaSql()) {
-      defaultQueries = createZetaSqlQueries();
+      defaultQueries = createSqlQueries(configuration);
     } else {
       defaultQueries = createJavaQueries();
     }
@@ -1317,60 +1308,6 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
       }
     }
     return skipQueries;
-  }
-
-  private Map<NexmarkQueryName, NexmarkQuery> createSqlQueries() {
-    return ImmutableMap.<NexmarkQueryName, NexmarkQuery>builder()
-        .put(
-            NexmarkQueryName.PASSTHROUGH,
-            new NexmarkQuery(configuration, SqlQuery0.calciteSqlQuery0()))
-        .put(NexmarkQueryName.CURRENCY_CONVERSION, new NexmarkQuery(configuration, new SqlQuery1()))
-        .put(
-            NexmarkQueryName.SELECTION,
-            new NexmarkQuery(configuration, SqlQuery2.calciteSqlQuery2(configuration.auctionSkip)))
-        .put(
-            NexmarkQueryName.LOCAL_ITEM_SUGGESTION,
-            new NexmarkQuery(configuration, SqlQuery3.calciteSqlQuery3(configuration)))
-
-        // SqlQuery5 is disabled for now, uses non-equi-joins,
-        // never worked right, was giving incorrect results.
-        // Gets rejected after PR/8301, causing failures.
-        //
-        // See:
-        //   https://issues.apache.org/jira/browse/BEAM-7072
-        //   https://github.com/apache/beam/pull/8301
-        //   https://github.com/apache/beam/pull/8422#issuecomment-487676350
-        //
-        //        .put(
-        //            NexmarkQueryName.HOT_ITEMS,
-        //            new NexmarkQuery(configuration, new SqlQuery5(configuration)))
-        .put(
-            NexmarkQueryName.HIGHEST_BID,
-            new NexmarkQuery(configuration, new SqlQuery7(configuration)))
-        .put(
-            NexmarkQueryName.BOUNDED_SIDE_INPUT_JOIN,
-            new NexmarkQuery(
-                configuration,
-                SqlBoundedSideInputJoin.calciteSqlBoundedSideInputJoin(configuration)))
-        .build();
-  }
-
-  private Map<NexmarkQueryName, NexmarkQuery> createZetaSqlQueries() {
-    return ImmutableMap.<NexmarkQueryName, NexmarkQuery>builder()
-        .put(
-            NexmarkQueryName.PASSTHROUGH,
-            new NexmarkQuery(configuration, SqlQuery0.zetaSqlQuery0()))
-        .put(
-            NexmarkQueryName.SELECTION,
-            new NexmarkQuery(configuration, SqlQuery2.zetaSqlQuery2(configuration.auctionSkip)))
-        .put(
-            NexmarkQueryName.LOCAL_ITEM_SUGGESTION,
-            new NexmarkQuery(configuration, SqlQuery3.zetaSqlQuery3(configuration)))
-        .put(
-            NexmarkQueryName.BOUNDED_SIDE_INPUT_JOIN,
-            new NexmarkQuery(
-                configuration, SqlBoundedSideInputJoin.zetaSqlBoundedSideInputJoin(configuration)))
-        .build();
   }
 
   private Map<NexmarkQueryName, NexmarkQuery> createJavaQueries() {
@@ -1417,6 +1354,8 @@ public class NexmarkLauncher<OptionT extends NexmarkOptions> {
         .put(
             NexmarkQueryName.PORTABILITY_BATCH,
             new NexmarkQuery(configuration, new Query13(configuration)))
+        .put(
+            NexmarkQueryName.RESHUFFLE, new NexmarkQuery(configuration, new Query14(configuration)))
         .build();
   }
 

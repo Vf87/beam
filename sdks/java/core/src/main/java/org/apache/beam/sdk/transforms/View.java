@@ -28,8 +28,10 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.io.range.OffsetRange;
+import org.apache.beam.sdk.options.StreamingOptions;
 import org.apache.beam.sdk.runners.TransformHierarchy.Node;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
 import org.apache.beam.sdk.util.CoderUtils;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
@@ -131,7 +133,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * inside a {@link ParDo} over another {@link PCollection}.
  */
 @SuppressWarnings({
-  "nullness", // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness", // TODO(https://github.com/apache/beam/issues/20497)
   "rawtypes"
 })
 public class View {
@@ -173,7 +175,7 @@ public class View {
    * <p>Some runners may require that the view fits in memory.
    */
   public static <T> AsList<T> asList() {
-    return new AsList<>();
+    return new AsList<>(null, false);
   }
 
   /**
@@ -205,7 +207,7 @@ public class View {
    * <p>Some runners may require that the view fits in memory.
    */
   public static <K, V> AsMap<K, V> asMap() {
-    return new AsMap<>();
+    return new AsMap<>(false);
   }
 
   /**
@@ -223,7 +225,7 @@ public class View {
    * <p>Some runners may require that the view fits in memory.
    */
   public static <K, V> AsMultimap<K, V> asMultimap() {
-    return new AsMultimap<>();
+    return new AsMultimap<>(false);
   }
 
   /**
@@ -235,7 +237,55 @@ public class View {
    */
   @Internal
   public static class AsList<T> extends PTransform<PCollection<T>, PCollectionView<List<T>>> {
-    private AsList() {}
+    private final @Nullable Boolean withRandomAccess;
+    private final boolean inMemory;
+
+    private AsList(@Nullable Boolean withRandomAccess, boolean inMemory) {
+      this.withRandomAccess = withRandomAccess;
+      this.inMemory = inMemory;
+    }
+
+    /**
+     * Returns a PCollection view like this one, but whose resulting list will have RandomAccess
+     * (aka fast indexing).
+     *
+     * <p>A veiw with random access will be much more expensive to compute and iterate over, but
+     * will have a faster get() method.
+     */
+    public AsList<T> withRandomAccess() {
+      return withRandomAccess(true);
+    }
+
+    /**
+     * Returns a PCollection view like this one, but whose resulting list will have RandomAccess
+     * (aka fast indexing) according to the input parameter.
+     *
+     * <p>A veiw with random access will be much more expensive to compute and iterate over, but
+     * will have a faster get() method.
+     */
+    public AsList<T> withRandomAccess(boolean withRandomAccess) {
+      return new AsList<>(withRandomAccess, inMemory);
+    }
+
+    /**
+     * Returns a PCollection view like this one, but whose resulting list will be entirely cached in
+     * memory.
+     *
+     * <p>This may use more memory in exchange for the fastest access when used repeatedly.
+     */
+    public AsList<T> inMemory() {
+      return inMemory(true);
+    }
+
+    /**
+     * Returns a PCollection view like this one, but whose resulting list will be entirely cached in
+     * memory according to the input parameter.
+     *
+     * <p>This may use more memory in exchange for the fastest access when used repeatedly.
+     */
+    public AsList<T> inMemory(boolean inMemory) {
+      return new AsList<>(withRandomAccess, inMemory);
+    }
 
     @Override
     public PCollectionView<List<T>> expand(PCollection<T> input) {
@@ -244,7 +294,68 @@ public class View {
       } catch (IllegalStateException e) {
         throw new IllegalStateException("Unable to create a side-input view from input", e);
       }
+      boolean explicitWithRandomAccess =
+          withRandomAccess != null
+              ? withRandomAccess
+              : StreamingOptions.updateCompatibilityVersionLessThan(
+                  input.getPipeline().getOptions(), "2.57.0");
+      if (inMemory) {
+        return expandInMemory(input);
+      } else if (explicitWithRandomAccess
+          || !(input.getWindowingStrategy().getWindowFn() instanceof GlobalWindows)) {
+        return expandWithRandomAccess(input);
+      } else {
+        return expandWithoutRandomAccess(input);
+      }
+    }
 
+    private PCollectionView<List<T>> expandInMemory(PCollection<T> input) {
+      if (input.getWindowingStrategy().getWindowFn() instanceof GlobalWindows) {
+        // HACK to work around https://github.com/apache/beam/issues/20873:
+        // There are bugs in "composite" vs "primitive" transform distinction
+        // in TransformHierachy. This noop transform works around them and should be zero
+        // cost.
+        PCollection<T> materializationInput =
+            input.apply(MapElements.via(new SimpleFunction<T, T>(x -> x) {}));
+        PCollectionView<List<T>> view =
+            PCollectionViews.inMemoryListView(
+                materializationInput,
+                (TypeDescriptorSupplier<T>) input.getCoder()::getEncodedTypeDescriptor,
+                materializationInput.getWindowingStrategy());
+        materializationInput.apply(CreatePCollectionView.of(view));
+        return view;
+      } else {
+        PCollection<KV<Void, T>> materializationInput =
+            input.apply(
+                MapElements.via(new SimpleFunction<T, KV<Void, T>>(x -> KV.of(null, x)) {}));
+        PCollectionView<List<T>> view =
+            PCollectionViews.inMemoryListViewUsingVoidKey(
+                materializationInput,
+                (TypeDescriptorSupplier<T>) input.getCoder()::getEncodedTypeDescriptor,
+                materializationInput.getWindowingStrategy());
+        materializationInput.apply(CreatePCollectionView.of(view));
+        return view;
+      }
+    }
+
+    private PCollectionView<List<T>> expandWithoutRandomAccess(PCollection<T> input) {
+      Coder<T> inputCoder = input.getCoder();
+      // HACK to work around https://github.com/apache/beam/issues/20873:
+      // There are bugs in "composite" vs "primitive" transform distinction
+      // in TransformHierachy. This noop transform works around them and should be zero
+      // cost.
+      PCollection<T> materializationInput =
+          input.apply(MapElements.via(new SimpleFunction<T, T>(x -> x) {}));
+      PCollectionView<List<T>> view =
+          PCollectionViews.listView(
+              materializationInput,
+              (TypeDescriptorSupplier<T>) inputCoder::getEncodedTypeDescriptor,
+              materializationInput.getWindowingStrategy());
+      materializationInput.apply(CreatePCollectionView.of(view));
+      return view;
+    }
+
+    private PCollectionView<List<T>> expandWithRandomAccess(PCollection<T> input) {
       /**
        * The materialized format uses {@link Materializations#MULTIMAP_MATERIALIZATION_URN multimap}
        * access pattern where the key is a position and the index of the value in the iterable is a
@@ -266,7 +377,7 @@ public class View {
                       BigEndianLongCoder.of(),
                       ValueOrMetadataCoder.create(inputCoder, OffsetRange.Coder.of())));
       PCollectionView<List<T>> view =
-          PCollectionViews.listView(
+          PCollectionViews.listViewWithRandomAccess(
               materializationInput,
               (TypeDescriptorSupplier<T>) inputCoder::getEncodedTypeDescriptor,
               materializationInput.getWindowingStrategy());
@@ -331,7 +442,7 @@ public class View {
       }
 
       Coder<T> inputCoder = input.getCoder();
-      // HACK to work around https://issues.apache.org/jira/browse/BEAM-12228:
+      // HACK to work around https://github.com/apache/beam/issues/20873:
       // There are bugs in "composite" vs "primitive" transform distinction
       // in TransformHierachy. This noop transform works around them and should be zero
       // cost.
@@ -391,7 +502,6 @@ public class View {
       } catch (IllegalStateException e) {
         throw new IllegalStateException("Unable to create a side-input view from input", e);
       }
-
       Combine.Globally<T, T> singletonCombine =
           Combine.globally(new SingletonCombineFn<>(hasDefault, input.getCoder(), defaultValue));
       if (!hasDefault) {
@@ -401,7 +511,7 @@ public class View {
     }
   }
 
-  private static class SingletonCombineFn<T> extends Combine.BinaryCombineFn<T> {
+  private static final class SingletonCombineFn<T> extends Combine.BinaryCombineFn<T> {
     private final boolean hasDefault;
     private final @Nullable Coder<T> valueCoder;
     private final byte @Nullable [] defaultValue;
@@ -468,7 +578,33 @@ public class View {
   @Internal
   public static class AsMultimap<K, V>
       extends PTransform<PCollection<KV<K, V>>, PCollectionView<Map<K, Iterable<V>>>> {
-    private AsMultimap() {}
+    private final boolean inMemory;
+
+    private AsMultimap(boolean inMemory) {
+      this.inMemory = inMemory;
+    }
+
+    /**
+     * Returns a PCollection view like this one, but whose resulting map will be entirely cached in
+     * memory.
+     *
+     * <p>This may use more memory in exchange for the fastest access when used repeatedly,
+     * especially when the majority of keys are expected to be used.
+     */
+    public AsMultimap<K, V> inMemory() {
+      return inMemory(true);
+    }
+
+    /**
+     * Returns a PCollection view like this one, but whose resulting map will be entirely cached in
+     * memory according to the input parameter.
+     *
+     * <p>This may use more memory in exchange for the fastest access when used repeatedly,
+     * especially when the majority of keys are expected to be used.
+     */
+    public AsMultimap<K, V> inMemory(boolean inMemory) {
+      return new AsMultimap<>(inMemory);
+    }
 
     @Override
     public PCollectionView<Map<K, Iterable<V>>> expand(PCollection<KV<K, V>> input) {
@@ -481,18 +617,43 @@ public class View {
       KvCoder<K, V> kvCoder = (KvCoder<K, V>) input.getCoder();
       Coder<K> keyCoder = kvCoder.getKeyCoder();
       Coder<V> valueCoder = kvCoder.getValueCoder();
-      // HACK to work around https://issues.apache.org/jira/browse/BEAM-12228:
+      // HACK to work around https://github.com/apache/beam/issues/20873:
       // There are bugs in "composite" vs "primitive" transform distinction
       // in TransformHierachy. This noop transform works around them and should be zero
       // cost.
       PCollection<KV<K, V>> materializationInput =
           input.apply(MapElements.via(new SimpleFunction<KV<K, V>, KV<K, V>>(x -> x) {}));
-      PCollectionView<Map<K, Iterable<V>>> view =
-          PCollectionViews.multimapView(
-              materializationInput,
-              (TypeDescriptorSupplier<K>) keyCoder::getEncodedTypeDescriptor,
-              (TypeDescriptorSupplier<V>) valueCoder::getEncodedTypeDescriptor,
-              materializationInput.getWindowingStrategy());
+      PCollectionView<Map<K, Iterable<V>>> view;
+      if (inMemory) {
+        if (input.getWindowingStrategy().getWindowFn() instanceof GlobalWindows) {
+          view =
+              PCollectionViews.inMemoryMultimapView(
+                  materializationInput,
+                  keyCoder,
+                  valueCoder,
+                  materializationInput.getWindowingStrategy());
+        } else {
+          PCollection<KV<Void, KV<K, V>>> voidKeyMaterializationInput =
+              input.apply(
+                  MapElements.via(
+                      new SimpleFunction<KV<K, V>, KV<Void, KV<K, V>>>(kv -> KV.of(null, kv)) {}));
+          view =
+              PCollectionViews.inMemoryMultimapViewUsingVoidKey(
+                  voidKeyMaterializationInput,
+                  keyCoder,
+                  valueCoder,
+                  voidKeyMaterializationInput.getWindowingStrategy());
+          voidKeyMaterializationInput.apply(CreatePCollectionView.of(view));
+          return view;
+        }
+      } else {
+        view =
+            PCollectionViews.multimapView(
+                materializationInput,
+                (TypeDescriptorSupplier<K>) keyCoder::getEncodedTypeDescriptor,
+                (TypeDescriptorSupplier<V>) valueCoder::getEncodedTypeDescriptor,
+                materializationInput.getWindowingStrategy());
+      }
       input.apply(CreatePCollectionView.of(view));
       return view;
     }
@@ -508,9 +669,37 @@ public class View {
   @Internal
   public static class AsMap<K, V>
       extends PTransform<PCollection<KV<K, V>>, PCollectionView<Map<K, V>>> {
-    private AsMap() {}
+    private final boolean inMemory;
 
-    /** @deprecated this method simply returns this AsMap unmodified */
+    private AsMap(boolean inMemory) {
+      this.inMemory = inMemory;
+    }
+
+    /**
+     * Returns a PCollection view like this one, but whose resulting map will be entirely cached in
+     * memory.
+     *
+     * <p>This may use more memory in exchange for the fastest access when used repeatedly,
+     * especially when the majority of keys are expected to be used.
+     */
+    public AsMap<K, V> inMemory() {
+      return inMemory(true);
+    }
+
+    /**
+     * Returns a PCollection view like this one, but whose resulting map will be entirely cached in
+     * memory according to the input parameter.
+     *
+     * <p>This may use more memory in exchange for the fastest access when used repeatedly,
+     * especially when the majority of keys are expected to be used.
+     */
+    public AsMap<K, V> inMemory(boolean inMemory) {
+      return new AsMap<>(inMemory);
+    }
+
+    /**
+     * @deprecated this method simply returns this AsMap unmodified
+     */
     @Deprecated()
     public AsMap<K, V> withSingletonValues() {
       return this;
@@ -530,12 +719,40 @@ public class View {
 
       PCollection<KV<K, V>> materializationInput =
           input.apply(MapElements.via(new SimpleFunction<KV<K, V>, KV<K, V>>(x -> x) {}));
-      PCollectionView<Map<K, V>> view =
-          PCollectionViews.mapView(
-              materializationInput,
-              (TypeDescriptorSupplier<K>) keyCoder::getEncodedTypeDescriptor,
-              (TypeDescriptorSupplier<V>) valueCoder::getEncodedTypeDescriptor,
-              materializationInput.getWindowingStrategy());
+      PCollectionView<Map<K, V>> view;
+      if (inMemory) {
+        if (input.getWindowingStrategy().getWindowFn() instanceof GlobalWindows) {
+          view =
+              PCollectionViews.inMemoryMapView(
+                  materializationInput,
+                  keyCoder,
+                  valueCoder,
+                  materializationInput.getWindowingStrategy());
+        } else {
+          PCollection<KV<Void, KV<K, V>>> voidKeyMaterializationInput =
+              input.apply(
+                  MapElements.via(
+                      new SimpleFunction<KV<K, V>, KV<Void, KV<K, V>>>(kv -> KV.of(null, kv)) {}));
+          view =
+              PCollectionViews.inMemoryMapViewUsingVoidKey(
+                  materializationInput.apply(
+                      MapElements.via(
+                          new SimpleFunction<KV<K, V>, KV<Void, KV<K, V>>>(
+                              kv -> KV.of(null, kv)) {})),
+                  keyCoder,
+                  valueCoder,
+                  voidKeyMaterializationInput.getWindowingStrategy());
+          voidKeyMaterializationInput.apply(CreatePCollectionView.of(view));
+          return view;
+        }
+      } else {
+        view =
+            PCollectionViews.mapView(
+                materializationInput,
+                (TypeDescriptorSupplier<K>) keyCoder::getEncodedTypeDescriptor,
+                (TypeDescriptorSupplier<V>) valueCoder::getEncodedTypeDescriptor,
+                materializationInput.getWindowingStrategy());
+      }
       input.apply(CreatePCollectionView.of(view));
       return view;
     }

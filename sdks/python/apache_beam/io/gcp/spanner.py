@@ -99,6 +99,7 @@ __all__ = [
     'SpannerUpdate',
     'TimestampBoundMode',
     'TimeUnit',
+    'ReadChangeStreamFromSpanner',
 ]
 
 
@@ -124,6 +125,11 @@ class TimestampBoundMode(Enum):
   STRONG = auto()
 
 
+class FailureMode(Enum):
+  FAIL_FAST = auto()
+  REPORT_FAILURES = auto()
+
+
 class ReadFromSpannerSchema(NamedTuple):
   instance_id: str
   database_id: str
@@ -138,6 +144,20 @@ class ReadFromSpannerSchema(NamedTuple):
   read_timestamp: Optional[str]
   staleness: Optional[int]
   time_unit: Optional[str]
+
+
+class ReadChangeStreamFromSpannerSchema(NamedTuple):
+  instance_id: str
+  database_id: str
+  project_id: str
+  changeStreamName: str
+  inclusiveStartAt: str
+  inclusiveEndAt: Optional[str]
+  metadataDatabase: str
+  metadataInstance: str
+  metadataTable: Optional[str]
+  rpcPriority: Optional[str]
+  watermarkRefreshRate: Optional[str]
 
 
 class ReadFromSpanner(ExternalTransform):
@@ -173,7 +193,7 @@ class ReadFromSpanner(ExternalTransform):
   Experimental; no backwards compatibility guarantees.
   """
 
-  URN = 'beam:external:java:spanner:read:v1'
+  URN = 'beam:transform:org.apache.beam:spanner_read:v1'
 
   def __init__(
       self,
@@ -282,6 +302,8 @@ class WriteToSpannerSchema(NamedTuple):
   emulator_host: Optional[str]
   commit_deadline: Optional[int]
   max_cumulative_backoff: Optional[int]
+  failure_mode: Optional[str]
+  high_priority: bool
 
 
 _CLASS_DOC = \
@@ -346,6 +368,11 @@ _INIT_DOC = \
       (15min). If the mutations still have not been written after this time,
       they are treated as a failure, and handled according to the setting of
       failure_mode. Pass seconds as value.
+  :param failure_mode: Specifies the behavior for mutations that fail to be
+      written to Spanner. Default is FAIL_FAST. When FAIL_FAST is set,
+      an exception will be thrown for any failed mutation. When REPORT_FAILURES
+      is set, processing will continue instead of throwing an exception. Note
+      that REPORT_FAILURES can cause data loss if used incorrectly.
   :param expansion_service: The address (host:port) of the ExpansionService.
   """
 
@@ -375,7 +402,7 @@ def _add_doc(
 )
 class SpannerDelete(ExternalTransform):
 
-  URN = 'beam:external:java:spanner:delete:v1'
+  URN = 'beam:transform:org.apache.beam:spanner_delete:v1'
 
   @_add_doc(_INIT_DOC, operation='a delete')
   def __init__(
@@ -392,7 +419,9 @@ class SpannerDelete(ExternalTransform):
       emulator_host=None,
       commit_deadline=None,
       max_cumulative_backoff=None,
+      failure_mode=None,
       expansion_service=None,
+      high_priority=False,
   ):
     max_cumulative_backoff = int(
         max_cumulative_backoff) if max_cumulative_backoff else None
@@ -413,6 +442,8 @@ class SpannerDelete(ExternalTransform):
                 emulator_host=emulator_host,
                 commit_deadline=commit_deadline,
                 max_cumulative_backoff=max_cumulative_backoff,
+                failure_mode=_get_enum_name(failure_mode),
+                high_priority=high_priority,
             ),
         ),
         expansion_service=expansion_service or default_io_expansion_service(),
@@ -427,7 +458,7 @@ class SpannerDelete(ExternalTransform):
 )
 class SpannerInsert(ExternalTransform):
 
-  URN = 'beam:external:java:spanner:insert:v1'
+  URN = 'beam:transform:org.apache.beam:spanner_insert:v1'
 
   @_add_doc(_INIT_DOC, operation='an insert')
   def __init__(
@@ -445,6 +476,8 @@ class SpannerInsert(ExternalTransform):
       commit_deadline=None,
       max_cumulative_backoff=None,
       expansion_service=None,
+      failure_mode=None,
+      high_priority=False,
   ):
     max_cumulative_backoff = int(
         max_cumulative_backoff) if max_cumulative_backoff else None
@@ -465,6 +498,8 @@ class SpannerInsert(ExternalTransform):
                 emulator_host=emulator_host,
                 commit_deadline=commit_deadline,
                 max_cumulative_backoff=max_cumulative_backoff,
+                failure_mode=_get_enum_name(failure_mode),
+                high_priority=high_priority,
             ),
         ),
         expansion_service=expansion_service or default_io_expansion_service(),
@@ -479,7 +514,7 @@ class SpannerInsert(ExternalTransform):
 )
 class SpannerReplace(ExternalTransform):
 
-  URN = 'beam:external:java:spanner:replace:v1'
+  URN = 'beam:transform:org.apache.beam:spanner_replace:v1'
 
   @_add_doc(_INIT_DOC, operation='a replace')
   def __init__(
@@ -497,6 +532,8 @@ class SpannerReplace(ExternalTransform):
       commit_deadline=None,
       max_cumulative_backoff=None,
       expansion_service=None,
+      failure_mode=None,
+      high_priority=False,
   ):
     max_cumulative_backoff = int(
         max_cumulative_backoff) if max_cumulative_backoff else None
@@ -517,6 +554,8 @@ class SpannerReplace(ExternalTransform):
                 emulator_host=emulator_host,
                 commit_deadline=commit_deadline,
                 max_cumulative_backoff=max_cumulative_backoff,
+                failure_mode=_get_enum_name(failure_mode),
+                high_priority=high_priority,
             ),
         ),
         expansion_service=expansion_service or default_io_expansion_service(),
@@ -531,7 +570,7 @@ class SpannerReplace(ExternalTransform):
 )
 class SpannerInsertOrUpdate(ExternalTransform):
 
-  URN = 'beam:external:java:spanner:insert_or_update:v1'
+  URN = 'beam:transform:org.apache.beam:spanner_insert_or_update:v1'
 
   @_add_doc(_INIT_DOC, operation='an insert-or-update')
   def __init__(
@@ -548,7 +587,9 @@ class SpannerInsertOrUpdate(ExternalTransform):
       emulator_host=None,
       commit_deadline=None,
       max_cumulative_backoff=None,
+      failure_mode=None,
       expansion_service=None,
+      high_priority=False,
   ):
     max_cumulative_backoff = int(
         max_cumulative_backoff) if max_cumulative_backoff else None
@@ -569,6 +610,8 @@ class SpannerInsertOrUpdate(ExternalTransform):
                 emulator_host=emulator_host,
                 commit_deadline=commit_deadline,
                 max_cumulative_backoff=max_cumulative_backoff,
+                failure_mode=_get_enum_name(failure_mode),
+                high_priority=high_priority,
             ),
         ),
         expansion_service=expansion_service or default_io_expansion_service(),
@@ -583,7 +626,7 @@ class SpannerInsertOrUpdate(ExternalTransform):
 )
 class SpannerUpdate(ExternalTransform):
 
-  URN = 'beam:external:java:spanner:update:v1'
+  URN = 'beam:transform:org.apache.beam:spanner_update:v1'
 
   @_add_doc(_INIT_DOC, operation='an update')
   def __init__(
@@ -600,7 +643,9 @@ class SpannerUpdate(ExternalTransform):
       emulator_host=None,
       commit_deadline=None,
       max_cumulative_backoff=None,
+      failure_mode=None,
       expansion_service=None,
+      high_priority=False,
   ):
     max_cumulative_backoff = int(
         max_cumulative_backoff) if max_cumulative_backoff else None
@@ -621,6 +666,96 @@ class SpannerUpdate(ExternalTransform):
                 emulator_host=emulator_host,
                 commit_deadline=commit_deadline,
                 max_cumulative_backoff=max_cumulative_backoff,
+                failure_mode=_get_enum_name(failure_mode),
+                high_priority=high_priority,
+            ),
+        ),
+        expansion_service=expansion_service or default_io_expansion_service(),
+    )
+
+
+class ReadChangeStreamFromSpanner(ExternalTransform):
+  """
+  A PTransform to read Change Streams from Google Cloud Spanner.
+
+  The output of this transform is a PCollection of JSON strings,
+  where each string represents a com.google.cloud.spanner.DataChangeRecord.
+
+  Example:
+
+  with beam.Pipeline(options=pipeline_options) as p:
+    p | "ReadSpannerChangeStream" >> beam_spanner.ReadChangeStreamFromSpanner( 
+        project_id="spanner-project-id", 
+        instance_id="spanner-instance-id", 
+        database_id="spanner-database-id", 
+        changeStreamName="spanner-change-stream", 
+        inclusiveStartAt="2025-05-20T10:00:00Z",
+        metadataDatabase="spanner-metadata-database",
+        metadataInstance="spanner-metadata-instance")
+
+  Experimental; no backwards compatibility guarantees.
+  """
+
+  URN = 'beam:transform:org.apache.beam:spanner_change_stream_reader:v1'
+
+  def __init__(
+      self,
+      project_id,
+      instance_id,
+      database_id,
+      changeStreamName,
+      metadataDatabase,
+      metadataInstance,
+      inclusiveStartAt,
+      inclusiveEndAt=None,
+      metadataTable=None,
+      rpcPriority=None,
+      watermarkRefreshRate=None,
+      expansion_service=None,
+  ):
+    """
+    Reads Change Streams from Google Cloud Spanner.
+    
+    :param project_id: (Required) Specifies the Cloud Spanner project.
+    :param instance_id: (Required) Specifies the Cloud Spanner 
+      instance.
+    :param database_id: (Required) Specifies the Cloud Spanner 
+      database.
+    :param changeStreamName: (Required) The name of the Spanner 
+      change stream to read.
+    :param metadataDatabase: (Required) The database where the 
+      change stream metadata is stored.
+    :param metadataInstance: (Required) The instance where the 
+      change stream metadata database resides.
+    :param inclusiveStartAt: (Required) An inclusive start timestamp 
+      for reading the change stream.
+    :param inclusiveEndAt: (Optional) An inclusive end timestamp for 
+      reading the change stream. If not specified, the stream will be 
+      read indefinitely.
+    :param metadataTable: (Optional) The name of the metadata table used 
+      by the change stream connector. If not specified, a default table 
+      name will be used.
+    :param rpcPriority: (Optional) The RPC priority for Spanner operations. 
+      Can be 'HIGH', 'MEDIUM', or 'LOW'.
+    :param watermarkRefreshRate: (Optional) The duration at which the 
+      watermark is refreshed.
+    """
+
+    super().__init__(
+        self.URN,
+        NamedTupleBasedPayloadBuilder(
+            ReadChangeStreamFromSpannerSchema(
+                instance_id=instance_id,
+                database_id=database_id,
+                project_id=project_id,
+                changeStreamName=changeStreamName,
+                inclusiveStartAt=inclusiveStartAt,
+                inclusiveEndAt=inclusiveEndAt,
+                metadataDatabase=metadataDatabase,
+                metadataInstance=metadataInstance,
+                metadataTable=metadataTable,
+                rpcPriority=rpcPriority,
+                watermarkRefreshRate=watermarkRefreshRate,
             ),
         ),
         expansion_service=expansion_service or default_io_expansion_service(),

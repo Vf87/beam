@@ -51,10 +51,12 @@ public class MetricsAccumulator implements SimpleAccumulator<MetricsContainerSte
   }
 
   @Override
+  @SuppressWarnings("ReturnValueIgnored")
   public Accumulator<MetricsContainerStepMap, MetricsContainerStepMap> clone() {
     try {
       super.clone();
     } catch (CloneNotSupportedException ignored) {
+      // Ignore CloneNotSupportedException
     }
     MetricsAccumulator metricsAccumulator = new MetricsAccumulator();
     metricsAccumulator.getLocalValue().updateAll(this.getLocalValue());

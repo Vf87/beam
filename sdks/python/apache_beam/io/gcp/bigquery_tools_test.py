@@ -23,38 +23,50 @@ import io
 import json
 import logging
 import math
+import os
 import re
-import time
 import unittest
+from typing import Optional
+from typing import Sequence
 
 import fastavro
 import mock
+import numpy as np
 import pytz
+from parameterized import parameterized
 
 import apache_beam as beam
-from apache_beam.internal.gcp.json_value import to_json_value
+from apache_beam.io.gcp import bigquery_tools
 from apache_beam.io.gcp import resource_identifiers
-from apache_beam.io.gcp.bigquery import TableRowJsonCoder
 from apache_beam.io.gcp.bigquery_tools import JSON_COMPLIANCE_ERROR
 from apache_beam.io.gcp.bigquery_tools import AvroRowWriter
 from apache_beam.io.gcp.bigquery_tools import BigQueryJobTypes
+from apache_beam.io.gcp.bigquery_tools import BigQueryWrapper
 from apache_beam.io.gcp.bigquery_tools import JsonRowWriter
 from apache_beam.io.gcp.bigquery_tools import RowAsDictJsonCoder
+from apache_beam.io.gcp.bigquery_tools import beam_row_from_dict
 from apache_beam.io.gcp.bigquery_tools import check_schema_equal
 from apache_beam.io.gcp.bigquery_tools import generate_bq_job_name
+from apache_beam.io.gcp.bigquery_tools import get_beam_typehints_from_tableschema
 from apache_beam.io.gcp.bigquery_tools import parse_table_reference
 from apache_beam.io.gcp.bigquery_tools import parse_table_schema_from_json
 from apache_beam.io.gcp.internal.clients import bigquery
 from apache_beam.metrics import monitoring_infos
 from apache_beam.metrics.execution import MetricsEnvironment
+from apache_beam.options.pipeline_options import BigQueryOptions
 from apache_beam.options.pipeline_options import PipelineOptions
+from apache_beam.options.value_provider import RuntimeValueProvider
 from apache_beam.options.value_provider import StaticValueProvider
+from apache_beam.typehints.row_type import RowTypeConstraint
+from apache_beam.utils.timestamp import Timestamp
 
 # Protect against environments where bigquery library is not available.
 # pylint: disable=wrong-import-order, wrong-import-position
 try:
-  from apitools.base.py.exceptions import HttpError, HttpForbiddenError
-  from google.api_core.exceptions import ClientError, DeadlineExceeded
+  from apitools.base.py.exceptions import HttpError
+  from apitools.base.py.exceptions import HttpForbiddenError
+  from google.api_core.exceptions import ClientError
+  from google.api_core.exceptions import DeadlineExceeded
   from google.api_core.exceptions import InternalServerError
 except ImportError:
   ClientError = None
@@ -62,6 +74,7 @@ except ImportError:
   HttpError = None
   HttpForbiddenError = None
   InternalServerError = None
+  google = None
 # pylint: enable=wrong-import-order, wrong-import-position
 
 
@@ -123,27 +136,65 @@ class TestTableReferenceParser(unittest.TestCase):
     parsed_ref = parse_table_reference(value_provider_ref)
     self.assertIs(value_provider_ref, parsed_ref)
 
-  def test_calling_with_fully_qualified_table_ref(self):
-    projectId = 'test_project'
-    datasetId = 'test_dataset'
-    tableId = 'test_table'
-    fully_qualified_table = '{}:{}.{}'.format(projectId, datasetId, tableId)
+  @parameterized.expand([
+      ('project:dataset.test_table', 'project', 'dataset', 'test_table'),
+      ('project:dataset.test-table', 'project', 'dataset', 'test-table'),
+      ('project:dataset.test- table', 'project', 'dataset', 'test- table'),
+      ('project.dataset. test_table', 'project', 'dataset', ' test_table'),
+      ('project.dataset.test$table', 'project', 'dataset', 'test$table'),
+      ('project.dataset.table', 'project', 'dataset', 'table'),
+      ('my-project.my_dataset.table', 'my-project', 'my_dataset', 'table'),
+      # Lakehouse runtime catalog tables: composite 'catalog.namespace'
+      # dataset id.
+      (
+          'project.catalog.namespace.table',
+          'project',
+          'catalog.namespace',
+          'table'),
+      (
+          'project:catalog.namespace.table',
+          'project',
+          'catalog.namespace',
+          'table'),
+      (
+          'my-project.my-catalog.ns.events$20240101',
+          'my-project',
+          'my-catalog.ns',
+          'events$20240101'),
+      # Domain-scoped project ids, in both spellings.
+      (
+          'example.com:proj.dataset.table',
+          'example.com:proj',
+          'dataset',
+          'table'),
+      (
+          'example.com:proj:dataset.table',
+          'example.com:proj',
+          'dataset',
+          'table'),
+      (
+          'example.com:proj.catalog.namespace.table',
+          'example.com:proj',
+          'catalog.namespace',
+          'table'),
+      (
+          'example.com:proj:catalog.namespace.table',
+          'example.com:proj',
+          'catalog.namespace',
+          'table'),
+  ])
+  def test_calling_with_fully_qualified_table_ref(
+      self,
+      fully_qualified_table: str,
+      project_id: str,
+      dataset_id: str,
+      table_id: str,
+  ):
     parsed_ref = parse_table_reference(fully_qualified_table)
     self.assertIsInstance(parsed_ref, bigquery.TableReference)
-    self.assertEqual(parsed_ref.projectId, projectId)
-    self.assertEqual(parsed_ref.datasetId, datasetId)
-    self.assertEqual(parsed_ref.tableId, tableId)
-
-  def test_calling_with_hyphened_table_ref(self):
-    projectId = 'test_project'
-    datasetId = 'test_dataset'
-    tableId = 'test-table'
-    fully_qualified_table = '{}:{}.{}'.format(projectId, datasetId, tableId)
-    parsed_ref = parse_table_reference(fully_qualified_table)
-    self.assertIsInstance(parsed_ref, bigquery.TableReference)
-    self.assertEqual(parsed_ref.projectId, projectId)
-    self.assertEqual(parsed_ref.datasetId, datasetId)
-    self.assertEqual(parsed_ref.tableId, tableId)
+    self.assertEqual(parsed_ref.projectId, project_id)
+    self.assertEqual(parsed_ref.datasetId, dataset_id)
+    self.assertEqual(parsed_ref.tableId, table_id)
 
   def test_calling_with_partially_qualified_table_ref(self):
     datasetId = 'test_dataset'
@@ -154,8 +205,31 @@ class TestTableReferenceParser(unittest.TestCase):
     self.assertEqual(parsed_ref.datasetId, datasetId)
     self.assertEqual(parsed_ref.tableId, tableId)
 
+  def test_composite_dataset_requires_project(self):
+    # A composite 'catalog.namespace' dataset id is only recognised with an
+    # explicit project id. Without one it would be ambiguous with
+    # 'PROJECT.DATASET.TABLE', so it is rejected rather than guessed at.
+    self.assertRaises(
+        ValueError, parse_table_reference, 'my_catalog.namespace.test_table')
+
   def test_calling_with_insufficient_table_ref(self):
     table = 'test_table'
+    self.assertRaises(ValueError, parse_table_reference, table)
+
+  @parameterized.expand([
+      ('a:b:c:d.table', ),
+      ('project:.table', ),
+      ('project:dataset', ),
+      ('MyProject.MyDataset.table', ),
+      ('1project.dataset.table', ),
+      ('c.namespace.table', ),
+      ('.dataset.table', ),
+      ('project..table', ),
+      ('a.b.c.d.e.f.g', ),
+  ])
+  def test_calling_with_invalid_table_ref(self, table):
+    # The dotted specs here have a leading segment that cannot be a project
+    # id; they are rejected rather than bound as a composite dataset id.
     self.assertRaises(ValueError, parse_table_reference, table)
 
   def test_calling_with_all_arguments(self):
@@ -168,6 +242,133 @@ class TestTableReferenceParser(unittest.TestCase):
     self.assertEqual(parsed_ref.projectId, projectId)
     self.assertEqual(parsed_ref.datasetId, datasetId)
     self.assertEqual(parsed_ref.tableId, tableId)
+
+
+@unittest.skipIf(HttpError is None, 'GCP dependencies are not installed')
+class TestBigQueryEndpoint(unittest.TestCase):
+  def setUp(self):
+    self._saved_runtime_options = RuntimeValueProvider.runtime_options
+    self._saved_experiments = RuntimeValueProvider.experiments
+    RuntimeValueProvider.runtime_options = None
+    env_patcher = mock.patch.dict(os.environ)
+    env_patcher.start()
+    self.addCleanup(env_patcher.stop)
+    os.environ.pop('GOOGLE_CLOUD_UNIVERSE_DOMAIN', None)
+
+  def tearDown(self):
+    RuntimeValueProvider.runtime_options = self._saved_runtime_options
+    RuntimeValueProvider.experiments = self._saved_experiments
+
+  def test_default_endpoint(self):
+    options = PipelineOptions([])
+    self.assertIsNone(options.view_as(BigQueryOptions).bigquery_endpoint)
+    self.assertEqual(
+        bigquery_tools.get_bigquery_api_url(options),
+        'https://bigquery.googleapis.com/bigquery/v2/')
+    self.assertIsNone(bigquery_tools.get_bigquery_client_options(options))
+
+  def test_default_universe_domain_uses_default_endpoint(self):
+    os.environ['GOOGLE_CLOUD_UNIVERSE_DOMAIN'] = 'googleapis.com'
+    self.assertEqual(
+        bigquery_tools.get_bigquery_api_url(PipelineOptions([])),
+        'https://bigquery.googleapis.com/bigquery/v2/')
+
+  def test_universe_domain_from_env(self):
+    os.environ['GOOGLE_CLOUD_UNIVERSE_DOMAIN'] = 'example-tpc.goog'
+    options = PipelineOptions([])
+    self.assertEqual(
+        bigquery_tools.get_bigquery_api_url(options),
+        'https://bigquery.example-tpc.goog/bigquery/v2/')
+    # google-cloud-bigquery resolves the universe domain by itself.
+    self.assertIsNone(bigquery_tools.get_bigquery_client_options(options))
+
+  @parameterized.expand([
+      ('https://bq.example.com', ),
+      ('https://bq.example.com/', ),
+      ('https://bq.example.com/bigquery/v2', ),
+      ('https://bq.example.com/bigquery/v2/', ),
+      ('bq.example.com', ),
+  ])
+  def test_explicit_endpoint(self, endpoint):
+    options = PipelineOptions(['--bigquery_endpoint', endpoint])
+    self.assertEqual(
+        options.view_as(BigQueryOptions).bigquery_endpoint, endpoint)
+    self.assertEqual(
+        bigquery_tools.get_bigquery_api_url(options),
+        'https://bq.example.com/bigquery/v2/')
+    self.assertEqual(
+        bigquery_tools.get_bigquery_client_options(options),
+        {'api_endpoint': 'https://bq.example.com'})
+
+  def test_explicit_endpoint_takes_precedence_over_universe_domain(self):
+    os.environ['GOOGLE_CLOUD_UNIVERSE_DOMAIN'] = 'example-tpc.goog'
+    options = PipelineOptions(['--bigquery_endpoint=http://localhost:9050'])
+    self.assertEqual(
+        bigquery_tools.get_bigquery_api_url(options),
+        'http://localhost:9050/bigquery/v2/')
+    self.assertEqual(
+        bigquery_tools.get_bigquery_client_options(options),
+        {'api_endpoint': 'http://localhost:9050'})
+
+  def test_endpoint_from_runtime_options(self):
+    # On workers, clients may be created without the pipeline options.
+    RuntimeValueProvider.set_runtime_options(
+        {'big_query_endpoint': 'https://bq.example.com'})
+    self.assertEqual(
+        bigquery_tools.get_bigquery_api_url(PipelineOptions([])),
+        'https://bq.example.com/bigquery/v2/')
+    self.assertEqual(
+        bigquery_tools.get_bigquery_client_options(None),
+        {'api_endpoint': 'https://bq.example.com'})
+
+  def test_endpoint_attribute_alias_setter(self):
+    bq_options = PipelineOptions([]).view_as(BigQueryOptions)
+    bq_options.bigquery_endpoint = 'https://bq.example.com'
+    self.assertEqual(
+        bigquery_tools.get_bigquery_api_url(bq_options),
+        'https://bq.example.com/bigquery/v2/')
+
+  @mock.patch.object(bigquery_tools.auth, 'get_service_credentials')
+  def test_bigquery_client_uses_endpoint(self, unused_mock_credentials):
+    options = PipelineOptions(['--bigquery_endpoint=https://bq.example.com'])
+    client = bigquery_tools.BigQueryWrapper._bigquery_client(options)
+    self.assertEqual(client.url, 'https://bq.example.com/bigquery/v2/')
+
+  @mock.patch.object(bigquery_tools.auth, 'get_service_credentials')
+  @mock.patch('apache_beam.io.gcp.bigquery_tools.gcp_bigquery')
+  def test_wrapper_applies_endpoint_to_both_clients(
+      self, mock_gcp_bq, unused_mock_credentials):
+    mock_gcp_client = mock_gcp_bq.Client
+    options = PipelineOptions(['--bigquery_endpoint=https://bq.example.com'])
+    wrapper = bigquery_tools.BigQueryWrapper(pipeline_options=options)
+    self.assertEqual(wrapper.client.url, 'https://bq.example.com/bigquery/v2/')
+    # The google-cloud-bigquery client is created on first use.
+    wrapper.gcp_bq_client  # pylint: disable=pointless-statement
+    self.assertEqual(
+        mock_gcp_client.call_args.kwargs['client_options'],
+        {'api_endpoint': 'https://bq.example.com'})
+
+  @mock.patch('apache_beam.io.gcp.bigquery_tools.gcp_bigquery')
+  def test_gcp_client_merges_endpoint_and_quota_project(self, mock_gcp_bq):
+    mock_gcp_client = mock_gcp_bq.Client
+    options = PipelineOptions(['--bigquery_endpoint=https://bq.example.com'])
+    bigquery_tools.BigQueryWrapper._gcp_bigquery_client(
+        quota_project_id='billing', pipeline_options=options)
+    self.assertEqual(
+        mock_gcp_client.call_args.kwargs['client_options'], {
+            'api_endpoint': 'https://bq.example.com',
+            'quota_project_id': 'billing'
+        })
+
+  @mock.patch.object(bigquery_tools.auth, 'get_service_credentials')
+  def test_quota_project_header_sent_to_custom_endpoint(self, mock_credentials):
+    options = PipelineOptions(['--bigquery_endpoint=https://bq.example.com'])
+    bigquery_tools.BigQueryWrapper._bigquery_client(
+        options, quota_project_id='billing')
+    # apitools wraps the given http with credentials.authorize().
+    http = mock_credentials.return_value.authorize.call_args.args[0]
+    self.assertIsInstance(http, bigquery_tools._HttpWithHeaders)
+    self.assertIn('bq.example.com', http._hosts)
 
 
 @unittest.skipIf(HttpError is None, 'GCP dependencies are not installed')
@@ -220,6 +421,53 @@ class TestBigQueryWrapper(unittest.TestCase):
     wrapper._delete_dataset('', '')
     self.assertTrue(client.datasets.Delete.called)
 
+  # the function _insert_all_rows() in the wrapper calls google.cloud.bigquery,
+  # so we have to skip that when this library is not accessible
+  @unittest.skipIf(
+      beam.io.gcp.bigquery_tools.gcp_bigquery is None,
+      "bigquery library not available in this env")
+  @mock.patch('time.sleep', return_value=None)
+  @mock.patch(
+      'apitools.base.py.base_api._SkipGetCredentials', return_value=True)
+  @mock.patch('google.cloud._http.JSONConnection.http')
+  def test_user_agent_insert_all(
+      self, http_mock, patched_skip_get_credentials, patched_sleep):
+    # Set GOOGLE_CLOUD_PROJECT to ensure Client creation succeeds in test env
+    with mock.patch.dict(os.environ, {'GOOGLE_CLOUD_PROJECT': 'test-project'}):
+      wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper()
+      try:
+        wrapper._insert_all_rows('p', 'd', 't', [{'name': 'any'}], None)
+      except:  # pylint: disable=bare-except
+        # Ignore errors. The errors come from the fact that we did not mock
+        # the response from the API, so the overall insert_all_rows call fails
+        # soon after the BQ API is called.
+        pass
+    call = http_mock.request.mock_calls[-2]
+    self.assertIn('apache-beam-', call[2]['headers']['User-Agent'])
+
+  # the function create_temporary_dataset() in the wrapper does not call
+  # google.cloud.bigquery, so it is fine to just mock it
+  @mock.patch(
+      'apache_beam.io.gcp.bigquery_tools.gcp_bigquery',
+      return_value=mock.Mock())
+  @mock.patch(
+      'apitools.base.py.base_api._SkipGetCredentials', return_value=True)
+  @mock.patch('time.sleep', return_value=None)
+  def test_user_agent_create_temporary_dataset(
+      self, sleep_mock, skip_get_credentials_mock, gcp_bigquery_mock):
+    wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper()
+    request_mock = mock.Mock()
+    wrapper.client._http.request = request_mock
+    try:
+      wrapper.create_temporary_dataset('project-id', 'location')
+    except:  # pylint: disable=bare-except
+      # Ignore errors. The errors come from the fact that we did not mock
+      # the response from the API, so the overall create_dataset call fails
+      # soon after the BQ API is called.
+      pass
+    call = request_mock.mock_calls[-1]
+    self.assertIn('apache-beam-', call[2]['headers']['user-agent'])
+
   @mock.patch('time.sleep', return_value=None)
   def test_delete_table_retries_for_timeouts(self, patched_time_sleep):
     client = mock.Mock()
@@ -236,10 +484,10 @@ class TestBigQueryWrapper(unittest.TestCase):
     client = mock.Mock()
     client.datasets.Get.return_value = bigquery.Dataset(
         datasetReference=bigquery.DatasetReference(
-            projectId='project_id', datasetId='dataset_id'))
+            projectId='project-id', datasetId='dataset_id'))
     wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
     with self.assertRaises(RuntimeError):
-      wrapper.create_temporary_dataset('project_id', 'location')
+      wrapper.create_temporary_dataset('project-id', 'location')
     self.assertTrue(client.datasets.Get.called)
 
   def test_get_or_create_dataset_created(self):
@@ -248,18 +496,46 @@ class TestBigQueryWrapper(unittest.TestCase):
         response={'status': '404'}, url='', content='')
     client.datasets.Insert.return_value = bigquery.Dataset(
         datasetReference=bigquery.DatasetReference(
-            projectId='project_id', datasetId='dataset_id'))
+            projectId='project-id', datasetId='dataset_id'))
     wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
-    new_dataset = wrapper.get_or_create_dataset('project_id', 'dataset_id')
+    new_dataset = wrapper.get_or_create_dataset('project-id', 'dataset_id')
     self.assertEqual(new_dataset.datasetReference.datasetId, 'dataset_id')
+
+  def test_create_temporary_dataset_with_kms_key(self):
+    kms_key = (
+        'projects/my-project/locations/global/keyRings/my-kr/'
+        'cryptoKeys/my-key')
+    client = mock.Mock()
+    client.datasets.Get.side_effect = HttpError(
+        response={'status': '404'}, url='', content='')
+
+    client.datasets.Insert.return_value = bigquery.Dataset(
+        datasetReference=bigquery.DatasetReference(
+            projectId='project-id', datasetId='temp_dataset'))
+    wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
+
+    try:
+      wrapper.create_temporary_dataset(
+          'project-id', 'location', kms_key=kms_key)
+    except Exception:
+      pass
+
+    args, _ = client.datasets.Insert.call_args
+    insert_request = args[0]  # BigqueryDatasetsInsertRequest
+    inserted_dataset = insert_request.dataset  # Actual Dataset object
+
+    # Assertions
+    self.assertIsNotNone(inserted_dataset.defaultEncryptionConfiguration)
+    self.assertEqual(
+        inserted_dataset.defaultEncryptionConfiguration.kmsKeyName, kms_key)
 
   def test_get_or_create_dataset_fetched(self):
     client = mock.Mock()
     client.datasets.Get.return_value = bigquery.Dataset(
         datasetReference=bigquery.DatasetReference(
-            projectId='project_id', datasetId='dataset_id'))
+            projectId='project-id', datasetId='dataset_id'))
     wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
-    new_dataset = wrapper.get_or_create_dataset('project_id', 'dataset_id')
+    new_dataset = wrapper.get_or_create_dataset('project-id', 'dataset_id')
     self.assertEqual(new_dataset.datasetReference.datasetId, 'dataset_id')
 
   def test_get_or_create_table(self):
@@ -268,7 +544,7 @@ class TestBigQueryWrapper(unittest.TestCase):
     client.tables.Get.side_effect = [None, 'table_id']
     wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
     new_table = wrapper.get_or_create_table(
-        'project_id',
+        'project-id',
         'dataset_id',
         'table_id',
         bigquery.TableSchema(
@@ -287,7 +563,7 @@ class TestBigQueryWrapper(unittest.TestCase):
     client.tables.Get.side_effect = [None, 'table_id']
     wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
     new_table = wrapper.get_or_create_table(
-        'project_id',
+        'project-id',
         'dataset_id',
         'table_id',
         bigquery.TableSchema(
@@ -307,7 +583,7 @@ class TestBigQueryWrapper(unittest.TestCase):
     client.tables.Get.side_effect = [None, 'table_id']
     wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
     new_table = wrapper.get_or_create_table(
-        'project_id',
+        'project-id',
         'dataset_id',
         'table_id',
         bigquery.TableSchema(
@@ -319,26 +595,25 @@ class TestBigQueryWrapper(unittest.TestCase):
         False)
     self.assertEqual(new_table, 'table_id')
 
-  def test_get_or_create_table_invalid_tablename(self):
-    invalid_names = ['big-query', 'table name', 'a' * 1025]
-    for table_id in invalid_names:
-      client = mock.Mock()
-      client.tables.Get.side_effect = [None]
-      wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
+  @parameterized.expand(['', 'a' * 1025])
+  def test_get_or_create_table_invalid_tablename(self, table_id):
+    client = mock.Mock()
+    client.tables.Get.side_effect = [None]
+    wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
 
-      self.assertRaises(
-          ValueError,
-          wrapper.get_or_create_table,
-          'project_id',
-          'dataset_id',
-          table_id,
-          bigquery.TableSchema(
-              fields=[
-                  bigquery.TableFieldSchema(
-                      name='b', type='BOOLEAN', mode='REQUIRED')
-              ]),
-          False,
-          False)
+    self.assertRaises(
+        ValueError,
+        wrapper.get_or_create_table,
+        'project-id',
+        'dataset_id',
+        table_id,
+        bigquery.TableSchema(
+            fields=[
+                bigquery.TableFieldSchema(
+                    name='b', type='BOOLEAN', mode='REQUIRED')
+            ]),
+        False,
+        False)
 
   def test_wait_for_job_returns_true_when_job_is_done(self):
     def make_response(state):
@@ -414,8 +689,8 @@ class TestBigQueryWrapper(unittest.TestCase):
           source_stream=io.BytesIO())
 
     # Neither source_uri nor source_stream specified.
-    with self.assertRaises(ValueError):
-      wrapper.perform_load_job(destination='P:D.T', job_id='J')
+    wrapper.perform_load_job(
+        destination=parse_table_reference('project:dataset.table'), job_id='J')
 
   def test_perform_load_job_with_source_stream(self):
     client = mock.Mock()
@@ -429,6 +704,18 @@ class TestBigQueryWrapper(unittest.TestCase):
     client.jobs.Insert.assert_called_once()
     upload = client.jobs.Insert.call_args[1]["upload"]
     self.assertEqual(b'some,data', upload.stream.read())
+
+  def test_perform_load_job_with_load_job_id(self):
+    client = mock.Mock()
+    wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
+
+    wrapper.perform_load_job(
+        destination=parse_table_reference('project:dataset.table'),
+        job_id='job_id',
+        source_uris=['gs://example.com/*'],
+        load_job_project_id='loadId')
+    call_args = client.jobs.Insert.call_args
+    self.assertEqual('loadId', call_args[0][0].projectId)
 
   def verify_write_call_metric(
       self, project_id, dataset_id, table_id, status, count):
@@ -487,6 +774,36 @@ class TestBigQueryWrapper(unittest.TestCase):
         "my_project", "my_dataset", "my_table", "ok", 1)
 
   @unittest.skipIf(ClientError is None, 'GCP dependencies are not installed')
+  def test_insert_rows_sets_metric_on_row_errors(self):
+    MetricsEnvironment.process_wide_container().reset()
+    client = mock.Mock()
+
+    def row_error(index, *reasons):
+      return {
+          'index': index,
+          'errors': [{
+              'reason': r, 'message': 'msg'
+          } for r in reasons],
+      }
+
+    client.insert_rows_json.return_value = [
+        row_error(0, 'invalid', 'stopped'),
+        row_error(1, 'invalid'),
+        row_error(2, 'stopped'),
+    ]
+    wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
+    success, errors = wrapper.insert_rows(
+        "my_project", "my_dataset", "my_table", [{'a': 1}] * 3)
+
+    self.assertFalse(success)
+    self.assertEqual(client.insert_rows_json.return_value, errors)
+    # One metric per failed row, labelled with the reason of its first error.
+    self.verify_write_call_metric(
+        "my_project", "my_dataset", "my_table", "invalid", 2)
+    self.verify_write_call_metric(
+        "my_project", "my_dataset", "my_table", "stopped", 1)
+
+  @unittest.skipIf(ClientError is None, 'GCP dependencies are not installed')
   def test_start_query_job_priority_configuration(self):
     client = mock.Mock()
     wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
@@ -519,456 +836,26 @@ class TestBigQueryWrapper(unittest.TestCase):
         client.jobs.Insert.call_args[0][0].job.configuration.query.priority,
         'INTERACTIVE')
 
-
-@unittest.skipIf(HttpError is None, 'GCP dependencies are not installed')
-class TestBigQueryReader(unittest.TestCase):
-  def get_test_rows(self):
-    now = time.time()
-    dt = datetime.datetime.utcfromtimestamp(float(now))
-    ts = dt.strftime('%Y-%m-%d %H:%M:%S.%f UTC')
-    expected_rows = [{
-        'i': 1,
-        's': 'abc',
-        'f': 2.3,
-        'b': True,
-        't': ts,
-        'dt': '2016-10-31',
-        'ts': '22:39:12.627498',
-        'dt_ts': '2008-12-25T07:30:00',
-        'r': {
-            's2': 'b'
-        },
-        'rpr': [{
-            's3': 'c', 'rpr2': [{
-                'rs': ['d', 'e'], 's4': None
-            }]
-        }]
-    },
-                     {
-                         'i': 10,
-                         's': 'xyz',
-                         'f': -3.14,
-                         'b': False,
-                         'rpr': [],
-                         't': None,
-                         'dt': None,
-                         'ts': None,
-                         'dt_ts': None,
-                         'r': None,
-                     }]
-
-    nested_schema = [
-        bigquery.TableFieldSchema(name='s2', type='STRING', mode='NULLABLE')
-    ]
-    nested_schema_2 = [
-        bigquery.TableFieldSchema(name='s3', type='STRING', mode='NULLABLE'),
-        bigquery.TableFieldSchema(
-            name='rpr2',
-            type='RECORD',
-            mode='REPEATED',
-            fields=[
-                bigquery.TableFieldSchema(
-                    name='rs', type='STRING', mode='REPEATED'),
-                bigquery.TableFieldSchema(
-                    name='s4', type='STRING', mode='NULLABLE')
-            ])
-    ]
-
-    schema = bigquery.TableSchema(
-        fields=[
-            bigquery.TableFieldSchema(
-                name='b', type='BOOLEAN', mode='REQUIRED'),
-            bigquery.TableFieldSchema(name='f', type='FLOAT', mode='REQUIRED'),
-            bigquery.TableFieldSchema(
-                name='i', type='INTEGER', mode='REQUIRED'),
-            bigquery.TableFieldSchema(name='s', type='STRING', mode='REQUIRED'),
-            bigquery.TableFieldSchema(
-                name='t', type='TIMESTAMP', mode='NULLABLE'),
-            bigquery.TableFieldSchema(name='dt', type='DATE', mode='NULLABLE'),
-            bigquery.TableFieldSchema(name='ts', type='TIME', mode='NULLABLE'),
-            bigquery.TableFieldSchema(
-                name='dt_ts', type='DATETIME', mode='NULLABLE'),
-            bigquery.TableFieldSchema(
-                name='r', type='RECORD', mode='NULLABLE', fields=nested_schema),
-            bigquery.TableFieldSchema(
-                name='rpr',
-                type='RECORD',
-                mode='REPEATED',
-                fields=nested_schema_2)
-        ])
-
-    table_rows = [
-        bigquery.TableRow(
-            f=[
-                bigquery.TableCell(v=to_json_value('true')),
-                bigquery.TableCell(v=to_json_value(str(2.3))),
-                bigquery.TableCell(v=to_json_value(str(1))),
-                bigquery.TableCell(v=to_json_value('abc')),
-                # For timestamps cannot use str() because it will truncate the
-                # number representing the timestamp.
-                bigquery.TableCell(v=to_json_value('%f' % now)),
-                bigquery.TableCell(v=to_json_value('2016-10-31')),
-                bigquery.TableCell(v=to_json_value('22:39:12.627498')),
-                bigquery.TableCell(v=to_json_value('2008-12-25T07:30:00')),
-                # For record we cannot use dict because it doesn't create nested
-                # schemas correctly so we have to use this f,v based format
-                bigquery.TableCell(v=to_json_value({'f': [{
-                    'v': 'b'
-                }]})),
-                bigquery.TableCell(
-                    v=to_json_value([{
-                        'v': {
-                            'f': [{
-                                'v': 'c'
-                            },
-                                  {
-                                      'v': [{
-                                          'v': {
-                                              'f': [{
-                                                  'v': [{
-                                                      'v': 'd'
-                                                  }, {
-                                                      'v': 'e'
-                                                  }]
-                                              }, {
-                                                  'v': None
-                                              }]
-                                          }
-                                      }]
-                                  }]
-                        }
-                    }]))
-            ]),
-        bigquery.TableRow(
-            f=[
-                bigquery.TableCell(v=to_json_value('false')),
-                bigquery.TableCell(v=to_json_value(str(-3.14))),
-                bigquery.TableCell(v=to_json_value(str(10))),
-                bigquery.TableCell(v=to_json_value('xyz')),
-                bigquery.TableCell(v=None),
-                bigquery.TableCell(v=None),
-                bigquery.TableCell(v=None),
-                bigquery.TableCell(v=None),
-                bigquery.TableCell(v=None),
-                # REPEATED field without any values.
-                bigquery.TableCell(v=None)
-            ])
-    ]
-    return table_rows, schema, expected_rows
-
-  def test_read_from_table(self):
+  def test_get_temp_table_project_with_temp_table_ref(self):
+    """Test _get_temp_table_project returns project from temp_table_ref."""
     client = mock.Mock()
-    client.jobs.Insert.return_value = bigquery.Job(
-        jobReference=bigquery.JobReference(jobId='somejob'))
-    table_rows, schema, expected_rows = self.get_test_rows()
-    client.jobs.GetQueryResults.return_value = bigquery.GetQueryResultsResponse(
-        jobComplete=True, rows=table_rows, schema=schema)
-    actual_rows = []
-    with beam.io.BigQuerySource(
-        'dataset.table',
-        use_dataflow_native_source=True).reader(client) as reader:
-      for row in reader:
-        actual_rows.append(row)
-    self.assertEqual(actual_rows, expected_rows)
-    self.assertEqual(schema, reader.schema)
+    temp_table_ref = bigquery.TableReference(
+        projectId='temp-project',
+        datasetId='temp_dataset',
+        tableId='temp_table')
+    wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(
+        client, temp_table_ref=temp_table_ref)
 
-  def test_read_from_query(self):
+    result = wrapper._get_temp_table_project('fallback-project')
+    self.assertEqual(result, 'temp-project')
+
+  def test_get_temp_table_project_without_temp_table_ref(self):
+    """Test _get_temp_table_project returns fallback when no temp_table_ref."""
     client = mock.Mock()
-    client.jobs.Insert.return_value = bigquery.Job(
-        jobReference=bigquery.JobReference(jobId='somejob'))
-    table_rows, schema, expected_rows = self.get_test_rows()
-    client.jobs.GetQueryResults.return_value = bigquery.GetQueryResultsResponse(
-        jobComplete=True, rows=table_rows, schema=schema)
-    actual_rows = []
-    with beam.io.BigQuerySource(
-        query='query',
-        use_dataflow_native_source=True).reader(client) as reader:
-      for row in reader:
-        actual_rows.append(row)
-    self.assertEqual(actual_rows, expected_rows)
-    self.assertEqual(schema, reader.schema)
-    self.assertTrue(reader.use_legacy_sql)
-    self.assertTrue(reader.flatten_results)
+    wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
 
-  def test_read_from_query_sql_format(self):
-    client = mock.Mock()
-    client.jobs.Insert.return_value = bigquery.Job(
-        jobReference=bigquery.JobReference(jobId='somejob'))
-    table_rows, schema, expected_rows = self.get_test_rows()
-    client.jobs.GetQueryResults.return_value = bigquery.GetQueryResultsResponse(
-        jobComplete=True, rows=table_rows, schema=schema)
-    actual_rows = []
-    with beam.io.BigQuerySource(
-        query='query', use_standard_sql=True,
-        use_dataflow_native_source=True).reader(client) as reader:
-      for row in reader:
-        actual_rows.append(row)
-    self.assertEqual(actual_rows, expected_rows)
-    self.assertEqual(schema, reader.schema)
-    self.assertFalse(reader.use_legacy_sql)
-    self.assertTrue(reader.flatten_results)
-
-  def test_read_from_query_unflatten_records(self):
-    client = mock.Mock()
-    client.jobs.Insert.return_value = bigquery.Job(
-        jobReference=bigquery.JobReference(jobId='somejob'))
-    table_rows, schema, expected_rows = self.get_test_rows()
-    client.jobs.GetQueryResults.return_value = bigquery.GetQueryResultsResponse(
-        jobComplete=True, rows=table_rows, schema=schema)
-    actual_rows = []
-    with beam.io.BigQuerySource(
-        query='query', flatten_results=False,
-        use_dataflow_native_source=True).reader(client) as reader:
-      for row in reader:
-        actual_rows.append(row)
-    self.assertEqual(actual_rows, expected_rows)
-    self.assertEqual(schema, reader.schema)
-    self.assertTrue(reader.use_legacy_sql)
-    self.assertFalse(reader.flatten_results)
-
-  def test_using_both_query_and_table_fails(self):
-    with self.assertRaisesRegex(
-        ValueError,
-        r'Both a BigQuery table and a query were specified\. Please specify '
-        r'only one of these'):
-      beam.io.BigQuerySource(
-          table='dataset.table', query='query', use_dataflow_native_source=True)
-
-  def test_using_neither_query_nor_table_fails(self):
-    with self.assertRaisesRegex(
-        ValueError, r'A BigQuery table or a query must be specified'):
-      beam.io.BigQuerySource(use_dataflow_native_source=True)
-
-  def test_read_from_table_as_tablerows(self):
-    client = mock.Mock()
-    client.jobs.Insert.return_value = bigquery.Job(
-        jobReference=bigquery.JobReference(jobId='somejob'))
-    table_rows, schema, _ = self.get_test_rows()
-    client.jobs.GetQueryResults.return_value = bigquery.GetQueryResultsResponse(
-        jobComplete=True, rows=table_rows, schema=schema)
-    actual_rows = []
-    # We set the coder to TableRowJsonCoder, which is a signal that
-    # the caller wants to see the rows as TableRows.
-    with beam.io.BigQuerySource(
-        'dataset.table',
-        coder=TableRowJsonCoder,
-        use_dataflow_native_source=True).reader(client) as reader:
-      for row in reader:
-        actual_rows.append(row)
-    self.assertEqual(actual_rows, table_rows)
-    self.assertEqual(schema, reader.schema)
-
-  @mock.patch('time.sleep', return_value=None)
-  def test_read_from_table_and_job_complete_retry(self, patched_time_sleep):
-    client = mock.Mock()
-    client.jobs.Insert.return_value = bigquery.Job(
-        jobReference=bigquery.JobReference(jobId='somejob'))
-    table_rows, schema, expected_rows = self.get_test_rows()
-    # Return jobComplete=False on first call to trigger the code path where
-    # query needs to handle waiting a bit.
-    client.jobs.GetQueryResults.side_effect = [
-        bigquery.GetQueryResultsResponse(jobComplete=False),
-        bigquery.GetQueryResultsResponse(
-            jobComplete=True, rows=table_rows, schema=schema)
-    ]
-    actual_rows = []
-    with beam.io.BigQuerySource(
-        'dataset.table',
-        use_dataflow_native_source=True).reader(client) as reader:
-      for row in reader:
-        actual_rows.append(row)
-    self.assertEqual(actual_rows, expected_rows)
-
-  def test_read_from_table_and_multiple_pages(self):
-    client = mock.Mock()
-    client.jobs.Insert.return_value = bigquery.Job(
-        jobReference=bigquery.JobReference(jobId='somejob'))
-    table_rows, schema, expected_rows = self.get_test_rows()
-    # Return a pageToken on first call to trigger the code path where
-    # query needs to handle multiple pages of results.
-    client.jobs.GetQueryResults.side_effect = [
-        bigquery.GetQueryResultsResponse(
-            jobComplete=True, rows=table_rows, schema=schema,
-            pageToken='token'),
-        bigquery.GetQueryResultsResponse(
-            jobComplete=True, rows=table_rows, schema=schema)
-    ]
-    actual_rows = []
-    with beam.io.BigQuerySource(
-        'dataset.table',
-        use_dataflow_native_source=True).reader(client) as reader:
-      for row in reader:
-        actual_rows.append(row)
-    # We return expected rows for each of the two pages of results so we
-    # adjust our expectation below accordingly.
-    self.assertEqual(actual_rows, expected_rows * 2)
-
-  def test_table_schema_without_project(self):
-    # Reader should pick executing project by default.
-    source = beam.io.BigQuerySource(
-        table='mydataset.mytable', use_dataflow_native_source=True)
-    options = PipelineOptions(flags=['--project', 'myproject'])
-    source.pipeline_options = options
-    reader = source.reader()
-    self.assertEqual(
-        'SELECT * FROM [myproject:mydataset.mytable];', reader.query)
-
-
-@unittest.skipIf(HttpError is None, 'GCP dependencies are not installed')
-class TestBigQueryWriter(unittest.TestCase):
-  @mock.patch('time.sleep', return_value=None)
-  def test_no_table_and_create_never(self, patched_time_sleep):
-    client = mock.Mock()
-    client.tables.Get.side_effect = HttpError(
-        response={'status': '404'}, url='', content='')
-    create_disposition = beam.io.BigQueryDisposition.CREATE_NEVER
-    with self.assertRaisesRegex(
-        RuntimeError,
-        r'Table project:dataset\.table not found but create '
-        r'disposition is CREATE_NEVER'):
-      with beam.io.BigQuerySink(
-          'project:dataset.table',
-          create_disposition=create_disposition).writer(client):
-        pass
-
-  def test_no_table_and_create_if_needed(self):
-    client = mock.Mock()
-    table = bigquery.Table(
-        tableReference=bigquery.TableReference(
-            projectId='project', datasetId='dataset', tableId='table'),
-        schema=bigquery.TableSchema())
-    client.tables.Get.side_effect = HttpError(
-        response={'status': '404'}, url='', content='')
-    client.tables.Insert.return_value = table
-    create_disposition = beam.io.BigQueryDisposition.CREATE_IF_NEEDED
-    with beam.io.BigQuerySink(
-        'project:dataset.table',
-        schema='somefield:INTEGER',
-        create_disposition=create_disposition).writer(client):
-      pass
-    self.assertTrue(client.tables.Get.called)
-    self.assertTrue(client.tables.Insert.called)
-
-  @mock.patch('time.sleep', return_value=None)
-  def test_no_table_and_create_if_needed_and_no_schema(
-      self, patched_time_sleep):
-    client = mock.Mock()
-    client.tables.Get.side_effect = HttpError(
-        response={'status': '404'}, url='', content='')
-    create_disposition = beam.io.BigQueryDisposition.CREATE_IF_NEEDED
-    with self.assertRaisesRegex(
-        RuntimeError,
-        r'Table project:dataset\.table requires a schema\. None '
-        r'can be inferred because the table does not exist'):
-      with beam.io.BigQuerySink(
-          'project:dataset.table',
-          create_disposition=create_disposition).writer(client):
-        pass
-
-  @mock.patch('time.sleep', return_value=None)
-  def test_table_not_empty_and_write_disposition_empty(
-      self, patched_time_sleep):
-    client = mock.Mock()
-    client.tables.Get.return_value = bigquery.Table(
-        tableReference=bigquery.TableReference(
-            projectId='project', datasetId='dataset', tableId='table'),
-        schema=bigquery.TableSchema())
-    client.tabledata.List.return_value = bigquery.TableDataList(totalRows=1)
-    write_disposition = beam.io.BigQueryDisposition.WRITE_EMPTY
-    with self.assertRaisesRegex(
-        RuntimeError,
-        r'Table project:dataset\.table is not empty but write '
-        r'disposition is WRITE_EMPTY'):
-      with beam.io.BigQuerySink(
-          'project:dataset.table',
-          write_disposition=write_disposition).writer(client):
-        pass
-
-  def test_table_empty_and_write_disposition_empty(self):
-    client = mock.Mock()
-    table = bigquery.Table(
-        tableReference=bigquery.TableReference(
-            projectId='project', datasetId='dataset', tableId='table'),
-        schema=bigquery.TableSchema())
-    client.tables.Get.return_value = table
-    client.tabledata.List.return_value = bigquery.TableDataList(totalRows=0)
-    client.tables.Insert.return_value = table
-    write_disposition = beam.io.BigQueryDisposition.WRITE_EMPTY
-    with beam.io.BigQuerySink(
-        'project:dataset.table',
-        write_disposition=write_disposition).writer(client):
-      pass
-    self.assertTrue(client.tables.Get.called)
-    self.assertTrue(client.tabledata.List.called)
-    self.assertFalse(client.tables.Delete.called)
-    self.assertFalse(client.tables.Insert.called)
-
-  @mock.patch('time.sleep', return_value=None)
-  def test_table_with_write_disposition_truncate(self, _patched_sleep):
-    client = mock.Mock()
-    table = bigquery.Table(
-        tableReference=bigquery.TableReference(
-            projectId='project', datasetId='dataset', tableId='table'),
-        schema=bigquery.TableSchema())
-    client.tables.Get.return_value = table
-    client.tables.Insert.return_value = table
-    write_disposition = beam.io.BigQueryDisposition.WRITE_TRUNCATE
-    with beam.io.BigQuerySink(
-        'project:dataset.table',
-        write_disposition=write_disposition).writer(client):
-      pass
-    self.assertTrue(client.tables.Get.called)
-    self.assertTrue(client.tables.Delete.called)
-    self.assertTrue(client.tables.Insert.called)
-
-  def test_table_with_write_disposition_append(self):
-    client = mock.Mock()
-    table = bigquery.Table(
-        tableReference=bigquery.TableReference(
-            projectId='project', datasetId='dataset', tableId='table'),
-        schema=bigquery.TableSchema())
-    client.tables.Get.return_value = table
-    client.tables.Insert.return_value = table
-    write_disposition = beam.io.BigQueryDisposition.WRITE_APPEND
-    with beam.io.BigQuerySink(
-        'project:dataset.table',
-        write_disposition=write_disposition).writer(client):
-      pass
-    self.assertTrue(client.tables.Get.called)
-    self.assertFalse(client.tables.Delete.called)
-    self.assertFalse(client.tables.Insert.called)
-
-  def test_rows_are_written(self):
-    client = mock.Mock()
-    table = bigquery.Table(
-        tableReference=bigquery.TableReference(
-            projectId='project', datasetId='dataset', tableId='table'),
-        schema=bigquery.TableSchema())
-    client.tables.Get.return_value = table
-    write_disposition = beam.io.BigQueryDisposition.WRITE_APPEND
-
-    client.insert_rows_json.return_value = []
-
-    with beam.io.BigQuerySink(
-        'project:dataset.table',
-        write_disposition=write_disposition).writer(client) as writer:
-      writer.Write({'i': 1, 'b': True, 's': 'abc', 'f': 3.14})
-
-    sample_row = {'i': 1, 'b': True, 's': 'abc', 'f': 3.14}
-    client.insert_rows_json.assert_called_with(
-        '%s.%s.%s' % ('project', 'dataset', 'table'),
-        json_rows=[sample_row],
-        row_ids=['_1'],
-        skip_invalid_rows=True,
-        timeout=120)
-
-  def test_table_schema_without_project(self):
-    # Writer should pick executing project by default.
-    sink = beam.io.BigQuerySink(table='mydataset.mytable')
-    options = PipelineOptions(flags=['--project', 'myproject'])
-    sink.pipeline_options = options
-    writer = sink.writer()
-    self.assertEqual('myproject', writer.project_id)
+    result = wrapper._get_temp_table_project('fallback-project')
+    self.assertEqual(result, 'fallback-project')
 
 
 @unittest.skipIf(HttpError is None, 'GCP dependencies are not installed')
@@ -1003,6 +890,13 @@ class TestRowAsDictJsonCoder(unittest.TestCase):
 
   def test_invalid_json_neg_inf(self):
     self.json_compliance_exception(float('-inf'))
+
+  def test_ensure_ascii(self):
+    coder = RowAsDictJsonCoder()
+    test_value = {'s': '🎉'}
+    output_value = b'{"s": "\xf0\x9f\x8e\x89"}'
+
+    self.assertEqual(output_value, coder.encode(test_value))
 
 
 @unittest.skipIf(HttpError is None, 'GCP dependencies are not installed')
@@ -1054,6 +948,7 @@ class TestAvroRowWriter(unittest.TestCase):
       with mock.patch.object(buf, 'close') as mock_close:
         writer = AvroRowWriter(buf, schema)
         writer.write({'stamp': stamp, 'number': float('NaN')})
+        self.assertGreater(writer.tell(), buf.tell())
         writer.close()
 
         mock_close.assert_called_once()
@@ -1183,6 +1078,770 @@ class TestCheckSchemaEqual(unittest.TestCase):
     self.assertFalse(check_schema_equal(schema1, schema2))
     self.assertTrue(
         check_schema_equal(schema1, schema2, ignore_descriptions=True))
+
+
+@unittest.skipIf(HttpError is None, 'GCP dependencies are not installed')
+class TestBeamRowFromDict(unittest.TestCase):
+  DICT_ROW = {
+      "str": "a",
+      "bool": True,
+      "bytes": b'a',
+      "int": 1,
+      "float": 0.1,
+      "numeric": decimal.Decimal("1.11"),
+      "timestamp": Timestamp(1000, 100)
+  }
+
+  def get_schema_fields_with_mode(self, mode):
+    return [{
+        "name": "str", "type": "STRING", "mode": mode
+    }, {
+        "name": "bool", "type": "boolean", "mode": mode
+    }, {
+        "name": "bytes", "type": "BYTES", "mode": mode
+    }, {
+        "name": "int", "type": "INTEGER", "mode": mode
+    }, {
+        "name": "float", "type": "Float", "mode": mode
+    }, {
+        "name": "numeric", "type": "NUMERIC", "mode": mode
+    }, {
+        "name": "timestamp", "type": "TIMESTAMP", "mode": mode
+    }]
+
+  def test_dict_to_beam_row_all_types_required(self):
+    schema = {"fields": self.get_schema_fields_with_mode("REQUIRED")}
+    expected_beam_row = beam.Row(
+        str="a",
+        bool=True,
+        bytes=b'a',
+        int=1,
+        float=0.1,
+        numeric=decimal.Decimal("1.11"),
+        timestamp=Timestamp(1000, 100))
+
+    self.assertEqual(
+        expected_beam_row, beam_row_from_dict(self.DICT_ROW, schema))
+
+  def test_dict_to_beam_row_all_types_repeated(self):
+    schema = {"fields": self.get_schema_fields_with_mode("REPEATED")}
+    dict_row = {
+        "str": ["a", "b"],
+        "bool": [True, False],
+        "bytes": [b'a', b'b'],
+        "int": [1, 2],
+        "float": [0.1, 0.2],
+        "numeric": [decimal.Decimal("1.11"), decimal.Decimal("2.22")],
+        "timestamp": [Timestamp(1000, 100), Timestamp(2000, 200)]
+    }
+
+    expected_beam_row = beam.Row(
+        str=["a", "b"],
+        bool=[True, False],
+        bytes=[b'a', b'b'],
+        int=[1, 2],
+        float=[0.1, 0.2],
+        numeric=[decimal.Decimal("1.11"), decimal.Decimal("2.22")],
+        timestamp=[Timestamp(1000, 100), Timestamp(2000, 200)])
+
+    self.assertEqual(expected_beam_row, beam_row_from_dict(dict_row, schema))
+
+  def test_dict_to_beam_row_all_types_nullable(self):
+    schema_fields_with_nested = [{
+        "name": "nested_record",
+        "type": "record",
+        "mode": "repeated",
+        "fields": self.get_schema_fields_with_mode("nullable")
+    }]
+    schema_fields_with_nested.extend(
+        self.get_schema_fields_with_mode("nullable"))
+    schema = {"fields": schema_fields_with_nested}
+    dict_row = {k: None for k in self.DICT_ROW}
+
+    # input dict row with missing nullable fields should still yield a full
+    # Beam Row
+    del dict_row['str']
+    del dict_row['bool']
+
+    expected_beam_row = beam.Row(
+        nested_record=None,
+        str=None,
+        bool=None,
+        bytes=None,
+        int=None,
+        float=None,
+        numeric=None,
+        timestamp=None)
+
+    self.assertEqual(expected_beam_row, beam_row_from_dict(dict_row, schema))
+
+  def test_dict_to_beam_row_nested_record(self):
+    schema_fields_with_nested = [{
+        "name": "nested_record",
+        "type": "record",
+        "fields": self.get_schema_fields_with_mode("required")
+    }]
+    schema_fields_with_nested.extend(
+        self.get_schema_fields_with_mode("required"))
+    schema = {"fields": schema_fields_with_nested}
+
+    dict_row = {
+        "nested_record": self.DICT_ROW,
+        "str": "a",
+        "bool": True,
+        "bytes": b'a',
+        "int": 1,
+        "float": 0.1,
+        "numeric": decimal.Decimal("1.11"),
+        "timestamp": Timestamp(1000, 100)
+    }
+    expected_beam_row = beam.Row(
+        nested_record=beam.Row(
+            str="a",
+            bool=True,
+            bytes=b'a',
+            int=1,
+            float=0.1,
+            numeric=decimal.Decimal("1.11"),
+            timestamp=Timestamp(1000, 100)),
+        str="a",
+        bool=True,
+        bytes=b'a',
+        int=1,
+        float=0.1,
+        numeric=decimal.Decimal("1.11"),
+        timestamp=Timestamp(1000, 100))
+
+    self.assertEqual(expected_beam_row, beam_row_from_dict(dict_row, schema))
+
+  def test_dict_to_beam_row_repeated_nested_record(self):
+    schema_fields_with_repeated_nested_record = [{
+        "name": "nested_repeated_record",
+        "type": "record",
+        "mode": "repeated",
+        "fields": self.get_schema_fields_with_mode("required")
+    }]
+    schema = {"fields": schema_fields_with_repeated_nested_record}
+
+    dict_row = {
+        "nested_repeated_record": [self.DICT_ROW, self.DICT_ROW, self.DICT_ROW],
+    }
+
+    beam_row = beam.Row(
+        str="a",
+        bool=True,
+        bytes=b'a',
+        int=1,
+        float=0.1,
+        numeric=decimal.Decimal("1.11"),
+        timestamp=Timestamp(1000, 100))
+    expected_beam_row = beam.Row(
+        nested_repeated_record=[beam_row, beam_row, beam_row])
+
+    self.assertEqual(expected_beam_row, beam_row_from_dict(dict_row, schema))
+
+
+@unittest.skipIf(HttpError is None, 'GCP dependencies are not installed')
+class TestBeamTypehintFromSchema(unittest.TestCase):
+  EXPECTED_TYPEHINTS = [("str", str), ("bool", bool), ("bytes", bytes),
+                        ("int", np.int64), ("float", np.float64),
+                        ("numeric", decimal.Decimal), ("timestamp", Timestamp)]
+
+  def get_schema_fields_with_mode(self, mode):
+    return [{
+        "name": "str", "type": "STRING", "mode": mode
+    }, {
+        "name": "bool", "type": "boolean", "mode": mode
+    }, {
+        "name": "bytes", "type": "BYTES", "mode": mode
+    }, {
+        "name": "int", "type": "INTEGER", "mode": mode
+    }, {
+        "name": "float", "type": "Float", "mode": mode
+    }, {
+        "name": "numeric", "type": "NUMERIC", "mode": mode
+    }, {
+        "name": "timestamp", "type": "TIMESTAMP", "mode": mode
+    }]
+
+  def test_typehints_from_required_schema(self):
+    schema = {"fields": self.get_schema_fields_with_mode("required")}
+    typehints = get_beam_typehints_from_tableschema(schema)
+
+    self.assertEqual(typehints, self.EXPECTED_TYPEHINTS)
+
+  def test_typehints_from_repeated_schema(self):
+    schema = {"fields": self.get_schema_fields_with_mode("repeated")}
+    typehints = get_beam_typehints_from_tableschema(schema)
+
+    expected_repeated_typehints = [(name, Sequence[type])
+                                   for name, type in self.EXPECTED_TYPEHINTS]
+
+    self.assertEqual(typehints, expected_repeated_typehints)
+
+  def test_typehints_from_nullable_schema(self):
+    schema = {"fields": self.get_schema_fields_with_mode("nullable")}
+    typehints = get_beam_typehints_from_tableschema(schema)
+
+    expected_nullable_typehints = [(name, Optional[type])
+                                   for name, type in self.EXPECTED_TYPEHINTS]
+
+    self.assertEqual(typehints, expected_nullable_typehints)
+
+  def test_typehints_from_schema_with_struct(self):
+    schema = {
+        "fields": [{
+            "name": "record",
+            "type": "record",
+            "mode": "required",
+            "fields": self.get_schema_fields_with_mode("required")
+        }]
+    }
+    typehints = get_beam_typehints_from_tableschema(schema)
+
+    expected_typehints = [
+        ("record", RowTypeConstraint.from_fields(self.EXPECTED_TYPEHINTS))
+    ]
+
+    self.assertEqual(typehints, expected_typehints)
+
+  def test_typehints_from_schema_with_repeated_struct(self):
+    schema = {
+        "fields": [{
+            "name": "record",
+            "type": "record",
+            "mode": "repeated",
+            "fields": self.get_schema_fields_with_mode("required")
+        }]
+    }
+    typehints = get_beam_typehints_from_tableschema(schema)
+
+    expected_typehints = [(
+        "record",
+        Sequence[RowTypeConstraint.from_fields(self.EXPECTED_TYPEHINTS)])]
+
+    self.assertEqual(typehints, expected_typehints)
+
+
+@unittest.skipIf(HttpError is None, 'GCP dependencies are not installed')
+class TestGeographyTypeSupport(unittest.TestCase):
+  """Tests for GEOGRAPHY data type support in BigQuery."""
+  def test_geography_in_bigquery_type_mapping(self):
+    """Test that GEOGRAPHY is properly mapped in type mapping."""
+    from apache_beam.io.gcp.bigquery_tools import BIGQUERY_TYPE_TO_PYTHON_TYPE
+
+    self.assertIn("GEOGRAPHY", BIGQUERY_TYPE_TO_PYTHON_TYPE)
+    self.assertEqual(BIGQUERY_TYPE_TO_PYTHON_TYPE["GEOGRAPHY"], str)
+
+  def test_geography_field_conversion(self):
+    """Test that GEOGRAPHY fields are converted correctly."""
+    # Create a mock field with GEOGRAPHY type
+    field = bigquery.TableFieldSchema()
+    field.type = 'GEOGRAPHY'
+    field.name = 'location'
+    field.mode = 'NULLABLE'
+
+    wrapper = BigQueryWrapper(client=mock.Mock())
+
+    # Test various WKT formats
+    test_cases = [
+        "POINT(30 10)",
+        "LINESTRING(30 10, 10 30, 40 40)",
+        "POLYGON((30 10, 40 40, 20 40, 10 20, 30 10))",
+        "MULTIPOINT((10 40), (40 30), (20 20), (30 10))",
+        "GEOMETRYCOLLECTION(POINT(4 6),LINESTRING(4 6,7 10))"
+    ]
+
+    for wkt_value in test_cases:
+      result = wrapper._convert_cell_value_to_dict(wkt_value, field)
+      self.assertEqual(result, wkt_value)
+      self.assertIsInstance(result, str)
+
+  def test_geography_typehints_from_schema(self):
+    """Test that GEOGRAPHY fields generate correct type hints."""
+    schema = {
+        "fields": [{
+            "name": "location", "type": "GEOGRAPHY", "mode": "REQUIRED"
+        },
+                   {
+                       "name": "optional_location",
+                       "type": "GEOGRAPHY",
+                       "mode": "NULLABLE"
+                   }, {
+                       "name": "locations",
+                       "type": "GEOGRAPHY",
+                       "mode": "REPEATED"
+                   }]
+    }
+
+    typehints = get_beam_typehints_from_tableschema(schema)
+
+    expected_typehints = [("location", str),
+                          ("optional_location", Optional[str]),
+                          ("locations", Sequence[str])]
+
+    self.assertEqual(typehints, expected_typehints)
+
+  def test_geography_beam_row_conversion(self):
+    """Test converting dictionary with GEOGRAPHY to Beam Row."""
+    schema = {
+        "fields": [{
+            "name": "id", "type": "INTEGER", "mode": "REQUIRED"
+        }, {
+            "name": "location", "type": "GEOGRAPHY", "mode": "NULLABLE"
+        }, {
+            "name": "name", "type": "STRING", "mode": "REQUIRED"
+        }]
+    }
+
+    row_dict = {"id": 1, "location": "POINT(30 10)", "name": "Test Location"}
+
+    beam_row = beam_row_from_dict(row_dict, schema)
+
+    self.assertEqual(beam_row.id, 1)
+    self.assertEqual(beam_row.location, "POINT(30 10)")
+    self.assertEqual(beam_row.name, "Test Location")
+
+  def test_geography_beam_row_conversion_with_null(self):
+    """Test converting dictionary with null GEOGRAPHY to Beam Row."""
+    schema = {
+        "fields": [{
+            "name": "id", "type": "INTEGER", "mode": "REQUIRED"
+        }, {
+            "name": "location", "type": "GEOGRAPHY", "mode": "NULLABLE"
+        }]
+    }
+
+    row_dict = {"id": 1, "location": None}
+
+    beam_row = beam_row_from_dict(row_dict, schema)
+
+    self.assertEqual(beam_row.id, 1)
+    self.assertIsNone(beam_row.location)
+
+  def test_geography_beam_row_conversion_repeated(self):
+    """Test converting dictionary with repeated GEOGRAPHY to Beam Row."""
+    schema = {
+        "fields": [{
+            "name": "id", "type": "INTEGER", "mode": "REQUIRED"
+        }, {
+            "name": "locations", "type": "GEOGRAPHY", "mode": "REPEATED"
+        }]
+    }
+
+    row_dict = {
+        "id": 1,
+        "locations": ["POINT(30 10)", "POINT(40 20)", "LINESTRING(0 0, 1 1)"]
+    }
+
+    beam_row = beam_row_from_dict(row_dict, schema)
+
+    self.assertEqual(beam_row.id, 1)
+    self.assertEqual(len(beam_row.locations), 3)
+    self.assertEqual(beam_row.locations[0], "POINT(30 10)")
+    self.assertEqual(beam_row.locations[1], "POINT(40 20)")
+    self.assertEqual(beam_row.locations[2], "LINESTRING(0 0, 1 1)")
+
+  def test_geography_json_encoding(self):
+    """Test that GEOGRAPHY values are properly JSON encoded."""
+    coder = RowAsDictJsonCoder()
+
+    row_with_geography = {"id": 1, "location": "POINT(30 10)", "name": "Test"}
+
+    encoded = coder.encode(row_with_geography)
+    decoded = coder.decode(encoded)
+
+    self.assertEqual(decoded["location"], "POINT(30 10)")
+    self.assertIsInstance(decoded["location"], str)
+
+  def test_geography_with_special_characters(self):
+    """Test GEOGRAPHY values with special characters and geometries."""
+    field = bigquery.TableFieldSchema()
+    field.type = 'GEOGRAPHY'
+    field.name = 'complex_geo'
+    field.mode = 'NULLABLE'
+
+    wrapper = BigQueryWrapper(client=mock.Mock())
+
+    # Test complex WKT with various coordinate systems and precision
+    complex_wkt = (
+        "POLYGON((-122.4194 37.7749, -122.4094 37.7849, "
+        "-122.3994 37.7749, -122.4194 37.7749))")
+
+    result = wrapper._convert_cell_value_to_dict(complex_wkt, field)
+    self.assertEqual(result, complex_wkt)
+    self.assertIsInstance(result, str)
+
+
+@unittest.skipIf(HttpError is None, 'GCP dependencies are not installed')
+class TestTypeOverrides(unittest.TestCase):
+  """Tests for type_overrides parameter in BigQuery type mappings."""
+  def test_type_overrides_enables_unsupported_types(self):
+    """Test that type_overrides enables support for DATE/DATETIME/JSON."""
+    import datetime
+    schema = {
+        "fields": [{
+            "name": "date_field", "type": "DATE", "mode": "REQUIRED"
+        },
+                   {
+                       "name": "datetime_field",
+                       "type": "DATETIME",
+                       "mode": "REQUIRED"
+                   }, {
+                       "name": "json_field", "type": "JSON", "mode": "REQUIRED"
+                   }]
+    }
+
+    # Without overrides, these types are not supported
+    with self.assertRaises(ValueError):
+      get_beam_typehints_from_tableschema(schema)
+
+    # With overrides, they work
+    type_overrides = {"DATE": str, "DATETIME": str, "JSON": str}
+    typehints = get_beam_typehints_from_tableschema(schema, type_overrides)
+    self.assertEqual(
+        typehints, [("date_field", str), ("datetime_field", str),
+                    ("json_field", str)])
+
+  def test_type_overrides_with_custom_types(self):
+    """Test type_overrides with custom Python types."""
+    import datetime
+    schema = {
+        "fields": [{
+            "name": "date_field", "type": "DATE", "mode": "REQUIRED"
+        },
+                   {
+                       "name": "datetime_field",
+                       "type": "DATETIME",
+                       "mode": "REQUIRED"
+                   }]
+    }
+
+    type_overrides = {"DATE": datetime.date, "DATETIME": datetime.datetime}
+    typehints = get_beam_typehints_from_tableschema(schema, type_overrides)
+    self.assertEqual(
+        typehints, [("date_field", datetime.date),
+                    ("datetime_field", datetime.datetime)])
+
+  def test_type_overrides_with_modes(self):
+    """Test that type_overrides works with NULLABLE and REPEATED modes."""
+    import datetime
+    schema = {
+        "fields": [{
+            "name": "required_date", "type": "DATE", "mode": "REQUIRED"
+        }, {
+            "name": "optional_date", "type": "DATE", "mode": "NULLABLE"
+        }, {
+            "name": "repeated_dates", "type": "DATE", "mode": "REPEATED"
+        }]
+    }
+
+    type_overrides = {"DATE": datetime.date}
+    typehints = get_beam_typehints_from_tableschema(schema, type_overrides)
+
+    expected = [("required_date", datetime.date),
+                ("optional_date", Optional[datetime.date]),
+                ("repeated_dates", Sequence[datetime.date])]
+    self.assertEqual(typehints, expected)
+
+  def test_type_overrides_mixed_with_default_types(self):
+    """Test type_overrides alongside default type mappings."""
+    import datetime
+    schema = {
+        "fields": [{
+            "name": "date_field", "type": "DATE", "mode": "REQUIRED"
+        }, {
+            "name": "string_field", "type": "STRING", "mode": "REQUIRED"
+        }, {
+            "name": "int_field", "type": "INTEGER", "mode": "REQUIRED"
+        }]
+    }
+
+    type_overrides = {"DATE": datetime.date}
+    typehints = get_beam_typehints_from_tableschema(schema, type_overrides)
+
+    expected = [("date_field", datetime.date), ("string_field", str),
+                ("int_field", np.int64)]
+    self.assertEqual(typehints, expected)
+
+  def test_type_overrides_with_nested_struct(self):
+    """Test that type_overrides is propagated to nested STRUCT fields."""
+    import datetime
+    schema = bigquery.TableSchema()
+
+    # Root field
+    date_field = bigquery.TableFieldSchema()
+    date_field.name = "date_field"
+    date_field.type = "DATE"
+    date_field.mode = "REQUIRED"
+
+    # Nested struct with DATE field
+    struct_field = bigquery.TableFieldSchema()
+    struct_field.name = "nested"
+    struct_field.type = "RECORD"
+    struct_field.mode = "REQUIRED"
+
+    nested_date = bigquery.TableFieldSchema()
+    nested_date.name = "nested_date"
+    nested_date.type = "DATE"
+    nested_date.mode = "REQUIRED"
+    struct_field.fields.append(nested_date)
+
+    schema.fields.append(date_field)
+    schema.fields.append(struct_field)
+
+    type_overrides = {"DATE": datetime.date}
+    typehints = get_beam_typehints_from_tableschema(schema, type_overrides)
+
+    self.assertEqual(len(typehints), 2)
+    self.assertEqual(typehints[0], ("date_field", datetime.date))
+    # The nested field's DATE should also be overridden
+    nested_constraint = typehints[1][1]
+    nested_fields = nested_constraint._fields
+    self.assertEqual(nested_fields[0], ("nested_date", datetime.date))
+
+  def test_type_overrides_can_override_default_types(self):
+    """Test that type_overrides can override default type mappings."""
+    schema = {
+        "fields": [{
+            "name": "geo_field", "type": "GEOGRAPHY", "mode": "REQUIRED"
+        }]
+    }
+
+    # Without overrides, GEOGRAPHY maps to str (default)
+    typehints = get_beam_typehints_from_tableschema(schema, None)
+    self.assertEqual(typehints, [("geo_field", str)])
+
+    # With overrides, we can change it
+    typehints_override = get_beam_typehints_from_tableschema(
+        schema, {"GEOGRAPHY": bytes})
+    self.assertEqual(typehints_override, [("geo_field", bytes)])
+
+  def test_type_overrides_json_to_dict(self):
+    """Test using type_overrides to map JSON to dict."""
+    schema = {"fields": [{"name": "data", "type": "JSON", "mode": "NULLABLE"}]}
+
+    # Without overrides, JSON is not supported
+    with self.assertRaises(ValueError):
+      get_beam_typehints_from_tableschema(schema)
+
+    # With overrides, can map to str
+    typehints_str = get_beam_typehints_from_tableschema(schema, {"JSON": str})
+    self.assertEqual(typehints_str, [("data", Optional[str])])
+
+    # Or map to dict
+    typehints_dict = get_beam_typehints_from_tableschema(schema, {"JSON": dict})
+    self.assertEqual(typehints_dict, [("data", Optional[dict])])
+
+
+@unittest.skipIf(HttpError is None, 'GCP dependencies are not installed')
+class TestBigQueryWrapperQuotaProject(unittest.TestCase):
+  """Tests for quota_project_id in BigQueryWrapper."""
+  @mock.patch(
+      'apache_beam.io.gcp.bigquery_tools.BigQueryWrapper._bigquery_client')
+  @mock.patch(
+      'apache_beam.io.gcp.bigquery_tools.BigQueryWrapper._gcp_bigquery_client')
+  def test_quota_project_id_stored(self, mock_gcp_client, mock_bq_client):
+    """Test that quota_project_id is stored in BigQueryWrapper."""
+    mock_bq_client.return_value = mock.Mock()
+    mock_gcp_client.return_value = mock.Mock()
+
+    wrapper = BigQueryWrapper(quota_project_id='my-billing-project')
+    self.assertEqual(wrapper.quota_project_id, 'my-billing-project')
+
+  @mock.patch(
+      'apache_beam.io.gcp.bigquery_tools.BigQueryWrapper._bigquery_client')
+  @mock.patch(
+      'apache_beam.io.gcp.bigquery_tools.BigQueryWrapper._gcp_bigquery_client')
+  def test_from_pipeline_options_reads_quota_from_options(
+      self, mock_gcp_client, mock_bq_client):
+    """Test from_pipeline_options reads quota_project_id from
+    BigQueryOptions."""
+    from apache_beam.options.pipeline_options import PipelineOptions
+
+    mock_bq_client.return_value = mock.Mock()
+    mock_gcp_client.return_value = mock.Mock()
+
+    options = PipelineOptions(
+        ['--bigquery_quota_project_id=my-billing-project'])
+    wrapper = BigQueryWrapper.from_pipeline_options(options)
+
+    self.assertEqual(wrapper.quota_project_id, 'my-billing-project')
+
+  @mock.patch(
+      'apache_beam.io.gcp.bigquery_tools.BigQueryWrapper._bigquery_client')
+  @mock.patch(
+      'apache_beam.io.gcp.bigquery_tools.BigQueryWrapper._gcp_bigquery_client')
+  def test_from_pipeline_options_none_when_not_set(
+      self, mock_gcp_client, mock_bq_client):
+    """Test from_pipeline_options returns None when quota_project_id not set."""
+    from apache_beam.options.pipeline_options import PipelineOptions
+
+    mock_bq_client.return_value = mock.Mock()
+    mock_gcp_client.return_value = mock.Mock()
+
+    options = PipelineOptions([])
+    wrapper = BigQueryWrapper.from_pipeline_options(options)
+
+    self.assertIsNone(wrapper.quota_project_id)
+
+  def test_http_with_headers_sets_headers_and_delegates(self):
+    from apache_beam.io.gcp.bigquery_tools import _HttpWithHeaders
+    inner = mock.MagicMock()
+    inner.request.return_value = ('response', b'content')
+    inner.redirect_codes = {301, 302}
+    http = _HttpWithHeaders(
+        inner, {'x-goog-user-project': 'p'}, hosts=['example.com'])
+
+    result = http.request(
+        'https://example.com',
+        method='GET',
+        headers={
+            'x-goog-user-project': 'other', 'accept': 'json'
+        },
+        redirections=3)
+
+    self.assertEqual(result, ('response', b'content'))
+    inner.request.assert_called_once_with(
+        'https://example.com',
+        'GET',
+        body=None,
+        headers={
+            'x-goog-user-project': 'p', 'accept': 'json'
+        },
+        redirections=3)
+    # Attribute reads and writes reach the wrapped http.
+    self.assertEqual(http.redirect_codes, {301, 302})
+    http.redirect_codes = {301}
+    self.assertEqual(inner.redirect_codes, {301})
+
+  def test_http_with_headers_survives_copy(self):
+    import copy
+
+    from apache_beam.io.gcp.bigquery_tools import _HttpWithHeaders
+    inner = mock.MagicMock()
+    http = copy.copy(
+        _HttpWithHeaders(
+            inner, {'x-goog-user-project': 'p'}, hosts=['example.com']))
+
+    http.request('https://example.com')
+    inner.request.assert_called_once_with(
+        'https://example.com',
+        'GET',
+        body=None,
+        headers={'x-goog-user-project': 'p'})
+
+  def test_http_with_headers_skips_other_hosts(self):
+    from apache_beam.io.gcp.bigquery_tools import _HttpWithHeaders
+    inner = mock.MagicMock()
+    http = _HttpWithHeaders(
+        inner, {'x-goog-user-project': 'p'}, hosts=['example.com'])
+
+    http.request('https://oauth2.googleapis.com/token', headers={'a': 'b'})
+    inner.request.assert_called_once_with(
+        'https://oauth2.googleapis.com/token',
+        'GET',
+        body=None,
+        headers={'a': 'b'})
+
+  @mock.patch('apache_beam.io.gcp.bigquery_tools.bq_storage')
+  def test_create_bq_storage_client_with_quota_project(self, mock_bq_storage):
+    """The quota project is passed as a client option; the client applies it
+    to the credentials it resolves itself."""
+    bigquery_tools.create_bq_storage_client('my-billing-project')
+    mock_bq_storage.BigQueryReadClient.assert_called_once_with(
+        client_options={'quota_project_id': 'my-billing-project'})
+
+  @mock.patch('apache_beam.io.gcp.bigquery_tools.bq_storage')
+  def test_create_bq_storage_client_without_quota_project(
+      self, mock_bq_storage):
+    """Without a quota project the client is created with defaults."""
+    bigquery_tools.create_bq_storage_client(None)
+    mock_bq_storage.BigQueryReadClient.assert_called_once_with()
+
+  @mock.patch('apache_beam.io.gcp.bigquery_tools.auth.get_service_credentials')
+  def test_bigquery_client_raises_without_credentials(
+      self, mock_get_credentials):
+    """An explicit quota project must fail loudly rather than fall back to
+    apitools' own credential discovery, which would bill another project."""
+    from apache_beam.options.pipeline_options import PipelineOptions
+    mock_get_credentials.return_value = None
+
+    with self.assertRaisesRegex(ValueError, 'no credentials were found'):
+      BigQueryWrapper._bigquery_client(
+          PipelineOptions(), quota_project_id='requested-project')
+
+  @mock.patch('apache_beam.io.gcp.bigquery_tools.get_new_http')
+  @mock.patch('apache_beam.io.gcp.bigquery_tools.auth.get_service_credentials')
+  def test_bigquery_client_quota_project_wins_over_credentials(
+      self, mock_get_credentials, mock_get_new_http):
+    """The requested quota project must reach every BigQuery request,
+    including the retry after a 401 refresh, even when the credentials carry
+    their own, but not the token refresh requests."""
+    import httplib2
+    from google.auth import credentials as ga_credentials
+
+    from apache_beam.internal.gcp import auth
+    from apache_beam.options.pipeline_options import PipelineOptions
+
+    class CredentialsWithQuotaProject(ga_credentials.Credentials):
+      def __init__(self):
+        super().__init__()
+        self._quota_project_id = 'adc-project'
+
+      def refresh(self, request):
+        # Token refreshes go through the same Http as the API requests.
+        request('https://oauth2.googleapis.com/token', method='POST')
+        self.token = 'token'
+
+    seen_headers = []
+    token_request_headers = []
+    statuses = iter([401, 200])
+
+    class FakeHttp(object):
+      connections = {}
+      redirect_codes = set()
+
+      def request(self, uri, method='GET', body=None, headers=None, **kwargs):
+        if uri.startswith('https://oauth2.googleapis.com/'):
+          token_request_headers.append(dict(headers or {}))
+          return httplib2.Response({'status': 200}), b'{}'
+        seen_headers.append(dict(headers))
+        response = httplib2.Response({
+            'status': next(statuses), 'content-type': 'application/json'
+        })
+        return response, b'{}'
+
+    mock_get_new_http.return_value = FakeHttp()
+    mock_get_credentials.return_value = auth._ApitoolsCredentialsAdapter(
+        CredentialsWithQuotaProject())
+
+    client = BigQueryWrapper._bigquery_client(
+        PipelineOptions(), quota_project_id='requested-project')
+    client.projects.List(bigquery.BigqueryProjectsListRequest())
+
+    self.assertEqual(len(seen_headers), 2)
+    for headers in seen_headers:
+      self.assertEqual(headers['x-goog-user-project'], 'requested-project')
+      self.assertEqual(headers['authorization'], 'Bearer token')
+    # The quota project must not be sent to the token endpoint.
+    self.assertTrue(token_request_headers)
+    for headers in token_request_headers:
+      self.assertNotIn('x-goog-user-project', headers)
+
+  @mock.patch('apache_beam.io.gcp.bigquery_tools.gcp_bigquery')
+  def test_gcp_bigquery_client_passes_quota_project(self, mock_gcp_bq):
+    mock_client = mock_gcp_bq.Client
+    BigQueryWrapper._gcp_bigquery_client(quota_project_id='my-billing-project')
+    self.assertEqual(
+        mock_client.call_args.kwargs['client_options'],
+        {'quota_project_id': 'my-billing-project'})
+
+  @mock.patch('apache_beam.io.gcp.bigquery_tools.gcp_bigquery')
+  def test_gcp_bigquery_client_no_quota_project_by_default(self, mock_gcp_bq):
+    mock_client = mock_gcp_bq.Client
+    BigQueryWrapper._gcp_bigquery_client()
+    self.assertIsNone(mock_client.call_args.kwargs['client_options'])
 
 
 if __name__ == '__main__':

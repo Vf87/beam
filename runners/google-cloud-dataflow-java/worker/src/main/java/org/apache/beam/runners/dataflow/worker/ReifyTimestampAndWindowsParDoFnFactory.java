@@ -17,7 +17,7 @@
  */
 package org.apache.beam.runners.dataflow.worker;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import com.google.api.services.dataflow.model.SideInputInfo;
 import java.util.List;
@@ -26,14 +26,16 @@ import org.apache.beam.runners.dataflow.util.CloudObject;
 import org.apache.beam.runners.dataflow.worker.util.common.worker.ParDoFn;
 import org.apache.beam.runners.dataflow.worker.util.common.worker.Receiver;
 import org.apache.beam.sdk.options.PipelineOptions;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.DoFnInfo;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** A {@link ParDoFnFactory} to create instances of {@link ReifyTimestampAndWindowsParDoFn}. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 class ReifyTimestampAndWindowsParDoFnFactory implements ParDoFnFactory {
   @Override
@@ -69,27 +71,38 @@ class ReifyTimestampAndWindowsParDoFnFactory implements ParDoFnFactory {
     public void processElement(Object untypedElem) throws Exception {
       WindowedValue<KV<?, ?>> typedElem = (WindowedValue<KV<?, ?>>) untypedElem;
 
-      receiver.process(
-          WindowedValue.of(
+      WindowedValues.builder(typedElem)
+          .withValue(
               KV.of(
                   typedElem.getValue().getKey(),
-                  WindowedValue.of(
+                  WindowedValues.of(
                       typedElem.getValue().getValue(),
                       typedElem.getTimestamp(),
                       typedElem.getWindows(),
-                      typedElem.getPane())),
-              typedElem.getTimestamp(),
-              typedElem.getWindows(),
-              typedElem.getPane()));
+                      typedElem.getPaneInfo())))
+          .setReceiver(receiver::process)
+          .output();
     }
 
     @Override
     public void processTimers() {}
 
     @Override
-    public void finishBundle() throws Exception {}
+    public void finishKey(Object key) throws Exception {}
 
     @Override
-    public void abort() throws Exception {}
+    public void finishBundle() throws Exception {
+      this.receiver = null;
+    }
+
+    @Override
+    public void abort() throws Exception {
+      this.receiver = null;
+    }
+
+    @Override
+    public @Nullable DoFnInfo<?, ?> getDoFnInfo() {
+      return null;
+    }
   }
 }

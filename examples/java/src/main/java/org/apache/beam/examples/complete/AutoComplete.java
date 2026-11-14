@@ -19,7 +19,7 @@ package org.apache.beam.examples.complete;
 
 import static com.google.datastore.v1.client.DatastoreHelper.makeKey;
 import static com.google.datastore.v1.client.DatastoreHelper.makeValue;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableReference;
@@ -39,8 +39,8 @@ import org.apache.beam.examples.common.ExampleOptions;
 import org.apache.beam.examples.common.ExampleUtils;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
-import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.coders.DefaultCoder;
+import org.apache.beam.sdk.extensions.avro.coders.AvroCoder;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.io.gcp.datastore.DatastoreIO;
@@ -52,6 +52,8 @@ import org.apache.beam.sdk.options.Validation;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.DoFn.Element;
+import org.apache.beam.sdk.transforms.DoFn.OutputReceiver;
 import org.apache.beam.sdk.transforms.Filter;
 import org.apache.beam.sdk.transforms.Flatten;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -68,7 +70,7 @@ import org.apache.beam.sdk.transforms.windowing.WindowFn;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
 import org.joda.time.Duration;
 
 /**
@@ -96,7 +98,7 @@ import org.joda.time.Duration;
  * received.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class AutoComplete {
 
@@ -125,16 +127,17 @@ public class AutoComplete {
               // First count how often each token appears.
               .apply(Count.perElement())
 
-              // Map the KV outputs of Count into our own CompletionCandiate class.
+              // Map the KV outputs of Count into our own CompletionCandidate class.
               .apply(
                   "CreateCompletionCandidates",
                   ParDo.of(
                       new DoFn<KV<String, Long>, CompletionCandidate>() {
                         @ProcessElement
-                        public void processElement(ProcessContext c) {
-                          c.output(
-                              new CompletionCandidate(
-                                  c.element().getKey(), c.element().getValue()));
+                        public void processElement(
+                            @Element KV<String, Long> element,
+                            OutputReceiver<CompletionCandidate> receiver) {
+                          receiver.output(
+                              new CompletionCandidate(element.getKey(), element.getValue()));
                         }
                       }));
 
@@ -168,7 +171,7 @@ public class AutoComplete {
           // For each completion candidate, map it to all prefixes.
           .apply(ParDo.of(new AllPrefixes(minPrefix)))
 
-          // Find and return the top candiates for each prefix.
+          // Find and return the top candidates for each prefix.
           .apply(
               Top.<String, CompletionCandidate>largestPerKey(candidatesPerPrefix)
                   .withHotKeyFanout(new HotKeyFanout()));
@@ -210,9 +213,11 @@ public class AutoComplete {
     private static class FlattenTops
         extends DoFn<KV<String, List<CompletionCandidate>>, CompletionCandidate> {
       @ProcessElement
-      public void processElement(ProcessContext c) {
-        for (CompletionCandidate cc : c.element().getValue()) {
-          c.output(cc);
+      public void processElement(
+          @Element KV<String, List<CompletionCandidate>> element,
+          OutputReceiver<CompletionCandidate> receiver) {
+        for (CompletionCandidate cc : element.getValue()) {
+          receiver.output(cc);
         }
       }
     }
@@ -227,7 +232,7 @@ public class AutoComplete {
             .apply(Partition.of(2, new KeySizePartitionFn()));
       } else {
         // If a candidate is in the top N for prefix a...b, it must also be in the top
-        // N for a...bX for every X, which is typlically a much smaller set to consider.
+        // N for a...bX for every X, which is typically a much smaller set to consider.
         // First, compute the top candidate for prefixes of size at least minPrefix + 1.
         PCollectionList<KV<String, List<CompletionCandidate>>> larger =
             input.apply(new ComputeTopRecursive(candidatesPerPrefix, minPrefix + 1));
@@ -267,10 +272,12 @@ public class AutoComplete {
     }
 
     @ProcessElement
-    public void processElement(ProcessContext c) {
-      String word = c.element().value;
+    public void processElement(
+        @Element CompletionCandidate element,
+        OutputReceiver<KV<String, CompletionCandidate>> receiver) {
+      String word = element.value;
       for (int i = minPrefix; i <= Math.min(word.length(), maxPrefix); i++) {
-        c.output(KV.of(word.substring(0, i), c.element()));
+        receiver.output(KV.of(word.substring(0, i), element));
       }
     }
   }
@@ -332,23 +339,24 @@ public class AutoComplete {
   /** Takes as input a set of strings, and emits each #hashtag found therein. */
   static class ExtractHashtags extends DoFn<String, String> {
     @ProcessElement
-    public void processElement(ProcessContext c) {
-      Matcher m = Pattern.compile("#\\S+").matcher(c.element());
+    public void processElement(@Element String element, OutputReceiver<String> receiver) {
+      Matcher m = Pattern.compile("#\\S+").matcher(element);
       while (m.find()) {
-        c.output(m.group().substring(1));
+        receiver.output(m.group().substring(1));
       }
     }
   }
 
   static class FormatForBigquery extends DoFn<KV<String, List<CompletionCandidate>>, TableRow> {
     @ProcessElement
-    public void processElement(ProcessContext c) {
+    public void processElement(
+        @Element KV<String, List<CompletionCandidate>> element, OutputReceiver<TableRow> receiver) {
       List<TableRow> completions = new ArrayList<>();
-      for (CompletionCandidate cc : c.element().getValue()) {
+      for (CompletionCandidate cc : element.getValue()) {
         completions.add(new TableRow().set("count", cc.getCount()).set("tag", cc.getValue()));
       }
-      TableRow row = new TableRow().set("prefix", c.element().getKey()).set("tags", completions);
-      c.output(row);
+      TableRow row = new TableRow().set("prefix", element.getKey()).set("tags", completions);
+      receiver.output(row);
     }
 
     /** Defines the BigQuery schema used for the output. */
@@ -369,8 +377,8 @@ public class AutoComplete {
   }
 
   /**
-   * Takes as input a the top candidates per prefix, and emits an entity suitable for writing to
-   * Cloud Datastore.
+   * Takes as input the top candidates per prefix, and emits an entity suitable for writing to Cloud
+   * Datastore.
    *
    * <p>Note: We use ancestor keys for strong consistency. See the Cloud Datastore documentation on
    * <a href="https://cloud.google.com/datastore/docs/concepts/structuring_for_strong_consistency">
@@ -386,15 +394,16 @@ public class AutoComplete {
     }
 
     @ProcessElement
-    public void processElement(ProcessContext c) {
+    public void processElement(
+        @Element KV<String, List<CompletionCandidate>> element, OutputReceiver<Entity> receiver) {
       Entity.Builder entityBuilder = Entity.newBuilder();
       com.google.datastore.v1.Key key =
-          makeKey(makeKey(kind, ancestorKey).build(), kind, c.element().getKey()).build();
+          makeKey(makeKey(kind, ancestorKey).build(), kind, element.getKey()).build();
 
       entityBuilder.setKey(key);
       List<Value> candidates = new ArrayList<>();
       Map<String, Value> properties = new HashMap<>();
-      for (CompletionCandidate tag : c.element().getValue()) {
+      for (CompletionCandidate tag : element.getValue()) {
         Entity.Builder tagEntity = Entity.newBuilder();
         properties.put("tag", makeValue(tag.value).build());
         properties.put("count", makeValue(tag.count).build());
@@ -402,7 +411,7 @@ public class AutoComplete {
       }
       properties.put("candidates", makeValue(candidates).build());
       entityBuilder.putAllProperties(properties);
-      c.output(entityBuilder.build());
+      receiver.output(entityBuilder.build());
     }
   }
 
@@ -467,7 +476,6 @@ public class AutoComplete {
 
   public static void runAutocompletePipeline(Options options) throws IOException {
 
-    options.setBigQuerySchema(FormatForBigquery.getSchema());
     ExampleUtils exampleUtils = new ExampleUtils(options);
 
     // We support running the same pipeline in either
@@ -528,11 +536,12 @@ public class AutoComplete {
                   ParDo.of(
                       new DoFn<KV<String, List<CompletionCandidate>>, Long>() {
                         @ProcessElement
-                        public void process(ProcessContext c) {
-                          KV<String, List<CompletionCandidate>> elm = c.element();
+                        public void process(
+                            @Element KV<String, List<CompletionCandidate>> elm,
+                            OutputReceiver<Long> receiver) {
                           Long listHash =
-                              c.element().getValue().stream().mapToLong(cc -> cc.hashCode()).sum();
-                          c.output(Long.valueOf(elm.getKey().hashCode()) + listHash);
+                              elm.getValue().stream().mapToLong(cc -> cc.hashCode()).sum();
+                          receiver.output(Long.valueOf(elm.getKey().hashCode()) + listHash);
                         }
                       }))
               .apply(Sum.longsGlobally());

@@ -27,11 +27,13 @@ import org.apache.beam.sdk.io.gcp.bigquery.WriteResult
 import org.apache.beam.sdk.options.*
 import org.apache.beam.sdk.transforms.Count
 import org.apache.beam.sdk.transforms.DoFn
+import org.apache.beam.sdk.transforms.DoFn.Element
+import org.apache.beam.sdk.transforms.DoFn.OutputReceiver
 import org.apache.beam.sdk.transforms.PTransform
 import org.apache.beam.sdk.transforms.ParDo
 import org.apache.beam.sdk.values.KV
 import org.apache.beam.sdk.values.PCollection
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists
 
 
 /**
@@ -60,12 +62,12 @@ import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists
  * See examples/java/README.md for instructions about how to configure different runners.
  *
  *
- * The BigQuery input table defaults to `clouddataflow-readonly:samples.weather_stations`
+ * The BigQuery input table defaults to `apache-beam-testing.samples.weather_stations`
  * and can be overridden with `--input`.
  */
 object BigQueryTornadoes {
     // Default to using a 1000 row subset of the public weather station table publicdata:samples.gsod.
-    private const val WEATHER_SAMPLES_TABLE = "clouddataflow-readonly:samples.weather_stations"
+    private const val WEATHER_SAMPLES_TABLE = "apache-beam-testing.samples.weather_stations"
 
     /**
      * Examines each row in the input table. If a tornado was recorded in that sample, the month in
@@ -73,10 +75,9 @@ object BigQueryTornadoes {
      */
     internal class ExtractTornadoesFn : DoFn<TableRow, Int>() {
         @ProcessElement
-        fun processElement(c: ProcessContext) {
-            val row = c.element()
+        fun processElement(@Element row: TableRow, receiver: OutputReceiver<Int>) {
             if (row["tornado"] as Boolean) {
-                c.output(Integer.parseInt(row["month"] as String))
+                receiver.output(Integer.parseInt(row["month"] as String))
             }
         }
     }
@@ -87,11 +88,11 @@ object BigQueryTornadoes {
      */
     internal class FormatCountsFn : DoFn<KV<Int, Long>, TableRow>() {
         @ProcessElement
-        fun processElement(c: ProcessContext) {
+        fun processElement(@Element element: KV<Int, Long>, receiver: OutputReceiver<TableRow>) {
             val row = TableRow()
-                    .set("month", c.element().key)
-                    .set("tornado_count", c.element().value)
-            c.output(row)
+                    .set("month", element.key)
+                    .set("tornado_count", element.value)
+            receiver.output(row)
         }
     }
 

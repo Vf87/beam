@@ -36,16 +36,15 @@ import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VarIntCoder;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Create;
-import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.GroupByKey;
-import org.apache.beam.sdk.transforms.SimpleFunction;
 import org.apache.beam.sdk.transforms.WithKeys;
 import org.apache.beam.sdk.util.UserCodeException;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.joda.time.Instant;
 import org.junit.Rule;
 import org.junit.Test;
@@ -63,10 +62,10 @@ public class CloningBundleFactoryTest {
 
   @Test
   public void rootBundleSucceedsIgnoresCoder() {
-    WindowedValue<Record> one = WindowedValue.valueInGlobalWindow(new Record());
-    WindowedValue<Record> two = WindowedValue.valueInGlobalWindow(new Record());
-    CommittedBundle<Record> root =
-        factory.<Record>createRootBundle().add(one).add(two).commit(Instant.now());
+    WindowedValue<TestRecord> one = WindowedValues.valueInGlobalWindow(new TestRecord());
+    WindowedValue<TestRecord> two = WindowedValues.valueInGlobalWindow(new TestRecord());
+    CommittedBundle<TestRecord> root =
+        factory.<TestRecord>createRootBundle().add(one).add(two).commit(Instant.now());
 
     assertThat(root.getElements(), containsInAnyOrder(one, two));
   }
@@ -78,9 +77,9 @@ public class CloningBundleFactoryTest {
         created
             .apply(WithKeys.of("foo"))
             .setCoder(KvCoder.of(StringUtf8Coder.of(), VarIntCoder.of()));
-    WindowedValue<KV<String, Integer>> fooOne = WindowedValue.valueInGlobalWindow(KV.of("foo", 1));
+    WindowedValue<KV<String, Integer>> fooOne = WindowedValues.valueInGlobalWindow(KV.of("foo", 1));
     WindowedValue<KV<String, Integer>> fooThree =
-        WindowedValue.valueInGlobalWindow(KV.of("foo", 3));
+        WindowedValues.valueInGlobalWindow(KV.of("foo", 3));
     CommittedBundle<KV<String, Integer>> bundle =
         factory.createBundle(kvs).add(fooOne).add(fooThree).commit(Instant.now());
 
@@ -105,7 +104,7 @@ public class CloningBundleFactoryTest {
             .setCoder(KvCoder.of(StringUtf8Coder.of(), VarIntCoder.of()))
             .apply(GroupByKey.create());
     WindowedValue<KV<String, Iterable<Integer>>> foos =
-        WindowedValue.valueInGlobalWindow(
+        WindowedValues.valueInGlobalWindow(
             KV.<String, Iterable<Integer>>of("foo", ImmutableList.of(1, 3)));
     CommittedBundle<KV<String, Iterable<Integer>>> keyedBundle =
         factory
@@ -123,137 +122,72 @@ public class CloningBundleFactoryTest {
 
   @Test
   public void bundleEncodeFailsAddFails() {
-    PCollection<Record> pc = p.apply(Create.empty(new RecordNoEncodeCoder()));
-    UncommittedBundle<Record> bundle = factory.createBundle(pc);
+    PCollection<TestRecord> pc = p.apply(Create.empty(new TestRecordNoEncodeCoder()));
+    UncommittedBundle<TestRecord> bundle = factory.createBundle(pc);
 
     thrown.expect(UserCodeException.class);
     thrown.expectCause(isA(CoderException.class));
     thrown.expectMessage("Encode not allowed");
-    bundle.add(WindowedValue.valueInGlobalWindow(new Record()));
+    bundle.add(WindowedValues.valueInGlobalWindow(new TestRecord()));
   }
 
   @Test
   public void bundleDecodeFailsAddFails() {
-    PCollection<Record> pc = p.apply(Create.empty(new RecordNoDecodeCoder()));
-    UncommittedBundle<Record> bundle = factory.createBundle(pc);
+    PCollection<TestRecord> pc = p.apply(Create.empty(new TestRecordNoDecodeCoder()));
+    UncommittedBundle<TestRecord> bundle = factory.createBundle(pc);
 
     thrown.expect(UserCodeException.class);
     thrown.expectCause(isA(CoderException.class));
     thrown.expectMessage("Decode not allowed");
-    bundle.add(WindowedValue.valueInGlobalWindow(new Record()));
+    bundle.add(WindowedValues.valueInGlobalWindow(new TestRecord()));
   }
 
   @Test
   public void keyedBundleEncodeFailsAddFails() {
-    PCollection<Record> pc = p.apply(Create.empty(new RecordNoEncodeCoder()));
-    UncommittedBundle<Record> bundle =
+    PCollection<TestRecord> pc = p.apply(Create.empty(new TestRecordNoEncodeCoder()));
+    UncommittedBundle<TestRecord> bundle =
         factory.createKeyedBundle(StructuralKey.of("foo", StringUtf8Coder.of()), pc);
 
     thrown.expect(UserCodeException.class);
     thrown.expectCause(isA(CoderException.class));
     thrown.expectMessage("Encode not allowed");
-    bundle.add(WindowedValue.valueInGlobalWindow(new Record()));
+    bundle.add(WindowedValues.valueInGlobalWindow(new TestRecord()));
   }
 
   @Test
   public void keyedBundleDecodeFailsAddFails() {
-    PCollection<Record> pc = p.apply(Create.empty(new RecordNoDecodeCoder()));
-    UncommittedBundle<Record> bundle =
+    PCollection<TestRecord> pc = p.apply(Create.empty(new TestRecordNoDecodeCoder()));
+    UncommittedBundle<TestRecord> bundle =
         factory.createKeyedBundle(StructuralKey.of("foo", StringUtf8Coder.of()), pc);
 
     thrown.expect(UserCodeException.class);
     thrown.expectCause(isA(CoderException.class));
     thrown.expectMessage("Decode not allowed");
-    bundle.add(WindowedValue.valueInGlobalWindow(new Record()));
+    bundle.add(WindowedValues.valueInGlobalWindow(new TestRecord()));
   }
 
-  static class Record {}
+  static class TestRecord {}
 
-  static class RecordNoEncodeCoder extends AtomicCoder<Record> {
+  static class TestRecordNoEncodeCoder extends AtomicCoder<TestRecord> {
 
     @Override
-    public void encode(Record value, OutputStream outStream) throws IOException {
+    public void encode(TestRecord value, OutputStream outStream) throws IOException {
       throw new CoderException("Encode not allowed");
     }
 
     @Override
-    public Record decode(InputStream inStream) throws IOException {
+    public TestRecord decode(InputStream inStream) throws IOException {
       return null;
     }
   }
 
-  static class RecordNoDecodeCoder extends AtomicCoder<Record> {
+  static class TestRecordNoDecodeCoder extends AtomicCoder<TestRecord> {
     @Override
-    public void encode(Record value, OutputStream outStream) throws IOException {}
+    public void encode(TestRecord value, OutputStream outStream) throws IOException {}
 
     @Override
-    public Record decode(InputStream inStream) throws IOException {
+    public TestRecord decode(InputStream inStream) throws IOException {
       throw new CoderException("Decode not allowed");
-    }
-  }
-
-  private static class RecordStructuralValueCoder extends AtomicCoder<Record> {
-    @Override
-    public void encode(Record value, OutputStream outStream) throws CoderException, IOException {}
-
-    @Override
-    public Record decode(InputStream inStream) throws CoderException, IOException {
-      return new Record() {
-        @Override
-        public String toString() {
-          return "DecodedRecord";
-        }
-      };
-    }
-
-    @Override
-    public boolean consistentWithEquals() {
-      return true;
-    }
-
-    @Override
-    public Object structuralValue(Record value) {
-      return value;
-    }
-  }
-
-  private static class RecordNotConsistentWithEqualsStructuralValueCoder
-      extends AtomicCoder<Record> {
-    @Override
-    public void encode(Record value, OutputStream outStream) throws CoderException, IOException {}
-
-    @Override
-    public Record decode(InputStream inStream) throws CoderException, IOException {
-      return new Record() {
-        @Override
-        public String toString() {
-          return "DecodedRecord";
-        }
-      };
-    }
-
-    @Override
-    public boolean consistentWithEquals() {
-      return false;
-    }
-
-    @Override
-    public Object structuralValue(Record value) {
-      return value;
-    }
-  }
-
-  private static class IdentityDoFn extends DoFn<Record, Record> {
-    @ProcessElement
-    public void proc(ProcessContext ctxt) {
-      ctxt.output(ctxt.element());
-    }
-  }
-
-  private static class SimpleIdentity extends SimpleFunction<Record, Record> {
-    @Override
-    public Record apply(Record input) {
-      return input;
     }
   }
 }

@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.extensions.protobuf;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.ExtensionRegistry;
@@ -42,8 +42,8 @@ import org.apache.beam.sdk.coders.CustomCoder;
 import org.apache.beam.sdk.coders.DefaultCoder;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Sets;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -106,7 +106,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * @param <T> the Protocol Buffers {@link Message} handled by this {@link Coder}.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class ProtoCoder<T extends Message> extends CustomCoder<T> {
 
@@ -208,6 +208,7 @@ public class ProtoCoder<T extends Message> extends CustomCoder<T> {
     }
   }
 
+  @SuppressWarnings("EqualsGetClass")
   @Override
   public boolean equals(@Nullable Object other) {
     if (this == other) {
@@ -237,6 +238,11 @@ public class ProtoCoder<T extends Message> extends CustomCoder<T> {
     return protoMessageClass;
   }
 
+  @Override
+  public TypeDescriptor<T> getEncodedTypeDescriptor() {
+    return TypeDescriptor.of(protoMessageClass);
+  }
+
   public Set<Class<?>> getExtensionHosts() {
     return extensionHostClasses;
   }
@@ -247,17 +253,21 @@ public class ProtoCoder<T extends Message> extends CustomCoder<T> {
    */
   public ExtensionRegistry getExtensionRegistry() {
     if (memoizedExtensionRegistry == null) {
-      ExtensionRegistry registry = ExtensionRegistry.newInstance();
-      for (Class<?> extensionHost : extensionHostClasses) {
-        try {
-          extensionHost
-              .getDeclaredMethod("registerAllExtensions", ExtensionRegistry.class)
-              .invoke(null, registry);
-        } catch (IllegalAccessException | InvocationTargetException | NoSuchMethodException e) {
-          throw new IllegalStateException(e);
+      synchronized (this) {
+        if (memoizedExtensionRegistry == null) {
+          ExtensionRegistry registry = ExtensionRegistry.newInstance();
+          for (Class<?> extensionHost : extensionHostClasses) {
+            try {
+              extensionHost
+                  .getDeclaredMethod("registerAllExtensions", ExtensionRegistry.class)
+                  .invoke(null, registry);
+            } catch (IllegalAccessException | InvocationTargetException | NoSuchMethodException e) {
+              throw new IllegalStateException(e);
+            }
+          }
+          memoizedExtensionRegistry = registry.getUnmodifiable();
         }
       }
-      memoizedExtensionRegistry = registry.getUnmodifiable();
     }
     return memoizedExtensionRegistry;
   }
@@ -274,12 +284,8 @@ public class ProtoCoder<T extends Message> extends CustomCoder<T> {
    */
   final Set<Class<?>> extensionHostClasses;
 
-  // Constants used to serialize and deserialize
-  private static final String PROTO_MESSAGE_CLASS = "proto_message_class";
-  private static final String PROTO_EXTENSION_HOSTS = "proto_extension_hosts";
-
   // Transient fields that are lazy initialized and then memoized.
-  private transient ExtensionRegistry memoizedExtensionRegistry;
+  private transient volatile ExtensionRegistry memoizedExtensionRegistry;
   transient Parser<T> memoizedParser;
 
   /** Private constructor. */
@@ -289,7 +295,7 @@ public class ProtoCoder<T extends Message> extends CustomCoder<T> {
   }
 
   /** Get the memoized {@link Parser}, possibly initializing it lazily. */
-  protected Parser<T> getParser() {
+  protected synchronized Parser<T> getParser() {
     if (memoizedParser == null) {
       try {
         if (DynamicMessage.class.equals(protoMessageClass)) {
@@ -303,7 +309,16 @@ public class ProtoCoder<T extends Message> extends CustomCoder<T> {
           Parser<T> tParser = (Parser<T>) protoMessageInstance.getParserForType();
           memoizedParser = tParser;
         }
-      } catch (IllegalAccessException | InvocationTargetException | NoSuchMethodException e) {
+      } catch (NoSuchMethodException e) {
+        throw new IllegalArgumentException(
+            String.format(
+                "Cannot decode %s: it has no static getDefaultInstance() method, so its Parser "
+                    + "cannot be determined. This happens for the raw %s interface, e.g. when the "
+                    + "coder was inferred for a generic 'T extends Message'. Use a concrete "
+                    + "generated message class, DynamicProtoCoder, or call setCoder().",
+                protoMessageClass.getName(), Message.class.getName()),
+            e);
+      } catch (IllegalAccessException | InvocationTargetException e) {
         throw new IllegalArgumentException(e);
       }
     }

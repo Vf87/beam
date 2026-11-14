@@ -17,7 +17,8 @@
  */
 package org.apache.beam.runners.direct;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -38,17 +39,17 @@ import org.apache.beam.sdk.transforms.Materializations.MultimapView;
 import org.apache.beam.sdk.transforms.ViewFn;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollectionView;
+import org.apache.beam.sdk.values.WindowedValue;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.CacheBuilder;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.CacheLoader;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.LoadingCache;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Sets;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheBuilder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheLoader;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.LoadingCache;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -57,8 +58,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * and writing to a {@link PCollectionView}.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 class SideInputContainer {
   private static final Set<String> SUPPORTED_MATERIALIZATIONS =
@@ -68,7 +68,7 @@ class SideInputContainer {
 
   private final Collection<PCollectionView<?>> containedViews;
   private final LoadingCache<
-          PCollectionViewWindow<?>, AtomicReference<Iterable<? extends WindowedValue<?>>>>
+          PCollectionViewWindow<?>, AtomicReference<@Nullable Iterable<? extends WindowedValue<?>>>>
       viewByWindows;
 
   /** Create a new {@link SideInputContainer} with the provided views and the provided context. */
@@ -84,14 +84,18 @@ class SideInputContainer {
           pCollectionView.getViewFn().getMaterialization().getUrn(),
           pCollectionView.getTagInternal().getId());
     }
-    LoadingCache<PCollectionViewWindow<?>, AtomicReference<Iterable<? extends WindowedValue<?>>>>
+    LoadingCache<
+            PCollectionViewWindow<?>,
+            AtomicReference<@Nullable Iterable<? extends WindowedValue<?>>>>
         viewByWindows = CacheBuilder.newBuilder().build(new CallbackSchedulingLoader(context));
     return new SideInputContainer(containedViews, viewByWindows);
   }
 
   private SideInputContainer(
       Collection<PCollectionView<?>> containedViews,
-      LoadingCache<PCollectionViewWindow<?>, AtomicReference<Iterable<? extends WindowedValue<?>>>>
+      LoadingCache<
+              PCollectionViewWindow<?>,
+              AtomicReference<@Nullable Iterable<? extends WindowedValue<?>>>>
           viewByWindows) {
     this.containedViews = ImmutableSet.copyOf(containedViews);
     this.viewByWindows = viewByWindows;
@@ -153,29 +157,30 @@ class SideInputContainer {
   private void updatePCollectionViewWindowValues(
       PCollectionView<?> view, BoundedWindow window, Collection<WindowedValue<?>> windowValues) {
     PCollectionViewWindow<?> windowedView = PCollectionViewWindow.of(view, window);
-    AtomicReference<Iterable<? extends WindowedValue<?>>> contents =
+    AtomicReference<@Nullable Iterable<? extends WindowedValue<?>>> contents =
         viewByWindows.getUnchecked(windowedView);
     if (contents.compareAndSet(null, windowValues)) {
       // the value had never been set, so we set it and are done.
       return;
     }
-    PaneInfo newPane = windowValues.iterator().next().getPane();
+    PaneInfo newPane = windowValues.iterator().next().getPaneInfo();
 
     Iterable<? extends WindowedValue<?>> existingValues;
     long existingPane;
     do {
-      existingValues = contents.get();
+      existingValues = checkStateNotNull(contents.get());
       existingPane =
           Iterables.isEmpty(existingValues)
               ? -1L
-              : existingValues.iterator().next().getPane().getIndex();
+              : existingValues.iterator().next().getPaneInfo().getIndex();
     } while (newPane.getIndex() > existingPane
         && !contents.compareAndSet(existingValues, windowValues));
   }
 
   private static class CallbackSchedulingLoader
       extends CacheLoader<
-          PCollectionViewWindow<?>, AtomicReference<Iterable<? extends WindowedValue<?>>>> {
+          PCollectionViewWindow<?>,
+          AtomicReference<@Nullable Iterable<? extends WindowedValue<?>>>> {
     private final EvaluationContext context;
 
     public CallbackSchedulingLoader(EvaluationContext context) {
@@ -183,10 +188,11 @@ class SideInputContainer {
     }
 
     @Override
-    public AtomicReference<Iterable<? extends WindowedValue<?>>> load(
+    public AtomicReference<@Nullable Iterable<? extends WindowedValue<?>>> load(
         PCollectionViewWindow<?> view) {
 
-      AtomicReference<Iterable<? extends WindowedValue<?>>> contents = new AtomicReference<>();
+      AtomicReference<@Nullable Iterable<? extends WindowedValue<?>>> contents =
+          new AtomicReference<>();
       WindowingStrategy<?, ?> windowingStrategy = view.getView().getWindowingStrategyInternal();
 
       context.scheduleAfterOutputWouldBeProduced(
@@ -201,12 +207,12 @@ class SideInputContainer {
   private static class WriteEmptyViewContents implements Runnable {
     private final PCollectionView<?> view;
     private final BoundedWindow window;
-    private final AtomicReference<Iterable<? extends WindowedValue<?>>> contents;
+    private final AtomicReference<@Nullable Iterable<? extends WindowedValue<?>>> contents;
 
     private WriteEmptyViewContents(
         PCollectionView<?> view,
         BoundedWindow window,
-        AtomicReference<Iterable<? extends WindowedValue<?>>> contents) {
+        AtomicReference<@Nullable Iterable<? extends WindowedValue<?>>> contents) {
       this.contents = contents;
       this.view = view;
       this.window = window;

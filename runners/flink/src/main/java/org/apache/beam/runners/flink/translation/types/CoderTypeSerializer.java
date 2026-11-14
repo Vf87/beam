@@ -26,12 +26,9 @@ import org.apache.beam.runners.flink.translation.wrappers.DataOutputViewWrapper;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.util.CoderUtils;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.common.typeutils.TypeSerializerConfigSnapshot;
-import org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
-import org.apache.flink.core.io.VersionedIOReadableWritable;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -41,30 +38,51 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * org.apache.beam.sdk.coders.Coder Coders}.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class CoderTypeSerializer<T> extends TypeSerializer<T> {
 
-  private final Coder<T> coder;
+  private static final long serialVersionUID = 7247319138941746449L;
 
-  /**
-   * {@link SerializablePipelineOptions} deserialization will cause {@link
-   * org.apache.beam.sdk.io.FileSystems} registration needed for {@link
-   * org.apache.beam.sdk.transforms.Reshuffle} translation.
-   */
-  private final SerializablePipelineOptions pipelineOptions;
+  private final Coder<T> coder;
 
   private final boolean fasterCopy;
 
-  public CoderTypeSerializer(Coder<T> coder, SerializablePipelineOptions pipelineOptions) {
-    Preconditions.checkNotNull(coder);
-    Preconditions.checkNotNull(pipelineOptions);
-    this.coder = coder;
-    this.pipelineOptions = pipelineOptions;
+  /**
+   * Creates the serializer to use for a {@link CoderTypeInformation}. In batch mode, this is a
+   * {@link LengthPrefixedCoderTypeSerializer} if {@code lazyKvValues} is set and supported by the
+   * coder, or if {@link FlinkPipelineOptions#getLengthPrefixBatchRecords()} is set. Otherwise, it
+   * is a {@link CoderTypeSerializer}.
+   */
+  public static <T> CoderTypeSerializer<T> forTypeInformation(
+      Coder<T> coder, SerializablePipelineOptions pipelineOptions, boolean lazyKvValues) {
+    FlinkPipelineOptions options =
+        Preconditions.checkNotNull(pipelineOptions).get().as(FlinkPipelineOptions.class);
+    if (!options.isStreaming()) {
+      if (lazyKvValues && LengthPrefixedCoderTypeSerializer.supportsLazyKvValues(coder)) {
+        return new LengthPrefixedCoderTypeSerializer<>(coder, options.getFasterCopy(), true);
+      }
+      if (options.getLengthPrefixBatchRecords()) {
+        return new LengthPrefixedCoderTypeSerializer<>(coder, options.getFasterCopy());
+      }
+    }
+    return new CoderTypeSerializer<>(coder, options.getFasterCopy());
+  }
 
-    FlinkPipelineOptions options = pipelineOptions.get().as(FlinkPipelineOptions.class);
-    this.fasterCopy = options.getFasterCopy();
+  public CoderTypeSerializer(Coder<T> coder, SerializablePipelineOptions pipelineOptions) {
+    this(
+        coder,
+        Preconditions.checkNotNull(pipelineOptions)
+            .get()
+            .as(FlinkPipelineOptions.class)
+            .getFasterCopy());
+  }
+
+  public CoderTypeSerializer(Coder<T> coder, boolean fasterCopy) {
+    Preconditions.checkNotNull(coder);
+    this.coder = coder;
+    this.fasterCopy = fasterCopy;
   }
 
   @Override
@@ -74,7 +92,7 @@ public class CoderTypeSerializer<T> extends TypeSerializer<T> {
 
   @Override
   public CoderTypeSerializer<T> duplicate() {
-    return new CoderTypeSerializer<>(coder, pipelineOptions);
+    return new CoderTypeSerializer<>(coder, fasterCopy);
   }
 
   @Override
@@ -140,12 +158,24 @@ public class CoderTypeSerializer<T> extends TypeSerializer<T> {
     if (this == o) {
       return true;
     }
-    if (o == null || getClass() != o.getClass()) {
+    if (!(o instanceof CoderTypeSerializer)) {
       return false;
     }
 
     CoderTypeSerializer that = (CoderTypeSerializer) o;
-    return coder.equals(that.coder);
+    return isLengthPrefixed() == that.isLengthPrefixed()
+        && isLazyKvValues() == that.isLazyKvValues()
+        && coder.equals(that.coder);
+  }
+
+  /** Whether serialized records carry a length prefix, i.e. use a different binary format. */
+  boolean isLengthPrefixed() {
+    return false;
+  }
+
+  /** Whether records are deserialized as {@link LazyKvWindowedValue}s. */
+  boolean isLazyKvValues() {
+    return false;
   }
 
   @Override
@@ -155,31 +185,7 @@ public class CoderTypeSerializer<T> extends TypeSerializer<T> {
 
   @Override
   public TypeSerializerSnapshot<T> snapshotConfiguration() {
-    return new LegacySnapshot<>(this);
-  }
-
-  /** A legacy snapshot which does not care about schema compatibility. */
-  public static class LegacySnapshot<T> extends TypeSerializerConfigSnapshot<T> {
-
-    /** Needs to be public to work with {@link VersionedIOReadableWritable}. */
-    public LegacySnapshot() {}
-
-    public LegacySnapshot(CoderTypeSerializer<T> serializer) {
-      setPriorSerializer(serializer);
-    }
-
-    @Override
-    public int getVersion() {
-      // We always return the same version
-      return 1;
-    }
-
-    @Override
-    public TypeSerializerSchemaCompatibility<T> resolveSchemaCompatibility(
-        TypeSerializer<T> newSerializer) {
-      // We assume compatibility because we don't have a way of checking schema compatibility
-      return TypeSerializerSchemaCompatibility.compatibleAsIs();
-    }
+    return new UnversionedTypeSerializerSnapshot<>(this);
   }
 
   @Override

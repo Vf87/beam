@@ -20,42 +20,33 @@ package org.apache.beam.sdk.io.kafka;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors;
 import org.apache.beam.model.expansion.v1.ExpansionApi;
 import org.apache.beam.model.pipeline.v1.ExternalTransforms;
 import org.apache.beam.model.pipeline.v1.ExternalTransforms.ExternalConfigurationPayload;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
-import org.apache.beam.runners.core.construction.ParDoTranslation;
-import org.apache.beam.runners.core.construction.PipelineTranslation;
 import org.apache.beam.sdk.Pipeline;
-import org.apache.beam.sdk.coders.IterableCoder;
-import org.apache.beam.sdk.coders.KvCoder;
-import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.expansion.service.ExpansionService;
 import org.apache.beam.sdk.io.kafka.KafkaIO.ByteArrayKafkaRecord;
-import org.apache.beam.sdk.io.kafka.KafkaIO.Read.External;
 import org.apache.beam.sdk.io.kafka.KafkaIO.RowsWithMetadata;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.Field;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.schemas.SchemaCoder;
 import org.apache.beam.sdk.schemas.SchemaTranslation;
-import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.Impulse;
-import org.apache.beam.sdk.transforms.WithKeys;
-import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.transforms.Create;
+import org.apache.beam.sdk.util.ByteStringOutputStream;
+import org.apache.beam.sdk.util.construction.ParDoTranslation;
+import org.apache.beam.sdk.util.construction.PipelineTranslation;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.ByteString;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.StreamObserver;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.header.internals.RecordHeaders;
@@ -64,13 +55,9 @@ import org.hamcrest.text.MatchesPattern;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-import org.powermock.reflect.Whitebox;
 
 /** Tests for building {@link KafkaIO} externally via the ExpansionService. */
 @RunWith(JUnit4.class)
-@SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-})
 public class KafkaIOExternalTest {
 
   private void verifyKafkaReadComposite(
@@ -78,7 +65,7 @@ public class KafkaIOExternalTest {
       throws Exception {
     assertThat(
         kafkaSDFReadComposite.getSubtransformsList(),
-        Matchers.hasItem(MatchesPattern.matchesPattern(".*Impulse.*")));
+        Matchers.hasItem(MatchesPattern.matchesPattern(".*Create.*")));
     assertThat(
         kafkaSDFReadComposite.getSubtransformsList(),
         Matchers.hasItem(MatchesPattern.matchesPattern(".*GenerateKafkaSourceDescriptor.*")));
@@ -117,7 +104,11 @@ public class KafkaIOExternalTest {
                         Field.of("value_deserializer", FieldType.STRING),
                         Field.of("start_read_time", FieldType.INT64),
                         Field.of("commit_offset_in_finalize", FieldType.BOOLEAN),
-                        Field.of("timestamp_policy", FieldType.STRING)))
+                        Field.of("timestamp_policy", FieldType.STRING),
+                        Field.of("consumer_polling_timeout", FieldType.INT64),
+                        Field.of("redistribute_num_keys", FieldType.INT32),
+                        Field.of("redistribute", FieldType.BOOLEAN),
+                        Field.of("allow_duplicates", FieldType.BOOLEAN)))
                 .withFieldValue("topics", topics)
                 .withFieldValue("consumer_config", consumerConfig)
                 .withFieldValue("key_deserializer", keyDeserializer)
@@ -125,6 +116,10 @@ public class KafkaIOExternalTest {
                 .withFieldValue("start_read_time", startReadTime)
                 .withFieldValue("commit_offset_in_finalize", false)
                 .withFieldValue("timestamp_policy", "ProcessingTime")
+                .withFieldValue("consumer_polling_timeout", 5L)
+                .withFieldValue("redistribute_num_keys", 0)
+                .withFieldValue("redistribute", false)
+                .withFieldValue("allow_duplicates", false)
                 .build());
 
     RunnerApi.Components defaultInstance = RunnerApi.Components.getDefaultInstance();
@@ -136,7 +131,9 @@ public class KafkaIOExternalTest {
                     .setUniqueName("test")
                     .setSpec(
                         RunnerApi.FunctionSpec.newBuilder()
-                            .setUrn(External.URN_WITH_METADATA)
+                            .setUrn(
+                                org.apache.beam.sdk.io.kafka.KafkaIO.Read.External
+                                    .URN_WITH_METADATA)
                             .setPayload(payload.toByteString())))
             .setNamespace("test_namespace")
             .build();
@@ -165,12 +162,49 @@ public class KafkaIOExternalTest {
         result);
   }
 
+  /** Builds the read the way the external transform builders do. */
+  @SuppressWarnings("AutoValueSubclassLeaked")
+  private static KafkaIO.Read<byte[], byte[]> readFromExternalConfig(
+      Boolean redistribute, Integer redistributeNumKeys) {
+    String deserializer = "org.apache.kafka.common.serialization.ByteArrayDeserializer";
+    KafkaIO.Read.External.Configuration config = new KafkaIO.Read.External.Configuration();
+    config.setTopics(ImmutableList.of("topic1"));
+    config.setConsumerConfig(
+        ImmutableMap.of(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "server1:port"));
+    config.setKeyDeserializer(deserializer);
+    config.setValueDeserializer(deserializer);
+    config.setCommitOffsetInFinalize(false);
+    config.setTimestampPolicy("ProcessingTime");
+    config.setRedistribute(redistribute);
+    config.setRedistributeNumKeys(redistributeNumKeys);
+    config.setAllowDuplicates(true);
+
+    KafkaIO.Read.Builder<byte[], byte[]> builder = new AutoValue_KafkaIO_Read.Builder<>();
+    KafkaIO.Read.Builder.setupExternalBuilder(builder, config);
+    return builder.build();
+  }
+
+  @Test
+  public void testExternalRedistributeUsesDefaultNumKeysWhenNotSet() {
+    int defaultNumKeys = KafkaIO.<byte[], byte[]>read().withRedistribute().getRedistributeNumKeys();
+    assertThat(defaultNumKeys, Matchers.greaterThan(0));
+
+    assertEquals(defaultNumKeys, readFromExternalConfig(true, 0).getRedistributeNumKeys());
+    assertEquals(defaultNumKeys, readFromExternalConfig(true, null).getRedistributeNumKeys());
+  }
+
+  @Test
+  public void testExternalRedistributeKeepsConfiguredNumKeys() {
+    assertEquals(16, readFromExternalConfig(true, 16).getRedistributeNumKeys());
+    assertEquals(0, readFromExternalConfig(false, 0).getRedistributeNumKeys());
+  }
+
   @Test
   public void testKafkaRecordToExternalKafkaRecord() throws Exception {
     RecordHeaders headers = new RecordHeaders();
     headers.add("dummyHeaderKey", "dummyHeaderVal".getBytes(StandardCharsets.UTF_8));
     KafkaRecord<byte[], byte[]> kafkaRecord =
-        new KafkaRecord(
+        new KafkaRecord<>(
             "dummyTopic",
             111,
             222,
@@ -188,11 +222,38 @@ public class KafkaIOExternalTest {
     assertEquals(12345, byteArrayKafkaRecord.timestamp);
     assertEquals(KafkaTimestampType.LOG_APPEND_TIME.id, byteArrayKafkaRecord.timestampTypeId);
     assertEquals(KafkaTimestampType.LOG_APPEND_TIME.name, byteArrayKafkaRecord.timestampTypeName);
-    assertEquals("dummyKey", new String(byteArrayKafkaRecord.key, "UTF-8"));
-    assertEquals("dummyValue", new String(byteArrayKafkaRecord.value, "UTF-8"));
+    assertEquals("dummyKey", new String(byteArrayKafkaRecord.key, StandardCharsets.UTF_8));
+    assertEquals("dummyValue", new String(byteArrayKafkaRecord.value, StandardCharsets.UTF_8));
     assertEquals(1, byteArrayKafkaRecord.headers.size());
     assertEquals("dummyHeaderKey", byteArrayKafkaRecord.headers.get(0).key);
-    assertEquals("dummyHeaderVal", new String(byteArrayKafkaRecord.headers.get(0).value, "UTF-8"));
+    assertEquals(
+        "dummyHeaderVal",
+        new String(byteArrayKafkaRecord.headers.get(0).value, StandardCharsets.UTF_8));
+  }
+
+  @Test
+  public void testKafkaRecordToExternalKafkaRecordWithNullKeyAndValue() throws Exception {
+    RecordHeaders headers = new RecordHeaders();
+    headers.add("dummyHeaderKey", "dummyHeaderVal".getBytes(StandardCharsets.UTF_8));
+    KafkaRecord<byte[], byte[]> kafkaRecord =
+        new KafkaRecord<>(
+            "dummyTopic", 111, 222, 12345, KafkaTimestampType.LOG_APPEND_TIME, headers, null, null);
+
+    ByteArrayKafkaRecord byteArrayKafkaRecord = RowsWithMetadata.toExternalKafkaRecord(kafkaRecord);
+
+    assertEquals("dummyTopic", byteArrayKafkaRecord.topic);
+    assertEquals(111, byteArrayKafkaRecord.partition);
+    assertEquals(222, byteArrayKafkaRecord.offset);
+    assertEquals(12345, byteArrayKafkaRecord.timestamp);
+    assertEquals(KafkaTimestampType.LOG_APPEND_TIME.id, byteArrayKafkaRecord.timestampTypeId);
+    assertEquals(KafkaTimestampType.LOG_APPEND_TIME.name, byteArrayKafkaRecord.timestampTypeName);
+    assertNull(byteArrayKafkaRecord.key);
+    assertNull(byteArrayKafkaRecord.value);
+    assertEquals(1, byteArrayKafkaRecord.headers.size());
+    assertEquals("dummyHeaderKey", byteArrayKafkaRecord.headers.get(0).key);
+    assertEquals(
+        "dummyHeaderVal",
+        new String(byteArrayKafkaRecord.headers.get(0).value, StandardCharsets.UTF_8));
   }
 
   @Test
@@ -220,7 +281,10 @@ public class KafkaIOExternalTest {
                         Field.of("value_deserializer", FieldType.STRING),
                         Field.of("start_read_time", FieldType.INT64),
                         Field.of("commit_offset_in_finalize", FieldType.BOOLEAN),
-                        Field.of("timestamp_policy", FieldType.STRING)))
+                        Field.of("timestamp_policy", FieldType.STRING),
+                        Field.of("redistribute_num_keys", FieldType.INT32),
+                        Field.of("redistribute", FieldType.BOOLEAN),
+                        Field.of("allow_duplicates", FieldType.BOOLEAN)))
                 .withFieldValue("topics", topics)
                 .withFieldValue("consumer_config", consumerConfig)
                 .withFieldValue("key_deserializer", keyDeserializer)
@@ -228,6 +292,9 @@ public class KafkaIOExternalTest {
                 .withFieldValue("start_read_time", startReadTime)
                 .withFieldValue("commit_offset_in_finalize", false)
                 .withFieldValue("timestamp_policy", "ProcessingTime")
+                .withFieldValue("redistribute_num_keys", 0)
+                .withFieldValue("redistribute", false)
+                .withFieldValue("allow_duplicates", false)
                 .build());
 
     RunnerApi.Components defaultInstance = RunnerApi.Components.getDefaultInstance();
@@ -239,7 +306,9 @@ public class KafkaIOExternalTest {
                     .setUniqueName("test")
                     .setSpec(
                         RunnerApi.FunctionSpec.newBuilder()
-                            .setUrn(External.URN_WITHOUT_METADATA)
+                            .setUrn(
+                                org.apache.beam.sdk.io.kafka.KafkaIO.Read.External
+                                    .URN_WITHOUT_METADATA)
                             .setPayload(payload.toByteString())))
             .setNamespace("test_namespace")
             .build();
@@ -248,6 +317,7 @@ public class KafkaIOExternalTest {
     expansionService.expand(request, observer);
     ExpansionApi.ExpansionResponse result = observer.result;
     RunnerApi.PTransform transform = result.getTransform();
+
     assertThat(
         transform.getSubtransformsList(),
         Matchers.hasItem(MatchesPattern.matchesPattern(".*KafkaIO-Read.*")));
@@ -259,8 +329,7 @@ public class KafkaIOExternalTest {
 
     RunnerApi.PTransform kafkaReadComposite =
         result.getComponents().getTransformsOrThrow(transform.getSubtransforms(0));
-    RunnerApi.PTransform kafkaComposite =
-        result.getComponents().getTransformsOrThrow(kafkaReadComposite.getSubtransforms(0));
+    result.getComponents().getTransformsOrThrow(kafkaReadComposite.getSubtransforms(0));
 
     verifyKafkaReadComposite(
         result.getComponents().getTransformsOrThrow(kafkaReadComposite.getSubtransforms(0)),
@@ -294,7 +363,7 @@ public class KafkaIOExternalTest {
                 .build());
 
     Pipeline p = Pipeline.create();
-    p.apply(Impulse.create()).apply(WithKeys.of("key"));
+    p.apply(Create.of(ImmutableMap.of("key", new byte[0])));
     RunnerApi.Pipeline pipelineProto = PipelineTranslation.toProto(p);
     String inputPCollection =
         Iterables.getOnlyElement(
@@ -311,7 +380,7 @@ public class KafkaIOExternalTest {
                     .putInputs("input", inputPCollection)
                     .setSpec(
                         RunnerApi.FunctionSpec.newBuilder()
-                            .setUrn("beam:external:java:kafka:write:v1")
+                            .setUrn(org.apache.beam.sdk.io.kafka.KafkaIO.Write.External.URN)
                             .setPayload(payload.toByteString())))
             .setNamespace("test_namespace")
             .build();
@@ -334,20 +403,12 @@ public class KafkaIOExternalTest {
     RunnerApi.PTransform writeComposite =
         result.getComponents().getTransformsOrThrow(transform.getSubtransforms(1));
     RunnerApi.PTransform writeParDo =
-        result
-            .getComponents()
-            .getTransformsOrThrow(
-                result
-                    .getComponents()
-                    .getTransformsOrThrow(writeComposite.getSubtransforms(0))
-                    .getSubtransforms(0));
+        result.getComponents().getTransformsOrThrow(writeComposite.getSubtransforms(0));
 
     RunnerApi.ParDoPayload parDoPayload =
         RunnerApi.ParDoPayload.parseFrom(writeParDo.getSpec().getPayload());
-    DoFn kafkaWriter = ParDoTranslation.getDoFn(parDoPayload);
-    assertThat(kafkaWriter, Matchers.instanceOf(KafkaWriter.class));
-    KafkaIO.WriteRecords spec =
-        (KafkaIO.WriteRecords) Whitebox.getInternalState(kafkaWriter, "spec");
+    KafkaWriter<?, ?> kafkaWriter = (KafkaWriter<?, ?>) ParDoTranslation.getDoFn(parDoPayload);
+    KafkaIO.WriteRecords<?, ?> spec = kafkaWriter.getSpec();
 
     assertThat(spec.getProducerConfig(), Matchers.is(producerConfig));
     assertThat(spec.getTopic(), Matchers.is(topic));
@@ -355,33 +416,94 @@ public class KafkaIOExternalTest {
     assertThat(spec.getValueSerializer().getName(), Matchers.is(valueSerializer));
   }
 
-  private static byte[] listAsBytes(List<String> stringList) throws IOException {
-    IterableCoder<String> coder = IterableCoder.of(StringUtf8Coder.of());
-    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-    coder.encode(stringList, baos);
-    return baos.toByteArray();
-  }
+  @Test
+  public void testConstructKafkaWriteWithHeaders() throws Exception {
+    String topic = "topic";
+    String keySerializer = "org.apache.kafka.common.serialization.ByteArraySerializer";
+    String valueSerializer = "org.apache.kafka.common.serialization.ByteArraySerializer";
+    ImmutableMap<String, String> producerConfig =
+        ImmutableMap.<String, String>builder()
+            .put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "server1:port,server2:port")
+            .put("retries", "3")
+            .build();
 
-  private static byte[] mapAsBytes(Map<String, String> stringMap) throws IOException {
-    IterableCoder<KV<String, String>> coder =
-        IterableCoder.of(KvCoder.of(StringUtf8Coder.of(), StringUtf8Coder.of()));
-    List<KV<String, String>> stringList =
-        stringMap.entrySet().stream()
-            .map(kv -> KV.of(kv.getKey(), kv.getValue()))
-            .collect(Collectors.toList());
-    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-    coder.encode(stringList, baos);
-    return baos.toByteArray();
-  }
+    ExternalTransforms.ExternalConfigurationPayload payload =
+        encodeRow(
+            Row.withSchema(
+                    Schema.of(
+                        Field.of("topic", FieldType.STRING),
+                        Field.of(
+                            "producer_config", FieldType.map(FieldType.STRING, FieldType.STRING)),
+                        Field.of("key_serializer", FieldType.STRING),
+                        Field.of("value_serializer", FieldType.STRING)))
+                .withFieldValue("topic", topic)
+                .withFieldValue("producer_config", producerConfig)
+                .withFieldValue("key_serializer", keySerializer)
+                .withFieldValue("value_serializer", valueSerializer)
+                .build());
 
-  private static byte[] encodeString(String str) throws IOException {
-    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-    StringUtf8Coder.of().encode(str, baos);
-    return baos.toByteArray();
+    Schema rowSchema =
+        Schema.of(Field.of("key", FieldType.BYTES), Field.of("value", FieldType.BYTES));
+    Row inputRow = Row.withSchema(rowSchema).addValues(new byte[0], new byte[0]).build();
+
+    Pipeline p = Pipeline.create();
+    p.apply(Create.of(inputRow).withRowSchema(rowSchema));
+    RunnerApi.Pipeline pipelineProto = PipelineTranslation.toProto(p);
+    String inputPCollection =
+        Iterables.getOnlyElement(
+            Iterables.getLast(pipelineProto.getComponents().getTransformsMap().values())
+                .getOutputsMap()
+                .values());
+
+    ExpansionApi.ExpansionRequest request =
+        ExpansionApi.ExpansionRequest.newBuilder()
+            .setComponents(pipelineProto.getComponents())
+            .setTransform(
+                RunnerApi.PTransform.newBuilder()
+                    .setUniqueName("test")
+                    .putInputs("input", inputPCollection)
+                    .setSpec(
+                        RunnerApi.FunctionSpec.newBuilder()
+                            .setUrn(
+                                org.apache.beam.sdk.io.kafka.KafkaIO.Write.External
+                                    .URN_WITH_HEADERS)
+                            .setPayload(payload.toByteString())))
+            .setNamespace("test_namespace")
+            .build();
+
+    ExpansionService expansionService = new ExpansionService();
+    TestStreamObserver<ExpansionApi.ExpansionResponse> observer = new TestStreamObserver<>();
+    expansionService.expand(request, observer);
+
+    ExpansionApi.ExpansionResponse result = observer.result;
+    RunnerApi.PTransform transform = result.getTransform();
+    assertThat(
+        transform.getSubtransformsList(),
+        Matchers.hasItem(MatchesPattern.matchesPattern(".*Row-to-ProducerRecord.*")));
+    assertThat(
+        transform.getSubtransformsList(),
+        Matchers.hasItem(MatchesPattern.matchesPattern(".*KafkaIO-WriteRecords.*")));
+    assertThat(transform.getInputsCount(), Matchers.is(1));
+    assertThat(transform.getOutputsCount(), Matchers.is(0));
+
+    RunnerApi.PTransform writeComposite =
+        result.getComponents().getTransformsOrThrow(transform.getSubtransforms(1));
+    RunnerApi.PTransform writeParDo =
+        result.getComponents().getTransformsOrThrow(writeComposite.getSubtransforms(0));
+
+    RunnerApi.ParDoPayload parDoPayload =
+        RunnerApi.ParDoPayload.parseFrom(writeParDo.getSpec().getPayload());
+    KafkaWriter<?, ?> kafkaWriter = (KafkaWriter<?, ?>) ParDoTranslation.getDoFn(parDoPayload);
+    KafkaIO.WriteRecords<?, ?> spec = kafkaWriter.getSpec();
+
+    assertThat(spec.getProducerConfig(), Matchers.is(producerConfig));
+    assertThat(spec.getTopic(), Matchers.is(topic));
+    assertThat(spec.getKeySerializer().getName(), Matchers.is(keySerializer));
+    assertThat(spec.getValueSerializer().getName(), Matchers.is(valueSerializer));
   }
 
   private static ExternalConfigurationPayload encodeRow(Row row) {
-    ByteString.Output outputStream = ByteString.newOutput();
+    ByteStringOutputStream outputStream = new ByteStringOutputStream();
     try {
       SchemaCoder.of(row.getSchema()).encode(row, outputStream);
     } catch (IOException e) {

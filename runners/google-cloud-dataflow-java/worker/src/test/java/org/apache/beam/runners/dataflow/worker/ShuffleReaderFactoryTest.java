@@ -34,8 +34,8 @@ import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow.IntervalWindowCoder;
-import org.apache.beam.sdk.util.WindowedValue.FullWindowedValueCoder;
-import org.apache.beam.sdk.util.WindowedValue.WindowedValueCoder;
+import org.apache.beam.sdk.values.WindowedValues.FullWindowedValueCoder;
+import org.apache.beam.sdk.values.WindowedValues.WindowedValueCoder;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.hamcrest.core.IsInstanceOf;
 import org.junit.Assert;
@@ -49,7 +49,7 @@ import org.junit.runners.JUnit4;
  */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
   "unchecked",
 })
 public class ShuffleReaderFactoryTest {
@@ -90,7 +90,7 @@ public class ShuffleReaderFactoryTest {
             shuffleReaderConfig,
             start,
             end,
-            CloudObjects.asCloudObject(coder, /*sdkComponents=*/ null),
+            CloudObjects.asCloudObject(coder, /* sdkComponents= */ null),
             BatchModeExecutionContext.forTesting(PipelineOptionsFactory.create(), "testStage"),
             UngroupedShuffleReader.class,
             "UngroupedShuffleSource");
@@ -118,7 +118,7 @@ public class ShuffleReaderFactoryTest {
             CloudObjects.asCloudObject(
                 FullWindowedValueCoder.of(
                     KvCoder.of(keyCoder, IterableCoder.of(valueCoder)), IntervalWindowCoder.of()),
-                /*sdkComponents=*/ null),
+                /* sdkComponents= */ null),
             context,
             GroupingShuffleReader.class,
             "GroupingShuffleSource");
@@ -147,7 +147,7 @@ public class ShuffleReaderFactoryTest {
                 FullWindowedValueCoder.of(
                     KvCoder.of(keyCoder, windowedValueCoder.getValueCoder()),
                     IntervalWindowCoder.of()),
-                /*sdkComponents=*/ null),
+                /* sdkComponents= */ null),
             BatchModeExecutionContext.forTesting(PipelineOptionsFactory.create(), "testStage"),
             PartitioningShuffleReader.class,
             "PartitioningShuffleSource");

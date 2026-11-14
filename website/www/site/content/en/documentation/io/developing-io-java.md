@@ -75,7 +75,7 @@ multiple worker instances in parallel. As such, the code you provide for
      can use `SourceTestUtils` to increase your implementation's test coverage
      using a wide range of inputs with relatively few lines of code. For
      examples that use `SourceTestUtils`, see the
-     [AvroSourceTest](https://github.com/apache/beam/blob/master/sdks/java/core/src/test/java/org/apache/beam/sdk/io/AvroSourceTest.java) and
+     [AvroSourceTest](https://github.com/apache/beam/blob/master/sdks/java/extensions/avro/src/test/java/org/apache/beam/sdk/extensions/avro/io/AvroSourceTest.java) and
      [TextIOReadTest](https://github.com/apache/beam/blob/master/sdks/java/core/src/test/java/org/apache/beam/sdk/io/TextIOReadTest.java)
      source code.
 
@@ -147,7 +147,7 @@ abstract methods:
     `BoundedSource`.
 
 You can see a model of how to implement `BoundedSource` and the required
-abstract methods in Beam’s implementations for Cloud BigTable
+abstract methods in Beam’s implementations for Cloud Bigtable
 ([BigtableIO.java](https://github.com/apache/beam/blob/master/sdks/java/io/google-cloud-platform/src/main/java/org/apache/beam/sdk/io/gcp/bigtable/BigtableIO.java))
 and BigQuery ([BigQuerySourceBase.java](https://github.com/apache/beam/blob/master/sdks/java/io/google-cloud-platform/src/main/java/org/apache/beam/sdk/io/gcp/bigquery/BigQuerySourceBase.java)).
 
@@ -344,7 +344,7 @@ sinks that interact with files, including:
 implementations for examples:
 
   * [TextSink](https://github.com/apache/beam/blob/master/sdks/java/core/src/main/java/org/apache/beam/sdk/io/TextSink.java) and
-  * [AvroSink](https://github.com/apache/beam/blob/master/sdks/java/core/src/main/java/org/apache/beam/sdk/io/AvroSink.java).
+  * [AvroSink](https://github.com/apache/beam/blob/master/sdks/java/extensions/avro/src/main/java/org/apache/beam/sdk/extensions/avro/io/AvroSink.java).
 
 
 ## PTransform wrappers {#ptransform-wrappers}

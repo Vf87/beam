@@ -28,9 +28,9 @@ import java.util.zip.GZIPOutputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import org.apache.beam.sdk.util.LzoCompression;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.ByteStreams;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.primitives.Ints;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.ByteStreams;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.primitives.Ints;
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream;
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorOutputStream;
 import org.apache.commons.compress.compressors.deflate.DeflateCompressorInputStream;
@@ -99,7 +99,9 @@ public enum Compression {
 
     @Override
     public WritableByteChannel writeCompressed(WritableByteChannel channel) throws IOException {
-      return Channels.newChannel(new GZIPOutputStream(Channels.newOutputStream(channel), true));
+      // Increase the default deflate output stream buffer size from 512 to 4096 for performance.
+      return Channels.newChannel(
+          new GZIPOutputStream(Channels.newOutputStream(channel), 4096, true));
     }
   },
 
@@ -287,7 +289,7 @@ public enum Compression {
       throws IOException;
 
   /** Concatenates all {@link ZipInputStream}s contained within the zip file. */
-  private static class FullZipInputStream extends InputStream {
+  private static final class FullZipInputStream extends InputStream {
     private ZipInputStream zipInputStream;
     private ZipEntry currentEntry;
 

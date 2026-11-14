@@ -17,8 +17,20 @@ package dataflowlib
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
+
+	"encoding/json"
+
+	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/runtime"
+	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/runtime/graphx"
+	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/util/protox"
+	pipepb "github.com/apache/beam/sdks/v2/go/pkg/beam/model/pipeline_v1"
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	df "google.golang.org/api/dataflow/v1b3"
+	"google.golang.org/protobuf/testing/protocmp"
 )
 
 func TestValidateWorkerSettings(t *testing.T) {
@@ -155,5 +167,269 @@ func TestValidateWorkerSettings(t *testing.T) {
 				t.Fatalf("expected job options: %v, got job options: %v", test.expected, test.opts)
 			}
 		})
+	}
+}
+
+func TestCurrentStateMessage(t *testing.T) {
+	tests := []struct {
+		state   string
+		term    bool
+		want    string
+		wantErr error
+	}{
+		{state: "JOB_STATE_DONE", want: "Job JorbID-09876 succeeded!", term: true},
+		{state: "JOB_STATE_DRAINED", want: "Job JorbID-09876 drained", term: true},
+		{state: "JOB_STATE_UPDATED", want: "Job JorbID-09876 updated", term: true},
+		{state: "JOB_STATE_CANCELLED", want: "Job JorbID-09876 cancelled", term: true},
+		{state: "JOB_STATE_RUNNING", want: "Job still running ...", term: false},
+		{state: "JOB_STATE_FAILED", wantErr: fmt.Errorf("Job JorbID-09876 failed"), term: true},
+		{state: "Ossiphrage", want: "Job state: Ossiphrage ...", term: false},
+	}
+	for _, test := range tests {
+		t.Run(test.state, func(t *testing.T) {
+			const jobID = "JorbID-09876"
+			term, got, err := currentStateMessage(test.state, jobID)
+			if term != test.term {
+				termGot, termWant := "false (continues)", "true (terminal)"
+				if !test.term {
+					termGot, termWant = termWant, termGot
+				}
+				t.Errorf("currentStateMessage(%v, %q) = %v, want %v", test.state, jobID, termGot, termWant)
+			}
+			if err != nil && err.Error() != test.wantErr.Error() {
+				t.Errorf("currentStateMessage(%v, %q) = %v, want %v", test.state, jobID, err, test.wantErr)
+			}
+			if got != test.want {
+				t.Errorf("currentStateMessage(%v, %q) = %v, want %v", test.state, jobID, got, test.want)
+			}
+		})
+	}
+}
+
+func Test_containerImages(t *testing.T) {
+	type testcase struct {
+		name        string
+		envs        map[string]*pipepb.Environment
+		wantImages  []*df.SdkHarnessContainerImage
+		wantDisplay []string
+	}
+
+	type img struct {
+		id, image string
+		single    bool
+		caps      []string
+	}
+
+	newCase := func(name string, imgs ...img) testcase {
+		envs := map[string]*pipepb.Environment{}
+		images := []*df.SdkHarnessContainerImage{}
+		display := []string{}
+
+		for _, i := range imgs {
+			envs[i.id] = &pipepb.Environment{
+				Capabilities: i.caps,
+				Payload: protox.MustEncode(&pipepb.DockerPayload{
+					ContainerImage: i.image,
+				}),
+			}
+			images = append(images, &df.SdkHarnessContainerImage{
+				ContainerImage:            i.image,
+				UseSingleCorePerContainer: i.single,
+				Capabilities:              i.caps,
+				EnvironmentId:             i.id,
+			})
+			display = append(display, i.image)
+		}
+		return testcase{
+			name:        name,
+			envs:        envs,
+			wantImages:  images,
+			wantDisplay: display,
+		}
+	}
+
+	tests := []testcase{
+		newCase("go", img{"go", "goImage", false, []string{graphx.URNMultiCore}}),
+		newCase("py", img{"py", "pyImage", true, []string{graphx.URNWorkerStatus}}),
+		newCase("multi",
+			img{"py", "pyImage", true, []string{graphx.URNWorkerStatus}},
+			img{"go", "goImage", false, []string{graphx.URNMultiCore}},
+			img{"java", "javaImage", false, []string{graphx.URNMultiCore, graphx.URNExpand}},
+		),
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pipeline := &pipepb.Pipeline{
+				Components: &pipepb.Components{
+					Environments: test.envs,
+				},
+			}
+			gotImages, gotDisplay, err := containerImages(pipeline)
+			if err != nil {
+				t.Fatalf("containerImages(...) error = %v, want nil", err)
+			}
+			less := func(a, b *df.SdkHarnessContainerImage) bool {
+				return a.ContainerImage < b.ContainerImage
+			}
+			if d := cmp.Diff(test.wantImages, gotImages, protocmp.Transform(), cmpopts.SortSlices(less)); d != "" {
+				t.Errorf("containerImages(...) images diff; (-want, +got)\n%v", d)
+			}
+			if d := cmp.Diff(test.wantDisplay, gotDisplay, cmpopts.SortSlices(func(a, b string) bool { return a < b })); d != "" {
+				t.Errorf("containerImages(...) display diff; (-want, +got)\n%v", d)
+			}
+		})
+
+	}
+
+}
+
+func TestTranslate(t *testing.T) {
+	ctx := context.Background()
+	p := &pipepb.Pipeline{}
+	opts := &JobOptions{
+		Project:                        "test-project",
+		Name:                           "test-job",
+		DataflowServiceOptions:         []string{"enable_prime", "enable_google_cloud_profiler"},
+		DiskProvisionedIops:            4000,
+		DiskProvisionedThroughputMibps: 200,
+		WorkerHash:                     "worker-sha256-hash",
+	}
+	workerURL := "gs://any-location/temp"
+	modelURL := "gs://any-location/temp"
+
+	job, err := Translate(ctx, p, opts, workerURL, modelURL, "dummy-hash-12345")
+	if err != nil {
+		t.Fatalf("Translate(...) error = %v, want nil", err)
+	}
+
+	if len(job.Environment.WorkerPools) == 0 {
+		t.Fatal("Translate(...) returned job with no worker pools")
+	}
+
+	wp := job.Environment.WorkerPools[0]
+	if wp.DiskProvisionedIops != 4000 {
+		t.Errorf("DiskProvisionedIops = %v, want 4000", wp.DiskProvisionedIops)
+	}
+	if wp.DiskProvisionedThroughputMibps != 200 {
+		t.Errorf("DiskProvisionedThroughputMibps = %v, want 200", wp.DiskProvisionedThroughputMibps)
+	}
+
+	var recoveredOptions struct {
+		Options dataflowOptions `json:"options"`
+	}
+	if err := json.Unmarshal(job.Environment.SdkPipelineOptions, &recoveredOptions); err != nil {
+		t.Fatalf("Failed to unmarshal SdkPipelineOptions: %v", err)
+	}
+	if recoveredOptions.Options.Project != "test-project" {
+		t.Errorf("Options.Project = %q, want %q", recoveredOptions.Options.Project, "test-project")
+	}
+	if recoveredOptions.Options.JobName != "test-job" {
+		t.Errorf("Options.JobName = %q, want %q", recoveredOptions.Options.JobName, "test-job")
+	}
+	if diff := cmp.Diff([]string{"enable_prime", "enable_google_cloud_profiler"}, recoveredOptions.Options.DataflowServiceOptions); diff != "" {
+		t.Errorf("Options.DataflowServiceOptions diff (-want +got):\n%s", diff)
+	}
+	if recoveredOptions.Options.DiskProvisionedIops != 4000 {
+		t.Errorf("Options.DiskProvisionedIops = %v, want 4000", recoveredOptions.Options.DiskProvisionedIops)
+	}
+	if recoveredOptions.Options.DiskProvisionedThroughputMibps != 200 {
+		t.Errorf("Options.DiskProvisionedThroughputMibps = %v, want 200", recoveredOptions.Options.DiskProvisionedThroughputMibps)
+	}
+
+	// Verify worker package has Sha256
+	found := false
+	for _, pkg := range wp.Packages {
+		if pkg.Name == "worker" {
+			found = true
+			if pkg.Sha256 != "worker-sha256-hash" {
+				t.Errorf("worker package Sha256 = %q, want %q", pkg.Sha256, "worker-sha256-hash")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("worker package not found in wp.Packages")
+	}
+}
+
+func TestTranslateWithPipelineHash(t *testing.T) {
+	p := &pipepb.Pipeline{
+		Components: &pipepb.Components{
+			Environments: map[string]*pipepb.Environment{
+				"env1": {
+					Payload: protox.MustEncode(&pipepb.DockerPayload{
+						ContainerImage: "dummy_image",
+					}),
+				},
+			},
+		},
+	}
+	opts := &JobOptions{
+		Name:    "test-job",
+		Project: "test-project",
+		Region:  "test-region",
+		Options: runtime.RawOptions{
+			Options: make(map[string]string),
+		},
+	}
+
+	expectedHashStr := "dummy-hash-12345"
+
+	job, err := Translate(context.Background(), p, opts, "worker-url", "model-url", expectedHashStr)
+	if err != nil {
+		t.Fatalf("Translate failed: %v", err)
+	}
+
+	// Verify PipelineProtoHash
+	var recoveredOptions struct {
+		Options struct {
+			PipelineURL       string `json:"pipelineUrl"`
+			PipelineProtoHash string `json:"pipelineProtoHash"`
+		} `json:"options"`
+	}
+
+	rawOpts := job.Environment.SdkPipelineOptions
+	if err := json.Unmarshal(rawOpts, &recoveredOptions); err != nil {
+		t.Fatalf("Failed to unmarshal SdkPipelineOptions: %v", err)
+	}
+
+	if recoveredOptions.Options.PipelineProtoHash != expectedHashStr {
+		t.Errorf("Expected PipelineProtoHash %v, got %v", expectedHashStr, recoveredOptions.Options.PipelineProtoHash)
+	}
+}
+
+func TestTranslateStreamingWorkerHarnessThreads(t *testing.T) {
+	ctx := context.Background()
+	p := &pipepb.Pipeline{}
+	opts := &JobOptions{
+		Project:              "test-project",
+		Name:                 "test-streaming-job",
+		Region:               "us-central1",
+		Streaming:            true,
+		WorkerHarnessThreads: 16,
+	}
+
+	job, err := Translate(ctx, p, opts, "gs://bucket/worker", "gs://bucket/model", "hash-123")
+	if err != nil {
+		t.Fatalf("Translate(...) error = %v, want nil", err)
+	}
+
+	if got := job.Environment.WorkerPools[0].NumThreadsPerWorker; got != 16 {
+		t.Errorf("WorkerPools[0].NumThreadsPerWorker = %d, want 16", got)
+	}
+
+	var parsed struct {
+		Options map[string]any `json:"options"`
+	}
+	if err := json.Unmarshal(job.Environment.SdkPipelineOptions, &parsed); err != nil {
+		t.Fatalf("Failed to unmarshal SdkPipelineOptions: %v", err)
+	}
+
+	if got, ok := parsed.Options["streaming"].(bool); !ok || !got {
+		t.Errorf("SdkPipelineOptions.options[streaming] = %v, want true", parsed.Options["streaming"])
+	}
+	if got, ok := parsed.Options["numberOfWorkerHarnessThreads"].(float64); !ok || int64(got) != 16 {
+		t.Errorf("SdkPipelineOptions.options[numberOfWorkerHarnessThreads] = %v, want 16", parsed.Options["numberOfWorkerHarnessThreads"])
 	}
 }

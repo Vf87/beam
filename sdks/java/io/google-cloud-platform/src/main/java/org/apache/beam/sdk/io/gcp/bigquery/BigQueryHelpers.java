@@ -17,26 +17,39 @@
  */
 package org.apache.beam.sdk.io.gcp.bigquery;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import com.google.api.client.util.BackOff;
 import com.google.api.client.util.BackOffUtils;
 import com.google.api.client.util.Sleeper;
+import com.google.api.services.bigquery.model.Clustering;
 import com.google.api.services.bigquery.model.Dataset;
+import com.google.api.services.bigquery.model.ErrorProto;
 import com.google.api.services.bigquery.model.Job;
+import com.google.api.services.bigquery.model.JobConfiguration;
+import com.google.api.services.bigquery.model.JobConfigurationLoad;
+import com.google.api.services.bigquery.model.JobReference;
 import com.google.api.services.bigquery.model.JobStatus;
 import com.google.api.services.bigquery.model.Table;
 import com.google.api.services.bigquery.model.TableReference;
 import com.google.api.services.bigquery.model.TableSchema;
 import com.google.api.services.bigquery.model.TimePartitioning;
 import com.google.cloud.hadoop.util.ApiErrorExtractor;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
 import java.io.IOException;
+import java.io.Serializable;
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.apache.beam.sdk.extensions.gcp.util.BackOffAdapter;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.fs.ResolveOptions;
@@ -45,17 +58,18 @@ import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.options.ValueProvider.NestedValueProvider;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.util.FluentBackoff;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
+import org.checkerframework.checker.nullness.qual.PolyNull;
 import org.joda.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** A set of helper functions and classes used by {@link BigQueryIO}. */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class BigQueryHelpers {
   private static final String RESOURCE_NOT_FOUND_ERROR =
       "BigQuery %1$s not found for table \"%2$s\" . Please create the %1$s before pipeline"
@@ -68,6 +82,9 @@ public class BigQueryHelpers {
           + " #withoutValidation.";
 
   private static final Logger LOG = LoggerFactory.getLogger(BigQueryHelpers.class);
+
+  /** Matches valid Project ID patterns. */
+  private static final Pattern PROJECT_NAME_SEGMENT_PATTERN = Pattern.compile("[-a-z0-9]*[a-z0-9]");
 
   // Given a potential failure and a current job-id, return the next job-id to be used on retry.
   // Algorithm is as follows (given input of job_id_prefix-N)
@@ -91,9 +108,10 @@ public class BigQueryHelpers {
   static class PendingJobManager {
     private static class JobInfo {
       private final PendingJob pendingJob;
-      private final @Nullable SerializableFunction<PendingJob, Exception> onSuccess;
+      private final SerializableFunction<PendingJob, @Nullable Exception> onSuccess;
 
-      public JobInfo(PendingJob pendingJob, SerializableFunction<PendingJob, Exception> onSuccess) {
+      public JobInfo(
+          PendingJob pendingJob, SerializableFunction<PendingJob, @Nullable Exception> onSuccess) {
         this.pendingJob = pendingJob;
         this.onSuccess = onSuccess;
       }
@@ -118,13 +136,13 @@ public class BigQueryHelpers {
 
     // Add a pending job and a function to call when the job has completed successfully.
     PendingJobManager addPendingJob(
-        PendingJob pendingJob, @Nullable SerializableFunction<PendingJob, Exception> onSuccess) {
+        PendingJob pendingJob, SerializableFunction<PendingJob, @Nullable Exception> onSuccess) {
       this.pendingJobs.add(new JobInfo(pendingJob, onSuccess));
       return this;
     }
 
     void waitForDone() throws Exception {
-      LOG.info("Waiting for jobs to complete.");
+      LOG.debug("Waiting for BigQuery jobs to complete.");
       Sleeper sleeper = Sleeper.DEFAULT;
       while (!pendingJobs.isEmpty()) {
         List<JobInfo> retryJobs = Lists.newArrayList();
@@ -166,14 +184,14 @@ public class BigQueryHelpers {
     }
   }
 
-  static class PendingJob {
+  static class PendingJob implements Serializable {
     private final SerializableFunction<RetryJobId, Void> executeJob;
     private final SerializableFunction<RetryJobId, Job> pollJob;
     private final SerializableFunction<RetryJobId, Job> lookupJob;
     private final int maxRetries;
     private int currentAttempt;
     RetryJobId currentJobId;
-    Job lastJobAttempted;
+    @Nullable Job lastJobAttempted = null;
     boolean started;
 
     PendingJob(
@@ -195,6 +213,7 @@ public class BigQueryHelpers {
     void runJob() throws IOException {
       ++currentAttempt;
       if (!shouldRetry()) {
+        logBigQueryError(lastJobAttempted);
         throw new RuntimeException(
             String.format(
                 "Failed to create job with prefix %s, "
@@ -243,26 +262,26 @@ public class BigQueryHelpers {
             // This might happen if BigQuery's job listing is slow. Retry with the same
             // job id.
             LOG.info(
-                "Load job {} finished in unknown state: {}: {}",
+                "Load job {} finished in unknown state, {}: {}",
                 currentJobId,
-                job.getStatus(),
-                shouldRetry() ? "will retry" : "will not retry");
+                shouldRetry() ? "will retry" : "will not retry",
+                statusToPrettyString(job.getStatus()));
             return false;
           case FAILED:
             String oldJobId = currentJobId.getJobId();
-            currentJobId = BigQueryHelpers.getRetryJobId(currentJobId, lookupJob).jobId;
+            currentJobId = getRetryJobId(currentJobId, lookupJob).jobId;
             LOG.warn(
                 "Load job {} failed, {}: {}. Next job id {}",
                 oldJobId,
                 shouldRetry() ? "will retry" : "will not retry",
-                job.getStatus(),
+                statusToPrettyString(job.getStatus()),
                 currentJobId);
             return false;
           default:
             throw new IllegalStateException(
                 String.format(
                     "Unexpected status [%s] of load job: %s.",
-                    job.getStatus(), BigQueryHelpers.jobToPrettyString(job)));
+                    job.getStatus(), jobToPrettyString(job)));
         }
       }
       return false;
@@ -271,9 +290,24 @@ public class BigQueryHelpers {
     boolean shouldRetry() {
       return currentAttempt < maxRetries + 1;
     }
+
+    void logBigQueryError(@Nullable Job job) {
+      if (job == null || !parseStatus(job).equals(Status.FAILED)) {
+        return;
+      }
+
+      List<ErrorProto> jobErrors = job.getStatus().getErrors();
+      String finalError = job.getStatus().getErrorResult().getMessage();
+      String causativeError =
+          jobErrors != null && !jobErrors.isEmpty()
+              ? String.format(" due to: %s", jobErrors.get(jobErrors.size() - 1).getMessage())
+              : "";
+
+      LOG.error("BigQuery Error : {} {}", finalError, causativeError);
+    }
   }
 
-  static class RetryJobId {
+  static class RetryJobId implements Serializable {
     private final String jobIdPrefix;
     private final int retryIndex;
 
@@ -365,6 +399,24 @@ public class BigQueryHelpers {
         + tableReference.getTableId();
   }
 
+  /** Table full resource name formatted according to https://google.aip.dev/122. */
+  static String toTableFullResourceName(TableReference tableReference) {
+    return "//bigquery.googleapis.com/" + toTableResourceName(tableReference);
+  }
+
+  /**
+   * Unofficial full resource name for a BigQuery job. Used for logging QuotaEvents related to BQ
+   * jobs.
+   */
+  static String toJobFullResourceName(JobReference jobReference) {
+    return "//bigquery.googleapis.com/projects/"
+        + jobReference.getProjectId()
+        + "/locations/"
+        + jobReference.getLocation()
+        + "/jobs/"
+        + jobReference.getJobId();
+  }
+
   /** Return a displayable string representation for a {@link TableReference}. */
   static @Nullable ValueProvider<String> displayTable(
       @Nullable ValueProvider<TableReference> table) {
@@ -386,29 +438,129 @@ public class BigQueryHelpers {
     return sb.toString();
   }
 
+  public static List<String> dataCatalogSegments(TableReference ref, BigQueryOptions options) {
+    String tableIdBase;
+    int ix = ref.getTableId().indexOf('$');
+    if (ix == -1) {
+      tableIdBase = ref.getTableId();
+    } else {
+      tableIdBase = ref.getTableId().substring(0, ix);
+    }
+    String projectId;
+    if (!Strings.isNullOrEmpty(ref.getProjectId())) {
+      projectId = ref.getProjectId();
+    } else if (!Strings.isNullOrEmpty(options.getBigQueryProject())) {
+      projectId = options.getBigQueryProject();
+    } else {
+      projectId = options.getProject();
+    }
+    return ImmutableList.of(projectId, ref.getDatasetId(), tableIdBase);
+  }
+
   static <K, V> List<V> getOrCreateMapListValue(Map<K, List<V>> map, K key) {
     return map.computeIfAbsent(key, k -> new ArrayList<>());
   }
 
   /**
    * Parse a table specification in the form {@code "[project_id]:[dataset_id].[table_id]"} or
-   * {@code "[dataset_id].[table_id]"}.
+   * {@code "[project_id].[dataset_id].[table_id]"} or {@code "[dataset_id].[table_id]"}.
+   *
+   * <p>Lakehouse runtime catalog (BigLake metastore) tables are referenced with four parts, {@code
+   * "[project_id].[catalog_id].[namespace_id].[table_id]"} (or {@code
+   * "[project_id]:[catalog_id].[namespace_id].[table_id]"}); these parse to a composite {@code
+   * "[catalog_id].[namespace_id]"} dataset id, which is the form the BigQuery APIs accept for such
+   * tables. More generally, when a specification contains more than three segments, everything
+   * between the project id and the final (table) segment becomes the dataset id.
    *
    * <p>If the project id is omitted, the default project id is used.
    */
   public static TableReference parseTableSpec(String tableSpec) {
     Matcher match = BigQueryIO.TABLE_SPEC.matcher(tableSpec);
     if (!match.matches()) {
-      throw new IllegalArgumentException(
-          "Table reference is not in [project_id]:[dataset_id].[table_id] "
-              + "format: "
-              + tableSpec);
+      throw invalidTableSpec(tableSpec);
+    }
+
+    // Table ids cannot contain '.', so the table is always the segment after
+    // the last dot.
+    int lastDot = tableSpec.lastIndexOf('.');
+    String table = tableSpec.substring(lastDot + 1);
+    String prefix = tableSpec.substring(0, lastDot);
+
+    String project = null;
+    String dataset;
+    long colonCount = prefix.chars().filter(c -> c == ':').count();
+    if (colonCount == 0) {
+      // No colon means the purely dotted form ("p.d.t", "d.t", "p.catalog.ns.t"): the
+      // leading segment is the project id when it is a plausible project id.
+      // (Dataset ids may contain characters such as '_' that project ids may
+      // not, in which case the whole prefix is the dataset id.)
+      // The firstDot < length-1 guard keeps degenerate trailing-dot specs
+      // ("pp..t", accepted by the character-set gate with dataset "pp.")
+      // instead of producing an empty dataset id.
+      int firstDot = prefix.indexOf('.');
+      if (firstDot >= 0
+          && firstDot < prefix.length() - 1
+          && BigQueryIO.PROJECT_ID_PATTERN.matcher(prefix.substring(0, firstDot)).matches()) {
+        project = prefix.substring(0, firstDot);
+        dataset = prefix.substring(firstDot + 1);
+      } else {
+        dataset = prefix;
+      }
+    } else if (colonCount == 1) {
+      // One colon ("p:d.t", "p:catalog.ns.t", "example.com:proj.ds.t"). If the
+      // part before the colon is dotted, it is the domain half of a legacy
+      // domain-scoped project id ("example.com:proj") spelled with '.',
+      // the first segment after the colon completes the project id, and any
+      // remaining middle segments bind as a (possibly composite) dataset.
+      // (Only the domain half of a domain-scoped id may contain dots, so
+      // exactly one segment can complete it.)
+      int colon = prefix.indexOf(':');
+      project = prefix.substring(0, colon);
+      dataset = prefix.substring(colon + 1);
+      int firstDot = dataset.indexOf('.');
+      // Absorb the first dataset segment into a dotted (domain-scoped) project
+      // only when the split leaves a non-empty dataset.
+      if (firstDot >= 0
+          && firstDot < dataset.length() - 1
+          && project.indexOf('.') >= 0
+          && PROJECT_NAME_SEGMENT_PATTERN.matcher(dataset.substring(0, firstDot)).matches()) {
+        project = project + ":" + dataset.substring(0, firstDot);
+        dataset = dataset.substring(firstDot + 1);
+      }
+    } else if (colonCount == 2) {
+      // Two colons - the last colon is an explicit project terminator. This is
+      // the canonical spelling for a domain-scoped project, whose id itself
+      // contains a colon ("example.com:proj:ds.t"), including with a composite
+      // Lakehouse catalog dataset ("example.com:proj:catalog.ns.t"). Both
+      // domain-scoped spellings keep toTableSpec/parseTableSpec a round trip
+      // for composite dataset ids.
+      int lastColon = prefix.lastIndexOf(':');
+      project = prefix.substring(0, lastColon);
+      dataset = prefix.substring(lastColon + 1);
+    } else {
+      // Project ids contain at most one colon (domain-scoped), so no valid
+      // reference has more than two. Fail early rather than binding an
+      // invalid project id.
+      throw invalidTableSpec(tableSpec);
     }
 
     TableReference ref = new TableReference();
-    ref.setProjectId(match.group("PROJECT"));
+    // The project id is optional; the API client accepts a null project id but is not annotated.
+    @SuppressWarnings("nullness")
+    TableReference unused = ref.setProjectId(project);
+    return ref.setDatasetId(dataset).setTableId(table);
+  }
 
-    return ref.setDatasetId(match.group("DATASET")).setTableId(match.group("TABLE"));
+  private static IllegalArgumentException invalidTableSpec(String tableSpec) {
+    return new IllegalArgumentException(
+        String.format(
+            "Table specification [%s] is not in one of the expected formats ("
+                + " [project_id]:[dataset_id].[table_id],"
+                + " [project_id].[dataset_id].[table_id],"
+                + " [dataset_id].[table_id],"
+                + " [project_id]:[catalog_id].[namespace_id].[table_id],"
+                + " [project_id].[catalog_id].[namespace_id].[table_id])",
+            tableSpec));
   }
 
   public static TableReference parseTableUrn(String tableUrn) {
@@ -420,10 +572,10 @@ public class BigQueryHelpers {
               + tableUrn);
     }
 
-    TableReference ref = new TableReference();
-    ref.setProjectId(match.group("PROJECT"));
-
-    return ref.setDatasetId(match.group("DATASET")).setTableId(match.group("TABLE"));
+    return new TableReference()
+        .setProjectId(checkStateNotNull(match.group("PROJECT")))
+        .setDatasetId(checkStateNotNull(match.group("DATASET")))
+        .setTableId(checkStateNotNull(match.group("TABLE")));
   }
 
   /** Strip off any partition decorator information from a tablespec. */
@@ -433,15 +585,21 @@ public class BigQueryHelpers {
   }
 
   static String jobToPrettyString(@Nullable Job job) throws IOException {
-    if (job != null && job.getConfiguration().getLoad() != null) {
+    if (job == null) {
+      return "null";
+    }
+    JobConfiguration configuration = job.getConfiguration();
+    if (configuration != null && configuration.getLoad() != null) {
       // Removing schema and sourceUris from error messages for load jobs since these fields can be
       // quite long and error message might not be displayed properly in runner specific logs.
       job = job.clone();
-      job.getConfiguration().getLoad().setSchema(null);
-      job.getConfiguration().getLoad().setSourceUris(null);
+      JobConfigurationLoad load = checkStateNotNull(job.getConfiguration()).getLoad();
+      // The BigQuery API library is documented to accept nulls here but is not annotated.
+      @SuppressWarnings("nullness")
+      JobConfigurationLoad unused = load.setSchema(null).setSourceUris(null);
     }
 
-    return job == null ? "null" : job.toPrettyString();
+    return job.toPrettyString();
   }
 
   static String statusToPrettyString(@Nullable JobStatus status) throws IOException {
@@ -462,7 +620,7 @@ public class BigQueryHelpers {
     }
   }
 
-  public static String toJsonString(Object item) {
+  public static @PolyNull String toJsonString(@PolyNull Object item) {
     if (item == null) {
       return null;
     }
@@ -475,12 +633,17 @@ public class BigQueryHelpers {
     }
   }
 
-  public static <T> T fromJsonString(String json, Class<T> clazz) {
+  public static <T> @PolyNull T fromJsonString(@PolyNull String json, Class<T> clazz) {
     if (json == null) {
       return null;
     }
     try {
-      return BigQueryIO.JSON_FACTORY.fromString(json, clazz);
+      // If T is Void then this ends up null, otherwise it is not; kind of a tough invariant
+      @SuppressWarnings({
+        "nullness" // TODO(https://github.com/apache/beam/issues/20497)
+      })
+      @NonNull T result = BigQueryIO.JSON_FACTORY.fromString(json, clazz);
+      return result;
     } catch (IOException e) {
       throw new RuntimeException(
           String.format("Cannot deserialize %s from a JSON string: %s.", clazz, json), e);
@@ -498,7 +661,9 @@ public class BigQueryHelpers {
 
   static void verifyTableNotExistOrEmpty(DatasetService datasetService, TableReference tableRef) {
     try {
-      if (datasetService.getTable(tableRef) != null) {
+      if (datasetService.getTable(
+              tableRef, Collections.emptyList(), DatasetService.TableMetadataView.BASIC)
+          != null) {
         checkState(
             datasetService.isTableEmpty(tableRef),
             "BigQuery table is not empty: %s.",
@@ -553,6 +718,17 @@ public class BigQueryHelpers {
     }
   }
 
+  public static @Nullable Table getTable(BigQueryOptions options, TableReference tableRef)
+      throws InterruptedException, IOException {
+    try (DatasetService datasetService = new BigQueryServicesImpl().getDatasetService(options)) {
+      return datasetService.getTable(tableRef);
+    } catch (IOException | InterruptedException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
   static String getDatasetLocation(
       DatasetService datasetService, String projectId, String datasetId) {
     Dataset dataset;
@@ -572,10 +748,15 @@ public class BigQueryHelpers {
 
   static void verifyTablePresence(DatasetService datasetService, TableReference table) {
     try {
-      datasetService.getTable(table);
+      Table fetchedTable = datasetService.getTable(table);
+      if (fetchedTable == null) {
+        throw new IOException("Table does not exist.");
+      }
     } catch (Exception e) {
       ApiErrorExtractor errorExtractor = new ApiErrorExtractor();
-      if ((e instanceof IOException) && errorExtractor.itemNotFound((IOException) e)) {
+      if ((e instanceof IOException)
+          && ("Table does not exist.".equals(e.getMessage())
+              || errorExtractor.itemNotFound((IOException) e))) {
         throw new IllegalArgumentException(
             String.format(RESOURCE_NOT_FOUND_ERROR, "table", toTableSpec(table)), e);
       } else if (e instanceof RuntimeException) {
@@ -645,6 +826,23 @@ public class BigQueryHelpers {
     public String apply(TimePartitioning partitioning) {
       return toJsonString(partitioning);
     }
+  }
+
+  static Clustering clusteringFromJsonFields(String jsonStringClustering) {
+    JsonElement jsonClustering = JsonParser.parseString(jsonStringClustering);
+
+    checkArgument(
+        jsonClustering.isJsonArray(),
+        "Received an invalid Clustering json string: %s."
+            + "Please provide a serialized json array like so: [\"column1\", \"column2\"]",
+        jsonStringClustering);
+
+    List<String> fields =
+        jsonClustering.getAsJsonArray().asList().stream()
+            .map(JsonElement::getAsString)
+            .collect(Collectors.toList());
+
+    return new Clustering().setFields(fields);
   }
 
   static String resolveTempLocation(

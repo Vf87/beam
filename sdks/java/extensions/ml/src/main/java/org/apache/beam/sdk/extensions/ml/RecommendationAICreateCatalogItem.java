@@ -49,12 +49,12 @@ import org.json.JSONObject;
 public abstract class RecommendationAICreateCatalogItem
     extends PTransform<PCollection<GenericJson>, PCollectionTuple> {
 
-  /** @return ID of Google Cloud project to be used for creating catalog items. */
+  /** Returns ID of Google Cloud project to be used for creating catalog items. */
   public abstract @Nullable String projectId();
 
   /**
-   * @return Name of the catalog where the catalog items will be created (defaults to
-   *     "default_catalog").
+   * Returns name of the catalog where the catalog items will be created (defaults to
+   * "default_catalog").
    */
   public abstract @Nullable String catalogName();
 
@@ -66,10 +66,18 @@ public abstract class RecommendationAICreateCatalogItem
 
   @AutoValue.Builder
   abstract static class Builder {
-    /** @param projectId ID of Google Cloud project to be used for creating catalog items. */
+    /**
+     * Sets ID of Google Cloud project to be used for creating catalog items.
+     *
+     * @param projectId ID of Google Cloud project to be used for creating catalog items.
+     */
     public abstract Builder setProjectId(@Nullable String projectId);
 
-    /** @param catalogName Name of the catalog where the catalog items will be created. */
+    /**
+     * Sets name of the catalog where the catalog items will be created.
+     *
+     * @param catalogName Name of the catalog where the catalog items will be created.
+     */
     public abstract Builder setCatalogName(@Nullable String catalogName);
 
     public abstract RecommendationAICreateCatalogItem build();
@@ -119,7 +127,7 @@ public abstract class RecommendationAICreateCatalogItem
     public void processElement(ProcessContext context) throws IOException {
       CatalogName parent = CatalogName.of(projectId, "global", catalogName);
       CatalogItem.Builder catalogItemBuilder = CatalogItem.newBuilder();
-      JsonFormat.parser().merge((new JSONObject(context.element())).toString(), catalogItemBuilder);
+      JsonFormat.parser().merge(new JSONObject(context.element()).toString(), catalogItemBuilder);
       CatalogItem catalogItem = catalogItemBuilder.build();
 
       try (CatalogServiceClient catalogServiceClient = CatalogServiceClient.create()) {

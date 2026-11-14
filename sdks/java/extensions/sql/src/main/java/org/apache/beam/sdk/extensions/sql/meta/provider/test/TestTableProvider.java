@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.extensions.sql.meta.provider.test;
 
-import static org.apache.beam.vendor.calcite.v1_26_0.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.auto.service.AutoService;
 import java.io.Serializable;
@@ -36,6 +36,7 @@ import org.apache.beam.sdk.extensions.sql.meta.BeamSqlTableFilter;
 import org.apache.beam.sdk.extensions.sql.meta.DefaultTableFilter;
 import org.apache.beam.sdk.extensions.sql.meta.ProjectSupport;
 import org.apache.beam.sdk.extensions.sql.meta.Table;
+import org.apache.beam.sdk.extensions.sql.meta.provider.AlterTableOps;
 import org.apache.beam.sdk.extensions.sql.meta.provider.InMemoryMetaTableProvider;
 import org.apache.beam.sdk.extensions.sql.meta.provider.TableProvider;
 import org.apache.beam.sdk.options.PipelineOptions;
@@ -50,16 +51,17 @@ import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SerializableFunction;
+import org.apache.beam.sdk.util.Preconditions;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.POutput;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexCall;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexInputRef;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexLiteral;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexNode;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexCall;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexInputRef;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexLiteral;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.type.SqlTypeName;
 
 /**
  * Test in-memory table provider for use in tests.
@@ -68,8 +70,8 @@ import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.type.SqlTyp
  */
 @AutoService(TableProvider.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class TestTableProvider extends InMemoryMetaTableProvider {
   static final Map<Long, Map<String, TableWithRows>> GLOBAL_TABLES = new ConcurrentHashMap<>();
@@ -108,12 +110,19 @@ public class TestTableProvider extends InMemoryMetaTableProvider {
   }
 
   @Override
+  public AlterTableOps alterTable(String name) {
+    TableWithRows table =
+        Preconditions.checkArgumentNotNull(tables().get(name), "Could not find table '%s'", name);
+    return new AlterTestTableOps(table);
+  }
+
+  @Override
   public synchronized BeamSqlTable buildBeamSqlTable(Table table) {
     return new InMemoryTable(tables().get(table.getName()));
   }
 
   public void addRows(String tableName, Row... rows) {
-    checkArgument(tables().containsKey(tableName), "Table not found: " + tableName);
+    checkArgument(tables().containsKey(tableName), "Table not found: %s", tableName);
     tables().get(tableName).rows.addAll(Arrays.asList(rows));
   }
 
@@ -133,8 +142,20 @@ public class TestTableProvider extends InMemoryMetaTableProvider {
       this.rows = new CopyOnWriteArrayList<>();
     }
 
+    public Table getTable() {
+      return table;
+    }
+
+    void setTable(Table table) {
+      this.table = table;
+    }
+
     public List<Row> getRows() {
       return rows;
+    }
+
+    void setRows(List<Row> rows) {
+      this.rows = rows;
     }
   }
 
@@ -152,10 +173,10 @@ public class TestTableProvider extends InMemoryMetaTableProvider {
 
       // The reason for introducing a property here is to simplify writing unit tests, testing
       // project and predicate push-down behavior when run separate and together.
-      if (tableWithRows.table.getProperties().containsKey(PUSH_DOWN_OPTION)) {
+      if (tableWithRows.table.getProperties().has(PUSH_DOWN_OPTION)) {
         options =
             PushDownOptions.valueOf(
-                tableWithRows.table.getProperties().getString(PUSH_DOWN_OPTION).toUpperCase());
+                tableWithRows.table.getProperties().get(PUSH_DOWN_OPTION).asText().toUpperCase());
       } else {
         options = PushDownOptions.NONE;
       }

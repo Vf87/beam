@@ -17,22 +17,23 @@
  */
 package org.apache.beam.sdk.util;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings.lenientFormat;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings.lenientFormat;
 
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import org.apache.beam.sdk.annotations.Internal;
 import org.checkerframework.checker.nullness.qual.EnsuresNonNull;
 import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
+import org.checkerframework.dataflow.qual.Pure;
 
 /**
  * Beam-specific variants of {@link
- * org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions} that throws more
+ * org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions} that throws more
  * appropriate exception classes while being static analysis friendly.
  */
 @Internal
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class Preconditions {
   /**
@@ -44,6 +45,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(@Nullable T reference) {
     if (reference == null) {
       throw new IllegalArgumentException();
@@ -62,6 +64,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T reference, @Nullable Object errorMessage) {
     if (reference == null) {
@@ -86,6 +89,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("reference")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T reference,
       @Nullable String errorMessageTemplate,
@@ -103,6 +107,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, char p1) {
     if (obj == null) {
@@ -118,6 +123,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, int p1) {
     if (obj == null) {
@@ -133,6 +139,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, long p1) {
     if (obj == null) {
@@ -148,6 +155,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, @Nullable Object p1) {
     if (obj == null) {
@@ -163,6 +171,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, char p1, char p2) {
     if (obj == null) {
@@ -178,6 +187,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, char p1, int p2) {
     if (obj == null) {
@@ -193,6 +203,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, char p1, long p2) {
     if (obj == null) {
@@ -208,6 +219,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, char p1, @Nullable Object p2) {
     if (obj == null) {
@@ -223,6 +235,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, int p1, char p2) {
     if (obj == null) {
@@ -238,6 +251,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, int p1, int p2) {
     if (obj == null) {
@@ -253,6 +267,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, int p1, long p2) {
     if (obj == null) {
@@ -268,6 +283,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, int p1, @Nullable Object p2) {
     if (obj == null) {
@@ -283,6 +299,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, long p1, char p2) {
     if (obj == null) {
@@ -298,6 +315,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, long p1, int p2) {
     if (obj == null) {
@@ -313,6 +331,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, long p1, long p2) {
     if (obj == null) {
@@ -328,6 +347,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, long p1, @Nullable Object p2) {
     if (obj == null) {
@@ -343,6 +363,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, @Nullable Object p1, char p2) {
     if (obj == null) {
@@ -358,6 +379,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, @Nullable Object p1, int p2) {
     if (obj == null) {
@@ -373,6 +395,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj, @Nullable String errorMessageTemplate, @Nullable Object p1, long p2) {
     if (obj == null) {
@@ -388,6 +411,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj,
       @Nullable String errorMessageTemplate,
@@ -406,6 +430,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj,
       @Nullable String errorMessageTemplate,
@@ -425,6 +450,7 @@ public class Preconditions {
    */
   @CanIgnoreReturnValue
   @EnsuresNonNull("#1")
+  @Pure
   public static <T extends @NonNull Object> T checkArgumentNotNull(
       @Nullable T obj,
       @Nullable String errorMessageTemplate,
@@ -434,6 +460,105 @@ public class Preconditions {
       @Nullable Object p4) {
     if (obj == null) {
       throw new IllegalArgumentException(lenientFormat(errorMessageTemplate, p1, p2, p3, p4));
+    }
+    return obj;
+  }
+
+  /**
+   * Ensures that a piece of state is not null.
+   *
+   * @param obj an object reference
+   * @return the non-null reference that was validated
+   * @throws IllegalStateException if {@code obj} is null
+   */
+  @CanIgnoreReturnValue
+  @EnsuresNonNull("#1")
+  @Pure
+  public static <T extends @NonNull Object> T checkStateNotNull(@Nullable T obj) {
+    if (obj == null) {
+      throw new IllegalStateException();
+    }
+    return obj;
+  }
+
+  /**
+   * Ensures that a piece of state passed as a parameter to the calling method is not null.
+   *
+   * @param reference an object reference
+   * @param errorMessage the exception message to use if the check fails; will be converted to a
+   *     string using {@link String#valueOf(Object)}
+   * @return the non-null reference that was validated
+   * @throws IllegalStateException if {@code reference} is null
+   */
+  @CanIgnoreReturnValue
+  @EnsuresNonNull("#1")
+  @Pure
+  public static <T extends @NonNull Object> T checkStateNotNull(
+      @Nullable T reference, @Nullable Object errorMessage) {
+    if (reference == null) {
+      throw new IllegalStateException(String.valueOf(errorMessage));
+    }
+    return reference;
+  }
+
+  /**
+   * Ensures that a piece of state passed as a parameter to the calling method is not null.
+   *
+   * @param obj an object reference
+   * @param errorMessageTemplate a template for the exception message should the check fail. The
+   *     message is formed by replacing each {@code %s} placeholder in the template with an
+   *     argument. These are matched by position - the first {@code %s} gets {@code
+   *     errorMessageArgs[0]}, etc. Unmatched arguments will be appended to the formatted message in
+   *     square braces. Unmatched placeholders will be left as-is.
+   * @param errorMessageArgs the arguments to be substituted into the message template. Arguments
+   *     are converted to strings using {@link String#valueOf(Object)}.
+   * @return the non-null reference that was validated
+   * @throws IllegalStateException if {@code obj} is null
+   */
+  @CanIgnoreReturnValue
+  @EnsuresNonNull("#1")
+  @Pure
+  public static <T extends @NonNull Object> T checkStateNotNull(
+      @Nullable T obj,
+      @Nullable String errorMessageTemplate,
+      @Nullable Object... errorMessageArgs) {
+    if (obj == null) {
+      throw new IllegalStateException(lenientFormat(errorMessageTemplate, errorMessageArgs));
+    }
+    return obj;
+  }
+
+  /**
+   * Ensures that a piece of state is not null.
+   *
+   * <p>See {@link #checkStateNotNull(Object, String, Object...)} for details.
+   */
+  @CanIgnoreReturnValue
+  @EnsuresNonNull("#1")
+  @Pure
+  public static <T extends @NonNull Object> T checkStateNotNull(
+      @Nullable T obj, @Nullable String errorMessageTemplate, @Nullable Object p1) {
+    if (obj == null) {
+      throw new IllegalStateException(lenientFormat(errorMessageTemplate, p1));
+    }
+    return obj;
+  }
+
+  /**
+   * Ensures that an object reference passed as a parameter to the calling method is not null.
+   *
+   * <p>See {@link #checkArgumentNotNull(Object, String, Object...)} for details.
+   */
+  @CanIgnoreReturnValue
+  @EnsuresNonNull("#1")
+  @Pure
+  public static <T extends @NonNull Object> T checkStateNotNull(
+      @Nullable T obj,
+      @Nullable String errorMessageTemplate,
+      @Nullable Object p1,
+      @Nullable Object p2) {
+    if (obj == null) {
+      throw new IllegalStateException(lenientFormat(errorMessageTemplate, p1, p2));
     }
     return obj;
   }

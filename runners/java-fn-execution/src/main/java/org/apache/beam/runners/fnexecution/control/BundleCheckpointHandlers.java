@@ -23,36 +23,38 @@ import org.apache.beam.runners.core.StateInternals;
 import org.apache.beam.runners.core.StateInternalsFactory;
 import org.apache.beam.runners.core.StateNamespace;
 import org.apache.beam.runners.core.StateNamespaces;
+import org.apache.beam.runners.core.StateTag;
 import org.apache.beam.runners.core.StateTags;
 import org.apache.beam.runners.core.TimerInternals;
 import org.apache.beam.runners.core.TimerInternalsFactory;
 import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.fn.IdGenerator;
 import org.apache.beam.sdk.fn.IdGenerators;
+import org.apache.beam.sdk.state.MapState;
 import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.util.CoderUtils;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.joda.time.Duration;
 import org.joda.time.Instant;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /** Utility methods for creating {@link BundleCheckpointHandler}s. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class BundleCheckpointHandlers {
 
   /**
    * A {@link BundleCheckpointHandler} which uses {@link
-   * org.apache.beam.runners.core.TimerInternals.TimerData} ans {@link
-   * org.apache.beam.sdk.state.ValueState} to reschedule {@link DelayedBundleApplication}.
+   * org.apache.beam.runners.core.TimerInternals.TimerData} and {@link
+   * org.apache.beam.sdk.state.MapState} to reschedule {@link DelayedBundleApplication}.
    */
   public static class StateAndTimerBundleCheckpointHandler<T> implements BundleCheckpointHandler {
-    private static final Logger LOG =
-        LoggerFactory.getLogger(StateAndTimerBundleCheckpointHandler.class);
+
     private final TimerInternalsFactory<T> timerInternalsFactory;
     private final StateInternalsFactory<T> stateInternalsFactory;
     private final Coder<WindowedValue<T>> residualCoder;
@@ -83,6 +85,20 @@ public class BundleCheckpointHandlers {
       return SDF_PREFIX + ":" + id + ":" + index;
     }
 
+    /** The state id under which all SDF self-checkpoint residuals for a key/window are stored. */
+    public static final String SDF_RESIDUAL_STATE = "sdf_checkpoint_residuals";
+
+    /**
+     * The single, stable state tag holding every SDF self-checkpoint residual for a key/window,
+     * keyed by the per-residual checkpoint id. Storing all residuals under one stable descriptor,
+     * instead of a fresh {@link StateTags#value} per residual, keeps a polling SDF's keyed state
+     * bounded. See https://github.com/apache/beam/issues/27648.
+     */
+    public static <T> StateTag<MapState<String, WindowedValue<T>>> residualStateTag(
+        Coder<WindowedValue<T>> residualCoder) {
+      return StateTags.map(SDF_RESIDUAL_STATE, StringUtf8Coder.of(), residualCoder);
+    }
+
     @Override
     public void onCheckpoint(ProcessBundleResponse response) {
       String id = idGenerator.getId();
@@ -97,18 +113,20 @@ public class BundleCheckpointHandlers {
               CoderUtils.decodeFromByteArray(
                   residualCoder, residual.getApplication().getElement().toByteArray());
           TimerInternals timerInternals =
-              timerInternalsFactory.timerInternalsForKey((stateValue.getValue()));
+              timerInternalsFactory.timerInternalsForKey(stateValue.getValue());
           StateInternals stateInternals =
               stateInternalsFactory.stateInternalsForKey(stateValue.getValue());
           // Calculate the timestamp for the timer.
           Instant timestamp = Instant.now();
           if (residual.hasRequestedTimeDelay()) {
-            timestamp = timestamp.plus(residual.getRequestedTimeDelay().getSeconds() * 1000);
+            timestamp =
+                timestamp.plus(
+                    Duration.millis(residual.getRequestedTimeDelay().getSeconds() * 1000));
           }
           // Calculate the watermark hold for the timer.
           long outputTimestamp = BoundedWindow.TIMESTAMP_MAX_VALUE.getMillis();
           if (!residual.getApplication().getOutputWatermarksMap().isEmpty()) {
-            for (org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.Timestamp outputWatermark :
+            for (org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.Timestamp outputWatermark :
                 residual.getApplication().getOutputWatermarksMap().values()) {
               outputTimestamp = Math.min(outputTimestamp, outputWatermark.getSeconds() * 1000);
             }
@@ -125,13 +143,14 @@ public class BundleCheckpointHandlers {
                 Instant.ofEpochMilli(outputTimestamp),
                 TimeDomain.PROCESSING_TIME);
             stateInternals
-                .state(stateNamespace, StateTags.value(tag, residualCoder))
-                .write(
-                    WindowedValue.of(
+                .state(stateNamespace, residualStateTag(residualCoder))
+                .put(
+                    tag,
+                    WindowedValues.of(
                         stateValue.getValue(),
                         stateValue.getTimestamp(),
                         ImmutableList.of(window),
-                        stateValue.getPane()));
+                        stateValue.getPaneInfo()));
           }
         } catch (Exception e) {
           throw new RuntimeException("Failed to set timer/state for the residual", e);

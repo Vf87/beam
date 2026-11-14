@@ -17,13 +17,15 @@
  */
 package org.apache.beam.sdk.transforms;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.sdk.util.Preconditions.checkArgumentNotNull;
 
-import javax.annotation.CheckForNull;
 import org.apache.beam.sdk.coders.CannotProvideCoderException;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.coders.KvCoder;
+import org.apache.beam.sdk.schemas.NoSuchSchemaException;
+import org.apache.beam.sdk.schemas.SchemaCoder;
+import org.apache.beam.sdk.schemas.SchemaRegistry;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TypeDescriptor;
@@ -53,9 +55,6 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * @param <V> the type of the elements in the input {@code PCollection} and the values in the output
  *     {@code PCollection}
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class WithKeys<K, V> extends PTransform<PCollection<V>, PCollection<KV<K, V>>> {
   /**
    * Returns a {@code PTransform} that takes a {@code PCollection<V>} and returns a {@code
@@ -66,7 +65,7 @@ public class WithKeys<K, V> extends PTransform<PCollection<V>, PCollection<KV<K,
    * result {@link PTransform}.
    */
   public static <K, V> WithKeys<K, V> of(SerializableFunction<V, K> fn) {
-    checkNotNull(
+    checkArgumentNotNull(
         fn, "WithKeys constructed with null function. Did you mean WithKeys.of((Void) null)?");
     return new WithKeys<>(fn, null);
   }
@@ -76,20 +75,22 @@ public class WithKeys<K, V> extends PTransform<PCollection<V>, PCollection<KV<K,
    * PCollection<KV<K, V>>}, where each of the values in the input {@code PCollection} has been
    * paired with the given key.
    */
-  @SuppressWarnings("unchecked")
-  public static <K, V> WithKeys<K, V> of(final @Nullable K key) {
-    return new WithKeys<>(
-        value -> key,
-        (TypeDescriptor<K>)
-            (key == null ? TypeDescriptors.voids() : TypeDescriptor.of(key.getClass())));
+  public static <K, V> WithKeys<K, V> of(final K key) {
+    TypeDescriptor<K> keyType;
+    if (key == null) {
+      keyType = (TypeDescriptor<K>) TypeDescriptors.voids();
+    } else {
+      keyType = (TypeDescriptor<K>) TypeDescriptor.of(key.getClass());
+    }
+    return new WithKeys<>(value -> key, keyType); // createWithConstantKey(key, keyType);
   }
 
   /////////////////////////////////////////////////////////////////////////////
 
   private SerializableFunction<V, K> fn;
-  @CheckForNull private transient TypeDescriptor<K> keyType;
+  private transient @Nullable TypeDescriptor<K> keyType;
 
-  private WithKeys(SerializableFunction<V, K> fn, TypeDescriptor<K> keyType) {
+  private WithKeys(SerializableFunction<V, K> fn, @Nullable TypeDescriptor<K> keyType) {
     this.fn = fn;
     this.keyType = keyType;
   }
@@ -118,6 +119,7 @@ public class WithKeys<K, V> extends PTransform<PCollection<V>, PCollection<KV<K,
                   }
                 }));
 
+    TypeDescriptor<K> keyType = this.keyType;
     try {
       Coder<K> keyCoder;
       CoderRegistry coderRegistry = in.getPipeline().getCoderRegistry();
@@ -129,6 +131,20 @@ public class WithKeys<K, V> extends PTransform<PCollection<V>, PCollection<KV<K,
       // TODO: Remove when we can set the coder inference context.
       result.setCoder(KvCoder.of(keyCoder, in.getCoder()));
     } catch (CannotProvideCoderException exc) {
+      if (keyType != null) {
+        try {
+          SchemaRegistry schemaRegistry = SchemaRegistry.createDefault();
+          SchemaCoder<K> schemaCoder =
+              SchemaCoder.of(
+                  schemaRegistry.getSchema(keyType),
+                  keyType,
+                  schemaRegistry.getToRowFunction(keyType),
+                  schemaRegistry.getFromRowFunction(keyType));
+          result.setCoder(KvCoder.of(schemaCoder, in.getCoder()));
+        } catch (NoSuchSchemaException exception) {
+          // No Schema.
+        }
+      }
       // let lazy coder inference have a try
     }
 

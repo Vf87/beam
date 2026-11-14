@@ -17,6 +17,8 @@
  */
 package org.apache.beam.sdk.schemas.logicaltypes;
 
+import static org.apache.beam.sdk.util.Preconditions.checkArgumentNotNull;
+
 import java.io.Serializable;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -26,27 +28,21 @@ import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.schemas.Schema.LogicalType;
 import org.apache.beam.sdk.schemas.logicaltypes.EnumerationType.Value;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.BiMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.HashBiMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.BiMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableBiMap;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** This {@link LogicalType} represent an enumeration over a fixed set of values. */
-@Experimental(Kind.SCHEMAS)
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class EnumerationType implements LogicalType<Value, Integer> {
   public static final String IDENTIFIER = "Enum";
-  final BiMap<String, Integer> enumValues = HashBiMap.create();
+  final BiMap<String, Integer> enumValues;
   final List<String> values;
 
   private EnumerationType(Map<String, Integer> enumValues) {
-    this.enumValues.putAll(enumValues);
+    this.enumValues = ImmutableBiMap.copyOf(enumValues);
     values =
         enumValues.entrySet().stream()
             .sorted(Comparator.comparingInt(e -> e.getValue()))
@@ -77,9 +73,12 @@ public class EnumerationType implements LogicalType<Value, Integer> {
   public static EnumerationType create(String... enumValues) {
     return create(Arrays.asList(enumValues));
   }
+
   /** Return an {@link Value} corresponding to one of the enumeration strings. */
   public Value valueOf(String stringValue) {
-    return new Value(enumValues.get(stringValue));
+    return new Value(
+        checkArgumentNotNull(
+            enumValues.get(stringValue), "Unknown enumeration value {}", stringValue));
   }
 
   /** Return an {@link Value} corresponding to one of the enumeration integer values. */
@@ -117,8 +116,16 @@ public class EnumerationType implements LogicalType<Value, Integer> {
     return valueOf(base);
   }
 
-  public Map<String, Integer> getValuesMap() {
+  public BiMap<String, Integer> getValuesMap() {
     return enumValues;
+  }
+
+  public @Nullable String getEnumName(int number) {
+    return enumValues.inverse().get(number);
+  }
+
+  public @Nullable Integer getEnumValue(String enumName) {
+    return enumValues.get(enumName);
   }
 
   public List<String> getValues() {
@@ -126,7 +133,10 @@ public class EnumerationType implements LogicalType<Value, Integer> {
   }
 
   public String toString(EnumerationType.Value value) {
-    return enumValues.inverse().get(value.getValue());
+    return checkArgumentNotNull(
+        enumValues.inverse().get(value.getValue()),
+        "Unknown enumeration value {}",
+        value.getValue());
   }
 
   @Override
@@ -154,7 +164,7 @@ public class EnumerationType implements LogicalType<Value, Integer> {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof Value)) {
         return false;
       }
       Value enumValue = (Value) o;

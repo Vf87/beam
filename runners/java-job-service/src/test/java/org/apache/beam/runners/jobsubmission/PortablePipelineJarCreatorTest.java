@@ -20,7 +20,7 @@ package org.apache.beam.runners.jobsubmission;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -41,8 +41,8 @@ import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
 import org.apache.beam.runners.fnexecution.artifact.ArtifactRetrievalService;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.ByteString;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -122,7 +122,7 @@ public class PortablePipelineJarCreatorTest implements Serializable {
   }
 
   private static class FakePipelineRunnner {
-    public static void main(String[] args) {
+    public static void main(@SuppressWarnings("unused") String[] args) {
       System.out.println("Hello world");
     }
   }
@@ -143,8 +143,9 @@ public class PortablePipelineJarCreatorTest implements Serializable {
     assertNull(manifest.getMainAttributes().getValue(Name.MAIN_CLASS));
   }
 
+  @SuppressWarnings("IncorrectMainMethod") // intended
   private static class EvilPipelineRunner {
-    public static int main(String[] args) {
+    public static int main(@SuppressWarnings("unused") String[] args) {
       return 0;
     }
   }

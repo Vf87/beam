@@ -18,8 +18,8 @@
 package org.apache.beam.sdk.util.common;
 
 import static java.util.Arrays.asList;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
 import java.lang.annotation.Annotation;
 import java.lang.reflect.AnnotatedElement;
@@ -34,28 +34,52 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.Queue;
+import java.util.ServiceConfigurationError;
 import java.util.ServiceLoader;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Function;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.FluentIterable;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSortedSet;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Queues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Function;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Joiner;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.FluentIterable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSortedSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Queues;
+import org.checkerframework.checker.nullness.qual.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Utilities for working with with {@link Class Classes} and {@link Method Methods}. */
-@SuppressWarnings({"nullness", "keyfor"}) // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+@SuppressWarnings({"nullness", "keyfor"}) // TODO(https://github.com/apache/beam/issues/20497)
 public class ReflectHelpers {
+  private static final Logger LOG = LoggerFactory.getLogger(ReflectHelpers.class);
 
   private static final Joiner COMMA_SEPARATOR = Joiner.on(", ");
+
+  /**
+   * Returns the simple name of the given class, or a fallback simple name derived from the class
+   * name if {@link Class#getSimpleName()} throws an exception (such as an {@link
+   * IllegalAccessError} on Java 17+ for non-public inner classes).
+   */
+  public static String getSimpleName(Class<?> clazz) {
+    try {
+      return clazz.getSimpleName();
+    } catch (Throwable t) {
+      if (clazz.isArray()) {
+        return getSimpleName(clazz.getComponentType()) + "[]";
+      }
+      String name = clazz.getName();
+      int idx = Math.max(name.lastIndexOf('.'), name.lastIndexOf('$'));
+      return idx != -1 ? name.substring(idx + 1) : name;
+    }
+  }
 
   /** Returns a string representation of the signature of a {@link Method}. */
   public static String formatMethod(Method input) {
     String parameterTypes =
         FluentIterable.from(asList(input.getParameterTypes()))
-            .transform(Class::getSimpleName)
+            .transform(ReflectHelpers::getSimpleName)
             .join(COMMA_SEPARATOR);
     return String.format("%s(%s)", input.getName(), parameterTypes);
   }
@@ -99,7 +123,7 @@ public class ReflectHelpers {
   }
 
   private static void formatClass(StringBuilder builder, Class<?> clazz) {
-    builder.append(clazz.getSimpleName());
+    builder.append(getSimpleName(clazz));
   }
 
   private static void formatTypeVariable(StringBuilder builder, TypeVariable<?> t) {
@@ -184,8 +208,12 @@ public class ReflectHelpers {
   }
 
   /**
-   * Returns instances of all implementations of the the specified {@code iface}. Instances are
-   * sorted by their class' name to ensure deterministic execution.
+   * Returns instances of all implementations of the specified {@code iface}. Instances are sorted
+   * by their class' name to ensure deterministic execution.
+   *
+   * <p>Safely handles malformed service providers: if a provider fails to load (e.g. throwing
+   * {@link ServiceConfigurationError}, {@link LinkageError}, or other exceptions), it will be
+   * logged as a warning and skipped so that other valid implementations continue to load.
    *
    * @param iface The interface to load implementations of
    * @param classLoader The class loader to use
@@ -193,10 +221,30 @@ public class ReflectHelpers {
    * @return An iterable of instances of T, ordered by their class' canonical name
    */
   public static <T> Iterable<T> loadServicesOrdered(Class<T> iface, ClassLoader classLoader) {
-    ServiceLoader<T> loader = ServiceLoader.load(iface, classLoader);
     ImmutableSortedSet.Builder<T> builder =
         new ImmutableSortedSet.Builder<>(ObjectsClassComparator.INSTANCE);
-    builder.addAll(loader);
+    try {
+      ServiceLoader<T> loader = ServiceLoader.load(iface, classLoader);
+      Iterator<T> iterator = loader.iterator();
+      while (true) {
+        T service;
+        try {
+          if (!iterator.hasNext()) {
+            break;
+          }
+          service = iterator.next();
+        } catch (ServiceConfigurationError | LinkageError | Exception e) {
+          // A single broken provider on the classpath shouldn't abort discovery of valid ones.
+          LOG.warn("Failed to load a service implementation of {}; skipping", iface.getName(), e);
+          continue;
+        }
+        if (service != null) {
+          builder.add(service);
+        }
+      }
+    } catch (Throwable t) {
+      LOG.warn("Failed to discover services for {}", iface.getName(), t);
+    }
     return builder.build();
   }
 
@@ -214,9 +262,9 @@ public class ReflectHelpers {
   /**
    * Finds the appropriate {@code ClassLoader} to be used by the {@link ServiceLoader#load} call,
    * which by default would use the proposed {@code ClassLoader}, which can be null. The fallback is
-   * as follows: context ClassLoader, class ClassLoader and finaly the system ClassLoader.
+   * as follows: context ClassLoader, class ClassLoader and finally the system ClassLoader.
    */
-  public static ClassLoader findClassLoader(final ClassLoader proposed) {
+  public static ClassLoader findClassLoader(@Nullable final ClassLoader proposed) {
     ClassLoader classLoader = proposed;
     if (classLoader == null) {
       classLoader = ReflectHelpers.class.getClassLoader();

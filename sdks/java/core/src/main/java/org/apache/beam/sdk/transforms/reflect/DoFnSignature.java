@@ -51,8 +51,9 @@ import org.apache.beam.sdk.transforms.splittabledofn.WatermarkEstimator;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Predicates;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Predicates;
 import org.checkerframework.checker.nullness.qual.Nullable;
+import org.checkerframework.dataflow.qual.Pure;
 
 /**
  * Describes the signature of a {@link DoFn}, in particular, which features it uses, which extra
@@ -63,95 +64,124 @@ import org.checkerframework.checker.nullness.qual.Nullable;
 @AutoValue
 @Internal
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public abstract class DoFnSignature {
   /** Class of the original {@link DoFn} from which this signature was produced. */
+  @Pure
   public abstract Class<? extends DoFn<?, ?>> fnClass();
 
   /** Whether this {@link DoFn} does a bounded amount of work per element. */
+  @Pure
   public abstract PCollection.IsBounded isBoundedPerElement();
 
   /** Details about this {@link DoFn}'s {@link DoFn.ProcessElement} method. */
+  @Pure
   public abstract ProcessElementMethod processElement();
 
   /** Details about the state cells that this {@link DoFn} declares. Immutable. */
+  @Pure
   public abstract Map<String, StateDeclaration> stateDeclarations();
 
   /** Details about this {@link DoFn}'s {@link DoFn.StartBundle} method. */
+  @Pure
   public abstract @Nullable BundleMethod startBundle();
 
   /** Details about this {@link DoFn}'s {@link DoFn.FinishBundle} method. */
+  @Pure
   public abstract @Nullable BundleMethod finishBundle();
 
   /** Details about this {@link DoFn}'s {@link DoFn.Setup} method. */
+  @Pure
   public abstract @Nullable LifecycleMethod setup();
 
   /** Details about this {@link DoFn}'s {@link DoFn.Teardown} method. */
+  @Pure
   public abstract @Nullable LifecycleMethod teardown();
 
   /** Details about this {@link DoFn}'s {@link DoFn.OnWindowExpiration} method. */
+  @Pure
   public abstract @Nullable OnWindowExpirationMethod onWindowExpiration();
 
   /** Timer declarations present on the {@link DoFn} class. Immutable. */
+  @Pure
   public abstract Map<String, TimerDeclaration> timerDeclarations();
 
   /** TimerMap declarations present on the {@link DoFn} class. Immutable. */
+  @Pure
   public abstract Map<String, TimerFamilyDeclaration> timerFamilyDeclarations();
 
   /** Field access declaration. */
+  @Pure
   public abstract @Nullable Map<String, FieldAccessDeclaration> fieldAccessDeclarations();
 
   /** Details about this {@link DoFn}'s {@link DoFn.GetInitialRestriction} method. */
+  @Pure
   public abstract @Nullable GetInitialRestrictionMethod getInitialRestriction();
 
   /** Details about this {@link DoFn}'s {@link DoFn.SplitRestriction} method. */
+  @Pure
   public abstract @Nullable SplitRestrictionMethod splitRestriction();
 
   /** Details about this {@link DoFn}'s {@link TruncateRestriction} method. */
+  @Pure
   public abstract @Nullable TruncateRestrictionMethod truncateRestriction();
 
   /** Details about this {@link DoFn}'s {@link DoFn.GetRestrictionCoder} method. */
+  @Pure
   public abstract @Nullable GetRestrictionCoderMethod getRestrictionCoder();
 
   /** Details about this {@link DoFn}'s {@link DoFn.GetWatermarkEstimatorStateCoder} method. */
+  @Pure
   public abstract @Nullable GetWatermarkEstimatorStateCoderMethod getWatermarkEstimatorStateCoder();
 
   /** Details about this {@link DoFn}'s {@link DoFn.GetInitialWatermarkEstimatorState} method. */
-  public abstract @Nullable GetInitialWatermarkEstimatorStateMethod
-      getInitialWatermarkEstimatorState();
+  @Pure
+  public abstract @Nullable
+      GetInitialWatermarkEstimatorStateMethod getInitialWatermarkEstimatorState();
 
   /** Details about this {@link DoFn}'s {@link DoFn.NewWatermarkEstimator} method. */
+  @Pure
   public abstract @Nullable NewWatermarkEstimatorMethod newWatermarkEstimator();
 
   /** Details about this {@link DoFn}'s {@link DoFn.NewTracker} method. */
+  @Pure
   public abstract @Nullable NewTrackerMethod newTracker();
 
   /** Details about this {@link DoFn}'s {@link DoFn.GetSize} method. */
+  @Pure
   public abstract @Nullable GetSizeMethod getSize();
 
   /** Details about this {@link DoFn}'s {@link DoFn.OnTimer} methods. */
+  @Pure
   public abstract @Nullable Map<String, OnTimerMethod> onTimerMethods();
 
   /** Details about this {@link DoFn}'s {@link DoFn.OnTimerFamily} methods. */
+  @Pure
   public abstract @Nullable Map<String, OnTimerFamilyMethod> onTimerFamilyMethods();
 
-  /** @deprecated use {@link #usesState()}, it's cleaner */
+  /**
+   * @deprecated use {@link #usesState()}, it's cleaner
+   */
   @Deprecated
+  @Pure
   public boolean isStateful() {
     return stateDeclarations().size() > 0;
   }
 
   /** Whether the {@link DoFn} described by this signature uses state. */
+  @Pure
   public boolean usesState() {
     return stateDeclarations().size() > 0;
   }
 
   /** Whether the {@link DoFn} described by this signature uses timers. */
+  @Pure
   public boolean usesTimers() {
     return timerDeclarations().size() > 0 || timerFamilyDeclarations().size() > 0;
   }
 
+  @Pure
   static Builder builder() {
     return new AutoValue_DoFnSignature.Builder();
   }
@@ -208,12 +238,14 @@ public abstract class DoFnSignature {
 
     abstract Builder setOnTimerFamilyMethods(Map<String, OnTimerFamilyMethod> onTimerFamilyMethods);
 
+    @Pure
     abstract DoFnSignature build();
   }
 
   /** A method delegated to an annotated method of an underlying {@link DoFn}. */
   public interface DoFnMethod {
     /** The annotated method itself. */
+    @Pure
     Method targetMethod();
   }
 
@@ -233,8 +265,8 @@ public abstract class DoFnSignature {
      * Whether this method observes - directly or indirectly - the window that an element resides
      * in.
      *
-     * <p>{@link State} and {@link Timer} parameters indirectly observe the window, because they are
-     * each scoped to a single window.
+     * <p>{@link State}, {@link Timer}, {@link DoFn.SideInput} parameters indirectly observe the
+     * window, because they are each scoped to a single window.
      */
     default boolean observesWindow() {
       return extraParameters().stream()
@@ -243,16 +275,17 @@ public abstract class DoFnSignature {
                       Predicates.instanceOf(WindowParameter.class),
                       Predicates.instanceOf(TimerParameter.class),
                       Predicates.instanceOf(TimerFamilyParameter.class),
-                      Predicates.instanceOf(StateParameter.class))
+                      Predicates.instanceOf(StateParameter.class),
+                      Predicates.instanceOf(SideInputParameter.class))
                   ::apply);
     }
 
     /** The type of window expected by this method, if any. */
-    @Nullable
-    TypeDescriptor<? extends BoundedWindow> windowT();
+    @Nullable TypeDescriptor<? extends BoundedWindow> windowT();
   }
 
   /** A descriptor for an optional parameter of the {@link DoFn.ProcessElement} method. */
+  @SuppressWarnings("ClassInitializationDeadlock")
   public abstract static class Parameter {
 
     // Private as no extensions other than those nested here are permitted
@@ -273,6 +306,8 @@ public abstract class DoFnSignature {
         return cases.dispatch((ProcessContextParameter) this);
       } else if (this instanceof OnTimerContextParameter) {
         return cases.dispatch((OnTimerContextParameter) this);
+      } else if (this instanceof OnWindowExpirationContextParameter) {
+        return cases.dispatch((OnWindowExpirationContextParameter) this);
       } else if (this instanceof WindowParameter) {
         return cases.dispatch((WindowParameter) this);
       } else if (this instanceof PaneInfoParameter) {
@@ -311,6 +346,16 @@ public abstract class DoFnSignature {
         return cases.dispatch((TimerIdParameter) this);
       } else if (this instanceof BundleFinalizerParameter) {
         return cases.dispatch((BundleFinalizerParameter) this);
+      } else if (this instanceof CausedByDrainParameter) {
+        return cases.dispatch((CausedByDrainParameter) this);
+      } else if (this instanceof CurrentRecordIdParameter) {
+        return cases.dispatch((CurrentRecordIdParameter) this);
+      } else if (this instanceof CurrentRecordOffsetParameter) {
+        return cases.dispatch((CurrentRecordOffsetParameter) this);
+      } else if (this instanceof FireTimestampParameter) {
+        return cases.dispatch((FireTimestampParameter) this);
+      } else if (this instanceof ValueKindParameter) {
+        return cases.dispatch((ValueKindParameter) this);
       } else if (this instanceof KeyParameter) {
         return cases.dispatch((KeyParameter) this);
       } else {
@@ -341,7 +386,15 @@ public abstract class DoFnSignature {
 
       ResultT dispatch(TaggedOutputReceiverParameter p);
 
+      ResultT dispatch(CurrentRecordIdParameter p);
+
+      ResultT dispatch(CurrentRecordOffsetParameter p);
+
+      ResultT dispatch(FireTimestampParameter p);
+
       ResultT dispatch(OnTimerContextParameter p);
+
+      ResultT dispatch(OnWindowExpirationContextParameter p);
 
       ResultT dispatch(WindowParameter p);
 
@@ -368,6 +421,10 @@ public abstract class DoFnSignature {
       ResultT dispatch(TimerIdParameter p);
 
       ResultT dispatch(BundleFinalizerParameter p);
+
+      ResultT dispatch(CausedByDrainParameter p);
+
+      ResultT dispatch(ValueKindParameter p);
 
       ResultT dispatch(KeyParameter p);
 
@@ -427,7 +484,27 @@ public abstract class DoFnSignature {
         }
 
         @Override
+        public ResultT dispatch(CurrentRecordIdParameter p) {
+          return dispatchDefault(p);
+        }
+
+        @Override
+        public ResultT dispatch(CurrentRecordOffsetParameter p) {
+          return dispatchDefault(p);
+        }
+
+        @Override
+        public ResultT dispatch(FireTimestampParameter p) {
+          return dispatchDefault(p);
+        }
+
+        @Override
         public ResultT dispatch(OnTimerContextParameter p) {
+          return dispatchDefault(p);
+        }
+
+        @Override
+        public ResultT dispatch(OnWindowExpirationContextParameter p) {
           return dispatchDefault(p);
         }
 
@@ -463,6 +540,16 @@ public abstract class DoFnSignature {
 
         @Override
         public ResultT dispatch(BundleFinalizerParameter p) {
+          return dispatchDefault(p);
+        }
+
+        @Override
+        public ResultT dispatch(CausedByDrainParameter p) {
+          return dispatchDefault(p);
+        }
+
+        @Override
+        public ResultT dispatch(ValueKindParameter p) {
           return dispatchDefault(p);
         }
 
@@ -521,8 +608,18 @@ public abstract class DoFnSignature {
         new AutoValue_DoFnSignature_Parameter_PipelineOptionsParameter();
     private static final BundleFinalizerParameter BUNDLE_FINALIZER_PARAMETER =
         new AutoValue_DoFnSignature_Parameter_BundleFinalizerParameter();
+    private static final CausedByDrainParameter CAUSED_BY_DRAIN_PARAMETER =
+        new AutoValue_DoFnSignature_Parameter_CausedByDrainParameter();
+    private static final ValueKindParameter VALUE_KIND_PARAMETER =
+        new AutoValue_DoFnSignature_Parameter_ValueKindParameter();
     private static final OnWindowExpirationContextParameter ON_WINDOW_EXPIRATION_CONTEXT_PARAMETER =
         new AutoValue_DoFnSignature_Parameter_OnWindowExpirationContextParameter();
+    private static final CurrentRecordIdParameter CURRENT_RECORD_ID_PARAMETER =
+        new AutoValue_DoFnSignature_Parameter_CurrentRecordIdParameter();
+    private static final CurrentRecordOffsetParameter CURRENT_RECORD_OFFSET_PARAMETER =
+        new AutoValue_DoFnSignature_Parameter_CurrentRecordOffsetParameter();
+    private static final FireTimestampParameter FIRE_TIMESTAMP_PARAMETER =
+        new AutoValue_DoFnSignature_Parameter_FireTimestampParameter();
 
     /** Returns a {@link ProcessContextParameter}. */
     public static ProcessContextParameter processContext() {
@@ -542,6 +639,31 @@ public abstract class DoFnSignature {
     /** Returns a {@link BundleFinalizerParameter}. */
     public static BundleFinalizerParameter bundleFinalizer() {
       return BUNDLE_FINALIZER_PARAMETER;
+    }
+
+    /** Returns a {@link CausedByDrainParameter}. */
+    public static CausedByDrainParameter causedByDrainParameter() {
+      return CAUSED_BY_DRAIN_PARAMETER;
+    }
+
+    /** Returns a {@link ValueKindParameter}. */
+    public static ValueKindParameter valueKindParameter() {
+      return VALUE_KIND_PARAMETER;
+    }
+
+    /** Returns a {@link CurrentRecordIdParameter}. */
+    public static CurrentRecordIdParameter currentRecordIdParameter() {
+      return CURRENT_RECORD_ID_PARAMETER;
+    }
+
+    /** Returns a {@link CurrentRecordOffsetParameter}. */
+    public static CurrentRecordOffsetParameter currentRecordOffsetParameter() {
+      return CURRENT_RECORD_OFFSET_PARAMETER;
+    }
+
+    /** Returns a {@link FireTimestampParameter}. */
+    public static FireTimestampParameter fireTimestampParameter() {
+      return FIRE_TIMESTAMP_PARAMETER;
     }
 
     public static ElementParameter elementParameter(TypeDescriptor<?> elementT) {
@@ -697,6 +819,56 @@ public abstract class DoFnSignature {
     }
 
     /**
+     * Descriptor for a {@link Parameter} of type {@link org.apache.beam.sdk.values.CausedByDrain}.
+     *
+     * <p>All such descriptors are equal.
+     */
+    @AutoValue
+    public abstract static class CausedByDrainParameter extends Parameter {
+      CausedByDrainParameter() {}
+    }
+
+    /**
+     * Descriptor for a {@link Parameter} of type {@link org.apache.beam.sdk.values.ValueKind}.
+     *
+     * <p>All such descriptors are equal.
+     */
+    @AutoValue
+    public abstract static class ValueKindParameter extends Parameter {
+      ValueKindParameter() {}
+    }
+
+    /**
+     * Descriptor for a {@link Parameter} of type {@link DoFn.RecordId}.
+     *
+     * <p>All such descriptors are equal.
+     */
+    @AutoValue
+    public abstract static class CurrentRecordIdParameter extends Parameter {
+      CurrentRecordIdParameter() {}
+    }
+
+    /**
+     * Descriptor for a {@link Parameter} of type {@link DoFn.RecordOffset}.
+     *
+     * <p>All such descriptors are equal.
+     */
+    @AutoValue
+    public abstract static class CurrentRecordOffsetParameter extends Parameter {
+      CurrentRecordOffsetParameter() {}
+    }
+
+    /**
+     * Descriptor for a {@link Parameter} of type {@link DoFn.FireTimestamp}.
+     *
+     * <p>All such descriptors are equal.
+     */
+    @AutoValue
+    public abstract static class FireTimestampParameter extends Parameter {
+      FireTimestampParameter() {}
+    }
+
+    /**
      * Descriptor for a {@link Parameter} of type {@link DoFn.Element}.
      *
      * <p>All such descriptors are equal.
@@ -705,21 +877,25 @@ public abstract class DoFnSignature {
     public abstract static class ElementParameter extends Parameter {
       ElementParameter() {}
 
+      @Pure
       public abstract TypeDescriptor<?> elementT();
     }
 
     /**
-     * Descriptor for a (@link Parameter} of type {@link DoFn.Element} where the type does not match
+     * Descriptor for a {@link Parameter} of type {@link DoFn.Element} where the type does not match
      * the DoFn's input type. This implies that the input must have a schema that is compatible.
      */
     @AutoValue
     public abstract static class SchemaElementParameter extends Parameter {
       SchemaElementParameter() {}
 
+      @Pure
       public abstract TypeDescriptor<?> elementT();
 
+      @Pure
       public abstract @Nullable String fieldAccessString();
 
+      @Pure
       public abstract int index();
 
       /** Builder class. */
@@ -731,9 +907,11 @@ public abstract class DoFnSignature {
 
         public abstract Builder setIndex(int index);
 
+        @Pure
         public abstract SchemaElementParameter build();
       }
 
+      @Pure
       public abstract Builder toBuilder();
     }
 
@@ -756,6 +934,7 @@ public abstract class DoFnSignature {
     public abstract static class KeyParameter extends Parameter {
       KeyParameter() {}
 
+      @Pure
       public abstract TypeDescriptor<?> keyT();
     }
 
@@ -774,8 +953,10 @@ public abstract class DoFnSignature {
     public abstract static class SideInputParameter extends Parameter {
       SideInputParameter() {}
 
+      @Pure
       public abstract TypeDescriptor<?> elementT();
 
+      @Pure
       public abstract String sideInputId();
 
       /** Builder class. */
@@ -785,9 +966,11 @@ public abstract class DoFnSignature {
 
         public abstract SideInputParameter.Builder setSideInputId(String sideInput);
 
+        @Pure
         public abstract SideInputParameter build();
       }
 
+      @Pure
       public abstract SideInputParameter.Builder toBuilder();
     }
 
@@ -800,6 +983,7 @@ public abstract class DoFnSignature {
     public abstract static class OutputReceiverParameter extends Parameter {
       OutputReceiverParameter() {}
 
+      @Pure
       public abstract boolean isRowReceiver();
     }
 
@@ -842,6 +1026,7 @@ public abstract class DoFnSignature {
     public abstract static class WindowParameter extends Parameter {
       WindowParameter() {}
 
+      @Pure
       public abstract TypeDescriptor<? extends BoundedWindow> windowT();
     }
 
@@ -866,6 +1051,7 @@ public abstract class DoFnSignature {
       // Package visible for AutoValue
       RestrictionParameter() {}
 
+      @Pure
       public abstract TypeDescriptor<?> restrictionT();
     }
 
@@ -879,6 +1065,7 @@ public abstract class DoFnSignature {
       // Package visible for AutoValue
       WatermarkEstimatorStateParameter() {}
 
+      @Pure
       public abstract TypeDescriptor<?> estimatorStateT();
     }
 
@@ -892,6 +1079,7 @@ public abstract class DoFnSignature {
       // Package visible for AutoValue
       WatermarkEstimatorParameter() {}
 
+      @Pure
       public abstract TypeDescriptor<?> estimatorT();
     }
 
@@ -905,6 +1093,7 @@ public abstract class DoFnSignature {
       // Package visible for AutoValue
       RestrictionTrackerParameter() {}
 
+      @Pure
       public abstract TypeDescriptor<?> trackerT();
     }
 
@@ -919,8 +1108,10 @@ public abstract class DoFnSignature {
       // Package visible for AutoValue
       StateParameter() {}
 
+      @Pure
       public abstract StateDeclaration referent();
 
+      @Pure
       public abstract boolean alwaysFetched();
     }
 
@@ -933,6 +1124,7 @@ public abstract class DoFnSignature {
       // Package visible for AutoValue
       TimerParameter() {}
 
+      @Pure
       public abstract TimerDeclaration referent();
     }
 
@@ -942,6 +1134,7 @@ public abstract class DoFnSignature {
       // Package visible for AutoValue
       TimerFamilyParameter() {}
 
+      @Pure
       public abstract TimerFamilyDeclaration referent();
     }
   }
@@ -951,37 +1144,46 @@ public abstract class DoFnSignature {
   public abstract static class ProcessElementMethod implements MethodWithExtraParameters {
     /** The annotated method itself. */
     @Override
+    @Pure
     public abstract Method targetMethod();
 
     /** Types of optional parameters of the annotated method, in the order they appear. */
     @Override
+    @Pure
     public abstract List<Parameter> extraParameters();
 
     /**
      * Whether this method requires stable input, expressed via {@link
      * org.apache.beam.sdk.transforms.DoFn.RequiresStableInput}.
      */
+    @Pure
     public abstract boolean requiresStableInput();
 
     /**
      * Whether this method requires time sorted input, expressed via {@link
      * org.apache.beam.sdk.transforms.DoFn.RequiresTimeSortedInput}.
      */
+    @Pure
     public abstract boolean requiresTimeSortedInput();
 
     /** Concrete type of the {@link RestrictionTracker} parameter, if present. */
+    @Pure
     public abstract @Nullable TypeDescriptor<?> trackerT();
 
     /** Concrete type of the {@link WatermarkEstimator} parameter, if present. */
+    @Pure
     public abstract @Nullable TypeDescriptor<?> watermarkEstimatorT();
 
     /** The window type used by this method, if any. */
     @Override
+    @Pure
     public abstract @Nullable TypeDescriptor<? extends BoundedWindow> windowT();
 
     /** Whether this {@link DoFn} returns a {@link ProcessContinuation} or void. */
+    @Pure
     public abstract boolean hasReturnValue();
 
+    @Pure
     static ProcessElementMethod create(
         Method targetMethod,
         List<Parameter> extraParameters,
@@ -1002,6 +1204,7 @@ public abstract class DoFnSignature {
           hasReturnValue);
     }
 
+    @Pure
     public @Nullable List<SchemaElementParameter> getSchemaElementParameters() {
       return extraParameters().stream()
           .filter(Predicates.instanceOf(SchemaElementParameter.class)::apply)
@@ -1009,6 +1212,7 @@ public abstract class DoFnSignature {
           .collect(Collectors.toList());
     }
 
+    @Pure
     public @Nullable List<SideInputParameter> getSideInputParameters() {
       return extraParameters().stream()
           .filter(Predicates.instanceOf(SideInputParameter.class)::apply)
@@ -1017,17 +1221,19 @@ public abstract class DoFnSignature {
     }
 
     /** The {@link OutputReceiverParameter} for a main output, or null if there is none. */
+    @Pure
     public @Nullable OutputReceiverParameter getMainOutputReceiver() {
       Optional<Parameter> parameter =
           extraParameters().stream()
               .filter(Predicates.instanceOf(OutputReceiverParameter.class)::apply)
               .findFirst();
-      return parameter.isPresent() ? ((OutputReceiverParameter) parameter.get()) : null;
+      return parameter.isPresent() ? (OutputReceiverParameter) parameter.get() : null;
     }
 
     /**
      * Whether this {@link DoFn} is <a href="https://s.apache.org/splittable-do-fn">splittable</a>.
      */
+    @Pure
     public boolean isSplittable() {
       return extraParameters().stream()
           .anyMatch(Predicates.instanceOf(RestrictionTrackerParameter.class)::apply);
@@ -1039,10 +1245,12 @@ public abstract class DoFnSignature {
   public abstract static class OnTimerMethod implements MethodWithExtraParameters {
 
     /** The id on the method's {@link DoFn.TimerId} annotation. */
+    @Pure
     public abstract String id();
 
     /** The annotated method itself. */
     @Override
+    @Pure
     public abstract Method targetMethod();
 
     /**
@@ -1050,16 +1258,20 @@ public abstract class DoFnSignature {
      * org.apache.beam.sdk.transforms.DoFn.RequiresStableInput}. For timers, this means that any
      * state must be stably persisted prior to calling it.
      */
+    @Pure
     public abstract boolean requiresStableInput();
 
     /** The window type used by this method, if any. */
     @Override
+    @Pure
     public abstract @Nullable TypeDescriptor<? extends BoundedWindow> windowT();
 
     /** Types of optional parameters of the annotated method, in the order they appear. */
     @Override
+    @Pure
     public abstract List<Parameter> extraParameters();
 
+    @Pure
     static OnTimerMethod create(
         Method targetMethod,
         String id,
@@ -1080,10 +1292,12 @@ public abstract class DoFnSignature {
   public abstract static class OnTimerFamilyMethod implements MethodWithExtraParameters {
 
     /** The id on the method's {@link DoFn.TimerId} annotation. */
+    @Pure
     public abstract String id();
 
     /** The annotated method itself. */
     @Override
+    @Pure
     public abstract Method targetMethod();
 
     /**
@@ -1091,16 +1305,20 @@ public abstract class DoFnSignature {
      * org.apache.beam.sdk.transforms.DoFn.RequiresStableInput}. For timers, this means that any
      * state must be stably persisted prior to calling it.
      */
+    @Pure
     public abstract boolean requiresStableInput();
 
     /** The window type used by this method, if any. */
     @Override
+    @Pure
     public abstract @Nullable TypeDescriptor<? extends BoundedWindow> windowT();
 
     /** Types of optional parameters of the annotated method, in the order they appear. */
     @Override
+    @Pure
     public abstract List<Parameter> extraParameters();
 
+    @Pure
     static OnTimerFamilyMethod create(
         Method targetMethod,
         String id,
@@ -1122,6 +1340,7 @@ public abstract class DoFnSignature {
 
     /** The annotated method itself. */
     @Override
+    @Pure
     public abstract Method targetMethod();
 
     /**
@@ -1130,16 +1349,20 @@ public abstract class DoFnSignature {
      * org.apache.beam.sdk.transforms.DoFn.OnWindowExpiration}, this means that any state must be
      * stably persisted prior to calling it.
      */
+    @Pure
     public abstract boolean requiresStableInput();
 
     /** The window type used by this method, if any. */
     @Override
+    @Pure
     public abstract @Nullable TypeDescriptor<? extends BoundedWindow> windowT();
 
     /** Types of optional parameters of the annotated method, in the order they appear. */
     @Override
+    @Pure
     public abstract List<Parameter> extraParameters();
 
+    @Pure
     static OnWindowExpirationMethod create(
         Method targetMethod,
         boolean requiresStableInput,
@@ -1162,10 +1385,13 @@ public abstract class DoFnSignature {
 
     public static final String PREFIX = "ts-";
 
+    @Pure
     public abstract String id();
 
+    @Pure
     public abstract Field field();
 
+    @Pure
     static TimerDeclaration create(String id, Field field) {
       return new AutoValue_DoFnSignature_TimerDeclaration(id, field);
     }
@@ -1180,10 +1406,13 @@ public abstract class DoFnSignature {
 
     public static final String PREFIX = "tfs-";
 
+    @Pure
     public abstract String id();
 
+    @Pure
     public abstract Field field();
 
+    @Pure
     static TimerFamilyDeclaration create(String id, Field field) {
       return new AutoValue_DoFnSignature_TimerFamilyDeclaration(id, field);
     }
@@ -1194,16 +1423,20 @@ public abstract class DoFnSignature {
   public abstract static class BundleMethod implements MethodWithExtraParameters {
     /** The annotated method itself. */
     @Override
+    @Pure
     public abstract Method targetMethod();
 
     /** Types of optional parameters of the annotated method, in the order they appear. */
     @Override
+    @Pure
     public abstract List<Parameter> extraParameters();
 
     /** The type of window expected by this method, if any. */
     @Override
+    @Pure
     public abstract @Nullable TypeDescriptor<? extends BoundedWindow> windowT();
 
+    @Pure
     static BundleMethod create(Method targetMethod, List<Parameter> extraParameters) {
       /* start bundle/finish bundle currently do not get invoked on a per window basis and can't accept a BoundedWindow parameter */
       return new AutoValue_DoFnSignature_BundleMethod(targetMethod, extraParameters, null);
@@ -1216,12 +1449,16 @@ public abstract class DoFnSignature {
    */
   @AutoValue
   public abstract static class StateDeclaration {
+    @Pure
     public abstract String id();
 
+    @Pure
     public abstract Field field();
 
+    @Pure
     public abstract TypeDescriptor<? extends State> stateType();
 
+    @Pure
     static StateDeclaration create(
         String id, Field field, TypeDescriptor<? extends State> stateType) {
       field.setAccessible(true);
@@ -1236,10 +1473,13 @@ public abstract class DoFnSignature {
    */
   @AutoValue
   public abstract static class FieldAccessDeclaration {
+    @Pure
     public abstract String id();
 
+    @Pure
     public abstract Field field();
 
+    @Pure
     static FieldAccessDeclaration create(String id, Field field) {
       field.setAccessible(true);
       return new AutoValue_DoFnSignature_FieldAccessDeclaration(id, field);
@@ -1251,12 +1491,15 @@ public abstract class DoFnSignature {
   public abstract static class LifecycleMethod implements MethodWithExtraParameters {
     /** The annotated method itself. */
     @Override
+    @Pure
     public abstract Method targetMethod();
 
     /** Types of optional parameters of the annotated method, in the order they appear. */
     @Override
+    @Pure
     public abstract List<Parameter> extraParameters();
 
+    @Pure
     static LifecycleMethod create(Method targetMethod, List<Parameter> extraParameters) {
       return new AutoValue_DoFnSignature_LifecycleMethod(null, targetMethod, extraParameters);
     }
@@ -1267,19 +1510,24 @@ public abstract class DoFnSignature {
   public abstract static class GetInitialRestrictionMethod implements MethodWithExtraParameters {
     /** The annotated method itself. */
     @Override
+    @Pure
     public abstract Method targetMethod();
 
     /** Type of the returned restriction. */
+    @Pure
     public abstract TypeDescriptor<?> restrictionT();
 
     /** The window type used by this method, if any. */
     @Override
+    @Pure
     public abstract @Nullable TypeDescriptor<? extends BoundedWindow> windowT();
 
     /** Types of optional parameters of the annotated method, in the order they appear. */
     @Override
+    @Pure
     public abstract List<Parameter> extraParameters();
 
+    @Pure
     static GetInitialRestrictionMethod create(
         Method targetMethod,
         TypeDescriptor<?> restrictionT,
@@ -1295,16 +1543,20 @@ public abstract class DoFnSignature {
   public abstract static class SplitRestrictionMethod implements MethodWithExtraParameters {
     /** The annotated method itself. */
     @Override
+    @Pure
     public abstract Method targetMethod();
 
     /** The window type used by this method, if any. */
     @Override
+    @Pure
     public abstract @Nullable TypeDescriptor<? extends BoundedWindow> windowT();
 
     /** Types of parameters of the annotated method, in the order they appear. */
     @Override
+    @Pure
     public abstract List<Parameter> extraParameters();
 
+    @Pure
     static SplitRestrictionMethod create(
         Method targetMethod,
         TypeDescriptor<? extends BoundedWindow> windowT,
@@ -1319,16 +1571,20 @@ public abstract class DoFnSignature {
   public abstract static class TruncateRestrictionMethod implements MethodWithExtraParameters {
     /** The annotated method itself. */
     @Override
+    @Pure
     public abstract Method targetMethod();
 
     /** The window type used by this method, if any. */
     @Override
+    @Pure
     public abstract @Nullable TypeDescriptor<? extends BoundedWindow> windowT();
 
     /** Types of parameters of the annotated method, in the order they appear. */
     @Override
+    @Pure
     public abstract List<Parameter> extraParameters();
 
+    @Pure
     static TruncateRestrictionMethod create(
         Method targetMethod,
         TypeDescriptor<? extends BoundedWindow> windowT,
@@ -1343,17 +1599,21 @@ public abstract class DoFnSignature {
   public abstract static class NewTrackerMethod implements MethodWithExtraParameters {
     /** The annotated method itself. */
     @Override
+    @Pure
     public abstract Method targetMethod();
 
     /** Type of the returned {@link RestrictionTracker}. */
+    @Pure
     public abstract TypeDescriptor<?> trackerT();
 
     /** The window type used by this method, if any. */
     @Override
+    @Pure
     public abstract @Nullable TypeDescriptor<? extends BoundedWindow> windowT();
 
     /** Types of optional parameters of the annotated method, in the order they appear. */
     @Override
+    @Pure
     public abstract List<Parameter> extraParameters();
 
     static NewTrackerMethod create(
@@ -1371,16 +1631,20 @@ public abstract class DoFnSignature {
   public abstract static class GetSizeMethod implements MethodWithExtraParameters {
     /** The annotated method itself. */
     @Override
+    @Pure
     public abstract Method targetMethod();
 
     /** The window type used by this method, if any. */
     @Override
+    @Pure
     public abstract @Nullable TypeDescriptor<? extends BoundedWindow> windowT();
 
     /** Types of optional parameters of the annotated method, in the order they appear. */
     @Override
+    @Pure
     public abstract List<Parameter> extraParameters();
 
+    @Pure
     static GetSizeMethod create(
         Method targetMethod,
         TypeDescriptor<? extends BoundedWindow> windowT,
@@ -1394,11 +1658,14 @@ public abstract class DoFnSignature {
   public abstract static class GetRestrictionCoderMethod implements DoFnMethod {
     /** The annotated method itself. */
     @Override
+    @Pure
     public abstract Method targetMethod();
 
     /** Type of the returned {@link Coder}. */
+    @Pure
     public abstract TypeDescriptor<?> coderT();
 
+    @Pure
     static GetRestrictionCoderMethod create(Method targetMethod, TypeDescriptor<?> coderT) {
       return new AutoValue_DoFnSignature_GetRestrictionCoderMethod(targetMethod, coderT);
     }
@@ -1410,19 +1677,24 @@ public abstract class DoFnSignature {
       implements MethodWithExtraParameters {
     /** The annotated method itself. */
     @Override
+    @Pure
     public abstract Method targetMethod();
 
     /** Type of the returned watermark estimator state. */
+    @Pure
     public abstract TypeDescriptor<?> watermarkEstimatorStateT();
 
     /** The window type used by this method, if any. */
     @Override
+    @Pure
     public abstract @Nullable TypeDescriptor<? extends BoundedWindow> windowT();
 
     /** Types of optional parameters of the annotated method, in the order they appear. */
     @Override
+    @Pure
     public abstract List<Parameter> extraParameters();
 
+    @Pure
     static GetInitialWatermarkEstimatorStateMethod create(
         Method targetMethod,
         TypeDescriptor<?> watermarkEstimatorStateT,
@@ -1438,19 +1710,24 @@ public abstract class DoFnSignature {
   public abstract static class NewWatermarkEstimatorMethod implements MethodWithExtraParameters {
     /** The annotated method itself. */
     @Override
+    @Pure
     public abstract Method targetMethod();
 
     /** Type of the returned {@link WatermarkEstimator}. */
+    @Pure
     public abstract TypeDescriptor<?> watermarkEstimatorT();
 
     /** The window type used by this method, if any. */
     @Override
+    @Pure
     public abstract @Nullable TypeDescriptor<? extends BoundedWindow> windowT();
 
     /** Types of optional parameters of the annotated method, in the order they appear. */
     @Override
+    @Pure
     public abstract List<Parameter> extraParameters();
 
+    @Pure
     static NewWatermarkEstimatorMethod create(
         Method targetMethod,
         TypeDescriptor<?> watermarkEstimatorT,
@@ -1466,11 +1743,14 @@ public abstract class DoFnSignature {
   public abstract static class GetWatermarkEstimatorStateCoderMethod implements DoFnMethod {
     /** The annotated method itself. */
     @Override
+    @Pure
     public abstract Method targetMethod();
 
     /** Type of the returned {@link Coder}. */
+    @Pure
     public abstract TypeDescriptor<?> coderT();
 
+    @Pure
     static GetWatermarkEstimatorStateCoderMethod create(
         Method targetMethod, TypeDescriptor<?> coderT) {
       return new AutoValue_DoFnSignature_GetWatermarkEstimatorStateCoderMethod(

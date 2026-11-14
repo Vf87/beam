@@ -33,6 +33,7 @@ try:
   import IPython  # pylint: disable=import-error
   from IPython import get_ipython  # pylint: disable=import-error
   from IPython.display import display as ip_display  # pylint: disable=import-error
+
   # _display_progress defines how outputs are printed on the frontend.
   _display_progress = ip_display
 
@@ -154,7 +155,7 @@ class DisplayManager(object):
         self._pipeline_graph.update_pcollection_stats(self._pcollection_stats)
 
         if IPython:
-          from IPython.core import display
+          from IPython import display
           display.clear_output(True)
           rendered_graph = self._renderer.render_pipeline_graph(
               self._pipeline_graph)

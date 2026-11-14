@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.transforms;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
 import org.apache.beam.sdk.transforms.Contextful.Fn;
 import org.apache.beam.sdk.transforms.WithFailures.ExceptionElement;
@@ -61,7 +61,7 @@ public class MapKeys<K1, K2, V> extends PTransform<PCollection<KV<K1, V>>, PColl
       SerializableFunction<NewKeyT, K2> fn) {
     return new MapKeys<>(
         Contextful.fn(
-            ((element, c) -> KV.of(fn.apply(element.getKey()), element.getValue())),
+            (element, c) -> KV.of(fn.apply(element.getKey()), element.getValue()),
             Requirements.empty()),
         outputType);
   }
@@ -129,7 +129,6 @@ public class MapKeys<K1, K2, V> extends PTransform<PCollection<KV<K1, V>>, PColl
    *                 .<String, String>via(word -> 1 / word.length)  // Could throw ArithmeticException
    *                 .exceptionsVia(
    *                     new InferableFunction<ExceptionElement<KV<String, String>>, String>() {
-   *                       @Override
    *                       public String apply(ExceptionElement<KV<String, String>> input) {
    *                         return input.exception().getMessage();
    *                       }

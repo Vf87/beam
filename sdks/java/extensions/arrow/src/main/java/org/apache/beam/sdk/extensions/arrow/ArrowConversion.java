@@ -17,11 +17,12 @@
  */
 package org.apache.beam.sdk.extensions.arrow;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.channels.Channels;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
@@ -35,10 +36,10 @@ import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ReadChannel;
 import org.apache.arrow.vector.ipc.message.ArrowRecordBatch;
 import org.apache.arrow.vector.ipc.message.MessageSerializer;
+import org.apache.arrow.vector.types.FloatingPointPrecision;
 import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.util.Text;
-import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.schemas.CachingFactory;
 import org.apache.beam.sdk.schemas.Factory;
 import org.apache.beam.sdk.schemas.FieldValueGetter;
@@ -46,7 +47,9 @@ import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.Field;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.schemas.logicaltypes.FixedBytes;
+import org.apache.beam.sdk.schemas.logicaltypes.Timestamp;
 import org.apache.beam.sdk.values.Row;
+import org.apache.beam.sdk.values.TypeDescriptor;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 
@@ -54,8 +57,58 @@ import org.joda.time.DateTimeZone;
  * Utilities to create {@link Iterable}s of Beam {@link Row} instances backed by Arrow record
  * batches.
  */
-@Experimental(Experimental.Kind.SCHEMAS)
 public class ArrowConversion {
+
+  /** Get Arrow Field from Beam Field. */
+  private static org.apache.arrow.vector.types.pojo.Field toArrowField(Field field) {
+    FieldType beamFieldType = field.getType();
+    ArrowType arrowType;
+    // TODO: Support aggregate and logical Beam field types.
+    switch (beamFieldType.getTypeName()) {
+      case BYTE:
+        arrowType = new ArrowType.Int(8, true);
+        break;
+      case INT16:
+        arrowType = new ArrowType.Int(16, true);
+        break;
+      case INT32:
+        arrowType = new ArrowType.Int(32, true);
+        break;
+      case INT64:
+        arrowType = new ArrowType.Int(64, true);
+        break;
+      case FLOAT:
+        arrowType = new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE);
+        break;
+      case DOUBLE:
+        arrowType = new ArrowType.FloatingPoint(FloatingPointPrecision.DOUBLE);
+        break;
+      case STRING:
+        arrowType = ArrowType.Utf8.INSTANCE;
+        break;
+      case BOOLEAN:
+        arrowType = ArrowType.Bool.INSTANCE;
+        break;
+      case BYTES:
+        arrowType = ArrowType.Binary.INSTANCE;
+        break;
+      case DATETIME:
+        arrowType = new ArrowType.Timestamp(TimeUnit.MILLISECOND, "UTC");
+        break;
+      default:
+        throw new IllegalArgumentException(
+            String.format(
+                "Arrow schema conversion does not support Beam type '%s' for field '%s'.",
+                beamFieldType.getTypeName(), field.getName()));
+    }
+
+    org.apache.arrow.vector.types.pojo.FieldType arrowFieldType =
+        beamFieldType.getNullable()
+            ? org.apache.arrow.vector.types.pojo.FieldType.nullable(arrowType)
+            : org.apache.arrow.vector.types.pojo.FieldType.notNullable(arrowType);
+    return new org.apache.arrow.vector.types.pojo.Field(
+        field.getName(), arrowFieldType, Collections.emptyList());
+  }
 
   /** Get Beam Field from Arrow Field. */
   private static Field toBeamField(org.apache.arrow.vector.types.pojo.Field field) {
@@ -156,8 +209,20 @@ public class ArrowConversion {
                   }
 
                   @Override
+                  public FieldType visit(ArrowType.Utf8View type) {
+                    throw new IllegalArgumentException(
+                        "Type \'" + type.toString() + "\' not supported.");
+                  }
+
+                  @Override
                   public FieldType visit(ArrowType.Binary type) {
                     return FieldType.BYTES;
+                  }
+
+                  @Override
+                  public FieldType visit(ArrowType.BinaryView type) {
+                    throw new IllegalArgumentException(
+                        "Type \'" + type.toString() + "\' not supported.");
                   }
 
                   @Override
@@ -196,6 +261,8 @@ public class ArrowConversion {
                     if (type.getUnit() == TimeUnit.MILLISECOND
                         || type.getUnit() == TimeUnit.MICROSECOND) {
                       return FieldType.DATETIME;
+                    } else if (type.getUnit() == TimeUnit.NANOSECOND) {
+                      return FieldType.logicalType(Timestamp.NANOS);
                     } else {
                       throw new IllegalArgumentException(
                           "Unsupported timestamp unit: " + type.getUnit().name());
@@ -210,6 +277,12 @@ public class ArrowConversion {
 
                   @Override
                   public FieldType visit(ArrowType.Duration type) {
+                    throw new IllegalArgumentException(
+                        "Type \'" + type.toString() + "\' not supported.");
+                  }
+
+                  @Override
+                  public FieldType visit(ArrowType.ListView type) {
                     throw new IllegalArgumentException(
                         "Type \'" + type.toString() + "\' not supported.");
                   }
@@ -277,11 +350,11 @@ public class ArrowConversion {
         new ArrowValueConverterVisitor();
     private final Schema schema;
     private final VectorSchemaRoot vectorSchemaRoot;
-    private final Factory<List<FieldValueGetter>> fieldValueGetters;
+    private final Factory<List<FieldValueGetter<Integer, Object>>> fieldValueGetters;
     private Integer currRowIndex;
 
     private static class FieldVectorListValueGetterFactory
-        implements Factory<List<FieldValueGetter>> {
+        implements Factory<List<FieldValueGetter<Integer, Object>>> {
       private final List<FieldVector> fieldVectors;
 
       static FieldVectorListValueGetterFactory of(List<FieldVector> fieldVectors) {
@@ -293,7 +366,8 @@ public class ArrowConversion {
       }
 
       @Override
-      public List<FieldValueGetter> create(Class<?> clazz, Schema schema) {
+      public List<FieldValueGetter<Integer, Object>> create(
+          TypeDescriptor<?> typeDescriptor, Schema schema) {
         return this.fieldVectors.stream()
             .map(
                 (fieldVector) -> {
@@ -377,6 +451,11 @@ public class ArrowConversion {
       }
 
       @Override
+      public Optional<Function<Object, Object>> visit(ArrowType.ListView listView) {
+        return Optional.empty();
+      }
+
+      @Override
       public Optional<Function<Object, Object>> visit(ArrowType.Int type) {
         return Optional.empty();
       }
@@ -392,7 +471,17 @@ public class ArrowConversion {
       }
 
       @Override
+      public Optional<Function<Object, Object>> visit(ArrowType.Utf8View utf8View) {
+        return Optional.empty();
+      }
+
+      @Override
       public Optional<Function<Object, Object>> visit(ArrowType.Binary type) {
+        return Optional.empty();
+      }
+
+      @Override
+      public Optional<Function<Object, Object>> visit(ArrowType.BinaryView binaryView) {
         return Optional.empty();
       }
 
@@ -423,6 +512,9 @@ public class ArrowConversion {
 
       @Override
       public Optional<Function<Object, Object>> visit(ArrowType.Timestamp type) {
+        // Arrow timestamp semantics:
+        // - With timezone: epoch is always UTC, timezone is display metadata
+        // - Without timezone: epoch is in an unknown timezone ("naive" wall-clock time)
         DateTimeZone tz;
         try {
           tz = DateTimeZone.forID(type.getTimezone());
@@ -430,14 +522,22 @@ public class ArrowConversion {
           throw new IllegalArgumentException(
               "Encountered unrecognized Timezone: " + type.getTimezone());
         }
-        switch (type.getUnit()) {
-          case MICROSECOND:
-            return Optional.of((epochMicros) -> new DateTime((long) epochMicros / 1000, tz));
-          case MILLISECOND:
-            return Optional.of((epochMills) -> new DateTime((long) epochMills, tz));
-          default:
-            throw new AssertionError("Encountered unrecognized TimeUnit: " + type.getUnit());
-        }
+
+        return Optional.of(
+            epoch -> {
+              switch (type.getUnit()) {
+                case MILLISECOND:
+                  return new DateTime((long) epoch, tz);
+                case MICROSECOND:
+                  return new DateTime(Math.floorDiv((long) epoch, 1000L), tz);
+                case NANOSECOND:
+                  long seconds = Math.floorDiv((long) epoch, 1_000_000_000L);
+                  long nanoAdjustment = Math.floorMod((long) epoch, 1_000_000_000L);
+                  return java.time.Instant.ofEpochSecond(seconds, nanoAdjustment);
+                default:
+                  throw new AssertionError("Encountered unrecognized TimeUnit: " + type.getUnit());
+              }
+            });
       }
 
       @Override
@@ -486,7 +586,9 @@ public class ArrowConversion {
         throw new IllegalStateException("There are no more Rows.");
       }
       Row result =
-          Row.withSchema(schema).withFieldValueGetters(this.fieldValueGetters, this.currRowIndex);
+          Row.withSchema(schema)
+              .withFieldValueGetters(
+                  this.fieldValueGetters, this.currRowIndex, TypeDescriptor.of(Integer.class));
       this.currRowIndex += 1;
       return result;
     }
@@ -496,6 +598,14 @@ public class ArrowConversion {
 
   /** Converts Arrow schema to Beam row schema. */
   public static class ArrowSchemaTranslator {
+
+    /** Converts a supported Beam row schema to an Arrow schema. */
+    public static org.apache.arrow.vector.types.pojo.Schema toArrowSchema(Schema schema) {
+      return new org.apache.arrow.vector.types.pojo.Schema(
+          schema.getFields().stream()
+              .map(ArrowConversion::toArrowField)
+              .collect(Collectors.toList()));
+    }
 
     public static Schema toBeamSchema(org.apache.arrow.vector.types.pojo.Schema schema) {
       return toBeamSchema(schema.getFields());

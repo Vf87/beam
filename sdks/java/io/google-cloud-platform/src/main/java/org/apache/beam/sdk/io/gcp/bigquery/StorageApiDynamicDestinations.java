@@ -17,62 +17,63 @@
  */
 package org.apache.beam.sdk.io.gcp.bigquery;
 
-import com.google.api.services.bigquery.model.TableSchema;
-import com.google.protobuf.Descriptors.Descriptor;
-import com.google.protobuf.Message;
-import java.util.List;
-import org.apache.beam.sdk.coders.Coder;
+import com.google.api.services.bigquery.model.TableRow;
+import com.google.cloud.bigquery.storage.v1.TableSchema;
+import com.google.protobuf.DescriptorProtos;
+import java.io.IOException;
+import javax.annotation.Nullable;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryServices.DatasetService;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.values.PCollectionView;
-import org.apache.beam.sdk.values.ValueInSingleWindow;
-import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Base dynamicDestinations class used by the Storage API sink. */
 abstract class StorageApiDynamicDestinations<T, DestinationT>
-    extends DynamicDestinations<T, DestinationT> {
+    extends DynamicDestinationsHelpers.DelegatingDynamicDestinations<T, DestinationT> {
   public interface MessageConverter<T> {
-    Descriptor getSchemaDescriptor();
+    TableSchema getTableSchema();
 
-    Message toMessage(T element);
+    DescriptorProtos.DescriptorProto getDescriptor(boolean includeCdcColumns) throws Exception;
+
+    StorageApiWritePayload toMessage(
+        T element,
+        @Nullable RowMutationInformation rowMutationInformation,
+        TableRowToStorageApiProto.ErrorCollector collectedExceptions)
+        throws Exception;
+
+    TableRow toFailsafeTableRow(T element);
+
+    void updateSchemaFromTable() throws IOException, InterruptedException;
+
+    default void updateSchema(TableSchema schema) {}
   }
-
-  private DynamicDestinations<T, DestinationT> inner;
 
   StorageApiDynamicDestinations(DynamicDestinations<T, DestinationT> inner) {
-    this.inner = inner;
+    super(inner);
   }
 
-  public abstract MessageConverter<T> getMessageConverter(DestinationT destination)
+  public abstract MessageConverter<T> getMessageConverter(
+      DestinationT destination,
+      PipelineOptions options,
+      DatasetService datasetService,
+      BigQueryServices.WriteStreamService writeStreamService)
       throws Exception;
-
-  @Override
-  public DestinationT getDestination(ValueInSingleWindow<T> element) {
-    return inner.getDestination(element);
-  }
-
-  @Override
-  public @Nullable Coder<DestinationT> getDestinationCoder() {
-    return inner.getDestinationCoder();
-  }
-
-  @Override
-  public TableDestination getTable(DestinationT destination) {
-    return inner.getTable(destination);
-  }
-
-  @Override
-  public TableSchema getSchema(DestinationT destination) {
-    return inner.getSchema(destination);
-  }
-
-  @Override
-  public List<PCollectionView<?>> getSideInputs() {
-    return inner.getSideInputs();
-  }
 
   @Override
   void setSideInputAccessorFromProcessContext(DoFn<?, ?>.ProcessContext context) {
     super.setSideInputAccessorFromProcessContext(context);
     inner.setSideInputAccessorFromProcessContext(context);
+  }
+
+  @Override
+  void setSideInputAccessorFromOnTimerContext(DoFn<?, ?>.OnTimerContext context) {
+    super.setSideInputAccessorFromOnTimerContext(context);
+    inner.setSideInputAccessorFromOnTimerContext(context);
+  }
+
+  @Override
+  void setSideInputAccessorFromOnWindowExpirationContext(
+      DoFn<?, ?>.OnWindowExpirationContext context) {
+    super.setSideInputAccessorFromOnWindowExpirationContext(context);
+    inner.setSideInputAccessorFromOnWindowExpirationContext(context);
   }
 }

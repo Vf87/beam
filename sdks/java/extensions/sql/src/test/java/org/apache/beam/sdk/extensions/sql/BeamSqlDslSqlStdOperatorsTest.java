@@ -44,14 +44,14 @@ import org.apache.beam.sdk.extensions.sql.impl.utils.CalciteUtils;
 import org.apache.beam.sdk.extensions.sql.integrationtest.BeamSqlBuiltinFunctionsIntegrationTestBase;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.base.Joiner;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.Lists;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.Ordering;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.runtime.SqlFunctions;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.SqlKind;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.SqlOperator;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.fun.SqlStdOperatorTable;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.runtime.SqlFunctions;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlKind;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlOperator;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.fun.SqlStdOperatorTable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Joiner;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Ordering;
 import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
@@ -59,7 +59,7 @@ import org.junit.rules.ExpectedException;
 
 /**
  * DSL compliance tests for the row-level operators of {@link
- * org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.fun.SqlStdOperatorTable}.
+ * org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.fun.SqlStdOperatorTable}.
  */
 public class BeamSqlDslSqlStdOperatorsTest extends BeamSqlBuiltinFunctionsIntegrationTestBase {
   private static final BigDecimal ZERO_0 = BigDecimal.valueOf(0).setScale(0, UNNECESSARY);
@@ -88,6 +88,7 @@ public class BeamSqlDslSqlStdOperatorsTest extends BeamSqlBuiltinFunctionsIntegr
     abstract SqlKind kind();
   }
 
+  @SuppressWarnings("unused")
   private static SqlOperatorId sqlOperatorId(String nameAndKind) {
     return sqlOperatorId(nameAndKind, SqlKind.valueOf(nameAndKind));
   }
@@ -366,11 +367,11 @@ public class BeamSqlDslSqlStdOperatorsTest extends BeamSqlBuiltinFunctionsIntegr
             .addExpr("mod(c_bigint, c_bigint)", 0L)
             .addExpr("mod(c_decimal, c_decimal)", ZERO_0)
             .addExpr("mod(c_tinyint, c_decimal)", ZERO_0)
-            // Test overflow
-            .addExpr("c_tinyint_max + c_tinyint_max", (byte) -2)
-            .addExpr("c_smallint_max + c_smallint_max", (short) -2)
-            .addExpr("c_integer_max + c_integer_max", -2)
-            .addExpr("c_bigint_max + c_bigint_max", -2L);
+            // conversions
+            .addExpr("c_tinyint_max + c_smallint", (short) 128)
+            .addExpr("c_integer + c_smallint_max", 32768)
+            .addExpr("c_integer_max + c_bigint", 2147483648L)
+            .addExpr("c_smallint - c_integer_max", -2147483646);
 
     checker.buildRunAndCheck();
   }
@@ -708,8 +709,8 @@ public class BeamSqlDslSqlStdOperatorsTest extends BeamSqlBuiltinFunctionsIntegr
 
   @Test
   @SqlOperatorTests({
-    @SqlOperatorTest(name = "CHARACTER_LENGTH", kind = "OTHER_FUNCTION"),
-    @SqlOperatorTest(name = "CHAR_LENGTH", kind = "OTHER_FUNCTION"),
+    @SqlOperatorTest(name = "CHARACTER_LENGTH", kind = "CHAR_LENGTH"),
+    @SqlOperatorTest(name = "CHAR_LENGTH", kind = "CHAR_LENGTH"),
     @SqlOperatorTest(name = "INITCAP", kind = "OTHER_FUNCTION"),
     @SqlOperatorTest(name = "LOWER", kind = "OTHER_FUNCTION"),
     @SqlOperatorTest(name = "POSITION", kind = "POSITION"),
@@ -743,10 +744,10 @@ public class BeamSqlDslSqlStdOperatorsTest extends BeamSqlBuiltinFunctionsIntegr
             .addExpr("OVERLAY('w3333333rce' PLACING 'resou' FROM 3 FOR 5) = 'w3resou3rce'")
             .addExpr("OVERLAY('w3333333rce' PLACING 'resou' FROM 3 FOR 7) = 'w3resouce'")
             .addExpr("SUBSTRING('hello' FROM 2) = 'ello'")
-            .addExpr("SUBSTRING('hello' FROM -1) = 'o'")
+            .addExpr("SUBSTRING('hello' FROM -1) = 'hello'")
             .addExpr("SUBSTRING('hello' FROM 2 FOR 2) = 'el'")
             .addExpr("SUBSTRING('hello' FROM 2 FOR 100) = 'ello'")
-            .addExpr("SUBSTRING('hello' FROM -3 for 2) = 'll'")
+            .addExpr("SUBSTRING('hello' FROM -3 for 2) = ''")
             .addExpr("UPPER('hello') = 'HELLO'");
 
     checker.check(pipeline);
@@ -985,8 +986,8 @@ public class BeamSqlDslSqlStdOperatorsTest extends BeamSqlBuiltinFunctionsIntegr
     ExpressionChecker checker =
         new ExpressionChecker()
             .addExpr("SIGN(c_integer)", Integer.signum(INTEGER_VALUE))
-            .addExpr("SIGN(c_bigint)", (long) (Long.signum(LONG_VALUE)))
-            .addExpr("SIGN(c_smallint)", (short) (Integer.signum(SHORT_VALUE)))
+            .addExpr("SIGN(c_bigint)", (long) Long.signum(LONG_VALUE))
+            .addExpr("SIGN(c_smallint)", (short) Integer.signum(SHORT_VALUE))
             .addExpr("SIGN(c_tinyint)", (byte) Integer.signum(BYTE_VALUE))
             .addExpr("SIGN(c_double)", Math.signum(DOUBLE_VALUE))
             .addExpr("SIGN(c_float)", Math.signum(FLOAT_VALUE))
@@ -1129,8 +1130,7 @@ public class BeamSqlDslSqlStdOperatorsTest extends BeamSqlBuiltinFunctionsIntegr
   }
 
   @Test
-  // https://issues.apache.org/jira/browse/BEAM-5128
-  // @SqlOperatorTest(name = "FLOOR", kind = "FLOOR")
+  @SqlOperatorTest(name = "FLOOR", kind = "FLOOR")
   public void testFloor() {
     ExpressionChecker checker =
         new ExpressionChecker()
@@ -1140,14 +1140,14 @@ public class BeamSqlDslSqlStdOperatorsTest extends BeamSqlBuiltinFunctionsIntegr
             .addExpr("FLOOR(ts TO DAY)", parseTimestampWithUTCTimeZone("1986-02-15 00:00:00"))
             .addExpr("FLOOR(ts TO MONTH)", parseTimestampWithUTCTimeZone("1986-02-01 00:00:00"))
             .addExpr("FLOOR(ts TO YEAR)", parseTimestampWithUTCTimeZone("1986-01-01 00:00:00"))
-            .addExpr("FLOOR(c_double)", 1.0);
+            .addExpr("FLOOR(c_double)", 1.0)
+            .addExpr("FLOOR(-c_double)", -2.0);
 
     checker.buildRunAndCheck(getFloorCeilingTestPCollection());
   }
 
   @Test
-  // https://issues.apache.org/jira/browse/BEAM-5128
-  // @SqlOperatorTest(name = "CEIL", kind = "CEIL")
+  @SqlOperatorTest(name = "CEIL", kind = "CEIL")
   public void testCeil() {
     ExpressionChecker checker =
         new ExpressionChecker()
@@ -1157,7 +1157,8 @@ public class BeamSqlDslSqlStdOperatorsTest extends BeamSqlBuiltinFunctionsIntegr
             .addExpr("CEIL(ts TO DAY)", parseTimestampWithUTCTimeZone("1986-02-16 00:00:00"))
             .addExpr("CEIL(ts TO MONTH)", parseTimestampWithUTCTimeZone("1986-03-01 00:00:00"))
             .addExpr("CEIL(ts TO YEAR)", parseTimestampWithUTCTimeZone("1987-01-01 00:00:00"))
-            .addExpr("CEIL(c_double)", 2.0);
+            .addExpr("CEIL(c_double)", 2.0)
+            .addExpr("CEIL(-c_double)", -1.0);
 
     checker.buildRunAndCheck(getFloorCeilingTestPCollection());
   }

@@ -17,8 +17,8 @@
  */
 package org.apache.beam.sdk.io.thrift;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.auto.value.AutoValue;
 import java.io.BufferedInputStream;
@@ -28,8 +28,6 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.channels.Channels;
 import java.nio.channels.WritableByteChannel;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -83,13 +81,9 @@ import org.slf4j.LoggerFactory;
  *     .via(ThriftIO.sink(thriftProto))
  *     .to("destination/path");
  * }</pre>
- *
- * <p>This IO API is considered experimental and may break or receive backwards-incompatible changes
- * in future versions of the Apache Beam SDK.
  */
-@Experimental(Kind.SOURCE_SINK)
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class ThriftIO {
 
@@ -193,7 +187,7 @@ public class ThriftIO {
           }
         } catch (Exception ioe) {
           String filename = file.getMetadata().resourceId().toString();
-          LOG.error(String.format("Error in reading file: %1$s%n%2$s", filename, ioe));
+          LOG.error("Error in reading file: {}", filename, ioe);
           throw new RuntimeException(ioe);
         }
       }
@@ -271,10 +265,10 @@ public class ThriftIO {
         TProtocol protocol = protocolFactory.getProtocol(new TIOStreamTransport(baos));
         element.write(protocol);
       } catch (TTransportException tte) {
-        LOG.error("Error in transport to TIOStreamTransport: " + tte);
+        LOG.error("Error in transport to TIOStreamTransport", tte);
         throw new RuntimeException(tte);
       } catch (TException te) {
-        LOG.error("Error in writing element to TProtocol: " + te);
+        LOG.error("Error in writing element to TProtocol", te);
         throw new RuntimeException(te);
       }
       this.stream.write(baos.toByteArray());

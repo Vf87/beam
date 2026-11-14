@@ -31,7 +31,7 @@ t.describe 'Run Apache Beam Java SDK Quickstart - Dataflow'
   t.intent 'Runs the WordCount Code with Dataflow runner'
 
     // Remove any count files
-    t.run """gsutil rm gs://${t.gcsBucket()}/count* || echo 'No files'"""
+    t.run """gcloud storage rm gs://${t.gcsBucket()}/count* || echo 'No files'"""
 
     // Run the wordcount example with the Dataflow runner
     t.run """mvn compile exec:java -q \
@@ -49,12 +49,30 @@ t.describe 'Run Apache Beam Java SDK Quickstart - Dataflow'
                    --inputFile=gs://apache-beam-samples/shakespeare/*" \
                     -Pdataflow-runner"""
 
+    int retries = 5
+    int waitTime = 15 // seconds
+    def outputPath = "gs://${t.gcsBucket()}/count"
+    def outputFound = false
+    for (int i = 0; i < retries; i++) {
+      def files = t.run("gcloud storage ls ${outputPath}*")
+      if (files?.trim()) {
+        outputFound = true
+        break
+      }
+      t.intent("Output not found yet. Waiting ${waitTime}s...")
+      Thread.sleep(waitTime * 1000)
+    }
+
+    if (!outputFound) {
+      throw new RuntimeException("No output files found for WordCount after ${retries * waitTime} seconds.")
+    }
+
     // Verify wordcount text
-    String result = t.run """gsutil cat gs://${t.gcsBucket()}/count* | grep Montague:"""
+    String result = t.run """gcloud storage cat ${outputPath}* | grep Montague:"""
     t.see "Montague: 47", result
 
     // Remove count files
-    t.run """gsutil rm gs://${t.gcsBucket()}/count*"""
+    t.run """gcloud storage rm gs://${t.gcsBucket()}/count*"""
 
     // Clean up
     t.done()

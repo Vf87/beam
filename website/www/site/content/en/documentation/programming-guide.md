@@ -22,20 +22,33 @@ limitations under the License.
 
 The **Beam Programming Guide** is intended for Beam users who want to use the
 Beam SDKs to create data processing pipelines. It provides guidance for using
-the Beam SDK classes to build and test your pipeline. It is not intended as an
-exhaustive reference, but as a language-agnostic, high-level guide to
-programmatically building your Beam pipeline. As the programming guide is filled
-out, the text will include code samples in multiple languages to help illustrate
-how to implement Beam concepts in your pipelines.
+the Beam SDK classes to build and test your pipeline. The programming guide is
+not intended as an exhaustive reference, but as a language-agnostic, high-level
+guide to programmatically building your Beam pipeline. As the programming guide
+is filled out, the text will include code samples in multiple languages to help
+illustrate how to implement Beam concepts in your pipelines.
 
-{{< language-switcher java py go >}}
+If you want a brief introduction to Beam's basic concepts before reading the
+programming guide, take a look at the
+[Basics of the Beam model](/documentation/basics/) page.
+
+{{< language-switcher java py go typescript yaml >}}
 
 {{< paragraph class="language-py" >}}
-The Python SDK supports Python 3.6, 3.7, and 3.8. Beam 2.24.0 was the last Python SDK release to support Python 2 and 3.5.
+The Python SDK supports Python 3.11, 3.12, 3.13, and 3.14.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
-The Go SDK supports Go v1.16+. SDK release 2.32.0 is the last experimental version.
+{{< paragraph class="language-go">}}
+The [Go SDK](https://pkg.go.dev/github.com/apache/beam/sdks/v2/go/pkg/beam) supports Go v1.20+.
+{{< /paragraph >}}
+
+{{< paragraph class="language-typescript">}}
+The Typescript SDK supports Node v16+ and is still experimental.
+{{< /paragraph >}}
+
+{{< paragraph class="language-yaml">}}
+YAML is supported as of Beam 2.52, but is under active development and the most
+recent SDK is advised.
 {{< /paragraph >}}
 
 ## 1. Overview {#overview}
@@ -85,6 +98,11 @@ include:
 * I/O transforms: Beam comes with a number of "IOs" - library `PTransform`s that
   read or write data to various external storage systems.
 
+<span class="language-yaml">
+Note that in Beam YAML, `PCollection`s are either implicit (e.g. when using
+`chain`) or referenced by their producing `PTransform`.
+</span>
+
 A typical Beam driver program works as follows:
 
 * **Create** a `Pipeline` object and set the pipeline execution options, including
@@ -127,6 +145,11 @@ your pipeline's configuration options programmatically, but it's often easier to
 set the options ahead of time (or read them from the command line) and pass them
 to the `Pipeline` object when you create the object.
 
+<span class="language-typescript">
+A Pipeline in the Typescript API is simply a function that will be called
+with a single `root` object and is passed to a Runner's `run` method.
+</span>
+
 {{< highlight java >}}
 // Start by defining the options for the pipeline.
 PipelineOptions options = PipelineOptionsFactory.create();
@@ -143,6 +166,22 @@ Pipeline p = Pipeline.create(options);
 {{< code_sample "sdks/go/examples/snippets/01_03intro.go" pipelines_constructing_creating >}}
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" pipelines_constructing_creating >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+pipeline:
+  ...
+
+options:
+  ...
+{{< /highlight >}}
+
+For a more in-depth tutorial on creating basic pipelines
+in the Python SDK, please read and work through
+[this colab notebook](https://colab.sandbox.google.com/github/apache/beam/blob/master/examples/notebooks/get-started/learn_beam_basics_by_doing.ipynb).
+
 ### 2.1. Configuring pipeline options {#configuring-pipeline-options}
 
 Use the pipeline options to configure different aspects of your pipeline, such
@@ -151,7 +190,7 @@ configuration required by the chosen runner. Your pipeline options will
 potentially include information such as your project ID or a location for
 storing files.
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 When you run the pipeline on a runner of your choice, a copy of the
 PipelineOptions will be available to your code. For example, if you add a PipelineOptions parameter
 to a DoFn's `@ProcessElement` method, it will be populated by the system.
@@ -170,9 +209,21 @@ To read options from the command-line, construct your `PipelineOptions` object
 as demonstrated in the following example code:
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 Use Go flags to parse command line arguments to configure your pipeline. Flags must be parsed
 before `beam.Init()` is called.
+{{< /paragraph >}}
+
+{{< paragraph class="language-typescript">}}
+Any Javascript object can be used as pipeline options.
+One can either construct one manually, but it is also common to pass an object
+created from command line options such as `yargs.argv`.
+{{< /paragraph >}}
+
+{{< paragraph class="language-yaml">}}
+Pipeline options are simply an optional YAML mapping property that is a sibling to
+the pipeline definition itself.
+It will be merged with whatever options are passed on the command line.
 {{< /paragraph >}}
 
 {{< highlight java >}}
@@ -186,6 +237,19 @@ PipelineOptions options =
 
 {{< highlight go >}}
 {{< code_sample "sdks/go/examples/snippets/01_03intro.go" pipeline_options >}}
+{{< /highlight >}}
+
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" pipeline_options >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+pipeline:
+  ...
+
+options:
+  my_pipeline_option: my_value
+  ...
 {{< /highlight >}}
 
 This interprets command-line arguments that follow the format:
@@ -206,7 +270,7 @@ Building your `PipelineOptions` this way lets you specify any of the options as
 a command-line argument.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 Defining flag variables this way lets you specify any of the options as a command-line argument.
 {{< /paragraph >}}
 
@@ -217,9 +281,12 @@ Defining flag variables this way lets you specify any of the options as a comman
 #### 2.1.2. Creating custom options {#creating-custom-options}
 
 You can add your own custom options in addition to the standard
-`PipelineOptions`. To add your own options, define an interface with getter and
-setter methods for each option, as in the following example for
-adding `input` and `output` custom options:
+`PipelineOptions`.
+{{< paragraph class="language-java">}}
+To add your own options, define an interface with getter and
+setter methods for each option.
+{{< /paragraph >}}
+The following example shows how to add `input` and `output` custom options:
 
 {{< highlight java >}}
 public interface MyOptions extends PipelineOptions {
@@ -239,10 +306,16 @@ public interface MyOptions extends PipelineOptions {
 {{< code_sample "sdks/go/examples/snippets/01_03intro.go" pipeline_options_define_custom >}}
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" pipeline_options_define_custom >}}
+{{< /highlight >}}
+
 You can also specify a description, which appears when a user passes `--help` as
 a command-line argument, and a default value.
 
+{{< paragraph class="language-java language-py language-go" >}}
 You set the description and default value using annotations, as follows:
+{{< /paragraph >}}
 
 {{< highlight java >}}
 public interface MyOptions extends PipelineOptions {
@@ -266,7 +339,13 @@ public interface MyOptions extends PipelineOptions {
 {{< code_sample "sdks/go/examples/snippets/01_03intro.go" pipeline_options_define_custom_with_help_and_default >}}
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+
+{{< paragraph class="language-py" >}}
+For Python, you can also simply parse your custom options with argparse; there
+is no need to create a separate PipelineOptions subclass.
+{{< /paragraph >}}
+
+{{< paragraph class="language-java">}}
 It's recommended that you register your interface with `PipelineOptionsFactory`
 and then pass the interface when creating the `PipelineOptions` object. When you
 register your interface with `PipelineOptionsFactory`, the `--help` can find
@@ -275,7 +354,7 @@ your custom options interface and add it to the output of the `--help` command.
 compatible with all other registered options.
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 The following example code shows how to register your custom options interface
 with `PipelineOptionsFactory`:
 {{< /paragraph >}}
@@ -304,6 +383,11 @@ After you've created your `Pipeline`, you'll need to begin by creating at least
 one `PCollection` in some form. The `PCollection` you create serves as the input
 for the first operation in your pipeline.
 
+<span class="language-yaml">
+In Beam YAML, `PCollection`s are either implicit (e.g. when using `chain`)
+or referred to by their producing `PTransform`.
+</span>
+
 ### 3.1. Creating a PCollection {#creating-a-pcollection}
 
 You create a `PCollection` by either reading data from an external source using
@@ -321,16 +405,30 @@ adapters](#pipeline-io). The adapters vary in their exact usage, but all of them
 read from some external data source and return a `PCollection` whose elements
 represent the data records in that source.
 
-Each data source adapter has a `Read` transform; to read, you must apply that
-transform to the `Pipeline` object itself.
+Each data source adapter has a `Read` transform; to read,
+<span class="language-java language-py language-go language-typescript">
+you must apply that transform to the `Pipeline` object itself.
+</span>
+<span class="language-yaml">
+place this transform in the `source` or `transforms` portion of the pipeline.
+</span>
 <span class="language-java">`TextIO.Read`</span>
 <span class="language-py">`io.TextFileSource`</span>
-<span class="language-go">`textio.Read`</span>, for example, reads from an
-external text file and returns a `PCollection` whose elements are of type
-`String`, each `String` represents one line from the text file. Here's how you
+<span class="language-go">`textio.Read`</span>
+<span class="language-typescript">`textio.ReadFromText`</span>,
+<span class="language-yaml">`ReadFromText`</span>,
+for example, reads from an
+external text file and returns a `PCollection` whose elements
+<span class="language-java language-py language-go language-typescript">
+are of type `String` where each `String`
+</span>
+represents one line from the text file. Here's how you
 would apply <span class="language-java">`TextIO.Read`</span>
 <span class="language-py">`io.TextFileSource`</span>
-<span class="language-go">`textio.Read`</span> to your `Pipeline` to create
+<span class="language-go">`textio.Read`</span>
+<span class="language-typescript">`textio.ReadFromText`</span>
+<span class="language-yaml">`ReadFromText`</span>
+to your `Pipeline` <span class="language-typescript">root</span> to create
 a `PCollection`:
 
 {{< highlight java >}}
@@ -354,18 +452,26 @@ public static void main(String[] args) {
 {{< code_sample "sdks/go/examples/snippets/01_03intro.go" pipelines_constructing_reading >}}
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" pipelines_constructing_reading >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" pipelines_constructing_reading >}}
+{{< /highlight >}}
+
 See the [section on I/O](#pipeline-io) to learn more about how to read from the
 various data sources supported by the Beam SDK.
 
 #### 3.1.2. Creating a PCollection from in-memory data {#creating-pcollection-in-memory}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 To create a `PCollection` from an in-memory Java `Collection`, you use the
 Beam-provided `Create` transform. Much like a data adapter's `Read`, you apply
 `Create` directly to your `Pipeline` object itself.
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 As parameters, `Create` accepts the Java `Collection` and a `Coder` object. The
 `Coder` specifies how the elements in the `Collection` should be
 [encoded](#element-type).
@@ -377,13 +483,26 @@ To create a `PCollection` from an in-memory `list`, you use the Beam-provided
 itself.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 To create a `PCollection` from an in-memory `slice`, you use the Beam-provided
 `beam.CreateList` transform. Pass the pipeline `scope`, and the `slice` to this transform.
 {{< /paragraph >}}
 
+{{< paragraph class="language-typescript">}}
+To create a `PCollection` from an in-memory `array`, you use the Beam-provided
+`Create` transform. Apply this transform directly to your `Root` object.
+{{< /paragraph >}}
+
+{{< paragraph class="language-yaml">}}
+To create a `PCollection` from an in-memory `array`, you use the Beam-provided
+`Create` transform. Specify the elements in the pipeline itself.
+{{< /paragraph >}}
+
 The following example code shows how to create a `PCollection` from an in-memory
-<span class="language-java">`List`</span><span class="language-py">`list`</span><span class="language-go">`slice`</span>:
+<span class="language-java">`List`</span>
+<span class="language-py">`list`</span>
+<span class="language-go">`slice`</span>
+<span class="language-typescript language-yaml">`array`</span>:
 
 {{< highlight java >}}
 public static void main(String[] args) {
@@ -412,6 +531,14 @@ public static void main(String[] args) {
 {{< code_sample "sdks/go/examples/snippets/01_03intro.go" model_pcollection >}}
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" create_pcollection >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" create_pcollection >}}
+{{< /highlight >}}
+
 ### 3.2. PCollection characteristics {#pcollection-characteristics}
 
 A `PCollection` is owned by the specific `Pipeline` object for which it is
@@ -428,15 +555,9 @@ around to distributed workers). The Beam SDKs provide a data encoding mechanism
 that includes built-in encoding for commonly-used types as well as support for
 specifying custom encodings as needed.
 
-{{< paragraph class="language-go" >}}
-Custom struct types should be registered with beam using `beam.RegisterType`.
-Among other things, this allows the Go SDK to infer an encoding from their
-exported fields. Unexported fields in struct types are ignored.
-{{< /paragraph >}}
-
 #### 3.2.2. Element schema {#element-schema}
 
-In many cases, the element type in a `PCollection` has a structure that can introspected.
+In many cases, the element type in a `PCollection` has a structure that can be introspected.
 Examples are JSON, Protocol Buffer, Avro, and database records. Schemas provide a way to
 express types as a set of named fields, allowing for more-expressive aggregations.
 
@@ -526,6 +647,10 @@ workers across a cluster may execute instances of your user code in parallel.
 The user code running on each worker generates the output elements that are
 ultimately added to the final output `PCollection` that the transform produces.
 
+> Aggregation is an important concept to understand when learning about Beam's
+> transforms. For an introduction to aggregation, see the Basics of the Beam
+> model [Aggregation section](/documentation/basics/#aggregation).
+
 The Beam SDKs contain a number of different transforms that you can apply to
 your pipeline's `PCollection`s. These include general-purpose core transforms,
 such as [ParDo](#pardo) or [Combine](#combine). There are also pre-written
@@ -534,14 +659,23 @@ combine one or more of the core transforms in a useful processing pattern, such
 as counting or combining elements in a collection. You can also define your own
 more complex composite transforms to fit your pipeline's exact use case.
 
+For a more in-depth tutorial of applying various transforms
+in the Python SDK, please read and work through
+[this colab notebook](https://colab.sandbox.google.com/github/liferoad/beam/blob/learn-transforms/examples/notebooks/get-started/learn_beam_transforms_by_doing.ipynb).
+
 ### 4.1. Applying transforms {#applying-transforms}
 
 To invoke a transform, you must **apply** it to the input `PCollection`. Each
-transform in the Beam SDKs has a generic `apply` method <span class="language-py">(or pipe operator `|`)</span>.
+transform in the Beam SDKs has a generic `apply` method<span class="language-py">
+(or pipe operator `|`)</span>.
 Invoking multiple Beam transforms is similar to *method chaining*, but with one
 slight difference: You apply the transform to the input `PCollection`, passing
 the transform itself as an argument, and the operation returns the output
-`PCollection`. This takes the general form:
+`PCollection`.
+<span class="language-yaml">`array`</span>
+In YAML, transforms are applied by listing their inputs.
+</span>
+This takes the general form:
 
 {{< highlight java >}}
 [Output PCollection] = [Input PCollection].apply([Transform])
@@ -555,14 +689,80 @@ the transform itself as an argument, and the operation returns the output
 [Output PCollection] := beam.ParDo(scope, [Transform], [Input PCollection])
 {{< /highlight >}}
 
-{{< paragraph class="language-java language-py" >}}
+{{< highlight typescript >}}
+[Output PCollection] = [Input PCollection].apply([Transform])
+[Output PCollection] = await [Input PCollection].applyAsync([AsyncTransform])
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+pipeline:
+  transforms:
+    ...
+    - name: ProducingTransform
+      type: ProducingTransformType
+      ...
+
+    - name: MyTransform
+      type: MyTransformType
+      input: ProducingTransform
+      ...
+{{< /highlight >}}
+
+{{< paragraph class="language-yaml">}}
+If a transform has more than one
+([non-error](https://beam.apache.org/documentation/sdks/yaml-errors/)) output,
+the various outputs can be identified by explicitly giving the output name.
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+pipeline:
+  transforms:
+    ...
+    - name: ProducingTransform
+      type: ProducingTransformType
+      ...
+
+    - name: MyTransform
+      type: MyTransformType
+      input: ProducingTransform.output_name
+      ...
+
+    - name: MyTransform
+      type: MyTransformType
+      input: ProducingTransform.another_output_name
+      ...
+{{< /highlight >}}
+
+{{< paragraph class="language-yaml">}}
+For linear pipelines, this can be further simplified by implicitly determining
+the inputs based on by the ordering of the transforms by designating and setting
+the type to `chain`.  For example
+{{< /paragraph >}}
+{{< highlight yaml >}}
+pipeline:
+  type: chain
+  transforms:
+    - name: ProducingTransform
+      type: ReadTransform
+      config: ...
+
+    - name: MyTransform
+      type: MyTransformType
+      config: ...
+
+    - name: ConsumingTransform
+      type: WriteTransform
+      config: ...
+{{< /highlight >}}
+
+{{< paragraph class="language-java language-py language-typescript" >}}
 Because Beam uses a generic `apply` method for `PCollection`, you can both chain
 transforms sequentially and also apply transforms that contain other transforms
 nested within (called [composite transforms](#composite-transforms) in the Beam
 SDKs).
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 It's recommended to create a new variable for each new `PCollection` to
 sequentially transform input data. `Scope`s can be used to create functions
 that contain other transforms
@@ -598,6 +798,12 @@ For example, you can successively call transforms on PCollections to modify the 
 [Final Output PCollection] := beam.ParDo(scope, [Third Transform], [Third PCollection])
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+[Final Output PCollection] = [Initial Input PCollection].apply([First Transform])
+.apply([Second Transform])
+.apply([Third Transform])
+{{< /highlight >}}
+
 The graph of this pipeline looks like the following:
 
 ![This linear pipeline starts with one input collection, sequentially applies
@@ -628,6 +834,12 @@ a branching pipeline, like so:
 [PCollection of 'B' names] = beam.ParDo(scope, [Transform B], [PCollection of database table rows])
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+[PCollection of database table rows] = [Database Table Reader].apply([Read Transform])
+[PCollection of 'A' names] = [PCollection of database table rows].apply([Transform A])
+[PCollection of 'B' names] = [PCollection of database table rows].apply([Transform B])
+{{< /highlight >}}
+
 The graph of this branching pipeline looks like the following:
 
 ![This pipeline applies two transforms to a single input collection. Each
@@ -641,6 +853,27 @@ nest multiple transforms inside a single, larger transform. Composite transforms
 are particularly useful for building a reusable sequence of simple steps that
 get used in a lot of different places.
 
+{{< paragraph class="language-python">}}
+The pipe syntax allows one to apply PTransforms to `tuple`s and `dict`s of
+PCollections as well for those transforms accepting multiple inputs (such as
+`Flatten` and `CoGroupByKey`).
+{{< /paragraph >}}
+
+{{< paragraph class="language-typescript">}}
+PTransforms can also be applied to any `PValue`, which include the Root object,
+PCollections, arrays of `PValue`s, and objects with `PValue` values.
+One can apply transforms to these composite types by wrapping them with
+`beam.P`, e.g.
+`beam.P({left: pcollA, right: pcollB}).apply(transformExpectingTwoPCollections)`.
+{{< /paragraph >}}
+
+{{< paragraph class="language-typescript">}}
+PTransforms come in two flavors, synchronous and asynchronous, depending on
+whether their *application** involves asynchronous invocations.
+An `AsyncTransform` must be applied with `applyAsync` and returns a `Promise`
+which must be awaited before further pipeline construction.
+{{< /paragraph >}}
+
 ### 4.2. Core Beam transforms {#core-beam-transforms}
 
 Beam provides the following core transforms, each of which represents a different
@@ -652,6 +885,11 @@ processing paradigm:
 * `Combine`
 * `Flatten`
 * `Partition`
+
+{{< paragraph class="language-typescript">}}
+The Typescript SDK provides some of the most basic of these transforms
+as methods on `PCollection` itself.
+{{< /paragraph >}}
 
 #### 4.2.1. ParDo {#pardo}
 
@@ -685,9 +923,18 @@ input into a different format; you might also use `ParDo` to convert processed
 data into a format suitable for output, like database table rows or printable
 strings.
 
+{{< paragraph class="language-java language-go language-py language-typescript">}}
 When you apply a `ParDo` transform, you'll need to provide user code in the form
 of a `DoFn` object. `DoFn` is a Beam SDK class that defines a distributed
 processing function.
+{{< /paragraph >}}
+
+{{< paragraph class="language-yaml">}}
+In Beam YAML, `ParDo` operations are expressed by the `MapToFields`, `Filter`,
+and `Explode` transform types. These types can take a UDF in the language of your
+choice, rather than introducing the notion of a `DoFn`.
+See [the page on mapping fns](https://beam.apache.org/documentation/sdks/yaml-udf/) for more details.
+{{< /paragraph >}}
 
 <span class="language-java language-py">
 
@@ -696,15 +943,46 @@ processing function.
 
 </span>
 
+{{< paragraph class="language-go">}}
+All DoFns should be registered using a generic `register.DoFnXxY[...]`
+function. This allows the Go SDK to infer an encoding from any inputs/outputs,
+registers the DoFn for execution on remote runners, and optimizes the runtime
+execution of the DoFns via reflection.
+{{< /paragraph >}}
+
+{{< highlight go >}}
+// ComputeWordLengthFn is a DoFn that computes the word length of string elements.
+type ComputeWordLengthFn struct{}
+
+// ProcessElement computes the length of word and emits the result.
+// When creating structs as a DoFn, the ProcessElement method performs the
+// work of this step in the pipeline.
+func (fn *ComputeWordLengthFn) ProcessElement(ctx context.Context, word string) int {
+   ...
+}
+
+func init() {
+  // 2 inputs and 1 output => DoFn2x1
+  // Input/output types are included in order in the brackets
+	register.DoFn2x1[context.Context, string, int](&ComputeWordLengthFn{})
+}
+{{< /highlight >}}
+
 ##### 4.2.1.1. Applying ParDo {#applying-pardo}
 
-{{< paragraph class="language-java language-py" >}}
+{{< paragraph class="language-java">}}
 Like all Beam transforms, you apply `ParDo` by calling the `apply` method on the
 input `PCollection` and passing `ParDo` as an argument, as shown in the
 following example code:
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-py">}}
+Like all Beam transforms, you apply `ParDo` by calling the `beam.ParDo` on the
+input `PCollection` and passing the `DoFn` as an argument, as shown in the
+following example code:
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
 `beam.ParDo` applies the passed in `DoFn` argument to the input `PCollection`,
 as shown in the following example code:
 {{< /paragraph >}}
@@ -739,6 +1017,15 @@ var words beam.PCollection = ...
 {{< code_sample  "sdks/go/examples/snippets/04transforms.go" model_pardo_apply >}}
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+# The input PCollection of Strings.
+const words : PCollection<string> = ...
+
+# The DoFn to perform on each element in the input PCollection.
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" model_pardo_pardo >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" model_pardo_apply >}}
+{{< /highlight >}}
+
 In the example, our input `PCollection` contains <span class="language-java language-py">`String`</span>
 <span class="language-go">`string`</span> values. We apply a
 `ParDo` transform that specifies a function (`ComputeWordLengthFn`) to compute
@@ -756,8 +1043,9 @@ define your pipeline's exact data processing tasks.
 > **Note:** When you create your `DoFn`, be mindful of the [Requirements
 > for writing user code for Beam transforms](#requirements-for-writing-user-code-for-beam-transforms)
 > and ensure that your code follows them.
+> You should avoid time-consuming operations such as reading large files in `DoFn.Setup`.
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 A `DoFn` processes one element at a time from the input `PCollection`. When you
 create a subclass of `DoFn`, you'll need to provide type parameters that match
 the types of the input and output elements. If your `DoFn` processes incoming
@@ -766,7 +1054,7 @@ the types of the input and output elements. If your `DoFn` processes incoming
 look like this:
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 A `DoFn` processes one element at a time from the input `PCollection`. When you
 create a `DoFn` struct, you'll need to provide type parameters that match
 the types of the input and output elements in a ProcessElement method.
@@ -791,11 +1079,15 @@ func (fn *ComputeWordLengthFn) ProcessElement(word string, emit func(int)) {
 }
 
 func init() {
-	beam.RegisterType(reflect.TypeOf((*ComputeWordLengthFn)(nil)))
+  // 2 inputs and 0 outputs => DoFn2x0
+  // 1 input => Emitter1
+  // Input/output types are included in order in the brackets
+	register.Function2x0(&ComputeWordLengthFn{})
+	register.Emitter1[int]()
 }
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 Inside your `DoFn` subclass, you'll write a method annotated with
 `@ProcessElement` where you provide the actual processing logic. You don't need
 to manually extract the elements from the input collection; the Beam SDKs handle
@@ -808,17 +1100,19 @@ and output types of your `DoFn` or the framework will raise an error. Note: `@El
 `ProcessContext` parameter should be used instead.
 {{< /paragraph >}}
 
-{{< paragraph class="language-py" >}}
+{{< paragraph class="language-py language-typescript" >}}
 Inside your `DoFn` subclass, you'll write a method `process` where you provide
 the actual processing logic. You don't need to manually extract the elements
 from the input collection; the Beam SDKs handle that for you. Your `process` method
 should accept an argument `element`, which is the input element, and return an
 iterable with its output values. You can accomplish this by emitting individual
-elements with `yield` statements. You can also use a `return` statement
-with an iterable, like a list or a generator.
+elements with `yield` statements, and use `yield from` to emit all elements from
+an iterable, such as a list or a generator. Using `return` statement
+with an iterable is also acceptable as long as you don't mix `yield` and
+`return` statements in the same `process` method, since that leads to [incorrect behavior](https://github.com/apache/beam/issues/22969).
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 For your `DoFn` type, you'll write a method `ProcessElement` where you provide
 the actual processing logic. You don't need to manually extract the elements
 from the input collection; the Beam SDKs handle that for you. Your `ProcessElement` method
@@ -846,7 +1140,11 @@ static class ComputeWordLengthFn extends DoFn<String, Integer> {
 {{< code_sample "sdks/go/examples/snippets/04transforms.go" model_pardo_pardo >}}
 {{< /highlight >}}
 
-{{< paragraph class="language-go" >}}
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" model_pardo_pardo >}}
+{{< /highlight >}}
+
+{{< paragraph class="language-go">}}
 Simple DoFns can also be written as functions.
 {{< /paragraph >}}
 
@@ -854,11 +1152,15 @@ Simple DoFns can also be written as functions.
 func ComputeWordLengthFn(word string, emit func(int)) { ... }
 
 func init() {
-	beam.RegisterFunction(ComputeWordLengthFn)
+  // 2 inputs and 0 outputs => DoFn2x0
+  // 1 input => Emitter1
+  // Input/output types are included in order in the brackets
+  register.DoFn2x0[string, func(int)](&ComputeWordLengthFn{})
+  register.Emitter1[int]()
 }
 {{< /highlight >}}
 
-<span class="language-go" >
+<span class="language-go">
 
 > **Note:** Whether using a structural `DoFn` type or a functional `DoFn`, they should be registered with
 > beam in an `init` block. Otherwise they may not execute on distributed runners.
@@ -882,6 +1184,104 @@ func init() {
 
 </span>
 
+{{< paragraph class="language-python">}}
+Proper use of return vs yield in Python Functions.
+{{< /paragraph >}}
+
+<span class="language-python">
+
+> **Returning a single element (e.g., `return element`) is incorrect**
+> The `process` method in Beam must return an *iterable* of elements. Returning a single value like an integer or string
+> (e.g., `return element`) leads to a runtime error (`TypeError: 'int' object is not iterable`) or incorrect results since the return value
+> will be treated as an iterable. Always ensure your return type is iterable.
+
+</span>
+
+{{< highlight python >}}
+# Incorrectly Returning a single string instead of a sequence
+class ReturnIndividualElement(beam.DoFn):
+    def process(self, element):
+        return element
+
+with beam.Pipeline() as pipeline:
+    (
+        pipeline
+        | "CreateExamples" >> beam.Create(["foo"])
+        | "MapIncorrect" >> beam.ParDo(ReturnIndividualElement())
+        | "Print" >> beam.Map(print)
+    )
+  # prints:
+  # f
+  # o
+  # o
+{{< /highlight >}}
+
+<span class="language-python">
+
+> **Returning a list (e.g., `return [element1, element2]`) is valid because List is Iterable**
+> This approach works well when emitting multiple outputs from a single call and is easy to read for small datasets.
+
+</span>
+
+{{< highlight python >}}
+# Returning a list of strings
+class ReturnWordsFn(beam.DoFn):
+    def process(self, element):
+        # Split the sentence and return all words longer than 2 characters as a list
+        return [word for word in element.split() if len(word) > 2]
+
+with beam.Pipeline() as pipeline:
+    (
+        pipeline
+        | "CreateSentences_Return" >> beam.Create([  # Create a collection of sentences
+            "Apache Beam is powerful",               # Sentence 1
+            "Try it now"                             # Sentence 2
+        ])
+        | "SplitWithReturn" >> beam.ParDo(ReturnWordsFn())  # Apply the custom DoFn to split words
+        | "PrintWords_Return" >> beam.Map(print)  # Print each List of words
+    )
+  # prints:
+  # Apache
+  # Beam
+  # powerful
+  # Try
+  # now
+{{< /highlight >}}
+
+<span class="language-python">
+
+> **Using `yield` (e.g., `yield element`) is also valid**
+> This approach can be useful for generating multiple outputs more flexibly, especially in cases where conditional logic or loops are involved.
+
+</span>
+
+{{< highlight python >}}
+# Yielding each line one at a time
+class YieldWordsFn(beam.DoFn):
+    def process(self, element):
+        # Splitting the sentence and yielding words that have more than 2 characters
+        for word in element.split():
+            if len(word) > 2:
+                yield word
+
+with beam.Pipeline() as pipeline:
+    (
+        pipeline
+        | "CreateSentences_Yield" >> beam.Create([  # Create a collection of sentences
+            "Apache Beam is powerful",              # Sentence 1
+            "Try it now"                            # Sentence 2
+        ])
+        | "SplitWithYield" >> beam.ParDo(YieldWordsFn())  # Apply the custom DoFn to split words
+        | "PrintWords_Yield" >> beam.Map(print)  # Print each word
+    )
+  # prints:
+  # Apache
+  # Beam
+  # powerful
+  # Try
+  # now
+{{< /highlight >}}
+
 A given `DoFn` instance generally gets invoked one or more times to process some
 arbitrary bundle of elements. However, Beam doesn't guarantee an exact number of
 invocations; it may be invoked multiple times on a given worker node to account
@@ -904,7 +1304,7 @@ following requirements:
 
 </span>
 
-<span class="language-py">
+<span class="language-py language-typescript">
 
 * You should not in any way modify the `element` argument provided to the
   `process` method, or any side inputs.
@@ -929,13 +1329,15 @@ If your function is relatively straightforward, you can simplify your use of
 `ParDo` by providing a lightweight `DoFn` in-line, as
 <span class="language-java">an anonymous inner class instance</span>
 <span class="language-py">a lambda function</span>
-<span class="language-go">an anonymous function</span>.
+<span class="language-go">an anonymous function</span>
+<span class="language-typescript">a function passed to `PCollection.map` or `PCollection.flatMap`</span>.
 
 Here's the previous example, `ParDo` with `ComputeLengthWordsFn`, with the
 `DoFn` specified as
 <span class="language-java">an anonymous inner class instance</span>
 <span class="language-py">a lambda function</span>
-<span class="language-go">an anonymous function</span>:
+<span class="language-go">an anonymous function</span>
+<span class="language-typescript">a function</span>:
 
 {{< highlight java >}}
 // The input PCollection.
@@ -963,6 +1365,9 @@ words = ...
 {{< /highlight >}}
 
 {{< highlight go >}}
+
+The Go SDK cannot support anonymous functions outside of the deprecated Go Direct runner.
+
 // words is the input PCollection of strings
 var words beam.PCollection = ...
 
@@ -971,16 +1376,22 @@ lengths := beam.ParDo(s, func (word string, emit func(int)) {
 }, words)
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+// The input PCollection of strings.
+words = ...
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" model_pardo_using_flatmap >}}
+{{< /highlight >}}
+
 If your `ParDo` performs a one-to-one mapping of input elements to output
 elements--that is, for each input element, it applies a function that produces
 *exactly one* output element, <span class="language-go">you can return that
 element directly.</span><span class="language-java language-py">you can use the higher-level
-<span class="language-java">`MapElements`</span><span class="language-py">`Map`</span>
+<span class="language-java">`MapElements`</span><span class="language-py language-py">`Map`</span>
 transform.</span><span class="language-java">`MapElements` can accept an anonymous
 Java 8 lambda function for additional brevity.</span>
 
 Here's the previous example using <span class="language-java">`MapElements`</span>
-<span class="language-py">`Map`</span><span class="language-go">a direct return</span>:
+<span class="language-py language-typescript">`Map`</span><span class="language-go">a direct return</span>:
 
 {{< highlight java >}}
 // The input PCollection.
@@ -1003,23 +1414,29 @@ words = ...
 {{< /highlight >}}
 
 {{< highlight go >}}
-// words is the input PCollection of strings
-var words beam.PCollection = ...
+
+The Go SDK cannot support anonymous functions outside of the deprecated Go Direct runner.
 
 {{< code_sample "sdks/go/examples/snippets/04transforms.go" model_pardo_apply_anon >}}
 {{< /highlight >}}
 
-<span class="language-java" >
+{{< highlight typescript >}}
+// The input PCollection of string.
+words = ...
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" model_pardo_using_map >}}
+{{< /highlight >}}
+
+<span class="language-java">
 
 > **Note:** You can use Java 8 lambda functions with several other Beam
 > transforms, including `Filter`, `FlatMapElements`, and `Partition`.
 
 </span>
 
-<span class="language-go" >
+<span class="language-go">
 
-> **Note:** Anonymous function DoFns may not work on distributed runners.
-> It's recommended to use named functions and register them with `beam.RegisterFunction` in
+> **Note:** Anonymous function DoFns do not work on distributed runners.
+> It's recommended to use named functions and register them with `register.FunctionXxY` in
 > an `init()` block.
 
 </span>
@@ -1030,9 +1447,15 @@ Here is a sequence diagram that shows the lifecycle of the DoFn during
  the execution of the ParDo transform. The comments give useful
  information to pipeline developers such as the constraints that
  apply to the objects or particular cases such as failover or
- instance reuse. They also give instantiation use cases.
+ instance reuse. They also give instantiation use cases. Three key points
+ to note are that:
+ 1. Teardown is done on a best effort basis and thus
+ isn't guaranteed.
+ 2. The number of DoFn instances created at runtime is runner-dependent.
+ 3. For the Python SDK, the pipeline contents such as DoFn user code,
+ is [serialized into a bytecode](https://beam.apache.org/documentation/sdks/python-pipeline-dependencies/#pickling-and-managing-the-main-session). Therefore, `DoFn`s should not reference objects that are not serializable, such as locks. To manage a single instance of an object across multiple `DoFn` instances in the same process, use utilities in the [shared.py](https://beam.apache.org/releases/pydoc/current/apache_beam.utils.shared.html) module.
 
-<!-- The source for the sequence diagram can be found in the the SVG resource. -->
+<!-- The source for the sequence diagram can be found in the SVG resource. -->
 ![This is a sequence diagram that shows the lifecycle of the DoFn](/images/dofn-sequence-diagram.svg)
 
 #### 4.2.2. GroupByKey {#groupbykey}
@@ -1092,6 +1515,52 @@ tree, [2]
 Thus, `GroupByKey` represents a transform from a multimap (multiple keys to
 individual values) to a uni-map (unique keys to collections of values).
 
+<span class="language-java">Using `GroupByKey` is straightforward:</span>
+
+{{< paragraph class="language-py language-typescript language-yaml" >}}
+While all SDKs have a `GroupByKey` transform, using `GroupBy` is
+generally more natural.
+The `GroupBy` transform can be parameterized by the name(s) of properties
+on which to group the elements of the PCollection, or a function taking
+the each element as input that maps to a key on which to do grouping.
+{{< /paragraph >}}
+
+{{< highlight java >}}
+// The input PCollection.
+ PCollection<KV<String, String>> mapped = ...;
+
+// Apply GroupByKey to the PCollection mapped.
+// Save the result as the PCollection reduced.
+PCollection<KV<String, Iterable<String>>> reduced =
+ mapped.apply(GroupByKey.<String, String>create());
+{{< /highlight >}}
+
+{{< highlight py >}}
+# The input PCollection of (`string`, `int`) tuples.
+words_and_counts = ...
+
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" model_group_by_key_transform >}}
+
+
+{{< /highlight >}}
+
+{{< highlight go >}}
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" groupbykey >}}
+{{< /highlight >}}
+
+{{< highlight typescript >}}
+// A PCollection of elements like
+//    {word: "cat", score: 1}, {word: "dog", score: 5}, {word: "cat", score: 5}, ...
+const scores : PCollection<{word: string, score: number}> = ...
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" groupby >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" group_by >}}
+{{< /highlight >}}
+
+
+
 ##### 4.2.2.1 GroupByKey and unbounded PCollections {#groupbykey-and-unbounded-pcollections}
 
 If you are using unbounded `PCollection`s, you must use either [non-global
@@ -1133,13 +1602,15 @@ name as a common key and the other data as the associated values. After the
 join, you have one data set that contains all of the information (email
 addresses and phone numbers) associated with each name.
 
+One can also consider using SqlTransform to perform a join.
+
 If you are using unbounded `PCollection`s, you must use either [non-global
 windowing](#setting-your-pcollections-windowing-function) or an
 [aggregation trigger](#triggers) in order to perform a `CoGroupByKey`. See
 [GroupByKey and unbounded PCollections](#groupbykey-and-unbounded-pcollections)
 for more details.
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 In the Beam SDK for Java, `CoGroupByKey` accepts a tuple of keyed
 `PCollection`s (`PCollection<KV<K, V>>`) as input. For type safety, the SDK
 requires you to pass each `PCollection` as part of a `KeyedPCollectionTuple`.
@@ -1160,7 +1631,7 @@ In the Beam SDK for Python, `CoGroupByKey` accepts a dictionary of keyed
 iterable of the values under they key in the corresponding `PCollection`.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 In the Beam Go SDK, `CoGroupByKey` accepts an arbitrary number of
 `PCollection`s as input. As output, `CoGroupByKey` creates a single output
 `PCollection` that groups each key with value iterator functions for each
@@ -1171,7 +1642,7 @@ input `PCollection`. The iterator functions map to input `PCollections` in
 The following conceptual examples use two input collections to show the mechanics of
 `CoGroupByKey`.
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 The first set of data has a `TupleTag<String>` called `emailsTag` and contains names
 and email addresses. The second set of data has a `TupleTag<String>` called
 `phonesTag` and contains names and phone numbers.
@@ -1195,6 +1666,14 @@ data contains names and phone numbers.
 {{< code_sample "sdks/go/examples/snippets/04transforms.go" cogroupbykey_inputs >}}
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" cogroupbykey_inputs >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" cogroupbykey_inputs >}}
+{{< /highlight >}}
+
 After `CoGroupByKey`, the resulting data contains all data associated with each
 unique key from any of the input collections.
 
@@ -1211,13 +1690,17 @@ unique key from any of the input collections.
 {{< code_sample "sdks/go/examples/snippets/04transforms_test.go" cogroupbykey_outputs >}}
 {{< /highlight >}}
 
-{{< paragraph class="language-java language-py" >}}
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" cogroupbykey_raw_outputs >}}
+{{< /highlight >}}
+
+{{< paragraph class="language-java language-py language-typescript" >}}
 The following code example joins the two `PCollection`s with `CoGroupByKey`,
 followed by a `ParDo` to consume the result. Then, the code uses tags to look up
 and format data from each collection.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 The following code example joins the two `PCollection`s with `CoGroupByKey`,
 followed by a `ParDo` to consume the result. The ordering of the `DoFn` iterator
 parameters maps to the ordering of the `CoGroupByKey` inputs.
@@ -1236,6 +1719,14 @@ parameters maps to the ordering of the `CoGroupByKey` inputs.
 {{< code_sample "sdks/go/examples/snippets/04transforms_test.go" cogroupbykey_outputs >}}
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" cogroupbykey >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" cogroupbykey >}}
+{{< /highlight >}}
+
 The formatted data looks like this:
 
 {{< highlight java >}}
@@ -1250,11 +1741,20 @@ The formatted data looks like this:
 {{< code_sample "sdks/go/examples/snippets/04transforms_test.go" cogroupbykey_formatted_outputs >}}
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" cogroupbykey_formatted_outputs >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" cogroupbykey_formatted_outputs >}}
+{{< /highlight >}}
+
 #### 4.2.4. Combine {#combine}
 
 <span class="language-java">[`Combine`](https://beam.apache.org/releases/javadoc/{{< param release_latest >}}/index.html?org/apache/beam/sdk/transforms/Combine.html)</span>
 <span class="language-py">[`Combine`](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/transforms/core.py)</span>
 <span class="language-go">[`Combine`](https://github.com/apache/beam/blob/master/sdks/go/pkg/beam/combine.go#L27)</span>
+<span class="language-typescript">[`Combine`](https://github.com/apache/beam/blob/master/sdks/typescript/src/apache_beam/transforms/group_and_combine.ts)</span>
 is a Beam transform for combining collections of elements or values in your
 data. `Combine` has variants that work on entire `PCollection`s, and some that
 combine the values for each key in `PCollection`s of key/value pairs.
@@ -1274,9 +1774,36 @@ function. More complex combination operations might require you to create a
 <span class="language-java language-py">subclass of</span> `CombineFn`
 that has an accumulation type distinct from the input/output type.
 
+The associativity and commutativity of a `CombineFn` allows runners to
+automatically apply some optimizations:
+
+ * **Combiner lifting**: This is the most significant optimization. Input
+   elements are combined per key and window before they are shuffled, so the
+   volume of data shuffled might be reduced by many orders of magnitude. Another
+   term for this optimization is "mapper-side combine."
+ * **Incremental combining**: When you have a `CombineFn` that reduces the data
+   size by a lot, it is useful to combine elements as they emerge from a
+   streaming shuffle. This spreads out the cost of doing combines over the time
+   that your streaming computation might be idle. Incremental combining also
+   reduces the storage of intermediate accumulators.
+
 ##### 4.2.4.1. Simple combinations using simple functions {#simple-combines}
 
+<span class="language-yaml">
+Beam YAML has the following buit-in CombineFns: count, sum, min, max,
+mean, any, all, group, and concat.
+CombineFns from other languages can also be referenced
+as described in the (full docs on aggregation)[https://beam.apache.org/documentation/sdks/yaml-combine/].
+</span>
 The following example code shows a simple combine function.
+
+<span class="language-typescript">
+Combining is done by modifying a grouping transform with the `combining` method.
+This method takes three parameters: the value to combine (either as a named
+property of the input elements, or a function of the entire input),
+the combining operation (either a binary function or a `CombineFn`),
+and finally a name for the combined value in the output object.
+</span>
 
 {{< highlight java >}}
 // Sum a collection of Integer values. The function SumInts implements the interface SerializableFunction.
@@ -1300,6 +1827,42 @@ public static class SumInts implements SerializableFunction<Iterable<Integer>, I
 {{< code_sample "sdks/go/examples/snippets/04transforms.go" combine_simple_sum >}}
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" combine_simple_sum >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" combine_simple_py >}}
+{{< /highlight >}}
+
+
+
+{{< paragraph class="language-go">}}
+All Combiners should be registered using a generic `register.CombinerX[...]`
+function. This allows the Go SDK to infer an encoding from any inputs/outputs,
+registers the Combiner for execution on remote runners, and optimizes the runtime
+execution of the Combiner via reflection.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
+Combiner1 should be used when your accumulator, input, and output are all of the
+same type. It can be called with `register.Combiner1[T](&CustomCombiner{})` where `T`
+is the type of the input/accumulator/output.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
+Combiner2 should be used when your accumulator, input, and output are 2 distinct
+types. It can be called with `register.Combiner2[T1, T2](&CustomCombiner{})` where
+`T1` is the type of the accumulator and `T2` is the other type.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
+Combiner3 should be used when your accumulator, input, and output are 3 distinct
+types. It can be called with `register.Combiner3[T1, T2, T3](&CustomCombiner{})`
+where `T1` is the type of the accumulator, `T2` is the type of the input, and `T3` is
+the type of the output.
+{{< /paragraph >}}
+
 ##### 4.2.4.2. Advanced combinations using CombineFn {#advanced-combines}
 
 For more complex combine functions, you can define a
@@ -1308,10 +1871,12 @@ You should use a `CombineFn` if the combine function requires a more sophisticat
 accumulator, must perform additional pre- or post-processing, might change the
 output type, or takes the key into account.
 
-A general combining operation consists of four operations. When you create a
+A general combining operation consists of five operations. When you create a
 <span class="language-java language-py">subclass of</span>
-`CombineFn`, you must provide four operations by overriding the
-corresponding methods:
+`CombineFn`, you must provide five operations by overriding the
+corresponding methods. Only `MergeAccumulators` is a required method. The
+others will have a default interpretation based on the accumulator type. The
+lifecycle methods are:
 
 1. **Create Accumulator** creates a new "local" accumulator. In the example
    case, taking a mean average, a local accumulator tracks the running sum of
@@ -1332,6 +1897,14 @@ corresponding methods:
 4. **Extract Output** performs the final computation. In the case of computing a
    mean average, this means dividing the combined sum of all the values by the
    number of values summed. It is called once on the final, merged accumulator.
+
+5. **Compact** returns a more compact represenation of the accumulator. This is
+    called before an accumulator is sent across the wire, and can be useful in
+    cases where values are buffered or otherwise lazily kept unprocessed when
+    added to the accumulator.  Compact should return an equivalent, though
+    possibly modified, accumulator. In most cases, Compact is not necessary. For
+    a real world example of using Compact, see the Python SDK implementation of
+    [TopCombineFn](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/transforms/combiners.py#L523)
 
 The following example code shows how to define a `CombineFn` that computes a
 mean average:
@@ -1367,6 +1940,10 @@ public class AverageFn extends CombineFn<Integer, AverageFn.Accum, Double> {
   public Double extractOutput(Accum accum) {
     return ((double) accum.sum) / accum.count;
   }
+
+  // No-op
+  @Override
+  public Accum compact(Accum accum) { return accum; }
 }
 {{< /highlight >}}
 
@@ -1379,10 +1956,11 @@ pc = ...
 {{< code_sample "sdks/go/examples/snippets/04transforms.go" combine_custom_average >}}
 {{< /highlight >}}
 
-<span class="language-go">
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" combine_custom_average >}}
+{{< /highlight >}}
 
-> **Note**: Only `MergeAccumulators` is a required method. The others will have a default interpretation
-> based on the accumulator type.
+<span class="language-go">
 
 </span>
 
@@ -1407,11 +1985,19 @@ PCollection<Integer> sum = pc.apply(
 # The resulting PCollection, called result, contains one value: the sum of all
 # the elements in the input PCollection.
 pc = ...
-{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets_test.py" combine_custom_average_execute >}}
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets_test.py" global_sum >}}
 {{< /highlight >}}
 
 {{< highlight go >}}
 {{< code_sample "sdks/go/examples/snippets/04transforms.go" combine_global_average >}}
+{{< /highlight >}}
+
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" combine_global_average >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" combine_global_sum >}}
 {{< /highlight >}}
 
 ##### 4.2.4.4. Combine and global windowing {#combine-global-windowing}
@@ -1442,6 +2028,10 @@ sum = pc | beam.CombineGlobally(sum).without_defaults()
 {{< code_sample "sdks/go/examples/snippets/04transforms.go" combine_global_with_default >}}
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" combine_globally >}}
+{{< /highlight >}}
+
 ##### 4.2.4.5. Combine and non-global windowing {#combine-non-global-windowing}
 
 <span class="language-java language-py">
@@ -1460,7 +2050,7 @@ applying `Combine`:
 
 </span>
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 If your `PCollection` uses any non-global windowing function, the Beam Go SDK
 behaves the same way as with global windowing. Windows that are empty in the input
   `PCollection` will likewise be empty in the output collection.
@@ -1521,11 +2111,20 @@ playerAccuracies := ... // PCollection<string,int>
 // avgAccuracyPerPlayer is a PCollection<string,float64>
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" combine_per_key >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" combine_per_key >}}
+{{< /highlight >}}
+
 #### 4.2.5. Flatten {#flatten}
 
 <span class="language-java">[`Flatten`](https://beam.apache.org/releases/javadoc/{{< param release_latest >}}/index.html?org/apache/beam/sdk/transforms/Flatten.html)</span>
-<span class="language-py">[`Flatten`](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/transforms/core.py)</span>
+<span class="language-py">[`Flatten`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.core.html#apache_beam.transforms.core.Flatten)</span>
 <span class="language-go">[`Flatten`](https://github.com/apache/beam/blob/master/sdks/go/pkg/beam/flatten.go)</span>
+<span class="language-typescript">`Flatten`</span>
 is a Beam transform for `PCollection` objects that store the same data type.
 `Flatten` merges multiple `PCollection` objects into a single logical
 `PCollection`.
@@ -1544,6 +2143,22 @@ PCollectionList<String> collections = PCollectionList.of(pc1).and(pc2).and(pc3);
 PCollection<String> merged = collections.apply(Flatten.<String>pCollections());
 {{< /highlight >}}
 
+{{< paragraph class="language-java" >}}
+One can also use the [`FlattenWith`](https://beam.apache.org/releases/javadoc/{{< param release_latest >}}/index.html?org/apache/beam/sdk/transforms/Flatten.html)
+transform to merge PCollections into an output PCollection in a manner more compatible with chaining.
+{{< /paragraph >}}
+
+{{< highlight java >}}
+PCollection<String> merged = pc1
+    .apply(...)
+    // Merges the elements of pc2 in at this point...
+    .apply(FlattenWith.of(pc2))
+    .apply(...)
+    // and the elements of pc3 at this point.
+    .apply(FlattenWith.of(pc3))
+    .apply(...);
+{{< /highlight >}}
+
 
 {{< highlight py >}}
 # Flatten takes a tuple of PCollection objects.
@@ -1551,11 +2166,46 @@ PCollection<String> merged = collections.apply(Flatten.<String>pCollections());
 {{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" model_multiple_pcollections_flatten >}}
 {{< /highlight >}}
 
+{{< paragraph class="language-py" >}}
+One can also use the [`FlattenWith`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.core.html#apache_beam.transforms.core.FlattenWith)
+transform to merge PCollections into an output PCollection in a manner more compatible with chaining.
+{{< /paragraph >}}
+
+{{< highlight py >}}
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" model_multiple_pcollections_flatten_with >}}
+{{< /highlight >}}
+
+{{< paragraph class="language-py" >}}
+`FlattenWith` can take root `PCollection`-producing transforms
+(such as `Create` and `Read`) as well as already constructed PCollections,
+and will apply them and flatten their outputs into the resulting output
+PCollection.
+{{< /paragraph >}}
+
+{{< highlight py >}}
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" model_multiple_pcollections_flatten_with_transform >}}
+{{< /highlight >}}
+
 {{< highlight go >}}
 // Flatten accepts any number of PCollections of the same element type.
 // Returns a single PCollection that contains all of the elements in input PCollections.
 {{< code_sample "sdks/go/examples/snippets/04transforms.go" model_multiple_pcollections_flatten >}}
 {{< /highlight >}}
+
+{{< highlight typescript >}}
+// Flatten taken an array of PCollection objects, wrapped in beam.P(...)
+// Returns a single PCollection that contains a union of all of the elements in all input PCollections.
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" model_multiple_pcollections_flatten >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" model_multiple_pcollections_flatten >}}
+{{< /highlight >}}
+
+{{< paragraph class="language-yaml" >}}
+In Beam YAML explicit flattens are not usually needed as one can list
+multiple inputs for any transform which will be implicitly flattened.
+{{< /paragraph >}}
 
 ##### 4.2.5.1. Data encoding in merged collections {#data-encoding-merged-collections}
 
@@ -1581,9 +2231,14 @@ pipeline is constructed.
 <span class="language-java">[`Partition`](https://beam.apache.org/releases/javadoc/{{< param release_latest >}}/index.html?org/apache/beam/sdk/transforms/Partition.html)</span>
 <span class="language-py">[`Partition`](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/transforms/core.py)</span>
 <span class="language-go">[`Partition`](https://github.com/apache/beam/blob/master/sdks/go/pkg/beam/partition.go)</span>
+<span class="language-typescript">`Partition`</span>
 is a Beam transform for `PCollection` objects that store the same data
 type. `Partition` splits a single `PCollection` into a fixed number of smaller
 collections.
+
+{{< paragraph class="language-typescript">}}
+Often in the Typescript SDK the `Split` transform is more natural to use.
+{{< /paragraph >}}
 
 `Partition` divides the elements of a `PCollection` according to a partitioning
 function that you provide. The partitioning function contains the logic that
@@ -1628,6 +2283,18 @@ students = ...
 {{< code_sample "sdks/go/examples/snippets/04transforms.go" model_multiple_pcollections_partition_fn >}}
 {{< code_sample "sdks/go/examples/snippets/04transforms.go" model_multiple_pcollections_partition >}}
 {{< /highlight >}}
+
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" model_multiple_pcollections_partition >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" model_multiple_pcollections_partition >}}
+{{< /highlight >}}
+
+{{< paragraph class="language-yaml">}}
+Note that in Beam YAML, `PCollections` are partitioned via string rather than integer values.
+{{< /paragraph >}}
 
 ### 4.3. Requirements for writing user code for Beam transforms {#requirements-for-writing-user-code-for-beam-transforms}
 
@@ -1677,13 +2344,28 @@ a remote worker in your processing cluster.
 as `DoFn`, `CombineFn`, and `WindowFn`, already implement `Serializable`;
 however, your subclass must not add any non-serializable members.</span>
 <span class="language-go">Funcs are serializable as long as
-they are registered with `beam.RegisterFunction`, and are not
-closures. Structural `DoFn`s will have all exported fields serialized.
-Unexported fields are unable to be serialized, and will be silently ignored.</span>
+they are registered with `register.FunctionXxY` (for simple functions) or
+`register.DoFnXxY` (for structural DoFns), and are not closures. Structural
+`DoFn`s will have all exported fields serialized. Unexported fields are unable to
+be serialized, and will be silently ignored.</span>
+<span class="language-typescript">
+The Typescript SDK use [ts-serialize-closures](https://github.com/nokia/ts-serialize-closures)
+to serialize functions (and other objects).
+This works out of the box for functions that are not closures, and also works
+for closures as long as the function in question (and any closures it references)
+are compiled with the
+[`ts-closure-transform` hooks](https://github.com/apache/beam/blob/master/sdks/typescript/tsconfig.json)
+(e.g. by using `ttsc` in place of `tsc`).
+One can alternatively call
+`requireForSerialization("importableModuleDefiningFunc", {func})`
+to [register a function directly](https://github.com/apache/beam/blob/master/sdks/typescript/src/apache_beam/serialization.ts) by name which can be less error-prone.
+Note that if, as is often the case in Javascript, `func` returns objects that
+contain closures, it is not sufficient to register `func` alone--its return
+value must be registered if used.</span>
 
 Some other serializability factors you should keep in mind are:
 
-* <span class="language-java language-py">Transient</span><span class="langauage-go">Unexported</span>
+* <span class="language-java language-py">Transient</span><span class="language-go">Unexported</span>
   fields in your function object are *not* transmitted to worker
   instances, because they are not automatically serialized.
 * Avoid loading a field with a large amount of data before serialization.
@@ -1740,6 +2422,10 @@ processing each element in the input `PCollection`, but the additional data
 needs to be determined at runtime (and not hard-coded). Such values might be
 determined by the input data, or depend on a different branch of your pipeline.
 
+{{< paragraph class="language-go">}}
+All side input iterables should be registered using a generic `register.IterX[...]`
+function. This optimizes runtime execution of the iterable.
+{{< /paragraph >}}
 
 #### 4.4.1. Passing side inputs to ParDo {#side-inputs-pardo}
 
@@ -1800,9 +2486,22 @@ words = ...
 {{< code_sample "sdks/go/examples/snippets/04transforms.go" model_pardo_side_input_dofn >}}
 
 // The Go SDK doesn't support custom ViewFns.
-// See https://issues.apache.org/jira/browse/BEAM-3305 for details
+// See https://github.com/apache/beam/issues/18602 for details
 // on how to contribute them!
 {{< /highlight >}}
+
+{{< highlight typescript >}}
+// Side inputs are provided by passing an extra context object to
+// `map`, `flatMap`, or `parDo` transforms.  This object will get passed as an
+// extra argument to the provided function (or `process` method of the `DoFn`).
+// `SideInputParam` properties (generally created with `pardo.xxxSideInput(...)`)
+// have a `lookup` method that can be invoked from within the process method.
+
+// Let words be a PCollection of strings.
+const words : PCollection<string> = ...
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" model_pardo_side_input >}}
+{{< /highlight >}}
+
 
 #### 4.4.2. Side inputs and windowing {#side-inputs-windowing}
 
@@ -1843,7 +2542,7 @@ returns all of the output `PCollection`s (including the main output) bundled
 together.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 While `beam.ParDo` always produces an output `PCollection`, your `DoFn` can produce any
 number of additional output `PCollections`s, or even none at all.
 If you choose to have multiple outputs, your `DoFn` needs to be called with the `ParDo`
@@ -1852,9 +2551,33 @@ function that matches the number of outputs. `beam.ParDo2` for two output `PColl
 use `beam.ParDoN` which will return a `[]beam.PCollection`.
 {{< /paragraph >}}
 
+{{< paragraph class="language-typescript">}}
+While `ParDo` always produces a main output `PCollection` (as the return value
+from `apply`). If you want to have multiple outputs, emit an object with distinct
+properties in your `ParDo` operation and follow this operation with a `Split`
+to break it into multiple `PCollection`s.
+{{< /paragraph >}}
+
+{{< paragraph class="language-yaml">}}
+In Beam YAML, one obtains multiple outputs by emitting all outputs to a single
+`PCollection`, possibly with an extra field, and then using `Partition` to
+split this single `PCollection` into multiple distinct `PCollection`
+outputs.
+{{< /paragraph >}}
+
+
 #### 4.5.1. Tags for multiple outputs {#output-tags}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-typescript">}}
+The `Split` PTransform will take a PCollection of elements of the form
+`{tagA?: A, tagB?: B, ...}` and return a object
+`{tagA: PCollection<A>, tagB: PCollection<B>, ...}`.
+The set of expected tags is passed to the operation; how multiple or
+unknown tags are handled can be specified by passing a non-default
+`SplitOptions` instance.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
 The Go SDK doesn't use output tags, and instead uses positional ordering for
 multiple output PCollections.
 {{< /paragraph >}}
@@ -1925,18 +2648,35 @@ multiple output PCollections.
 {{< code_sample "sdks/go/examples/snippets/04transforms.go" model_multiple_output >}}
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+# Create three PCollections from a single input PCollection.
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" model_multiple_output >}}
+{{< /highlight >}}
+
 #### 4.5.2. Emitting to multiple outputs in your DoFn {#multiple-outputs-dofn}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 Call emitter functions as needed to produce 0 or more elements for its matching
 `PCollection`. The same value can be emitted with multiple emitters.
 As normal, do not mutate values after emitting them from any emitter.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
+All emitters should be registered using a generic `register.EmitterX[...]`
+function. This optimizes runtime execution of the emitter.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
 DoFns can also return a single element via the standard return.
 The standard return is always the first PCollection returned from beam.ParDo.
 Other emitters output to their own PCollections in their defined parameter order.
+{{< /paragraph >}}
+
+{{< paragraph class="language-yaml">}}
+`MapToFields` is always one-to-one. To perform a one-to-many mapping one can
+first map a field to an iterable type and then follow this transform with an
+`Explode` transform that will emit multiple values, one per value of the
+exploded field.
 {{< /paragraph >}}
 
 {{< highlight java >}}
@@ -1979,9 +2719,17 @@ Other emitters output to their own PCollections in their defined parameter order
 {{< code_sample "sdks/go/examples/snippets/04transforms.go" model_multiple_output_dofn >}}
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" model_multiple_output_dofn >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" model_multiple_output_dofn >}}
+{{< /highlight >}}
+
 #### 4.5.3. Accessing additional parameters in your DoFn {#other-dofn-parameters}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 In addition to the element and the `OutputReceiver`, Beam will populate other parameters to your DoFn's `@ProcessElement` method.
 Any combination of these parameters can be added to your process method in any order.
 {{< /paragraph >}}
@@ -1991,12 +2739,17 @@ In addition to the element, Beam will populate other parameters to your DoFn's `
 Any combination of these parameters can be added to your process method in any order.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-typescript">}}
+In addition to the element, Beam will populate other parameters to your DoFn's `process` method.
+These are available by placing accessors in the context argument, just as for side inputs.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
 In addition to the element, Beam will populate other parameters to your DoFn's `ProcessElement` method.
 Any combination of these parameters can be added to your process method in a standard order.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 **context.Context:**
 To support consolidated logging and user defined metrics, a `context.Context` parameter can be requested.
 Per Go conventions, if present it's required to be the first parameter of the `DoFn` method.
@@ -2006,7 +2759,7 @@ Per Go conventions, if present it's required to be the first parameter of the `D
 func MyDoFn(ctx context.Context, word string) string { ... }
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 **Timestamp:**
 To access the timestamp of an input element, add a parameter annotated with `@Timestamp` of type `Instant`. For example:
 {{< /paragraph >}}
@@ -2016,9 +2769,14 @@ To access the timestamp of an input element, add a parameter annotated with `@Ti
 To access the timestamp of an input element, add a keyword parameter default to `DoFn.TimestampParam`. For example:
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 **Timestamp:**
 To access the timestamp of an input element, add a `beam.EventTime` parameter before the element. For example:
+{{< /paragraph >}}
+
+{{< paragraph class="language-typescript">}}
+**Timestamp:**
+To access the window an input element falls into, add a `pardo.windowParam()` to the context argument.
 {{< /paragraph >}}
 
 {{< highlight java >}}
@@ -2042,7 +2800,11 @@ class ProcessRecord(beam.DoFn):
 func MyDoFn(ts beam.EventTime, word string) string { ... }
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" timestamp_param >}}
+{{< /highlight >}}
+
+{{< paragraph class="language-java">}}
 **Window:**
 To access the window an input element falls into, add a parameter of the type of the window used for the input `PCollection`.
 If the parameter is a window type (a subclass of `BoundedWindow`) that does not match the input `PCollection`, then an error
@@ -2058,13 +2820,20 @@ If an element falls in multiple windows (for example, this will happen when usin
 `process` method will be invoked multiple time for the element, once for each window.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 **Window:**
-To access the timestamp of an input element, add a `beam.Window` parameter before the element.
+To access the window an input element falls into, add a `beam.Window` parameter before the element.
 If an element falls in multiple windows (for example, this will happen when using SlidingWindows),
 then the `ProcessElement` method will be invoked multiple time for the element, once for each window.
 Since `beam.Window` is an interface it's possible to type assert to the concrete implementation of the window.
 For example, when fixed windows are being used, the window is of type `window.IntervalWindow`.
+{{< /paragraph >}}
+
+{{< paragraph class="language-typescript">}}
+**Window:**
+To access the window an input element falls into, add a `pardo.windowParam()` to the context argument.
+If an element falls in multiple windows (for example, this will happen when using `SlidingWindows`), then the
+function will be invoked multiple time for the element, once for each window.
 {{< /paragraph >}}
 
 {{< highlight java >}}
@@ -2091,7 +2860,11 @@ func MyDoFn(w beam.Window, word string) string {
 }
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" window_param >}}
+{{< /highlight >}}
+
+{{< paragraph class="language-java">}}
 **PaneInfo:**
 When triggers are used, Beam provides a `PaneInfo` object that contains information about the current firing. Using `PaneInfo`
 you can determine whether this is an early or a late firing, and how many times this window has already fired for this key.
@@ -2101,14 +2874,20 @@ you can determine whether this is an early or a late firing, and how many times 
 **PaneInfo:**
 When triggers are used, Beam provides a `DoFn.PaneInfoParam` object that contains information about the current firing. Using `DoFn.PaneInfoParam`
 you can determine whether this is an early or a late firing, and how many times this window has already fired for this key.
-This feature implementation in Python SDK is not fully completed; see more at [BEAM-3759](https://issues.apache.org/jira/browse/BEAM-3759).
+This feature implementation in Python SDK is not fully completed; see more at [Issue 17821](https://github.com/apache/beam/issues/18721).
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 **PaneInfo:**
-This feature isn't implemented in the Go SDK; see more at [BEAM-3304](https://issues.apache.org/jira/browse/BEAM-3304). However, once implemented, when triggers are used, Beam provides
-information about the current firing. The pane lets you determine whether this
-is an early or a late firing, and how many times this window has already fired for this key.
+When triggers are used, Beam provides `beam.PaneInfo` object that contains information about the current firing. Using `beam.PaneInfo`
+you can determine whether this is an early or a late firing, and how many times this window has already fired for this key.
+{{< /paragraph >}}
+
+{{< paragraph class="language-typescript">}}
+**Window:**
+To access the window an input element falls into, add a `pardo.paneInfoParam()` to the context argument.
+Using `beam.PaneInfo` you can determine whether this is an early or a late firing,
+and how many times this window has already fired for this key.
 {{< /paragraph >}}
 
 {{< highlight java >}}
@@ -2129,12 +2908,14 @@ class ProcessRecord(beam.DoFn):
 {{< /highlight >}}
 
 {{< highlight go >}}
-// PaneInfo and triggers are not yet implemented in the Go SDK.
-// See https://issues.apache.org/jira/browse/BEAM-3304 for info
-// on contributing triggers and panes.
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" model_paneinfo >}}
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" pane_info_param >}}
+{{< /highlight >}}
+
+{{< paragraph class="language-java">}}
 **PipelineOptions:**
 The `PipelineOptions` for the current pipeline can always be accessed in a process method by adding it
 as a parameter:
@@ -2146,7 +2927,7 @@ as a parameter:
   }})
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 `@OnTimer` methods can also access many of these parameters. Timestamp, Window, key, `PipelineOptions`, `OutputReceiver`, and
 `MultiOutputReceiver` parameters can all be accessed in an `@OnTimer` method. In addition, an `@OnTimer` method can take
 a parameter of type `TimeDomain` which tells whether the timer is based on event time or processing time.
@@ -2161,9 +2942,19 @@ Timers and States are explained in more detail in the
 [Timely (and Stateful) Processing with Apache Beam](/blog/2017/08/28/timely-processing.html) blog post.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 **Timer and State:**
-This feature isn't implemented in the Go SDK; see more at [BEAM-10660](https://issues.apache.org/jira/browse/BEAM-10660). Once implemented, user defined Timer and State parameters can be used in a stateful DoFn.
+User defined State and Timer parameters can be used in a stateful DoFn.
+Timers and States are explained in more detail in the
+[Timely (and Stateful) Processing with Apache Beam](/blog/2017/08/28/timely-processing.html) blog post.
+{{< /paragraph >}}
+
+{{< paragraph class="language-typescript">}}
+**Timer and State:**
+This feature isn't yet implemented in the Typescript SDK,
+but we welcome [contributions](/contribute/).
+In the meantime, Typescript pipelines wishing to use state and timers can do so
+using [cross-language transforms](#use-x-lang-transforms).
 {{< /paragraph >}}
 
 {{< highlight py >}}
@@ -2225,9 +3016,11 @@ class StatefulDoFn(beam.DoFn):
 {{< /highlight >}}
 
 {{< highlight go >}}
-// State and Timers are yet implemented in the Go SDK.
-// See https://issues.apache.org/jira/browse/BEAM-10660 for info
-// on contributing State and Timers.
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" state_and_timers >}}
+{{< /highlight >}}
+
+{{< highlight typescript >}}
+// Not yet implemented.
 {{< /highlight >}}
 
 ### 4.6. Composite transforms {#composite-transforms}
@@ -2289,10 +3082,19 @@ transform operations:
 {{< code_sample "sdks/go/examples/snippets/04transforms.go" countwords_composite >}}
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" countwords_composite >}}
+{{< /highlight >}}
+
 > **Note:** Because `Count` is itself a composite transform,
 > `CountWords` is also a nested composite transform.
 
 #### 4.6.2. Creating a composite transform {#composite-transform-creation}
+
+{{< paragraph class="language-typescript">}}
+A PTransform in the Typescript SDK is simply a function that accepts and
+returns `PValue`s such as `PCollection`s.
+{{< /paragraph >}}
 
 {{< paragraph class="language-java language-py" >}}
 To create your own composite transform, create a subclass of the `PTransform`
@@ -2301,20 +3103,20 @@ You can then use this transform just as you would a built-in transform from the
 Beam SDK.
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 For the `PTransform` class type parameters, you pass the `PCollection` types
 that your transform takes as input, and produces as output. To take multiple
 `PCollection`s as input, or produce multiple `PCollection`s as output, use one
 of the multi-collection types for the relevant type parameter.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 To create your own composite `PTransform` call the `Scope` method on the current
 pipeline scope variable. Transforms passed this new sub-`Scope` will be a part of
 the same composite `PTransform`.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 To be able to re-use your Composite, build it inside a normal Go function or method.
 This function is passed a scope and input PCollections, and returns any
 output PCollections it produces. **Note:** Such functions cannot be passed directly to
@@ -2354,7 +3156,7 @@ The following code sample shows how to override `expand` for the
 `ComputeWordLengths` class declared in the previous example:
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 The following code sample shows how to call the `CountWords` composite PTransform,
 adding it to your pipeline:
 {{< /paragraph >}}
@@ -2387,7 +3189,7 @@ transforms can include core transforms, composite transforms, or the transforms
 included in the Beam SDK libraries.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 Your composite `PTransform`s can include as many transforms as you want. These
 transforms can include core transforms, other composite transforms, or the transforms
 included in the Beam SDK libraries. They can also consume and return as many
@@ -2513,7 +3315,7 @@ records.apply("WriteToText",
 
 {{< highlight go >}}
 // The Go SDK textio doesn't support sharding on writes yet.
-// See https://issues.apache.org/jira/browse/BEAM-12664 for ways
+// See https://github.com/apache/beam/issues/21031 for ways
 // to contribute a solution.
 {{< /highlight >}}
 
@@ -2548,7 +3350,8 @@ For example, consider the following schema, representing actions in a fictitious
 
 **Purchase**
 
-<table>
+<div class="table-container-wrapper">
+<table class="table-wrapper--pr">
   <thead>
     <tr class="header">
       <th><b>Field Name</b></th>
@@ -2579,10 +3382,11 @@ For example, consider the following schema, representing actions in a fictitious
   </tbody>
 </table>
 <br/>
+</div>
 
 **ShippingAddress**
 
-<table>
+<table class="table-wrapper--pr">
   <thead>
     <tr class="header">
       <th><b>Field Name</b></th>
@@ -2616,7 +3420,7 @@ For example, consider the following schema, representing actions in a fictitious
 
 **Transaction**
 
-<table>
+<table class="table-wrapper--pr">
   <thead>
     <tr class="header">
       <th><b>Field Name</b></th>
@@ -2658,7 +3462,7 @@ While schemas themselves are language independent, they are designed to embed na
 of the Beam SDK being used. This allows Beam users to continue using native types while reaping the advantage of
 having Beam understand their element schemas.
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 In Java you could use the following set of classes to represent the purchase schema.  Beam will automatically
 infer the correct schema based on the members of the class.
 {{< /paragraph >}}
@@ -2667,9 +3471,25 @@ infer the correct schema based on the members of the class.
 In Python you can use the following set of classes to represent the purchase schema. Beam will automatically infer the correct schema based on the members of the class.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 In Go, schema encoding is used by default for struct types, with Exported fields becoming part of the schema.
 Beam will automatically infer the schema based on the fields and field tags of the struct, and their order.
+{{< /paragraph >}}
+
+{{< paragraph class="language-typescript">}}
+In Typescript, JSON objects are used to represent schema'd data.
+Unfortunately type information in Typescript is not propagated to the runtime layer,
+so it needs to be manually specified in some places (e.g. when using cross-language pipelines).
+{{< /paragraph >}}
+
+{{< paragraph class="language-yaml">}}
+In Beam YAML, all transforms produce and accept schema'd data which is used to validate the pipeline.
+{{< /paragraph >}}
+
+{{< paragraph class="language-yaml">}}
+In some cases, Beam is unable to figure out the output type of a mapping function.
+In this case, you can specify it manually using
+[JSON schema syntax](https://json-schema.org/understanding-json-schema/reference/type).
 {{< /paragraph >}}
 
 {{< highlight java >}}
@@ -2741,7 +3561,15 @@ class Transaction(typing.NamedTuple):
 {{< code_sample "sdks/go/examples/snippets/06schemas.go" schema_define >}}
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" schema_def >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" schema_output_type >}}
+{{< /highlight >}}
+
+{{< paragraph class="language-java">}}
 Using JavaBean classes as above is one way to map a schema to Java classes. However multiple Java classes might have
 the same schema, in which case the different Java types can often be used interchangeably. Beam will add implicit
 conversions between types that have matching schemas. For example, the above
@@ -2756,7 +3584,7 @@ public class TransactionPojo {
 }
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 So if we had two `PCollection`s as follows
 {{< /paragraph >}}
 
@@ -2765,7 +3593,7 @@ PCollection<Transaction> transactionBeans = readTransactionsAsJavaBean();
 PCollection<TransactionPojos> transactionPojos = readTransactionsAsPojo();
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 Then these two `PCollection`s would have the same schema, even though their Java types would be different. This means
 for example the following two code snippets are valid:
 {{< /paragraph >}}
@@ -2778,7 +3606,7 @@ transactionBeans.apply(ParDo.of(new DoFn<...>() {
 }));
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 and
 {{< /paragraph >}}
 
@@ -2789,8 +3617,8 @@ transactionPojos.apply(ParDo.of(new DoFn<...>() {
 }));
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
-Even though the in both cases the `@Element` parameter differs from the the `PCollection`'s Java type, since the
+{{< paragraph class="language-java">}}
+Even though the in both cases the `@Element` parameter differs from the `PCollection`'s Java type, since the
 schemas are the same Beam will automatically make the conversion. The built-in `Convert` transform can also be used
 to translate between Java types of equivalent schemas, as detailed below.
 {{< /paragraph >}}
@@ -2801,7 +3629,7 @@ The schema for a `PCollection` defines elements of that `PCollection` as an orde
 has a name, a type, and possibly a set of user options. The type of a field can be primitive or composite. The following
 are the primitive types currently supported by Beam:
 
-<table>
+<table class="table-wrapper--pr">
   <thead>
     <tr class="header">
       <th>Type</th>
@@ -2893,15 +3721,21 @@ Logical types are also specified by an argument, which allows creating a class o
 limited-precision decimal type would have an integer argument indicating how many digits of precision are represented.
 The argument is represented by a schema type, so can itself be a complex type.
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 In Java, a logical type is specified as a subclass of the `LogicalType` class. A custom Java class can be specified to represent the logical type and conversion functions must be supplied to convert back and forth between this Java class and the underlying Schema type representation. For example, the logical type representing nanosecond timestamp might be implemented as follows
 {{< /paragraph >}}
 
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 In Go, a logical type is specified with a custom implementation of the `beam.SchemaProvider` interface.
 For example, the logical type provider representing nanosecond timestamps
 might be implemented as follows
+{{< /paragraph >}}
+
+{{< paragraph class="language-typescript">}}
+In Typescript, a logical type defined by the [LogicalTypeInfo](https://github.com/apache/beam/blob/master/sdks/typescript/src/apache_beam/coders/row_coder.ts)
+interface which associates a logical type's URN with its representation
+and its conversion to and from this representation.
 {{< /paragraph >}}
 
 {{< highlight java >}}
@@ -2934,6 +3768,14 @@ public class TimestampNanos implements LogicalType<Instant, Row> {
 {{< code_sample "sdks/go/examples/snippets/06schemas.go" schema_logical_register >}}
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+// Register a logical type:
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" schema_logical_register >}}
+
+// And use it as follows:
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" schema_logical_use >}}
+{{< /highlight >}}
+
 #### 6.4.2. Useful logical types {#built-in-logical-types}
 
 {{< paragraph class="language-py" >}}
@@ -2941,7 +3783,7 @@ Currently the Python SDK provides minimal convenience logical types,
 other than to handle `MicrosInstant`.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 Currently the Go SDK provides minimal convenience logical types,
 other than to handle additional integer primitives, and `time.Time`.
 {{< /paragraph >}}
@@ -2952,11 +3794,11 @@ other than to handle additional integer primitives, and `time.Time`.
 This convenience builder doesn't yet exist for the Python SDK.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 This convenience builder doesn't yet exist for the Go SDK.
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 This logical type allows creating an enumeration type consisting of a set of named constants.
 {{< /paragraph >}}
 
@@ -2967,7 +3809,7 @@ Schema schema = Schema.builder()
      .build();
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 The value of this field is stored in the row as an INT32 type, however the logical type defines a value type that lets
 you access the enumeration either as a string or a value. For example:
 {{< /paragraph >}}
@@ -2978,7 +3820,7 @@ enumValue.getValue();  // Returns 0, the integer value of the constant.
 enumValue.toString();  // Returns "RED", the string value of the constant
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 Given a row object with an enumeration field, you can also extract the field as the enumeration value.
 {{< /paragraph >}}
 
@@ -2986,7 +3828,7 @@ Given a row object with an enumeration field, you can also extract the field as 
 EnumerationType.Value enumValue = row.getLogicalTypeValue("color", EnumerationType.Value.class);
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 Automatic schema inference from Java POJOs and JavaBeans automatically converts Java enums to EnumerationType logical
 types.
 {{< /paragraph >}}
@@ -2997,11 +3839,11 @@ types.
 This convenience builder doesn't yet exist for the Python SDK.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 This convenience builder doesn't yet exist for the Go SDK.
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 OneOfType allows creating a disjoint union type over a set of schema fields. For example:
 {{< /paragraph >}}
 
@@ -3015,7 +3857,7 @@ Schema schema = Schema.builder()
       .build();
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 The value of this field is stored in the row as another Row type, where all the fields are marked as nullable. The
 logical type however defines a Value object that contains an enumeration value indicating which field was set and allows
  getting just that field:
@@ -3041,7 +3883,7 @@ switch (oneOfValue.getCaseEnumType().toString()) {
 }
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 In the above example we used the field names in the switch statement for clarity, however the enum integer values could
  also be used.
 {{< /paragraph >}}
@@ -3056,31 +3898,38 @@ In addition, often Beam pipelines have intermediate stages and types, and those 
 
 #### 6.5.1. Inferring schemas {#inferring-schemas}
 
-{{< language-switcher java py go >}}
+{{< language-switcher java py go typescript >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-typescript">}}
+Unfortunately, Beam is unable to access Typescript's type information at runtime.
+Schemas must be manually declared with `beam.withRowCoder`.
+On the other hand, schema-aware operations such as `GroupBy` can be used
+without an explicit schema declared.
+{{< /paragraph >}}
+
+{{< paragraph class="language-java">}}
 Beam is able to infer schemas from a variety of common Java types.
 The `@DefaultSchema` annotation can be used to tell Beam to infer schemas from a specific type.
 The annotation takes a `SchemaProvider` as an argument, and `SchemaProvider` classes are already built in for common Java types.
 The `SchemaRegistry` can also be invoked programmatically for cases where it is not practical to annotate the Java type itself.
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 **Java POJOs**
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 A POJO (Plain Old Java Object) is a Java object that is not bound by any restriction other than the Java Language
 Specification. A POJO can contain member variables that are primitives, that are other POJOs, or are collections maps or
 arrays thereof. POJOs do not have to extend prespecified classes or extend any specific interfaces.
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 If a POJO class is annotated with `@DefaultSchema(JavaFieldSchema.class)`, Beam will automatically infer a schema for
 this class. Nested classes are supported as are classes with `List`, array, and `Map` fields.
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 For example, annotating the following class tells Beam to infer a schema from this POJO class and apply it to any
 `PCollection<TransactionPojo>`.
 {{< /paragraph >}}
@@ -3100,14 +3949,14 @@ public class TransactionPojo {
 PCollection<TransactionPojo> pojos = readPojos();
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 The `@SchemaCreate` annotation tells Beam that this constructor can be used to create instances of TransactionPojo,
 assuming that constructor parameters have the same names as the field names. `@SchemaCreate` can also be used to annotate
 static factory methods on the class, allowing the constructor to remain private. If there is no `@SchemaCreate`
  annotation then all the fields must be non-final and the class must have a zero-argument constructor.
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 There are a couple of other useful annotations that affect how Beam infers schemas. By default the schema field names
 inferred will match that of the class field names. However `@SchemaFieldName` can be used to specify a different name to
 be used for the schema field. `@SchemaIgnore` can be used to mark specific class fields as excluded from the inferred
@@ -3116,7 +3965,7 @@ schema. For example, it’s common to have ephemeral fields in a class that shou
 exclude these fields. Note that ignored fields will not be included in the encoding of these records.
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 In some cases it is not convenient to annotate the POJO class, for example if the POJO is in a different package that is
 not owned by the Beam pipeline author. In these cases the schema inference can be triggered programmatically in
 pipeline’s main function as follows:
@@ -3126,11 +3975,11 @@ pipeline’s main function as follows:
  pipeline.getSchemaRegistry().registerPOJO(TransactionPOJO.class);
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 **Java Beans**
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 Java Beans are a de-facto standard for creating reusable property classes in Java. While the full
 standard has many characteristics, the key ones are that all properties are accessed via getter and setter classes, and
 the name format for these getters and setters is standardized. A Java Bean class can be annotated with
@@ -3150,7 +3999,7 @@ public class TransactionBean {
 PCollection<TransactionBean> beans = readBeans();
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 The `@SchemaCreate` annotation can be used to specify a constructor or a static factory method, in which case the
 setters and zero-argument constructor can be omitted.
 {{< /paragraph >}}
@@ -3165,21 +4014,21 @@ public class TransactionBean {
 }
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 `@SchemaFieldName` and `@SchemaIgnore` can be used to alter the schema inferred, just like with POJO classes.
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 **AutoValue**
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 Java value classes are notoriously difficult to generate correctly. There is a lot of boilerplate you must create in
 order to properly implement a value class. AutoValue is a popular library for easily generating such classes by
 implementing a simple abstract base class.
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 Beam can infer a schema from an AutoValue class. For example:
 {{< /paragraph >}}
 
@@ -3192,12 +4041,12 @@ public abstract class TransactionValue {
 }
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 This is all that’s needed to generate a simple AutoValue class, and the above `@DefaultSchema` annotation tells Beam to
 infer a schema from it. This also allows AutoValue elements to be used inside of `PCollection`s.
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 `@SchemaFieldName` and `@SchemaIgnore` can be used to alter the schema inferred.
 {{< /paragraph >}}
 
@@ -3265,15 +4114,15 @@ output_pc = input_pc | beam.Map(lambda item: beam.Row(bank=str(item["bank"]),
                                                       purchase_amount=float(item["purchase_amount"])))
 {{< /highlight >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 Beam currently only infers schemas for exported fields in Go structs.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 **Structs**
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 Beam will automatically infer schemas for all Go structs used
 as PCollection elements, and default to encoding them using
 schema encoding.
@@ -3288,14 +4137,14 @@ type Transaction struct{
 }
 {{< /highlight >}}
 
-{{< paragraph class="language-go" >}}
-Unexported fields are ignored, and cannot be automatically infered as part of the schema.
+{{< paragraph class="language-go">}}
+Unexported fields are ignored, and cannot be automatically inferred as part of the schema.
 Fields of type  func, channel, unsafe.Pointer, or uintptr will be ignored by inference.
 Fields of interface types are ignored, unless a schema provider
 is registered for them.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 By default, schema field names will match the exported struct field names.
 In the above example, "Bank" and "PurchaseAmount" are the schema field names.
 A schema field name can be overridden with a struct tag for the field.
@@ -3308,7 +4157,7 @@ type Transaction struct{
 }
 {{< /highlight >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 Overriding schema field names is useful for compatibility cross language transforms,
 as schema fields may have different requirements or restrictions from Go exported fields.
 {{< /paragraph >}}
@@ -3319,7 +4168,7 @@ A schema on a `PCollection` enables a rich variety of relational transforms. The
 named fields allows for simple and readable aggregations that reference fields by name, similar to the aggregations in
 a SQL expression.
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 Beam does not yet support Schema transforms natively in Go. However, it will be implemented with the following behavior.
 {{< /paragraph >}}
 
@@ -3346,39 +4195,89 @@ the user ids from a `PCollection` of purchases one would write (using the `Selec
 purchases.apply(Select.fieldNames("userId"));
 {{< /highlight >}}
 
+{{< highlight py >}}
+input_pc = ... # {"user_id": ...,"bank": ..., "purchase_amount": ...}
+output_pc = input_pc | beam.Select("user_id")
+{{< /highlight >}}
+
 ##### **Nested fields**
 
+{{< paragraph class="language-py" >}}
+Support for Nested fields hasn't been developed for the Python SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
+Support for Nested fields hasn't been developed for the Go SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="language-java">}}
 Individual nested fields can be specified using the dot operator. For example, to select just the postal code from the
  shipping address one would write
+{{< /paragraph >}}
 
 {{< highlight java >}}
 purchases.apply(Select.fieldNames("shippingAddress.postCode"));
 {{< /highlight >}}
 
+<!-- {{< highlight py >}}
+input_pc = ... # {"user_id": ..., "shipping_address": "post_code": ..., "bank": ..., "purchase_amount": ...}
+output_pc = input_pc | beam.Select(post_code=lambda item: str(item["shipping_address.post_code"]))
+{{< /highlight >}} -->
 ##### **Wildcards**
 
+{{< paragraph class="language-py" >}}
+Support for wildcards hasn't been developed for the Python SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
+Support for wildcards hasn't been developed for the Go SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="language-java">}}
 The * operator can be specified at any nesting level to represent all fields at that level. For example, to select all
 shipping-address fields one would write
+{{< /paragraph >}}
 
 {{< highlight java >}}
 purchases.apply(Select.fieldNames("shippingAddress.*"));
 {{< /highlight >}}
 
+<!--
+{{< highlight py >}}
+#TODO(https://github.com/apache/beam/issues/23275): Add support for projecting nested fields
+input_pc = ... # {"user_id": ..., "shipping_address": "post_code": ..., "bank": ..., "purchase_amount": ...}
+output_pc = input_pc | beam.Select("shipping_address.*"))
+{{< /highlight >}} -->
 ##### **Arrays**
 
+{{< paragraph class="language-java">}}
 An array field, where the array element type is a row, can also have subfields of the element type addressed. When
 selected, the result is an array of the selected subfield type. For example
+{{< /paragraph >}}
+
+{{< paragraph class="language-py" >}}
+Support for Array fields hasn't been developed for the Python SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
+Support for Array fields hasn't been developed for the Go SDK yet.
+{{< /paragraph >}}
 
 {{< highlight java >}}
 purchases.apply(Select.fieldNames("transactions[].bank"));
 {{< /highlight >}}
 
+{{< paragraph class="language-java">}}
 Will result in a row containing an array field with element-type string, containing the list of banks for each
 transaction.
+{{< /paragraph >}}
 
+{{< paragraph class="language-java">}}
 While the use of  [] brackets in the selector is recommended, to make it clear that array elements are being selected,
 they can be omitted for brevity. In the future, array slicing will be supported, allowing selection of portions of the
 array.
+{{< /paragraph >}}
+
 
 ##### **Maps**
 
@@ -3390,7 +4289,7 @@ specific keys from the map. For example, given the following schema:
 
 **PurchasesByType**
 
-<table>
+<table class="table-wrapper--pr">
   <thead>
     <tr class="header">
       <th><b>Field Name</b></th>
@@ -3411,6 +4310,14 @@ The following
 {{< highlight java >}}
 purchasesByType.apply(Select.fieldNames("purchases{}.userId"));
 {{< /highlight >}}
+
+{{< paragraph class="language-py" >}}
+Support for Map fields hasn't been developed for the Python SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
+Support for Map fields hasn't been developed for the Go SDK yet.
+{{< /paragraph >}}
 
 Will result in a row containing a map field with key-type string and value-type string. The selected map will contain
 all of the keys from the original map, and the values will be the userId contained in the purchase record.
@@ -3436,9 +4343,17 @@ could select only the userId and streetAddress fields as follows
 purchases.apply(Select.fieldNames("userId", "shippingAddress.streetAddress"));
 {{< /highlight >}}
 
+{{< paragraph class="language-py" >}}
+Support for Nested fields hasn't been developed for the Python SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
+Support for Nested fields hasn't been developed for the Go SDK yet.
+{{< /paragraph >}}
+
 The resulting `PCollection` will have the following schema
 
-<table>
+<table class="table-wrapper--pr">
   <thead>
     <tr class="header">
       <th><b>Field Name</b></th>
@@ -3464,9 +4379,17 @@ The same is true for wildcard selections. The following
 purchases.apply(Select.fieldNames("userId", "shippingAddress.*"));
 {{< /highlight >}}
 
+{{< paragraph class="language-py" >}}
+Support for Wildcards hasn't been developed for the Python SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
+Support for Wildcards hasn't been developed for the Go SDK yet.
+{{< /paragraph >}}
+
 Will result in the following schema
 
-<table>
+<table class="table-wrapper--pr">
   <thead>
     <tr class="header">
       <th><b>Field Name</b></th>
@@ -3510,8 +4433,17 @@ selected field will appear as its own array field. For example
 purchases.apply(Select.fieldNames( "transactions.bank", "transactions.purchaseAmount"));
 {{< /highlight >}}
 
+{{< paragraph class="language-py" >}}
+Support for nested fields hasn't been developed for the Python SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
+Support for nested fields hasn't been developed for the Go SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="language-java">}}
 Will result in the following schema
-<table>
+<table class="table-wrapper--pr">
   <thead>
     <tr class="header">
       <th><b>Field Name</b></th>
@@ -3530,6 +4462,7 @@ Will result in the following schema
   </tbody>
 </table>
 <br/>
+{{< /paragraph >}}
 
 Wildcard selections are equivalent to separately selecting each field.
 
@@ -3547,8 +4480,18 @@ Another use of the Select transform is to flatten a nested schema into a single 
 purchases.apply(Select.flattenedSchema());
 {{< /highlight >}}
 
+{{< paragraph class="language-py" >}}
+Support for nested fields hasn't been developed for the Python SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
+Support for nested fields hasn't been developed for the Go SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="language-java">}}
 Will result in the following schema
-<table>
+<div class="table-container-wrapper">
+<table class="table-wrapper--pr">
   <thead>
     <tr class="header">
       <th><b>Field Name</b></th>
@@ -3599,23 +4542,51 @@ Will result in the following schema
   </tbody>
 </table>
 <br/>
+</div>
+{{< /paragraph >}}
 
 ##### **Grouping aggregations**
 
+{{< paragraph class="language-java">}}
 The `Group` transform allows simply grouping data by any number of fields in the input schema, applying aggregations to
 those groupings, and storing the result of those aggregations in a new schema field. The output of the `Group` transform
 has a schema with one field corresponding to each aggregation performed.
+{{< /paragraph >}}
 
+{{< paragraph class="language-py" >}}
+The `GroupBy` transform allows simply grouping data by any number of fields in the input schema, applying aggregations to
+those groupings, and storing the result of those aggregations in a new schema field. The output of the `GroupBy` transform
+has a schema with one field corresponding to each aggregation performed.
+{{< /paragraph >}}
+
+{{< paragraph class="language-java">}}
 The simplest usage of `Group` specifies no aggregations, in which case all inputs matching the provided set of fields
 are grouped together into an `ITERABLE` field. For example
+{{< /paragraph >}}
+
+{{< paragraph class="language-py" >}}
+The simplest usage of `GroupBy` specifies no aggregations, in which case all inputs matching the provided set of fields
+are grouped together into an `ITERABLE` field. For example
+{{< /paragraph >}}
 
 {{< highlight java >}}
-purchases.apply(Group.byFieldNames("userId", "shippingAddress.streetAddress"));
+purchases.apply(Group.byFieldNames("userId", "bank"));
 {{< /highlight >}}
 
-The output schema of this is:
+{{< highlight py >}}
+input_pc = ... # {"user_id": ...,"bank": ..., "purchase_amount": ...}
+output_pc = input_pc | beam.GroupBy('user_id','bank')
+{{< /highlight >}}
 
-<table>
+{{< paragraph class="language-go">}}
+Support for schema-aware grouping hasn't been developed for the Go SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="lanuage-java" >}}
+The output schema of this is:
+{{< /paragraph >}}
+
+<table class="table-wrapper--pr">
   <thead>
     <tr class="header">
       <th><b>Field Name</b></th>
@@ -3625,7 +4596,7 @@ The output schema of this is:
   <tbody>
     <tr>
       <td>key</td>
-      <td>ROW{userId:STRING, streetAddress:STRING}</td>
+      <td>ROW{userId:STRING, bank:STRING}</td>
     </tr>
     <tr>
       <td>values</td>
@@ -3658,8 +4629,20 @@ purchases.apply(Group.byFieldNames("userId")
     .aggregateField("costCents", Top.<Long>largestLongsFn(10), "topPurchases"));
 {{< /highlight >}}
 
+{{< highlight py >}}
+input_pc = ... # {"user_id": ..., "item_Id": ..., "cost_cents": ...}
+output_pc = input_pc | beam.GroupBy("user_id")
+	.aggregate_field("item_id", CountCombineFn, "num_purchases")
+	.aggregate_field("cost_cents", sum, "total_spendcents")
+	.aggregate_field("cost_cents", TopCombineFn, "top_purchases")
+{{< /highlight >}}
+
+{{< paragraph class="language-go">}}
+Support for schema-aware grouping hasn't been developed for the Go SDK yet.
+{{< /paragraph >}}
+
 The result of this aggregation will have the following schema:
-<table>
+<table class="table-wrapper--pr">
   <thead>
     <tr class="header">
       <th><b>Field Name</b></th>
@@ -3689,6 +4672,14 @@ that are likely associated with that transaction (both the user and product matc
 "natural join" - one in which the same field names are used on both the left-hand and right-hand sides of the join -
 and is specified with the `using` keyword:
 
+{{< paragraph class="language-py" >}}
+Support for joins hasn't been developed for the Python SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
+Support for joins hasn't been developed for the Go SDK yet.
+{{< /paragraph >}}
+
 {{< highlight java >}}
 PCollection<Transaction> transactions = readTransactions();
 PCollection<Review> reviews = readReviews();
@@ -3696,8 +4687,9 @@ PCollection<Row> joined = transactions.apply(
     Join.innerJoin(reviews).using("userId", "productId"));
 {{< /highlight >}}
 
+{{< paragraph class="language-java">}}
 The resulting schema is the following:
-<table>
+<table class="table-wrapper--pr">
   <thead>
     <tr class="header">
       <th><b>Field Name</b></th>
@@ -3716,11 +4708,20 @@ The resulting schema is the following:
   </tbody>
 </table>
 <br/>
+{{< /paragraph >}}
 
 Each resulting row contains one Transaction and one Review that matched the join condition.
 
 If the fields to match in the two schemas have different names, then the on function can be used. For example, if the
 Review schema named those fields differently than the Transaction schema, then we could write the following:
+
+{{< paragraph class="language-py" >}}
+Support for joins hasn't been developed for the Python SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
+Support for joins hasn't been developed for the Go SDK yet.
+{{< /paragraph >}}
 
 {{< highlight java >}}
 PCollection<Row> joined = transactions.apply(
@@ -3742,13 +4743,21 @@ can optionally be expanded - providing individual joined records, as in the `Joi
 processed in unexpanded format - providing the join key along with Iterables of all records from each input that matched
 that key.
 
+{{< paragraph class="language-py" >}}
+Support for joins hasn't been developed for the Python SDK yet.
+{{< /paragraph >}}
+
+{{< paragraph class="language-go">}}
+Support for joins hasn't been developed for the Go SDK yet.
+{{< /paragraph >}}
+
 ##### **Filtering events**
 
 The `Filter` transform can be configured with a set of predicates, each one based one specified fields. Only records for
 which all predicates return true will pass the filter. For example the following
 
 {{< highlight java >}}
-purchases.apply(Filter
+purchases.apply(Filter.create()
     .whereFieldName("costCents", c -> c > 100 * 20)
     .whereFieldName("shippingAddress.country", c -> c.equals("de"));
 {{< /highlight >}}
@@ -3848,7 +4857,7 @@ A `PCollection` with a schema can apply a `ParDo`, just like any other `PCollect
 
 ##### **Input conversion**
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 Beam does not yet support input conversion in Go.
 {{< /paragraph >}}
 
@@ -3864,7 +4873,7 @@ If there were no schema, then the applied `DoFn` would have to accept an element
 since there is a schema, you could apply the following DoFn:
 
 {{< highlight java >}}
-purchases.appy(ParDo.of(new DoFn<PurchasePojo, PurchasePojo>() {
+purchases.apply(ParDo.of(new DoFn<PurchasePojo, PurchasePojo>() {
   @ProcessElement public void process(@Element PurchaseBean purchase) {
       ...
   }
@@ -3918,7 +4927,7 @@ automatically convert to any matching schema type, just like when reading the en
 
 ## 7. Data encoding and type safety {#data-encoding-and-type-safety}
 
-{{< language-switcher java py go >}}
+{{< language-switcher java py go typescript >}}
 
 When Beam runners execute your pipeline, they often need to materialize the
 intermediate data in your `PCollection`s, which requires converting elements to
@@ -3930,7 +4939,7 @@ the elements of a given `PCollection` may be encoded and decoded.
 > typically be done explicitly, using transforms such as `ParDo` or
 > `MapElements`.
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 In the Beam SDK for Java, the type `Coder` provides the methods required for
 encoding and decoding data. The SDK for Java provides a number of Coder
 subclasses that work with a variety of standard Java types, such as Integer,
@@ -3948,13 +4957,21 @@ Coder subclasses in the
 package.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 Standard Go types like `int`, `int64` `float64`, `[]byte`, and `string` and more are coded using builtin coders.
 Structs and pointers to structs default using Beam Schema Row encoding.
 However, users can build and register custom coders with `beam.RegisterCoder`.
 You can find available Coder functions in the
-[coder](https://pkg.go.dev/github.com/apache/beam/sdks/v2/go/pkg/beam/core/graph/coders)
+[coder](https://pkg.go.dev/github.com/apache/beam/sdks/go/pkg/beam/core/graph/coder)
 package.
+{{< /paragraph >}}
+
+{{< paragraph class="language-typescript">}}
+Standard Typescript types like `number`, `UInt8Array` and `string` and more are coded using builtin coders.
+Json objects and arrays are encoded via a BSON encoding.
+For these types, coders need not be specified unless interacting with cross-language transforms.
+Users can build custom coders by extending `beam.coders.Coder`
+for use with `withCoderInternal`, but generally logical types are preferred for this case.
 {{< /paragraph >}}
 
 > Note that coders do not necessarily have a 1:1 relationship with types. For
@@ -3971,13 +4988,13 @@ based on its element type or the transform that produces it, however, in some
 cases the pipeline author will need to specify a `Coder` explicitly, or develop
 a `Coder` for their custom type.
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 You can explicitly set the coder for an existing `PCollection` by using the
 method `PCollection.setCoder`. Note that you cannot call `setCoder` on a
 `PCollection` that has been finalized (e.g. by calling `.apply` on it).
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 You can get the coder for an existing `PCollection` by using the method
 `getCoder`. This method will fail with an `IllegalStateException` if a coder has
 not been set and cannot be inferred for the given `PCollection`.
@@ -3986,7 +5003,7 @@ not been set and cannot be inferred for the given `PCollection`.
 Beam SDKs use a variety of mechanisms when attempting to automatically infer the
 `Coder` for a `PCollection`.
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 Each pipeline object has a `CoderRegistry`. The `CoderRegistry` represents a
 mapping of Java types to the default coders that the pipeline should use for
 `PCollection`s of each type.
@@ -3998,12 +5015,12 @@ Python types to the default coder that should be used for `PCollection`s of each
 type.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 The Beam SDK for Go allows users to register default coder
 implementations with `beam.RegisterCoder`.
 {{< /paragraph >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 By default, the Beam SDK for Java automatically infers the `Coder` for the
 elements of a `PCollection` produced by a `PTransform` using the type parameter
 from the transform's function object, such as `DoFn`. In the case of `ParDo`,
@@ -4025,7 +5042,7 @@ Python will automatically infer the default `Coder` for the output `PCollection`
 (in the default pipeline `CoderRegistry`, this is `BytesCoder`).
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 By default, the Beam SDK for Go automatically infers the `Coder` for the elements of an output `PCollection` by the output of the transform's function object, such as a `DoFn`.
  In the case of `ParDo`, for example a `DoFn`
 with the parameters of `v int, emit func(string)` accepts an input element of type `int`
@@ -4043,7 +5060,7 @@ In such a case, the Beam SDK for Go will automatically infer the default `Coder`
 
 </span>
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 When using `Create`, the simplest way to ensure that you have the correct coder
 is by invoking `withCoder` when you apply the `Create` transform.
 {{< /paragraph >}}
@@ -4061,8 +5078,9 @@ types for any pipeline you create using the Beam SDK for
 <span class="language-java">Java</span><span class="language-py">Python</span>.
 The following table shows the standard mapping:
 
-{{< paragraph class="language-java" >}}
-<table>
+{{< paragraph class="language-java">}}
+<div class="table-container-wrapper">
+<table class="table-wrapper--pr">
   <thead>
     <tr class="header">
       <th>Java Type</th>
@@ -4124,10 +5142,11 @@ The following table shows the standard mapping:
     </tr>
   </tbody>
 </table>
+</div>
 {{< /paragraph >}}
 
 {{< paragraph class="language-py" >}}
-<table>
+<table class="table-wrapper--pr">
   <thead>
     <tr class="header">
       <th>Python Type</th>
@@ -4161,7 +5180,7 @@ The following table shows the standard mapping:
 
 #### 7.2.1. Looking up a default coder {#default-coder-lookup}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 You can use the method `CoderRegistry.getCoder` to determine the default
 Coder for a Java type. You can access the `CoderRegistry` for a given pipeline
 by using the method `Pipeline.getCoderRegistry`. This allows you to determine
@@ -4176,7 +5195,7 @@ for a Python type. You can use `coders.registry` to access the `CoderRegistry`.
 This allows you to determine (or set) the default Coder for a Python type.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 You can use the `beam.NewCoder` function to determine the default Coder for a Go type.
 {{< /paragraph >}}
 
@@ -4195,9 +5214,9 @@ to get the `CoderRegistry` object, and then use the method
 to register a new `Coder` for the target type.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 To set the default Coder for a Go type you use the function `beam.RegisterCoder` to register a encoder and decoder functions for the target type.
-However, built in types like `int`, `string`, `float64`, etc cannot have their coders overridde.
+However, built in types like `int`, `string`, `float64`, etc cannot have their coders override.
 {{< /paragraph >}}
 
 {{< paragraph class="language-java language-py" >}}
@@ -4207,7 +5226,7 @@ The following example code demonstrates how to set a default Coder, in this case
 values for a pipeline.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 The following example code demonstrates how to set a custom Coder for `MyCustomType` elements.
 {{< /paragraph >}}
 
@@ -4268,7 +5287,7 @@ public class MyCustomDataType {
 }
 {{< /highlight >}}
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 If you've created a custom coder to match your data type, and you want to use
 the `@DefaultCoder` annotation, your coder class must implement a static
 `Coder.of(Class<T>)` factory method.
@@ -4356,7 +5375,7 @@ example pipeline in the figure below:
 
 In the above pipeline, we create an unbounded `PCollection` by reading a set of
 key/value pairs using `KafkaIO`, and then apply a windowing function to that
-collection using the `Window` transform. We then apply a `ParDo` to the the
+collection using the `Window` transform. We then apply a `ParDo` to the
 collection, and then later group the result of that `ParDo` using `GroupByKey`.
 The windowing function has no effect on the `ParDo` transform, because the
 windows are not actually used until they're needed for the `GroupByKey`.
@@ -4420,10 +5439,12 @@ You can define different kinds of windows to divide the elements of your
 You can also define your own `WindowFn` if you have a more complex need.
 
 Note that each element can logically belong to more than one window, depending
-on the windowing function you use. Sliding time windowing, for example, creates
-overlapping windows wherein a single element can be assigned to multiple
-windows.
-
+on the windowing function you use. Sliding time windowing, for example, can
+create overlapping windows wherein a single element can be assigned to multiple
+windows. However, each element in a `PCollection` can only be in one window, so
+if an element is assigned to multiple windows, the element is conceptually
+duplicated into each of the windows and each element is identical except for its
+window.
 
 #### 8.2.1. Fixed time windows {#fixed-time-windows}
 
@@ -4505,6 +5526,11 @@ and emitted, and helps refine how the windowing function performs with respect
 to late data and computing early results. See the [triggers](#triggers) section
 for more information.
 
+{{< paragraph class="language-yaml">}}
+In Beam YAML windowing specifications can also be placed directly on any
+transform rather than requiring an explicit `WindowInto` transform.
+{{< /paragraph >}}
+
 #### 8.3.1. Fixed-time windows {#using-fixed-time-windows}
 
 The following example code shows how to apply `Window` to divide a `PCollection`
@@ -4522,6 +5548,14 @@ into fixed windows, each 60 seconds in length:
 
 {{< highlight go >}}
 {{< code_sample "sdks/go/examples/snippets/08windowing.go" setting_fixed_windows >}}
+{{< /highlight >}}
+
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" setting_fixed_windows >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" setting_fixed_windows >}}
 {{< /highlight >}}
 
 #### 8.3.2. Sliding time windows {#using-sliding-time-windows}
@@ -4544,6 +5578,14 @@ begins every five seconds:
 {{< code_sample "sdks/go/examples/snippets/08windowing.go" setting_sliding_windows >}}
 {{< /highlight >}}
 
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" setting_sliding_windows >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" setting_sliding_windows >}}
+{{< /highlight >}}
+
 #### 8.3.3. Session windows {#using-session-windows}
 
 The following example code shows how to apply `Window` to divide a `PCollection`
@@ -4562,6 +5604,14 @@ least 10 minutes (600 seconds):
 
 {{< highlight go >}}
 {{< code_sample "sdks/go/examples/snippets/08windowing.go" setting_session_windows >}}
+{{< /highlight >}}
+
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" setting_session_windows >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" setting_session_windows >}}
 {{< /highlight >}}
 
 Note that the sessions are per-key — each key in the collection will have its
@@ -4585,6 +5635,14 @@ a single global window for a `PCollection`:
 
 {{< highlight go >}}
 {{< code_sample "sdks/go/examples/snippets/08windowing.go" setting_global_window >}}
+{{< /highlight >}}
+
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" setting_global_window >}}
+{{< /highlight >}}
+
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" setting_global_window >}}
 {{< /highlight >}}
 
 ### 8.4. Watermarks and late data {#watermarks-and-late-data}
@@ -4709,6 +5767,10 @@ with a `DoFn` to attach the timestamps to each element in your `PCollection`.
 {{< code_sample "sdks/go/examples/snippets/08windowing.go" setting_timestamp_pipeline >}}
 {{< /highlight >}}
 
+{{< highlight yaml >}}
+{{< code_sample "sdks/python/apache_beam/yaml/programming_guide_test.py" setting_timestamp >}}
+{{< /highlight >}}
+
 ## 9. Triggers {#triggers}
 
 <span class="language-go">
@@ -4780,7 +5842,7 @@ timestamps attached to the data elements. The watermark is a global progress
 metric, and is Beam's notion of input completeness within your pipeline at any
 given point. <span class="language-java">`AfterWatermark.pastEndOfWindow()`</span>
 <span class="language-py">`AfterWatermark`</span>
-<span class="language-go">`window.AfterEndOfWindow`</span> *only* fires when the
+<span class="language-go">`trigger.AfterEndOfWindow`</span> *only* fires when the
 watermark passes the end of the window.
 
 In addition, you can configure triggers that fire if your pipeline receives data
@@ -4826,7 +5888,7 @@ modifying this behavior.
 The `AfterProcessingTime` trigger operates on *processing time*. For example,
 the <span class="language-java">`AfterProcessingTime.pastFirstElementInPane()`</span>
 <span class="language-py">`AfterProcessingTime`</span>
-<span class="language-go">`window.TriggerAfterProcessingTime()`</span> trigger emits a window
+<span class="language-go">`trigger.AfterProcessingTime()`</span> trigger emits a window
 after a certain amount of processing time has passed since data was received.
 The processing time is determined by the system clock, rather than the data
 element's timestamp.
@@ -4840,7 +5902,7 @@ window.
 Beam provides one data-driven trigger,
 <span class="language-java">`AfterPane.elementCountAtLeast()`</span>
 <span class="language-py">`AfterCount`</span>
-<span class="language-go">`window.TriggerAfterCount()`</span>. This trigger works on an element
+<span class="language-go">`trigger.AfterCount()`</span>. This trigger works on an element
 count; it fires after the current pane has collected at least *N* elements. This
 allows a window to emit early results (before all the data has accumulated),
 which can be particularly useful if you are using a single global window.
@@ -4848,7 +5910,7 @@ which can be particularly useful if you are using a single global window.
 It is important to note that if, for example, you specify
 <span class="language-java">`.elementCountAtLeast(50)`</span>
 <span class="language-py">AfterCount(50)</span>
-<span class="language-go">`window.TriggerAfterCount(50)`</span> and only 32 elements arrive,
+<span class="language-go">`trigger.AfterCount(50)`</span> and only 32 elements arrive,
 those 32 elements sit around forever. If the 32 elements are important to you,
 consider using [composite triggers](#composite-triggers) to combine multiple
 conditions. This allows you to specify multiple firing conditions such as "fire
@@ -4860,7 +5922,7 @@ When you set a windowing function for a `PCollection` by using the
 <span class="language-java">`Window`</span><span class="language-py">`WindowInto`</span><span class="language-go">`beam.WindowInto`</span>
 transform, you can also specify a trigger.
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 You set the trigger(s) for a `PCollection` by invoking the method
 `.triggering()` on the result of your `Window.into()` transform. This code
 sample sets a time-based trigger for a `PCollection`, which emits results one
@@ -4877,7 +5939,7 @@ element in that window has been processed. The `accumulation_mode` parameter
 sets the window's **accumulation mode**.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 You set the trigger(s) for a `PCollection` by passing in the `beam.Trigger` parameter
 when you use the `beam.WindowInto` transform. This code sample sets a time-based
 trigger for a `PCollection`, which emits results one minute after the first
@@ -4906,13 +5968,13 @@ element in that window has been processed.
 
 #### 9.4.1. Window accumulation modes {#window-accumulation-modes}
 
-When you specify a trigger, you must also set the the window's **accumulation
+When you specify a trigger, you must also set the window's **accumulation
 mode**. When a trigger fires, it emits the current contents of the window as a
 pane. Since a trigger can fire multiple times, the accumulation mode determines
 whether the system *accumulates* the window panes as the trigger fires, or
 *discards* them.
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 To set a window to accumulate the panes that are produced when the trigger
 fires, invoke`.accumulatingFiredPanes()` when you set the trigger. To set a
 window to discard fired panes, invoke `.discardingFiredPanes()`.
@@ -4925,7 +5987,7 @@ trigger. To set a window to discard fired panes, set `accumulation_mode` to
 `DISCARDING`.
 {{< /paragraph >}}
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 To set a window to accumulate the panes that are produced when the trigger
 fires, set the `beam.AccumulationMode` parameter to `beam.PanesAccumulate()` when you set the
 trigger. To set a window to discard fired panes, set `beam.AccumulationMode` to
@@ -4946,7 +6008,7 @@ The following diagram shows data events for key X as they arrive in the
 PCollection and are assigned to windows. To keep the diagram a bit simpler,
 we'll assume that the events all arrive in the pipeline in order.
 
-![Diagram of data events for acculumating mode example](/images/trigger-accumulation.png)
+![Diagram of data events for accumulating mode example](/images/trigger-accumulation.png)
 
 ##### 9.4.1.1. Accumulating mode {#accumulating-mode}
 
@@ -5067,7 +6129,7 @@ example trigger code fires on the following conditions:
 
 *   Any time late data arrives, after a ten-minute delay
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 *   After two days, we assume no more data of interest will arrive, and the
     trigger stops executing
 {{< /paragraph >}}
@@ -5139,7 +6201,7 @@ after jobs have completed.
 There are three types of metrics that are supported for the moment: `Counter`, `Distribution` and
 `Gauge`.
 
-{{< paragraph class="language-go" >}}
+{{< paragraph class="language-go">}}
 In the Beam SDK for Go, a `context.Context` provided by the framework must be passed to the metric
 or the metric value will not be recorded. The framework will automatically provide a valid
 `context.Context` to `ProcessElement` and similar methods when it's the first parameter.
@@ -5168,6 +6230,18 @@ func (fn *MyDoFn) ProcessElement(ctx context.Context, ...) {
 }
 {{< /highlight >}}
 
+{{< highlight py>}}
+from apache_beam import metrics
+
+class MyDoFn(beam.DoFn):
+  def __init__(self):
+    self.counter = metrics.Metrics.counter("namespace", "counter1")
+
+  def process(self, element):
+    self.counter.inc()
+    yield element
+{{< /highlight >}}
+
 **Distribution**: A metric that reports information about the distribution of reported values.
 
 {{< highlight java >}}
@@ -5187,9 +6261,19 @@ var distribution = beam.NewDistribution("namespace", "distribution1")
 
 func (fn *MyDoFn) ProcessElement(ctx context.Context, v int64, ...) {
     // create a distribution (histogram) of the values
-	distribution.Inc(ctx, v)
+	distribution.Update(ctx, v)
 	...
 }
+{{< /highlight >}}
+
+{{< highlight py >}}
+class MyDoFn(beam.DoFn):
+  def __init__(self):
+    self.distribution = metrics.Metrics.distribution("namespace", "distribution1")
+
+  def process(self, element):
+    self.distribution.update(element)
+    yield element
 {{< /highlight >}}
 
 **Gauge**: A metric that reports the latest value out of reported values. Since metrics are
@@ -5217,6 +6301,16 @@ func (fn *MyDoFn) ProcessElement(ctx context.Context, v int64, ...) {
 }
 {{< /highlight >}}
 
+{{< highlight py >}}
+class MyDoFn(beam.DoFn):
+  def __init__(self):
+    self.gauge = metrics.Metrics.gauge("namespace", "gauge1")
+
+  def process(self, element):
+    self.gauge.set(element)
+    yield element
+{{< /highlight >}}
+
 ### 10.3. Querying metrics {#querying-metrics}
 {{< paragraph class="language-java language-python">}}
 `PipelineResult` has a method `metrics()` which returns a `MetricResults` object that allows
@@ -5229,6 +6323,17 @@ matching a given filter.
 accessing metrics. The main method available in `metrics.Results` allows querying for all metrics
 matching a given filter.  It takes in a predicate with a `SingleResult` parameter type, which can
 be used for custom filters.
+{{< /paragraph >}}
+
+{{< paragraph class="language-py">}}
+`PipelineResult` has a `metrics` method that returns a `MetricResults` object. The `MetricResults` object  lets you
+access metrics. The main method available in the `MetricResults` object, `query`, lets you
+query all metrics that match a given filter. The `query` method takes in a `MetricsFilter` object that you can
+use to filter by several different criteria. Querying a `MetricResults` object returns
+a dictionary of lists of `MetricResult` objects, with the dictionary organizing them by type,
+for example, `Counter`, `Distribution`, and `Gauge`. The `MetricResult` object contains a `result` function
+that gets the value of the metric and contains a `key` property. The `key` property contains information about
+the namespace and the name of the metric.
 {{< /paragraph >}}
 
 {{< highlight java >}}
@@ -5256,6 +6361,20 @@ public interface MetricResult<T> {
 
 {{< highlight go >}}
 {{< code_sample "sdks/go/examples/snippets/10metrics.go" metrics_query >}}
+{{< /highlight >}}
+
+{{< highlight py >}}
+class PipelineResult:
+  def metrics(self) -> MetricResults:
+  """Returns a the metric results from the pipeline."""
+
+class MetricResults:
+  def query(self, filter: MetricsFilter) -> Dict[str, List[MetricResult]]:
+    """Filters the results against the specified filter."""
+
+class MetricResult:
+  def result(self):
+    """Returns the value of the metric."""
 {{< /highlight >}}
 
 ### 10.4. Using metrics in pipeline {#using-metrics}
@@ -5300,6 +6419,26 @@ public class MyMetricsDoFn extends DoFn<Integer, Integer> {
 {{< code_sample "sdks/go/examples/snippets/10metrics.go" metrics_pipeline >}}
 {{< /highlight >}}
 
+{{< highlight py >}}
+class MyMetricsDoFn(beam.DoFn):
+  def __init__(self):
+    super().__init__()
+    self.counter = metrics.Metrics.counter("namespace", "counter1")
+
+  def process(self, element):
+    self.counter.inc()
+    yield element
+
+with beam.Pipeline() as p:
+  p | beam.Create([1, 2, 3]) | beam.ParDo(MyMetricsDoFn())
+
+metrics_filter = metrics.MetricsFilter().with_name("counter1")
+query_result  = p.result.metrics().query(metrics_filter)
+
+for metric in query_result["counters"]:
+  print(metric)
+{{< /highlight >}}
+
 ### 10.5. Export metrics {#export-metrics}
 
 Beam metrics can be exported to external sinks. If a metrics sink is set up in the configuration, the runner will push metrics to it at a default 5s period.
@@ -5332,7 +6471,7 @@ care must be taken to remember that the elements in input PCollection have no gu
 program logic is resilient to this. Unit tests written using the DirectRunner will shuffle the order of element
 processing, and are recommended to test for correctness.
 
-{{< paragraph class="language-java" >}}
+{{< paragraph class="language-java">}}
 In Java, DoFn declares states to be accessed by creating final `StateSpec` member variables representing each state. Each
 state must be named using the `StateId` annotation; this name is unique to a ParDo in the graph and has no relation
 to other nodes in the graph. A `DoFn` can declare multiple state variables.
@@ -5344,9 +6483,17 @@ In Python, DoFn declares states to be accessed by creating `StateSpec` class mem
 to other nodes in the graph. A `DoFn` can declare multiple state variables.
 {{< /paragraph >}}
 
-<span class="language-go">
+{{< paragraph class="language-go">}}
+In Go, DoFn declares states to be accessed by creating state struct member variables representing each state. Each
+state variable is initialized with a key, this key is unique to a ParDo in the graph and has no relation
+to other nodes in the graph. If no name is supplied, the key defaults to the member variable's name.
+A `DoFn` can declare multiple state variables.
+{{< /paragraph >}}
 
-> **Note:** The Beam SDK for Go does not yet support a State and Timer API. See [BEAM-10660](https://issues.apache.org/jira/browse/BEAM-10660) to contribute.
+<span class="language-typescript">
+
+> **Note:** The Beam SDK for Typescript does not yet support a State and Timer API,
+but it is possible to use these features from cross-language pipelines (see below).
 
 </span>
 
@@ -5379,6 +6526,10 @@ perUser.apply(ParDo.of(new DoFn<KV<String, ValueT>, OutputT>() {
 }));
 {{< /highlight >}}
 
+{{< highlight go >}}
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" value_state >}}
+{{< /highlight >}}
+
 Beam also allows explicitly specifying a coder for `ValueState` values. For example:
 
 {{< highlight java >}}
@@ -5404,7 +6555,11 @@ _ = (p | 'Read per user' >> ReadPerUser()
 {{< /highlight >}}
 
 {{< highlight go >}}
-This is not supported yet, see BEAM-10660.
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" value_state_coder >}}
+{{< /highlight >}}
+
+{{< highlight typescript >}}
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" stateful_dofn >}}
 {{< /highlight >}}
 
 #### CombiningState
@@ -5436,7 +6591,7 @@ _ = (p | 'Read per user' >> ReadPerUser()
 {{< /highlight >}}
 
 {{< highlight go >}}
-This is not supported yet, see BEAM-10660.
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" combining_state >}}
 {{< /highlight >}}
 
 #### BagState
@@ -5482,9 +6637,113 @@ _ = (p | 'Read per user' >> ReadPerUser()
 {{< /highlight >}}
 
 {{< highlight go >}}
-This is not supported yet, see BEAM-10660.
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" bag_state >}}
 {{< /highlight >}}
 
+#### SetState
+
+A common use case for state is to accumulate unique elements. `SetState` allows for accumulating an unordered set
+of elements.
+
+{{< highlight java >}}
+PCollection<KV<String, ValueT>> perUser = readPerUser();
+perUser.apply(ParDo.of(new DoFn<KV<String, ValueT>, OutputT>() {
+  @StateId("state") private final StateSpec<SetState<ValueT>> uniqueElements = StateSpecs.bag();
+
+  @ProcessElement public void process(
+    @Element KV<String, ValueT> element,
+    @StateId("state") SetState<ValueT> state) {
+    // Add the current element to the set state for this key.
+    state.add(element.getValue());
+    if (shouldFetch()) {
+      // Occasionally we fetch and process the values.
+      Iterable<ValueT> values = state.read();
+      processValues(values);
+      state.clear();  // Clear the state for this key.
+    }
+  }
+}));
+{{< /highlight >}}
+{{< highlight py >}}
+class SetStateDoFn(DoFn):
+  UNIQUE_ELEMENTS = SetStateSpec('buffer', coders.VarIntCoder())
+
+  def process(self, element_pair, state=DoFn.StateParam(UNIQUE_ELEMENTS)):
+    state.add(element_pair[1])
+    if should_fetch():
+      unique_elements = list(state.read())
+      process_values(unique_elements)
+      state.clear()
+
+_ = (p | 'Read per user' >> ReadPerUser()
+       | 'Set state pardo' >> beam.ParDo(SetStateDoFn()))
+{{< /highlight >}}
+
+#### OrderListState
+
+`OrderListState` state that accumulate elements in an ordered List.
+
+{{< highlight java >}}
+PCollection<KV<String, ValueT>> perUser = readPerUser();
+perUser.apply(ParDo.of(new DoFn<KV<String, ValueT>, OutputT>() {
+  @StateId("state") private final StateSpec<OrderedListState<ValueT>> uniqueElements = StateSpecs.bag();
+
+  @ProcessElement public void process(
+    @Element KV<String, ValueT> element,
+    @StateId("state") SetState<ValueT> state) {
+    // Add the current element to the set state for this key.
+    state.add(element.getValue());
+    if (shouldFetch()) {
+      // Occasionally we fetch and process the values.
+      Iterable<ValueT> values = state.read();
+      processValues(values);
+      state.clear();  // Clear the state for this key.
+    }
+  }
+}));
+{{< /highlight >}}
+{{< highlight py >}}
+class OrderedListStateDoFn(DoFn):
+  STATE_ELEMENTS = OrderedListStateSpec('buffer', coders.ListCoder())
+
+  def process(self, element_pair, state=DoFn.StateParam(STATE_ELEMENTS)):
+    state.add(element_pair[1])
+    if should_fetch():
+      elements = list(state.read())
+      process_values(elements)
+      state.clear()
+
+_ = (p | 'Read per user' >> ReadPerUser()
+       | 'Set state pardo' >> beam.ParDo(OrderedListStateDoFn()))
+{{< /highlight >}}
+
+{{< highlight go >}}
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" ordered_list_state >}}
+{{< /highlight >}}
+
+#### MultimapState {#multimap-state}
+`MultimapState` allow one key mapped to different values but the key value could be unordered.
+
+{{< highlight java >}}
+
+  @StateId(stateId)
+  private final StateSpec<MultimapState<String, Integer>> multimapState =
+      StateSpecs.multimap(StringUtf8Coder.of(), VarIntCoder.of());
+
+  @ProcessElement
+  public void processElement(
+      ProcessContext c,
+      @Element KV<String, KV<String, Integer>> element,
+      @StateId(stateId) MultimapState<String, Integer> state,
+      @StateId(countStateId) CombiningState<Integer, int[], Integer> count,
+      OutputReceiver<KV<String, Integer>> r) {
+    ReadableState<Boolean> isEmptyView = state.isEmpty();
+    boolean isEmpty = state.isEmpty().read();
+
+    KV<String, Integer> value = element.getValue();
+    state.put(value.getKey(), value.getValue());
+  }
+{{< /highlight >}}
 ### 11.2. Deferred state reads {#deferred-state-reads}
 
 When a `DoFn` contains multiple state specifications, reading each one in order can be slow. Calling the `read()` function
@@ -5511,11 +6770,11 @@ perUser.apply(ParDo.of(new DoFn<KV<String, ValueT>, OutputT>() {
 {{< /highlight >}}
 
 {{< highlight py >}}
-This is not supported yet, see BEAM-11506.
+This is not supported yet, see https://github.com/apache/beam/issues/20739.
 {{< /highlight >}}
 
 {{< highlight go >}}
-This is not supported yet, see BEAM-10660.
+This is not supported yet, see https://github.com/apache/beam/issues/22964.
 {{< /highlight >}}
 
 If however there are code paths in which the states are not fetched, then annotating with @AlwaysFetched will add
@@ -5598,14 +6857,14 @@ class EventTimerDoFn(DoFn):
 
   @on_timer(TIMER)
   def expiry_callback(self, buffer = DoFn.StateParam(ALL_ELEMENTS)):
-    state.clear()
+    buffer.clear()
 
 _ = (p | 'Read per user' >> ReadPerUser()
        | 'EventTime timer pardo' >> beam.ParDo(EventTimerDoFn()))
 {{< /highlight >}}
 
 {{< highlight go >}}
-This is not supported yet, see BEAM-10660.
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" event_time_timer >}}
 {{< /highlight >}}
 
 #### 11.3.2. Processing-time timers {#processing-time-timers}
@@ -5650,14 +6909,14 @@ class ProcessingTimerDoFn(DoFn):
   @on_timer(TIMER)
   def expiry_callback(self, buffer = DoFn.StateParam(ALL_ELEMENTS)):
     # Process timer.
-    state.clear()
+    buffer.clear()
 
 _ = (p | 'Read per user' >> ReadPerUser()
        | 'ProcessingTime timer pardo' >> beam.ParDo(ProcessingTimerDoFn()))
 {{< /highlight >}}
 
 {{< highlight go >}}
-This is not supported yet, see BEAM-10660.
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" processing_time_timer >}}
 {{< /highlight >}}
 
 #### 11.3.3. Dynamic timer tags {#dynamic-timer-tags}
@@ -5718,7 +6977,7 @@ _ = (p | 'Read per user' >> ReadPerUser()
 {{< /highlight >}}
 
 {{< highlight go >}}
-This is not supported yet, see BEAM-10660.
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" dynamic_timer_tags >}}
 {{< /highlight >}}
 
 #### 11.3.4. Timer output timestamps {#timer-output-timestamps}
@@ -5770,6 +7029,10 @@ perUser.apply(ParDo.of(new DoFn<KV<String, ValueT>, OutputT>() {
 }));
 {{< /highlight >}}
 
+{{< highlight go >}}
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" timer_output_timestamps_bad >}}
+{{< /highlight >}}
+
 The problem with this code is that the ParDo is buffering elements, however nothing is preventing the watermark
 from advancing past the timestamp of those elements, so all those elements might be dropped as late data. In order
 to prevent this from happening, an output timestamp needs to be set on the timer to prevent the watermark from advancing
@@ -5806,7 +7069,7 @@ perUser.apply(ParDo.of(new DoFn<KV<String, ValueT>, OutputT>() {
         ? Instant.now().plus(Duration.standardMinutes(1)) : new Instant(timerTimestampMs);
     // Setting the outputTimestamp to the minimum timestamp in the bag holds the watermark to that timestamp until the
     // timer fires. This allows outputting all the elements with their timestamp.
-    timer.withOutputTimestamp(minTimestamp.read()).set(timerToSet).
+    timer.withOutputTimestamp(minTimestamp.read()).s et(timerToSet).
     timerTimestamp.write(timerToSet.getMillis());
   }
 
@@ -5825,11 +7088,74 @@ perUser.apply(ParDo.of(new DoFn<KV<String, ValueT>, OutputT>() {
 {{< /highlight >}}
 
 {{< highlight py >}}
-Timer output timestamps is not yet supported in Python SDK. See BEAM-11507.
+Timer output timestamps is not yet supported in Python SDK. See https://github.com/apache/beam/issues/20705.
 {{< /highlight >}}
 
 {{< highlight go >}}
-This is not supported yet, see BEAM-10660.
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" timer_output_timestamps_good >}}
+{{< /highlight >}}
+
+
+#### 11.3.5 Timer Callback Parameters {#timer-callback-parameters}
+The following parameters are provided for the timer callback methods which could be used for debuging.
+
+1. Window: This can provide the window object to access the window start and end time.
+2. Timestamp: This can provide the timestamp at which the timer was set to fire.
+3. Key: The key was associated with the element.
+
+{{< highlight java >}}
+
+
+@OnTimer(END_OF_WINDOW_ID)
+public void onWindowTimer(
+        OutputReceiver<KV<K, Iterable<InputT>>> receiver,
+        @Timestamp Instant timestamp,
+        @Key K key,
+        @StateId(BATCH_ID) BagState<InputT> batch,
+        BoundedWindow window) {
+
+      // You can write your debug code here.
+      LOG.debug(
+          "*** END OF WINDOW *** for key {} and timer timestamp {} in windows {}",
+          key.toString(),
+          timestamp.toString(),
+          window.toString());
+}
+{{< /highlight >}}
+
+{{< highlight py >}}
+class TimerDoFn(DoFn):
+  BAG_STATE = BagStateSpec('buffer', coders.VarIntCoder())
+  TIMER = TimerSpec('timer', TimeDomain.REAL_TIME)
+
+  def process(self,
+              element_pair,
+              bag_state=DoFn.StateParam(BAG_STATE),
+              timer=DoFn.TimerParam(TIMER)):
+    ...
+
+  @on_timer(TIMER)
+  def expiry_callback(self,
+                      bag_state=DoFn.StateParam(BAG_STATE),
+                      window=DoFn.WindowParam,
+                      timestamp=DoFn.TimestampParam,
+                      key=DoFn.KeyParam):
+    # You can potentlly print these parameter to get more information for debugging.
+    bag_state.clear()
+    log.info(f"Key: {key}, timestamp: {timestamp}, window: {window}")
+    yield (timer_tag, 'fired')
+
+{{< /highlight >}}
+{{< highlight go >}}
+
+func (s *Stateful) ProcessElement(ctx context.Context, ts beam.EventTime, sp state.Provider, tp timers.Provider, key, word string, _ func(beam.EventTime, string, string)) error {
+	s.ElementBag.Add(sp, word)
+	s.MinTime.Add(sp, int64(ts))
+  // Process the element here.
+}
+func (s *Stateful) OnTimer(ctx context.Context, ts beam.EventTime, sp state.Provider, tp timers.Provider, key string, timer timers.Context, emit func(beam.EventTime, string, string)) {
+	log.Infof(ctx, "Timer fired for key %q, for family %q and tag %q", key, timer.Family, timer.Tag)
+}
 {{< /highlight >}}
 
 ### 11.4. Garbage collecting state {#garbage-collecting-state}
@@ -5875,7 +7201,7 @@ _ = (p | 'Read per user' >> ReadPerUser()
 {{< /highlight >}}
 
 {{< highlight go >}}
-This is not supported yet, see BEAM-10660.
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" windowed_state >}}
 {{< /highlight >}}
 
 This `ParDo` stores state per day. Once the pipeline is done processing data for a given day, all the state for that
@@ -5959,7 +7285,7 @@ _ = (p | 'Read per user' >> ReadPerUser()
 {{< /highlight >}}
 
 {{< highlight go >}}
-This is not supported yet, see BEAM-10660.
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" timer_garbage_collection >}}
 {{< /highlight >}}
 
 ### 11.5. State and timers examples {#state-timers-examples}
@@ -6099,6 +7425,11 @@ _ = (p | 'EventsPerLinkId' >> ReadPerLinkEvents()
        | 'Join DoFn' >> beam.ParDo(JoinDoFn()))
 {{< /highlight >}}
 
+
+{{< highlight go >}}
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" join_dofn_example >}}
+{{< /highlight >}}
+
 #### 11.5.2. Batching RPCs {#batching-rpcs}
 
 In this example, input elements are being forwarded to an external RPC service. The RPC accepts batch requests -
@@ -6165,6 +7496,95 @@ class BufferDoFn(DoFn):
 
 {{< /highlight >}}
 
+
+{{< highlight go >}}
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" batching_dofn_example >}}
+{{< /highlight >}}
+
+#### 11.5.3. Looping timers {#looping-timers}
+
+Looping timers are a pattern where a timer sets another timer for a future time, creating a loop. This is useful for producing periodic outputs or heartbeats in the absence of data for a specific key.
+
+When draining a pipeline, it is important to terminate these loops to allow the pipeline to finish. In the Java SDK, you can use the `CausedByDrain` parameter in the `@OnTimer` method to check if the timer firing was induced by a drain operation. **Note:** `CausedByDrain` will be set only in certain runners. Check the [capability matrix](/documentation/runners/capability-matrix/) for more details.
+
+{{< highlight java >}}
+public static class LoopingStatefulTimer extends DoFn<KV<String, Integer>, KV<String, Integer>> {
+    @TimerId("loopingTimer") private final TimerSpec loopingTimer = TimerSpecs.timer(TimeDomain.EVENT_TIME);
+
+    @ProcessElement
+    public void process(
+        @Element KV<String, Integer> element,
+        @TimerId("loopingTimer") Timer timer,
+        OutputReceiver<KV<String, Integer>> output) {
+
+      // Set initial timer
+      timer.offset(Duration.standardMinutes(1)).setRelative();
+      output.output(element);
+    }
+
+    @OnTimer("loopingTimer")
+    public void onTimer(
+        @Key String key,
+        @TimerId("loopingTimer") Timer timer,
+        OutputReceiver<KV<String, Integer>> output,
+        CausedByDrain drain) {
+
+      output.output(KV.of(key, 0));
+
+      // Cancel looping timer if drain is in progress
+      if (drain == CausedByDrain.CAUSED_BY_DRAIN) {
+        return;
+      }
+
+      // Set next timer
+      timer.offset(Duration.standardMinutes(1)).setRelative();
+    }
+}
+{{< /highlight >}}
+
+{{< highlight py >}}
+# Python does not currently support detecting drain in OnTimer.
+# The following example demonstrates a looping timer without drain support,
+# using event time.
+
+class LoopingTimerDoFn(DoFn):
+  TIMER = TimerSpec('timer', TimeDomain.WATERMARK)
+
+  def process(self, element, ts=DoFn.TimestampParam, timer=DoFn.TimerParam(TIMER)):
+    timer.set(ts + Duration(seconds=60))
+    yield element
+
+  @on_timer(TIMER)
+  def on_timer(self, key=DoFn.KeyParam, timestamp=DoFn.TimestampParam, timer=DoFn.TimerParam(TIMER)):
+    yield (key, 0)
+    # Loops forever, cannot handle drain safely if it never stops.
+    timer.set(timestamp + Duration(seconds=60))
+{{< /highlight >}}
+
+{{< highlight go >}}
+// Go does not currently support detecting drain in OnTimer.
+// The following example demonstrates a looping timer without drain support,
+// using event time.
+
+type LoopingTimerFn struct {
+	Timer      timers.EventTime
+}
+
+func (fn *LoopingTimerFn) ProcessElement(et beam.EventTime, sp state.Provider, tp timers.Provider, key string, value int, emit func(string, int)) {
+	nextTime := et.ToTime().Add(60 * time.Second)
+	fn.Timer.Set(tp, nextTime)
+	emit(key, value)
+}
+
+func (fn *LoopingTimerFn) OnTimer(et beam.EventTime, sp state.Provider, tp timers.Provider, key string, timer timers.Context, emit func(string, int)) {
+	emit(key, 0)
+	// Loops forever, cannot handle drain safely if it never stops.
+	nextTime := et.ToTime().Add(60 * time.Second)
+	fn.Timer.Set(tp, nextTime)
+}
+{{< /highlight >}}
+
+
 ## 12. Splittable `DoFns` {#splittable-dofns}
 
 A Splittable `DoFn` (SDF) enables users to create modular components containing I/Os (and some advanced
@@ -6225,17 +7645,19 @@ There are some built-in `RestrictionTracker` implementations defined in Java:
 The SDF also has a built-in `RestrictionTracker` implementation in Python:
 1. [OffsetRangeTracker](https://beam.apache.org/releases/pydoc/current/apache_beam.io.restriction_trackers.html#apache_beam.io.restriction_trackers.OffsetRestrictionTracker)
 
+Go also has a built-in `RestrictionTracker` type:
+1. [OffsetRangeTracker](https://pkg.go.dev/github.com/apache/beam/sdks/v2/go/pkg/beam/io/rtrackers/offsetrange)
+
 The watermark state is a user-defined object which is used to create a `WatermarkEstimator` from a
 `WatermarkEstimatorProvider`. The simplest watermark state could be a `timestamp`.
 
 The watermark estimator provider lets SDF authors define how to initialize the watermark state and
-create a watermark estimator. In [Java](https://beam.apache.org/releases/javadoc/current/org/apache/beam/sdk/transforms/DoFn.ProcessElement.html)
+create a watermark estimator. In [Java](https://beam.apache.org/releases/javadoc/current/org/apache/beam/sdk/transforms/DoFn.ProcessElement.html) and [Go](https://pkg.go.dev/github.com/apache/beam/sdks/v2/go/pkg/beam#ParDo)
 this is the `DoFn`. [Python](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.core.html#apache_beam.transforms.core.WatermarkEstimatorProvider)
 has a dedicated `WatermarkEstimatorProvider` type.
 
 The watermark estimator tracks the watermark when an element-restriction pair is in progress.
-For APIs details, read the [Java](https://beam.apache.org/releases/javadoc/current/org/apache/beam/sdk/transforms/splittabledofn/WatermarkEstimator.html)
-and [Python](https://beam.apache.org/releases/pydoc/current/apache_beam.io.iobase.html#apache_beam.io.iobase.WatermarkEstimator)
+For APIs details, read the [Java](https://beam.apache.org/releases/javadoc/current/org/apache/beam/sdk/transforms/splittabledofn/WatermarkEstimator.html), [Python](https://beam.apache.org/releases/pydoc/current/apache_beam.io.iobase.html#apache_beam.io.iobase.WatermarkEstimator), and [Go](https://pkg.go.dev/github.com/apache/beam/sdks/v2/go/pkg/beam/core/sdf#WatermarkEstimator)
 reference documentation.
 
 There are some built-in `WatermarkEstimator` implementations in Java:
@@ -6249,13 +7671,17 @@ Along with the default `WatermarkEstimatorProvider`, there are the same set of b
 2. [MonotonicWatermarkEstimator](https://beam.apache.org/releases/pydoc/current/apache_beam.io.watermark_estimators.html#apache_beam.io.watermark_estimators.MonotonicWatermarkEstimator)
 3. [WalltimeWatermarkEstimator](https://beam.apache.org/releases/pydoc/current/apache_beam.io.watermark_estimators.html#apache_beam.io.watermark_estimators.WalltimeWatermarkEstimator)
 
+The following `WatermarkEstimator` types are implemented in Go:
+1. [TimestampObservingEstimator](https://pkg.go.dev/github.com/apache/beam/sdks/v2/go/pkg/beam/core/sdf#TimestampObservingWatermarkEstimator)
+2. [WalltimeWatermarkEstimator](https://pkg.go.dev/github.com/apache/beam/sdks/v2/go/pkg/beam/core/sdf#WallTimeWatermarkEstimator)
+
 To define an SDF, you must choose whether the SDF is bounded (default) or
 unbounded and define a way to initialize an initial restriction for an element. The distinction is
 based on how the amount of work is represented:
 * Bounded DoFns are those where the work represented by an element is well-known beforehand and has
 an end. Examples of bounded elements include a file or group of files.
 * Unbounded DoFns are those where the amount of work does not have a specific end or the
-amount of work is not known befrehand. Examples of unbounded elements include a Kafka or a PubSub
+amount of work is not known beforehand. Examples of unbounded elements include a Kafka or a PubSub
 topic.
 
 In Java, you can use [@UnboundedPerElement](https://beam.apache.org/releases/javadoc/current/index.html?org/apache/beam/sdk/transforms/DoFn.UnboundedPerElement.html)
@@ -6343,7 +7769,9 @@ which restrictions to split and who should process them.
 
 By default, we use the restriction tracker’s estimate for work remaining falling back to assuming
 that all restrictions have an equal cost. To override the default, SDF authors can provide the
-appropriate method within the restriction provider.
+appropriate method within the restriction provider. SDF authors need to be aware that the
+sizing method will be invoked concurrently during bundle processing due to runner initiated splitting
+and progress estimation.
 
 {{< highlight java >}}
 {{< code_sample "examples/java/src/main/java/org/apache/beam/examples/snippets/Snippets.java" SDF_GetSize >}}
@@ -6384,7 +7812,7 @@ resource utilization.
 {{< /highlight >}}
 
 {{< highlight go >}}
-This is not supported yet, see BEAM-11104.
+{{< code_sample "sdks/go/examples/snippets/12splittabledofns.go" self_checkpoint>}}
 {{< /highlight >}}
 
 ### 12.4. Runner-initiated split {#runner-initiated-split}
@@ -6475,7 +7903,7 @@ watermark estimator implementation. You can also provide your own watermark esti
 {{< /highlight >}}
 
 {{< highlight go >}}
-This is not supported yet, see BEAM-11105.
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" watermarkestimation_customestimator >}}
 {{< /highlight >}}
 
 ### 12.6. Truncating during drain {#truncating-during-drain}
@@ -6486,6 +7914,11 @@ unbounded restrictions finish processing at the next SDF-initiated checkpoint or
 You are able to override this default behavior by defining the appropriate method on the restriction
 provider.
 
+{{< paragraph class="language-go">}}
+Note: Once the pipeline drain starts and truncate restriction transform is triggered, the `sdf.ProcessContinuation`
+will not be rescheduled.
+{{< /paragraph >}}
+
 {{< highlight java >}}
 {{< code_sample "examples/java/src/main/java/org/apache/beam/examples/snippets/Snippets.java" SDF_Truncate >}}
 {{< /highlight >}}
@@ -6495,7 +7928,7 @@ provider.
 {{< /highlight >}}
 
 {{< highlight go >}}
-This is not supported yet, see BEAM-11106.
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" sdf_truncate >}}
 {{< /highlight >}}
 
 ### 12.7. Bundle finalization {#bundle-finalization}
@@ -6515,60 +7948,183 @@ use case.
 {{< /highlight >}}
 
 {{< highlight go >}}
-This is not supported yet, see BEAM-10976.
+{{< code_sample "sdks/go/examples/snippets/04transforms.go" bundlefinalization_simplecallback >}}
 {{< /highlight >}}
 
 ## 13. Multi-language pipelines {#multi-language-pipelines}
 
-Beam allows you to combine transforms written in any supported SDK language (currently, Java and Python) and use them in one multi-language pipeline. This capability makes it easy to provide new functionality simultaneously in different Apache Beam SDKs through a single cross-language transform. For example, the [Apache Kafka connector](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/io/kafka.py) and [SQL transform](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/transforms/sql.py) from the Java SDK can be used in Python streaming pipelines.
+This section provides comprehensive documentation of multi-language pipelines. To get started creating a multi-language pipeline, see:
+
+* [Python multi-language pipelines quickstart](/documentation/sdks/python-multi-language-pipelines)
+* [Java multi-language pipelines quickstart](/documentation/sdks/java-multi-language-pipelines)
+
+Beam lets you combine transforms written in any supported SDK language (currently, Java and Python) and use them in one multi-language pipeline. This capability makes it easy to provide new functionality simultaneously in different Apache Beam SDKs through a single cross-language transform. For example, the [Apache Kafka connector](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/io/kafka.py) and [SQL transform](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/transforms/sql.py) from the Java SDK can be used in Python pipelines.
 
 Pipelines that use transforms from more than one SDK-language are known as *multi-language pipelines*.
 
+{{< paragraph class="language-yaml">}}
+Beam YAML is built entirely on top of cross-language transforms.
+In addition to the built in transforms, you can author your own transforms
+(using the full expressivity of the Beam API) and surface them via a concept
+called [providers](https://beam.apache.org/documentation/sdks/yaml/#providers).
+
+{{< /highlight >}}
+
+
 ### 13.1. Creating cross-language transforms {#create-x-lang-transforms}
 
-To make transforms written in one language available to pipelines written in another language, an *expansion service* for transforms written in the same language is used to create and inject the appropriate language-specific pipeline fragments into your pipeline.
+To make transforms written in one language available to pipelines written in another language, Beam uses an *expansion service*, which creates and injects the appropriate language-specific pipeline fragments into the pipeline.
 
-In the following example, a Python pipeline written the Apache Beam SDK for Python starts up a local Java expansion service on your computer to create and inject the appropriate Java pipeline fragments for executing the Java Kafka cross-language transform into your Python pipeline. The SDK then downloads and stages the necessary Java dependencies needed to execute these transforms.
+In the following example, a Beam Python pipeline starts up a local Java expansion service to create and inject the appropriate Java pipeline fragments for executing the Java Kafka cross-language transform into the Python pipeline. The SDK then downloads and stages the necessary Java dependencies needed to execute these transforms.
 
 ![Diagram of multi-language pipeline execution flow.](/images/multi-language-pipelines-diagram.svg)
 
-At runtime, the Beam runner will execute both Python and Java transforms to execute your pipeline.
+At runtime, the Beam runner will execute both Python and Java transforms to run the pipeline.
 
 In this section, we will use [KafkaIO.Read](https://beam.apache.org/releases/javadoc/current/org/apache/beam/sdk/io/kafka/KafkaIO.Read.html) to illustrate how to create a cross-language transform for Java and a test example for Python.
 
 #### 13.1.1. Creating cross-language Java transforms
 
-To make your Apache Beam Java SDK transform portable across SDK languages, you must implement two interfaces: [ExternalTransformBuilder](https://github.com/apache/beam/blob/master/sdks/java/core/src/main/java/org/apache/beam/sdk/transforms/ExternalTransformBuilder.java) and [ExternalTransformRegistrar](https://github.com/apache/beam/blob/master/sdks/java/core/src/main/java/org/apache/beam/sdk/expansion/ExternalTransformRegistrar.java). The `ExternalTransformBuilder` interface constructs the cross-language transform using configuration values passed in from the pipeline and the `ExternalTransformRegistrar` interface registers the cross-language transform for use with the expansion service.
+There are two ways to make Java transforms available to other SDKs.
+
+* Option 1: In some cases, you can use existing Java transforms from other SDKs without writing any additional Java code.
+* Option 2: You can use arbitrary Java transforms from other SDKs by adding a few Java classes.
+
+##### 13.1.1.1 Using existing Java transforms without writing more Java code
+
+Starting with Beam 2.34.0, Python SDK users can use some Java transforms without writing additional Java code. This can be useful in many cases. For example:
+* A developer not familiar with Java may need to use an existing Java transform from a Python pipeline.
+* A developer may need to make an existing Java transform available to a Python pipeline without writing/releasing more Java code.
+
+> **Note:** This feature is currently only available when using Java transforms from a Python pipeline.
+
+To be eligible for direct usage, the API of the Java transform has to meet the following requirements:
+1. The Java transform can be constructed using an available public constructor or a public static method (a constructor method) in the same Java class.
+2. The Java transform can be configured using one or more builder methods. Each builder method should be public and should return an instance of the Java transform.
+
+Here's an example Java class that can be directly used from the Python API.
+
+```java
+public class JavaDataGenerator extends PTransform<PBegin, PCollection<String>> {
+  . . .
+
+  // The following method satisfies requirement 1.
+  // Note that you could use a class constructor instead of a static method.
+  public static JavaDataGenerator create(Integer size) {
+    return new JavaDataGenerator(size);
+  }
+
+  static class JavaDataGeneratorConfig implements Serializable  {
+    public String prefix;
+    public long length;
+    public String suffix;
+    . . .
+  }
+
+  // The following method conforms to requirement 2.
+  public JavaDataGenerator withJavaDataGeneratorConfig(JavaDataGeneratorConfig dataConfig) {
+    return new JavaDataGenerator(this.size, javaDataGeneratorConfig);
+  }
+
+   . . .
+}
+```
+
+For a complete example, see [JavaDataGenerator](https://github.com/apache/beam/blob/master/examples/multi-language/src/main/java/org/apache/beam/examples/multilanguage/JavaDataGenerator.java).
+
+To use a Java class that conforms to the above requirements from a Python SDK pipeline, follow these steps:
+
+1. Create a _yaml_ allowlist that describes the Java transform classes and methods that will be directly accessed from Python.
+2. Start an expansion service, using the `javaClassLookupAllowlistFile` option to pass the path to the allowlist.
+3. Use the Python [JavaExternalTransform](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/transforms/external.py) API to directly access Java transforms defined in the allowlist from the Python side.
+
+Starting with Beam 2.36.0, steps 1 and 2 can be skipped, as described in the corresponding sections below.
+
+**Step 1**
+
+To use an eligible Java transform from Python, define a _yaml_ allowlist. This allowlist lists the class names,
+constructor methods, and builder methods that are directly available to be used from the Python side.
+
+Starting with Beam 2.35.0, you have the option to pass `*` to the `javaClassLookupAllowlistFile` option instead of defining an actual allowlist. The `*` specifies that all supported transforms in the classpath of the expansion service can be accessed through the API. We encourage using an actual allowlist for production, because allowing clients to access arbitrary Java classes can pose a security risk.
+
+{{< highlight >}}
+version: v1
+allowedClasses:
+- className: my.beam.transforms.JavaDataGenerator
+  allowedConstructorMethods:
+    - create
+      allowedBuilderMethods:
+    - withJavaDataGeneratorConfig
+{{< /highlight >}}
+
+**Step 2**
+
+Provide the allowlist as an argument when starting up the Java expansion service. For example, you can start the expansion service
+as a local Java process using the following command:
+
+{{< highlight >}}
+java -jar <jar file> <port> --javaClassLookupAllowlistFile=<path to the allowlist file>
+{{< /highlight >}}
+
+Starting with Beam 2.36.0, the `JavaExternalTransform` API will automatically start up an expansion service with a given `jar` file dependency if an expansion service address was not provided.
+
+**Step 3**
+
+You can use the Java class directly from your Python pipeline using a stub transform created from the `JavaExternalTransform` API. This API allows you to construct the transform using the Java class name and allows you to invoke builder methods to configure the class.
+
+Constructor and method parameter types are mapped between Python and Java using a Beam schema. The schema is auto-generated using the object types
+provided on the Python side. If the Java class constructor method or builder method accepts any complex object types, make sure that the Beam schema
+for these objects is registered and available for the Java expansion service. If a schema has not been registered, the Java expansion service will
+try to register a schema using [JavaFieldSchema](/documentation/programming-guide/#creating-schemas). In Python, arbitrary objects
+can be represented using `NamedTuple`s, which will be represented as Beam rows in the schema. Here is a Python stub transform that represents the above
+mentioned Java transform:
+
+```py
+JavaDataGeneratorConfig = typing.NamedTuple(
+'JavaDataGeneratorConfig', [('prefix', str), ('length', int), ('suffix', str)])
+data_config = JavaDataGeneratorConfig(prefix='start', length=20, suffix='end')
+
+java_transform = JavaExternalTransform(
+'my.beam.transforms.JavaDataGenerator', expansion_service='localhost:<port>').create(numpy.int32(100)).withJavaDataGeneratorConfig(data_config)
+```
+
+You can use this transform in a Python pipeline along with other Python transforms. For a complete example, see [javadatagenerator.py](https://github.com/apache/beam/blob/master/examples/multi-language/python/javadatagenerator.py).
+
+##### 13.1.1.2 Using the API to make existing Java transforms available to other SDKs
+
+To make your Beam Java SDK transform portable across SDK languages, you must implement two interfaces: [ExternalTransformBuilder](https://github.com/apache/beam/blob/master/sdks/java/core/src/main/java/org/apache/beam/sdk/transforms/ExternalTransformBuilder.java) and [ExternalTransformRegistrar](https://github.com/apache/beam/blob/master/sdks/java/core/src/main/java/org/apache/beam/sdk/expansion/ExternalTransformRegistrar.java). The `ExternalTransformBuilder` interface constructs the cross-language transform using configuration values passed in from the pipeline, and the `ExternalTransformRegistrar` interface registers the cross-language transform for use with the expansion service.
 
 **Implementing the interfaces**
 
-1. Define a Builder class for your transform that implements the `ExternalTransformBuilder` interface and overrides the `buildExternal` method that will be used to build your transform object. Initial configuration values for your transform should be defined in the `buildExternal` method. In most cases, it is convenient to make the Java transform builder class implement `ExternalTransformBuilder`.
+1. Define a Builder class for your transform that implements the `ExternalTransformBuilder` interface and overrides the `buildExternal` method that will be used to build your transform object. Initial configuration values for your transform should be defined in the `buildExternal` method. In most cases, it's convenient to make the Java transform builder class implement `ExternalTransformBuilder`.
 
     > **Note:** `ExternalTransformBuilder` requires you to define a configuration object (a simple POJO) to capture a set of parameters sent by external SDKs to initiate the Java transform. Usually these parameters directly map to constructor parameters of the Java transform.
 
-    {{< highlight >}}
-@AutoValue.Builder
-abstract static class Builder<K, V>
-  implements ExternalTransformBuilder<External.Configuration, PBegin, PCollection<KV<K, V>>> {
-  abstract Builder<K, V> setConsumerConfig(Map<String, Object> config);
+    ```java
+    @AutoValue.Builder
+    abstract static class Builder<K, V>
+      implements ExternalTransformBuilder<External.Configuration, PBegin, PCollection<KV<K, V>>> {
+      abstract Builder<K, V> setConsumerConfig(Map<String, Object> config);
 
-  abstract Builder<K, V> setTopics(List<String> topics);
+      abstract Builder<K, V> setTopics(List<String> topics);
 
-  /** Remaining property declarations omitted for clarity. */
+      /** Remaining property declarations omitted for clarity. */
 
-  abstract Read<K, V> build();
+      abstract Read<K, V> build();
 
-  @Override
-  public PTransform<PBegin, PCollection<KV<K, V>>> buildExternal(
-      External.Configuration config) {
-    setTopics(ImmutableList.copyOf(config.topics));
+      @Override
+      public PTransform<PBegin, PCollection<KV<K, V>>> buildExternal(
+          External.Configuration config) {
+        setTopics(ImmutableList.copyOf(config.topics));
 
-    /** Remaining property defaults omitted for clarity. */
-  }
-}
-    {{< /highlight >}}
+        /** Remaining property defaults omitted for clarity. */
+      }
+    }
+    ```
 
-    Note that `buildExternal` method may choose to perform additional operations before setting properties received from external SDKs in the transform. For example, `buildExternal` method may validates properties available in the configuration object before setting them in the transform.
+    For complete examples, see [JavaCountBuilder](https://github.com/apache/beam/blob/master/examples/multi-language/src/main/java/org/apache/beam/examples/multilanguage/JavaCountBuilder.java) and [JavaPrefixBuilder](https://github.com/apache/beam/blob/master/examples/multi-language/src/main/java/org/apache/beam/examples/multilanguage/JavaPrefixBuilder.java).
+
+    Note that the `buildExternal` method can perform additional operations before setting properties received from external SDKs in the transform. For example, `buildExternal` can validate properties available in the configuration object before setting them in the transform.
 
 2. Register the transform as an external cross-language transform by defining a class that implements `ExternalTransformRegistrar`. You must annotate your class with the `AutoService` annotation to ensure that your transform is registered and instantiated properly by the expansion service.
 3. In your registrar class, define a Uniform Resource Name (URN) for your transform. The URN must be a unique string that identifies your transform with the expansion service.
@@ -6576,43 +8132,45 @@ abstract static class Builder<K, V>
 
     The following example from the KafkaIO transform shows how to implement steps two through four:
 
-    {{< highlight >}}
-@AutoService(ExternalTransformRegistrar.class)
-public static class External implements ExternalTransformRegistrar {
+    ```java
+    @AutoService(ExternalTransformRegistrar.class)
+    public static class External implements ExternalTransformRegistrar {
 
-  public static final String URN = "beam:external:java:kafka:read:v1";
+      public static final String URN = "beam:external:java:kafka:read:v1";
 
-  @Override
-  public Map<String, Class<? extends ExternalTransformBuilder<?, ?, ?>>> knownBuilders() {
-    return ImmutableMap.of(
-        URN,
-        (Class<? extends ExternalTransformBuilder<?, ?, ?>>)
-            (Class<?>) AutoValue_KafkaIO_Read.Builder.class);
-  }
+      @Override
+      public Map<String, Class<? extends ExternalTransformBuilder<?, ?, ?>>> knownBuilders() {
+        return ImmutableMap.of(
+            URN,
+            (Class<? extends ExternalTransformBuilder<?, ?, ?>>)
+                (Class<?>) AutoValue_KafkaIO_Read.Builder.class);
+      }
 
-  /** Parameters class to expose the Read transform to an external SDK. */
-  public static class Configuration {
-    private Map<String, String> consumerConfig;
-    private List<String> topics;
+      /** Parameters class to expose the Read transform to an external SDK. */
+      public static class Configuration {
+        private Map<String, String> consumerConfig;
+        private List<String> topics;
 
-    public void setConsumerConfig(Map<String, String> consumerConfig) {
-      this.consumerConfig = consumerConfig;
+        public void setConsumerConfig(Map<String, String> consumerConfig) {
+          this.consumerConfig = consumerConfig;
+        }
+
+        public void setTopics(List<String> topics) {
+          this.topics = topics;
+        }
+
+        /** Remaining properties omitted for clarity. */
+      }
     }
+    ```
 
-    public void setTopics(List<String> topics) {
-      this.topics = topics;
-    }
-
-    /** Remaining properties omitted for clarity. */
-  }
-}
-    {{< /highlight >}}
+    For additional examples, see [JavaCountRegistrar](https://github.com/apache/beam/blob/master/examples/multi-language/src/main/java/org/apache/beam/examples/multilanguage/JavaCountRegistrar.java) and [JavaPrefixRegistrar](https://github.com/apache/beam/blob/master/examples/multi-language/src/main/java/org/apache/beam/examples/multilanguage/JavaPrefixRegistrar.java).
 
 After you have implemented the `ExternalTransformBuilder` and `ExternalTransformRegistrar` interfaces, your transform can be registered and created successfully by the default Java expansion service.
 
 **Starting the expansion service**
 
-An expansion service can be used with multiple transforms in the same pipeline. Java has a default expansion service included and available in the Apache Beam Java SDK for you to use with your Java transforms. You can write your own expansion service, but that is generally not needed, so it is not covered in this section.
+You can use an expansion service with multiple transforms in the same pipeline. The Beam Java SDK provides a default expansion service for Java transforms. You can also write your own expansion service, but that's generally not needed, so it's not covered in this section.
 
 Perform the following to start up a Java expansion service directly:
 
@@ -6625,7 +8183,7 @@ $ jar -jar /path/to/expansion_service.jar <PORT_NUMBER>
 
 The expansion service is now ready to serve transforms on the specified port.
 
-When creating SDK-specific wrappers for your transform, SDKs may provide utilities that are readily available for easily starting up an expansion service. For example, the Python SDK provides the utilities [`JavaJarExpansionService`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.JavaJarExpansionService) and [`BeamJarExpansionService`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.BeamJarExpansionService) for starting up a Java expansion service using a JAR file.
+When creating SDK-specific wrappers for your transform, you may be able to use SDK-provided utilities to start up an expansion service. For example, the Python SDK provides the utilities [`JavaJarExpansionService`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.JavaJarExpansionService) and [`BeamJarExpansionService`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.BeamJarExpansionService) for starting up a Java expansion service using a JAR file.
 
 **Including dependencies**
 
@@ -6633,85 +8191,102 @@ If your transform requires external libraries, you can include them by adding th
 
 **Writing SDK-specific wrappers**
 
-Your cross-language Java transform can be called through the lower-level [`ExternalTransform`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.ExternalTransform) class in a multi-language pipeline (as described in the next section); however, if possible, you should create a SDK-specific wrapper written in the programming language of the pipeline (such as Python) to access the transform instead. This higher-level abstraction will make it easier for pipeline authors to use your transform.
+Your cross-language Java transform can be called through the lower-level [`ExternalTransform`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.ExternalTransform) class in a multi-language pipeline (as described in the next section); however, if possible, you should write an SDK-specific wrapper in the language of the pipeline (such as Python) to access the transform instead. This higher-level abstraction will make it easier for pipeline authors to use your transform.
 
 To create an SDK wrapper for use in a Python pipeline, do the following:
 
 1. Create a Python module for your cross-language transform(s).
-2. In the module, build the payload that should be used to initiate the cross-language transform expansion request using one of the available [`PayloadBuilder`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.PayloadBuilder) classes.
+2. In the module, use one of the [`PayloadBuilder`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.PayloadBuilder) classes to build the payload for the initial cross-language transform expansion request.
 
-    The parameter names and types of the payload should map to parameter names and types of the configuration POJO provided to the Java `ExternalTransformBuilder`. Parameter types are mapped across SDKs using a [Beam schema](https://github.com/apache/beam/blob/master/model/pipeline/src/main/proto/schema.proto). Parameter names are mapped by simply converting Python underscore-separated variable names to camel-case (Java standard).
+    The parameter names and types of the payload should map to parameter names and types of the configuration POJO provided to the Java `ExternalTransformBuilder`. Parameter types are mapped across SDKs using a [Beam schema](https://github.com/apache/beam/blob/master/model/pipeline/src/main/proto/org/apache/beam/model/pipeline/v1/schema.proto). Parameter names are mapped by simply converting Python underscore-separated variable names to camel-case (Java standard).
 
-    In the following example, [kafka.py](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/io/kafka.py) uses `NamedTupleBasedPayloadBuilder` to build the payload. The parameters map to the Java [KafkaIO.External.Configuration](https://github.com/apache/beam/blob/master/sdks/java/io/kafka/src/main/java/org/apache/beam/sdk/io/kafka/KafkaIO.java) config object defined previously in the **Implementing the interfaces** section.
+    In the following example, [kafka.py](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/io/kafka.py) uses `NamedTupleBasedPayloadBuilder` to build the payload. The parameters map to the Java [KafkaIO.External.Configuration](https://github.com/apache/beam/blob/master/sdks/java/io/kafka/src/main/java/org/apache/beam/sdk/io/kafka/KafkaIO.java) config object defined in the previous section.
 
-    {{< highlight >}}
-class ReadFromKafkaSchema(typing.NamedTuple):
-      consumer_config: typing.Mapping[str, str]
-      topics: typing.List[str]
-      # Other properties omitted for clarity.
+    ```py
+    class ReadFromKafkaSchema(typing.NamedTuple):
+        consumer_config: typing.Mapping[str, str]
+        topics: typing.List[str]
+        # Other properties omitted for clarity.
 
-payload = NamedTupleBasedPayloadBuilder(ReadFromKafkaSchema(...))
-    {{< /highlight >}}
+    payload = NamedTupleBasedPayloadBuilder(ReadFromKafkaSchema(...))
+    ```
 
-3. Start an expansion service unless one is specified by the pipeline creator. The Apache Beam Python SDK provides utilities [`JavaJarExpansionService`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.JavaJarExpansionService) and [`BeamJarExpansionService`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.BeamJarExpansionService) for easily starting up an expansion service using a JAR file.. [`JavaJarExpansionService`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.JavaJarExpansionService) can be used to startup an expansion service using path (a local path or a URL) to a given JAR file. [`BeamJarExpansionService`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.BeamJarExpansionService) can be used for easily starting an expansion service based on a JAR released with Beam.
+3. Start an expansion service, unless one is specified by the pipeline creator. The Beam Python SDK provides the utilities [`JavaJarExpansionService`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.JavaJarExpansionService) and [`BeamJarExpansionService`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.BeamJarExpansionService) for starting up an expansion service using a JAR file. [`JavaJarExpansionService`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.JavaJarExpansionService) can be used to start up an expansion service using the path (a local path or a URL) to a given JAR file. [`BeamJarExpansionService`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.BeamJarExpansionService) can be used to start an expansion service from a JAR released with Beam.
 
-    For transforms released with Beam do the following:
+    For transforms released with Beam, do the following:
 
-    1. Add a Gradle target to Beam that can be used to build a shaded expansion service JAR for the target Java transform. This target should produce a Beam JAR that contains all dependencies needed for expanding the Java transform and the JAR should be released with Beam. Note that you might be able to use one of the existing Gradle target that offer an aggregated version of an expansion service jar (for example, for all GCP IO).
+    1. Add a Gradle target to Beam that can be used to build a shaded expansion service JAR for the target Java transform. This target should produce a Beam JAR that contains all dependencies needed for expanding the Java transform, and the JAR should be released with Beam. You might be able to use an existing Gradle target that offers an aggregated version of an expansion service JAR (for example, for all GCP IO).
     2. In your Python module, instantiate `BeamJarExpansionService` with the Gradle target.
 
-        {{< highlight >}}
-    expansion_service = BeamJarExpansionService('sdks:java:io:expansion-service:shadowJar')
-        {{< /highlight >}}
+        ```py
+        expansion_service = BeamJarExpansionService('sdks:java:io:expansion-service:shadowJar')
+        ```
 4. Add a Python wrapper transform class that extends [`ExternalTransform`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.ExternalTransform). Pass the payload and expansion service defined above as parameters to the constructor of the [`ExternalTransform`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.ExternalTransform) parent class.
 
 #### 13.1.2. Creating cross-language Python transforms
 
-To make your Python transform usable with different SDK languages, you must create a Python module that registers an existing Python transform as a cross-language transform for use with the Python expansion service and calls into that existing transform to perform its intended operation.
+Any Python transforms defined in the scope of the expansion service should be accessible by specifying their fully qualified names. For example, you could use Python's `ReadFromText` transform in a Java pipeline with its fully qualified name `apache_beam.io.ReadFromText`:
+
+```java
+p.apply("Read",
+    PythonExternalTransform.<PBegin, PCollection<String>>from("apache_beam.io.ReadFromText")
+    .withKwarg("file_pattern", options.getInputFile())
+    .withKwarg("validate", false))
+```
+
+`PythonExternalTransform` has other useful methods such as `withExtraPackages` for staging PyPI package dependencies and `withOutputCoder` for setting an output coder. If your transform exists in an external package, make sure to specify that package using `withExtraPackages`, for example:
+
+```java
+p.apply("Read",
+    PythonExternalTransform.<PBegin, PCollection<String>>from("my_python_package.BeamReadPTransform")
+    .withExtraPackages(ImmutableList.of("my_python_package")))
+```
+
+Alternatively, you may want to create a Python module that registers an existing Python transform as a cross-language transform for use with the Python expansion service and calls into that existing transform to perform its intended operation. A registered URN can be used later in an expansion request for indicating an expansion target.
 
 **Defining the Python module**
 
 1. Define a Uniform Resource Name (URN) for your transform. The URN must be a unique string that identifies your transform with the expansion service.
 
-    {{< highlight >}}
-TEST_COMPK_URN = "beam:transforms:xlang:test:compk"
-    {{< /highlight >}}
+    ```py
+    TEST_COMPK_URN = "beam:transforms:xlang:test:compk"
+    ```
 2. For an existing Python transform, create a new class to register the URN with the Python expansion service.
 
-    {{< highlight >}}
-@ptransform.PTransform.register_urn(TEST_COMPK_URN, None)
-class CombinePerKeyTransform(ptransform.PTransform):
-    {{< /highlight >}}
+    ```py
+    @ptransform.PTransform.register_urn(TEST_COMPK_URN, None)
+    class CombinePerKeyTransform(ptransform.PTransform):
+    ```
 3. From within the class, define an expand method that takes an input PCollection, runs the Python transform, and then returns the output PCollection.
 
-    {{< highlight >}}
-def expand(self, pcoll):
-    return pcoll \
-        | beam.CombinePerKey(sum).with_output_types(
-              typing.Tuple[unicode, int])
-    {{< /highlight >}}
+    ```py
+    def expand(self, pcoll):
+        return pcoll \
+            | beam.CombinePerKey(sum).with_output_types(
+                  typing.Tuple[unicode, int])
+    ```
 4. As with other Python transforms, define a `to_runner_api_parameter` method that returns the URN.
 
-    {{< highlight >}}
-def to_runner_api_parameter(self, unused_context):
-    return TEST_COMPK_URN, None
-    {{< /highlight >}}
+    ```py
+    def to_runner_api_parameter(self, unused_context):
+        return TEST_COMPK_URN, None
+    ```
 5. Define a static `from_runner_api_parameter` method that returns an instantiation of the cross-language Python transform.
 
-    {{< highlight >}}
-@staticmethod
-def from_runner_api_parameter(
-      unused_ptransform, unused_parameter, unused_context):
-    return CombinePerKeyTransform()
-    {{< /highlight >}}
+    ```py
+    @staticmethod
+    def from_runner_api_parameter(
+          unused_ptransform, unused_parameter, unused_context):
+        return CombinePerKeyTransform()
+    ```
 
 **Starting the expansion service**
 
-An expansion service can be used with multiple transforms in the same pipeline. Python has a default expansion service included and available in the Apache Beam Python SDK for you to use with your Python transforms. You are free to write your own expansion service, but that is generally not needed, so it is not covered in this section.
+An expansion service can be used with multiple transforms in the same pipeline. The Beam Python SDK provides a default expansion service for you to use with your Python transforms. You are free to write your own expansion service, but that is generally not needed, so it is not covered in this section.
 
 Perform the following steps to start up the default Python expansion service directly:
 
-1. Create a virtual environment and [install the Apache Beam SDK](https://beam.apache.org/get-started/quickstart-py/).
+1. Create a virtual environment and [install the Apache Beam SDK](/get-started/quickstart-py/).
 2. Start the Python SDK’s expansion service with a specified port.
 
     {{< highlight >}}
@@ -6721,19 +8296,52 @@ $ export PORT_FOR_EXPANSION_SERVICE=12345
 3. Import any modules that contain transforms to be made available using the expansion service.
 
     {{< highlight >}}
-$ python -m apache_beam.runners.portability.expansion_service_test -p $PORT_FOR_EXPANSION_SERVICE
+$ python -m apache_beam.runners.portability.expansion_service_test -p $PORT_FOR_EXPANSION_SERVICE --pickle_library=cloudpickle
     {{< /highlight >}}
 
-4. This expansion service is not ready to serve up transforms on the address `localhost:$PORT_FOR_EXPANSION_SERVICE`.
-
-**Including dependencies**
-
-Currently Python external transforms are limited to dependencies available in core Beam SDK Harness.
+4. This expansion service is now ready to serve up transforms on the address `localhost:$PORT_FOR_EXPANSION_SERVICE
 
 #### 13.1.3. Creating cross-language Go transforms
 
 Go currently does not support creating cross-language transforms, only using cross-language
-transforms from other languages; see more at [BEAM-9923](https://issues.apache.org/jira/browse/BEAM-9923).
+transforms from other languages; see more at [Issue 21767](https://github.com/apache/beam/issues/21767).
+
+#### 13.1.4. Defining a URN
+
+Developing a cross-language transform involves defining a URN for registering the transform with an expansion service. In this section
+we provide a convention for defining such URNs. Following this convention is optional but it will ensure that your transform
+will not run into conflicts when registering in an expansion service along with transforms developed by other developers.
+
+##### 13.1.4.1. Schema
+
+A URN should consist of the following components:
+* **ns-id**: A namespace identifier. Default recommendation is `beam:transform`.
+* **org-identifier**: Identifies the organization where the transform was defined. Transforms defined in Apache Beam use `org.apache.beam` for this.
+* **functionality-identifier**: Identifies the functionality of the cross-language transform.
+* **version**: a version number for the transform.
+
+We provide the schema from the URN convention in [augmented Backus–Naur](https://en.wikipedia.org/wiki/Augmented_Backus%E2%80%93Naur_form) form.
+Keywords in upper case are from the [URN spec](https://datatracker.ietf.org/doc/html/rfc8141).
+
+{{< highlight >}}
+transform-urn = ns-id “:” org-identifier “:” functionality-identifier  “:” version
+ns-id = (“beam” / NID) “:” “transform”
+id-char = ALPHA / DIGIT / "-" / "." / "_" / "~" ; A subset of characters allowed in a URN
+org-identifier = 1*id-char
+functionality-identifier = 1*id-char
+version = “v” 1*(DIGIT / “.”)  ; For example, ‘v1.2’
+{{< /highlight >}}
+
+##### 13.1.4.2. Examples
+
+Below we’ve given some example transform classes and corresponding URNs to be used.
+
+* A transform offered with Apache Beam that writes Parquet files.
+    * `beam:transform:org.apache.beam:parquet_write:v1`
+* A transform offered with Apache Beam that reads from Kafka with metadata.
+    * `beam:transform:org.apache.beam:kafka_read_with_metadata:v1`
+* A transform developed by organization abc.org that reads from data store MyDatastore.
+    * `beam:transform:org.abc:mydatastore_read:v1`
 
 ### 13.2. Using cross-language transforms {#use-x-lang-transforms}
 
@@ -6741,28 +8349,50 @@ Depending on the SDK language of the pipeline, you can use a high-level SDK-wrap
 
 #### 13.2.1. Using cross-language transforms in a Java pipeline
 
-Currently, to access cross-language transforms from the Java SDK, you have to use the lower-level [External](https://github.com/apache/beam/blob/master/runners/core-construction-java/src/main/java/org/apache/beam/runners/core/construction/External.java) class.
+Users have three options to use cross-language transforms in a Java pipeline. At the highest level of abstraction, some popular Python transforms are accessible through dedicated Java wrapper transforms. For example, the Java SDK has the `DataframeTransform` class, which uses the Python SDK's `DataframeTransform`, and it has the `RunInference` class, which uses the Python SDK's `RunInference`, and so on. When an SDK-specific wrapper transform is not available for a target Python transform, you can use the lower-level [PythonExternalTransform](https://github.com/apache/beam/blob/master/sdks/java/extensions/python/src/main/java/org/apache/beam/sdk/extensions/python/PythonExternalTransform.java) class instead by specifying the fully qualified name of the Python transform. If you want to try external transforms from SDKs other than Python (including Java SDK itself), you can also use the lowest-level [External](https://github.com/apache/beam/blob/master/sdks/java/core/src/main/java/org/apache/beam/sdk/util/construction/External.java) class.
+
+**Using an SDK wrapper**
+
+To use a cross-language transform through an SDK wrapper, import the module for the SDK wrapper and call it from your pipeline, as shown in the example:
+
+```java
+import org.apache.beam.sdk.extensions.python.transforms.DataframeTransform;
+
+input.apply(DataframeTransform.of("lambda df: df.groupby('a').sum()").withIndexes())
+```
+
+**Using the PythonExternalTransform class**
+
+When an SDK-specific wrapper is not available, you can access the Python cross-language transform through the `PythonExternalTransform` class by specifying the fully qualified name and the constructor arguments of the target Python transform.
+
+```java
+input.apply(
+    PythonExternalTransform.<PCollection<Row>, PCollection<Row>>from(
+        "apache_beam.dataframe.transforms.DataframeTransform")
+    .withKwarg("func", PythonCallableSource.of("lambda df: df.groupby('a').sum()"))
+    .withKwarg("include_indexes", true))
+```
 
 **Using the External class**
 
-1. Make sure you have any runtime environment dependencies (like JRE) installed on your local machine (either directly on the local machine or available through a container). See the expansion service section for more details.
+1. Make sure you have any runtime environment dependencies (like the JRE) installed on your local machine (either directly on the local machine or available through a container). See the expansion service section for more details.
 
     > **Note:** When including Python transforms from within a Java pipeline, all Python dependencies have to be included in the SDK harness container.
 2. Start up the expansion service for the SDK that is in the language of the transform you're trying to consume, if not available.
 
     Make sure the transform you are trying to use is available and can be used by the expansion service.
-3. Include [External.of(...)](https://github.com/apache/beam/blob/master/runners/core-construction-java/src/main/java/org/apache/beam/runners/core/construction/External.java) when instantiating your pipeline. Reference the URN, payload, and expansion service. For examples, see the [cross-language transform test suite](https://github.com/apache/beam/blob/master/runners/core-construction-java/src/test/java/org/apache/beam/runners/core/construction/ValidateRunnerXlangTest.java).
+3. Include [External.of(...)](https://github.com/apache/beam/blob/master/sdks/java/core/src/main/java/org/apache/beam/sdk/util/construction/External.java) when instantiating your pipeline. Reference the URN, payload, and expansion service. For examples, see the [cross-language transform test suite](https://github.com/apache/beam/blob/master/sdks/java/core/src/test/java/org/apache/beam/sdk/util/construction/ValidateRunnerXlangTest.java).
 4. After the job has been submitted to the Beam runner, shutdown the expansion service by terminating the expansion service process.
 
 #### 13.2.2. Using cross-language transforms in a Python pipeline
 
-If a Python-specific wrapper for a cross-language transform is available, use that; otherwise, you have to use the lower-level [`ExternalTransform`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.ExternalTransform) class to access the transform.
+If a Python-specific wrapper for a cross-language transform is available, use that. Otherwise, you have to use the lower-level [`ExternalTransform`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.ExternalTransform) class to access the transform.
 
 **Using an SDK wrapper**
 
-To use a cross-language transform through an SDK wrapper, import the module for the SDK wrapper and call it from your pipeline as shown in the example:
+To use a cross-language transform through an SDK wrapper, import the module for the SDK wrapper and call it from your pipeline, as shown in the example:
 
-  {{< highlight >}}
+```py
 from apache_beam.io.kafka import ReadFromKafka
 
 kafka_records = (
@@ -6775,51 +8405,83 @@ kafka_records = (
             topics=[self.topic],
             max_num_records=max_num_records,
             expansion_service=<Address of expansion service>))
-  {{< /highlight >}}
+```
 
 **Using the ExternalTransform class**
 
 When an SDK-specific wrapper isn't available, you will have to access the cross-language transform through the `ExternalTransform` class.
 
-1. Make sure you have any runtime environment dependencies (like JRE) installed on your local machine. See the expansion service section for more details.
+1. Make sure you have any runtime environment dependencies (like the JRE) installed on your local machine. See the expansion service section for more details.
 2. Start up the expansion service for the SDK that is in the language of the transform you're trying to consume, if not available.
+    Python provides several classes for automatically starting expansion java services such as
+    [JavaJarExpansionService](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.JavaJarExpansionService)
+    and [BeamJarExpansionService](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.BeamJarExpansionService)
+    which can be passed directly as an expansion service to `beam.ExternalTransform`.
+    Make sure the transform you're trying to use is available and can be used by the expansion service.
 
-    Make sure the transform you're trying to use is available and can be used by the expansion service. For Java, make sure the builder and registrar for the transform are available in the classpath of the expansion service.
-3. Include `ExternalTransform` when instantiating your pipeline. Reference the URN, Payload, and expansion service. You can use one of the available [`PayloadBuilder`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.PayloadBuilder) classes to build the payload for `ExternalTransform`.
+    For Java, make sure the builder and registrar for the transform are available in the classpath of the expansion service.
+3. Include `ExternalTransform` when instantiating your pipeline. Reference the URN, payload, and expansion service.
+   You can use one of the available [`PayloadBuilder`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.PayloadBuilder) classes to build the payload for `ExternalTransform`.
 
-    {{< highlight >}}
-with pipeline as p:
-    res = (
-        p
-        | beam.Create(['a', 'b']).with_output_types(unicode)
-        | beam.ExternalTransform(
-            TEST_PREFIX_URN,
-            ImplicitSchemaPayloadBuilder({'data': u'0'}),
-            <Address of expansion service>))
-    assert_that(res, equal_to(['0a', '0b']))
-    {{< /highlight >}}
+    ```py
+    with pipeline as p:
+        res = (
+            p
+            | beam.Create(['a', 'b']).with_output_types(unicode)
+            | beam.ExternalTransform(
+                TEST_PREFIX_URN,
+                ImplicitSchemaPayloadBuilder({'data': '0'}),
+                <expansion service>))
+        assert_that(res, equal_to(['0a', '0b']))
+    ```
 
-4. After the job has been submitted to the Beam runner, shutdown the expansion service by terminating the expansion service process.
+    For additional examples, see [addprefix.py](https://github.com/apache/beam/blob/master/examples/multi-language/python/addprefix.py) and [javacount.py](https://github.com/apache/beam/blob/master/examples/multi-language/python/javacount.py).
+
+4. After the job has been submitted to the Beam runner, shut down any manually started expansion services by terminating the expansion service process.
+
+**Using the JavaExternalTransform class**
+
+Python has the ability to invoke Java-defined transforms via [proxy objects](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.external.html#apache_beam.transforms.external.JavaExternalTransform)
+as if they were Python transforms.
+These are invoked as follows
+
+    ```py
+    MyJavaTransform = beam.JavaExternalTransform('fully.qualified.ClassName', classpath=[jars])
+
+    with pipeline as p:
+        res = (
+            p
+            | beam.Create(['a', 'b']).with_output_types(unicode)
+            | MyJavaTransform(javaConstructorArg, ...).builderMethod(...)
+        assert_that(res, equal_to(['0a', '0b']))
+    ```
+
+Python's `getattr` method can be used if the method names in java are reserved
+Python keywords such as `from`.
+
+As with other external transforms, either a pre-started expansion service can
+be provided, or jar files that include the transform, its dependencies, and
+Beam's expansion service in which case an expansion service will be auto-started.
 
 #### 13.2.3. Using cross-language transforms in a Go pipeline
 
-If a Go-specific wrapper for a cross-language is available, use that; otherwise, you have to use the
-lower-level [CrossLanguage](https://pkg.go.dev/github.com/apache/beam/sdks/go/pkg/beam#CrossLanguage)
+If a Go-specific wrapper for a cross-language is available, use that. Otherwise, you have to use the
+lower-level [CrossLanguage](https://pkg.go.dev/github.com/apache/beam/sdks/v2/go/pkg/beam#CrossLanguage)
 function to access the transform.
 
 **Expansion Services**
 
-The Go SDK does not yet support automatically starting an expansion service. In order to use
-cross-language transforms, you must manually start any necessary expansion services on your local
-machine and ensure they are accessible to your code during pipeline construction; see more at
-[BEAM-12862](https://issues.apache.org/jira/browse/BEAM-12862).
+The Go SDK supports automatically starting Java expansion services if an expansion address is not provided, although this is slower than
+providing a persistent expansion service. Many wrapped Java transforms manage perform this automatically; if you wish to do this manually, use the `xlangx` package's
+[UseAutomatedJavaExpansionService()](https://pkg.go.dev/github.com/apache/beam/sdks/v2@v2.40.0/go/pkg/beam/core/runtime/xlangx#UseAutomatedJavaExpansionService) function. In order to use Python cross-language transforms, you must manually start any necessary expansion
+services on your local machine and ensure they are accessible to your code during pipeline construction.
 
 **Using an SDK wrapper**
 
 To use a cross-language transform through an SDK wrapper, import the package for the SDK wrapper
 and call it from your pipeline as shown in the example:
 
-{{< highlight >}}
+```go
 import (
     "github.com/apache/beam/sdks/v2/go/pkg/beam/io/xlang/kafkaio"
 )
@@ -6832,7 +8494,7 @@ kafkaRecords := kafkaio.Read(
     []string{topicName},
     kafkaio.MaxNumRecords(numRecords),
     kafkaio.ConsumerConfigs(map[string]string{"auto.offset.reset": "earliest"}))
-{{< /highlight >}}
+```
 
 **Using the CrossLanguage function**
 
@@ -6841,30 +8503,434 @@ When an SDK-specific wrapper isn't available, you will have to access the cross-
 1. Make sure you have the appropriate expansion service running. See the expansion service section for details.
 2. Make sure the transform you're trying to use is available and can be used by the expansion service.
    Refer to [Creating cross-language transforms](#create-x-lang-transforms) for details.
-3. Use the `beam.CrossLanguage` function in your pipeline as appropriate. Reference the URN, Payload,
+3. Use the `beam.CrossLanguage` function in your pipeline as appropriate. Reference the URN, payload,
    expansion service address, and define inputs and outputs. You can use the
-   [beam.CrossLanguagePayload](https://pkg.go.dev/github.com/apache/beam/sdks/go/pkg/beam#CrossLanguagePayload)
+   [beam.CrossLanguagePayload](https://pkg.go.dev/github.com/apache/beam/sdks/v2/go/pkg/beam#CrossLanguagePayload)
    function as a helper for encoding a payload. You can use the
-   [beam.UnnamedInput](https://pkg.go.dev/github.com/apache/beam/sdks/go/pkg/beam#UnnamedInput) and
-   [beam.UnnamedOutput](https://pkg.go.dev/github.com/apache/beam/sdks/go/pkg/beam#UnnamedOutput)
+   [beam.UnnamedInput](https://pkg.go.dev/github.com/apache/beam/sdks/v2/go/pkg/beam#UnnamedInput) and
+   [beam.UnnamedOutput](https://pkg.go.dev/github.com/apache/beam/sdks/v2/go/pkg/beam#UnnamedOutput)
    functions as shortcuts for single, unnamed inputs/outputs or define a map for named ones.
 
-   {{< highlight >}}
-type prefixPayload struct {
-    Data string `beam:"data"`
-}
-urn := "beam:transforms:xlang:test:prefix"
-payload := beam.CrossLanguagePayload(prefixPayload{Data: prefix})
-expansionAddr := "localhost:8097"
-outT := beam.UnnamedOutput(typex.New(reflectx.String))
-res := beam.CrossLanguage(s, urn, payload, expansionAddr, beam.UnnamedInput(inputPCol), outT)
-   {{< /highlight >}}
+   ```go
+   type prefixPayload struct {
+      Data string `beam:"data"`
+   }
+   urn := "beam:transforms:xlang:test:prefix"
+   payload := beam.CrossLanguagePayload(prefixPayload{Data: prefix})
+   expansionAddr := "localhost:8097"
+   outT := beam.UnnamedOutput(typex.New(reflectx.String))
+   res := beam.CrossLanguage(s, urn, payload, expansionAddr, beam.UnnamedInput(inputPCol), outT)
+   ```
 
 4. After the job has been submitted to the Beam runner, shutdown the expansion service by
    terminating the expansion service process.
 
+#### 13.2.4. Using cross-language transforms in a Typescript pipeline
+
+Using a Typescript wrapper for a cross-language pipeline is similar to using any
+other transform, provided the dependencies (e.g. a recent Python interpreter or
+a Java JRE) is available.  For example, most of the Typescript IOs are simply
+wrappers around Beam transforms from other languages.
+
+<p class="paragraph-wrap">If a wrapper is not already available, one can use it explicitly using
+<a href="https://github.com/apache/beam/blob/master/sdks/typescript/src/apache_beam/transforms/external.ts" target="_blank" rel="noopener noreferrer">apache_beam.transforms.external.rawExternalTransform</a>.
+which takes a `urn` (a string identifying the transform),
+a `payload` (a binary or json object parameterizing the transform),
+and a `expansionService` which can either be an address of a pre-started service
+or a callable returning an auto-started expansion service object.</p>
+
+For example, one could write
+
+```
+pcoll.applyAsync(
+    rawExternalTransform(
+        "beam:registered:urn",
+        {arg: value},
+        "localhost:expansion_service_port"
+    )
+);
+```
+
+Note that `pcoll` must have a cross-language compatible coder coder such as `SchemaCoder`.
+This can be ensured with the [withCoderInternal](https://github.com/apache/beam/blob/master/sdks/typescript/src/apache_beam/transforms/internal.ts)
+or [withRowCoder](https://github.com/apache/beam/blob/master/sdks/typescript/src/apache_beam/transforms/internal.ts)
+transforms, e.g.
+
+```
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" with_row_coder >}}
+```
+
+Coder can also be specified on the output if it cannot be inferred, e.g.
+
+In addition, there are several utilities such as [pythonTransform](https://github.com/apache/beam/blob/master/sdks/typescript/src/apache_beam/transforms/python.ts)
+that make it easier to invoke transforms from specific languages:
+
+```
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" python_map >}}
+```
+
+Cross-language transforms can also be defined in line, which can be useful
+for accessing features or libraries not available in the calling SDK
+
+```
+{{< code_sample "sdks/typescript/test/docs/programming_guide.ts" cross_lang_transform >}}
+```
+
+
 ### 13.3. Runner Support {#x-lang-transform-runner-support}
 
-Currently, portable runners such as Flink, Spark, and the Direct runner can be used with multi-language pipelines.
+Currently, portable runners such as Flink, Spark, and the direct runner can be used with multi-language pipelines.
 
-Google Cloud Dataflow supports multi-language pipelines through the Dataflow Runner v2 backend architecture.
+Dataflow supports multi-language pipelines through the Dataflow Runner v2 backend architecture.
+
+### 13.4 Tips and Troubleshooting {#x-lang-transform-tips-troubleshooting}
+
+For additional tips and troubleshooting information, see [here](https://cwiki.apache.org/confluence/display/BEAM/Multi-language+Pipelines+Tips).
+
+## 14 Batched DoFns {#batched-dofns}
+{{< language-switcher java py go typescript >}}
+
+{{< paragraph class="language-go language-java language-typescript" >}}
+Batched DoFns are currently a Python-only feature.
+{{< /paragraph >}}
+
+{{< paragraph class="language-py" >}}
+Batched DoFns enable users to create modular, composable components that
+operate on batches of multiple logical elements. These DoFns can leverage
+vectorized Python libraries, like numpy, scipy, and pandas, which operate on
+batches of data for efficiency.
+{{< /paragraph >}}
+
+### 14.1 Basics {#batched-dofn-basics}
+{{< paragraph class="language-go language-java language-typescript" >}}
+Batched DoFns are currently a Python-only feature.
+{{< /paragraph >}}
+
+{{< paragraph class="language-py" >}}
+A trivial Batched DoFn might look like this:
+{{< /paragraph >}}
+
+{{< highlight py >}}
+class MultiplyByTwo(beam.DoFn):
+  # Type
+  def process_batch(self, batch: np.ndarray) -> Iterator[np.ndarray]:
+    yield batch * 2
+
+  # Declare what the element-wise output type is
+  def infer_output_type(self, input_element_type):
+    return input_element_type
+{{< /highlight >}}
+
+{{< paragraph class="language-py" >}}
+This DoFn can be used in a Beam pipeline that otherwise operates on individual
+elements. Beam will implicitly buffer elements and create numpy arrays on the
+input side, and on the output side it will explode the numpy arrays back into
+individual elements:
+{{< /paragraph >}}
+
+{{< highlight py >}}
+(p | beam.Create([1, 2, 3, 4]).with_output_types(np.int64)
+   | beam.ParDo(MultiplyByTwo()) # Implicit buffering and batch creation
+   | beam.Map(lambda x: x/3))  # Implicit batch explosion
+{{< /highlight >}}
+
+{{< paragraph class="language-py" >}}
+Note that we use
+[`PTransform.with_output_types`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.ptransform.html#apache_beam.transforms.ptransform.PTransform.with_output_types) to
+set the _element-wise_ typehint for the output of `beam.Create`. Then, when
+`MultiplyByTwo` is applied to this `PCollection`, Beam recognizes that
+`np.ndarray` is an acceptable batch type to use in conjunction with `np.int64`
+elements.  We will use numpy typehints like these throughout this guide, but
+Beam supports typehints from other libraries as well, see [Supported Batch
+Types](#batched-dofn-types).
+{{< /paragraph >}}
+
+{{< paragraph class="language-py" >}}
+In the previous case, Beam will implicitly create and explode batches at the
+input and output boundaries. However, if Batched DoFns with equivalent types are
+chained together, this batch creation and explosion will be elided. The batches
+will be passed straight through! This makes it much simpler to efficiently
+compose transforms that operate on batches.
+{{< /paragraph >}}
+
+{{< highlight py >}}
+(p | beam.Create([1, 2, 3, 4]).with_output_types(np.int64)
+   | beam.ParDo(MultiplyByTwo()) # Implicit buffering and batch creation
+   | beam.ParDo(MultiplyByTwo()) # Batches passed through
+   | beam.ParDo(MultiplyByTwo()))
+{{< /highlight >}}
+
+### 14.2 Element-wise Fallback {#batched-dofn-elementwise}
+{{< paragraph class="language-go language-java language-typescript" >}}
+Batched DoFns are currently a Python-only feature.
+{{< /paragraph >}}
+
+{{< paragraph class="language-py" >}}
+For some DoFns you may be able to provide both a batched and an element-wise
+implementation of your desired logic. You can do this by simply defining both
+`process` and `process_batch`:
+{{< /paragraph >}}
+
+{{< highlight py >}}
+class MultiplyByTwo(beam.DoFn):
+  def process(self, element: np.int64) -> Iterator[np.int64]:
+    # Multiply an individual int64 by 2
+    yield element * 2
+
+  def process_batch(self, batch: np.ndarray) -> Iterator[np.ndarray]:
+    # Multiply a _batch_ of int64s by 2
+    yield batch * 2
+{{< /highlight >}}
+
+{{< paragraph class="language-py" >}}
+When executing this DoFn, Beam will select the best implementation to use given
+the context. Generally, if the inputs to a DoFn are already batched Beam will
+use the batched implementation; otherwise it will use the element-wise
+implementation defined in the `process` method.
+{{< /paragraph >}}
+
+{{< paragraph class="language-py" >}}
+Note that, in this case, there is no need to define `infer_output_type`. This is
+because Beam can get the output type from the typehint on `process`.
+{{< /paragraph >}}
+
+
+
+### 14.3 Batch Production vs. Batch Consumption {#batched-dofn-batch-production}
+{{< paragraph class="language-go language-java language-typescript" >}}
+Batched DoFns are currently a Python-only feature.
+{{< /paragraph >}}
+
+{{< paragraph class="language-py" >}}
+By convention, Beam assumes that the `process_batch` method, which consumes
+batched inputs, will also produce batched outputs. Similarly, Beam assumes the
+`process` method will produce individual elements. This can be overridden with
+the [`@beam.DoFn.yields_elements`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.core.html#apache_beam.transforms.core.DoFn.yields_elements) and
+[`@beam.DoFn.yields_batches`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.core.html#apache_beam.transforms.core.DoFn.yields_batches) decorators. For example:
+{{< /paragraph >}}
+
+{{< highlight py >}}
+# Consumes elements, produces batches
+class ReadFromFile(beam.DoFn):
+
+  @beam.DoFn.yields_batches
+  def process(self, path: str) -> Iterator[np.ndarray]:
+    ...
+    yield array
+  
+
+  # Declare what the element-wise output type is
+  def infer_output_type(self):
+    return np.int64
+
+# Consumes batches, produces elements
+class WriteToFile(beam.DoFn):
+  @beam.DoFn.yields_elements
+  def process_batch(self, batch: np.ndarray) -> Iterator[str]:
+    ...
+    yield output_path
+{{< /highlight >}}
+
+### 14.4 Supported Batch Types {#batched-dofn-types}
+{{< paragraph class="language-go language-java language-typescript" >}}
+Batched DoFns are currently a Python-only feature.
+{{< /paragraph >}}
+
+{{< paragraph class="language-py" >}}
+We’ve used numpy types in the Batched DoFn implementations in this guide &ndash;
+`np.int64 ` as the element typehint and `np.ndarray` as the corresponding
+batch typehint &ndash; but Beam supports typehints from other libraries as well.
+{{< /paragraph >}}
+
+#### [numpy](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/typehints/batch.py)
+| Element Typehint | Batch Typehint |
+| ---------------- | -------------- |
+| Numeric types (`int`, `np.int32`, `bool`, ...) | np.ndarray (or NumpyArray) |
+
+#### [pandas](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/typehints/pandas_type_compatibility.py)
+| Element Typehint | Batch Typehint |
+| ---------------- | -------------- |
+| Numeric types (`int`, `np.int32`, `bool`, ...) | `pd.Series` |
+| `bytes` | |
+| `Any` | |
+| [Beam Schema Types](#schemas) | `pd.DataFrame` |
+
+#### [pyarrow](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/typehints/arrow_type_compatibility.py)
+
+| Element Typehint | Batch Typehint |
+| ---------------- | -------------- |
+| Numeric types (`int`, `np.int32`, `bool`, ...) | `pd.Series` |
+| `Any` | |
+| `List` | |
+| `Mapping` | |
+| [Beam Schema Types](#schemas) | `pa.Table` |
+
+#### Other types?
+If there are other batch types you would like to use with Batched DoFns, please
+[file an issue](https://github.com/apache/beam/issues/new/choose).
+
+### 14.5 Dynamic Batch Input and Output Types {#batched-dofn-dynamic-types}
+{{< paragraph class="language-go language-java language-typescript" >}}
+Batched DoFns are currently a Python-only feature.
+{{< /paragraph >}}
+
+{{< paragraph class="language-py" >}}
+For some Batched DoFns, it may not be sufficient to declare batch types
+statically, with typehints on `process` and/or `process_batch`. You may need to
+declare these types dynamically. You can do this by overriding the
+[`get_input_batch_type`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.core.html#apache_beam.transforms.core.DoFn.get_input_batch_type)
+and
+[`get_output_batch_type`](https://beam.apache.org/releases/pydoc/current/apache_beam.transforms.core.html#apache_beam.transforms.core.DoFn.get_output_batch_type)
+methods on your DoFn:
+{{< /paragraph >}}
+
+{{< highlight py >}}
+# Utilize Beam's parameterized NumpyArray typehint
+from apache_beam.typehints.batch import NumpyArray
+
+class MultipyByTwo(beam.DoFn):
+  # No typehints needed
+  def process_batch(self, batch):
+    yield batch * 2
+
+  def get_input_batch_type(self, input_element_type):
+    return NumpyArray[input_element_type]
+
+  def get_output_batch_type(self, input_element_type):
+    return NumpyArray[input_element_type]
+
+  def infer_output_type(self, input_element_type):
+    return input_element_type
+{{< /highlight >}}
+
+### 14.6 Batches and Event-time Semantics {#batched-dofn-event-time}
+{{< paragraph class="language-go language-java language-typescript" >}}
+Batched DoFns are currently a Python-only feature.
+{{< /paragraph >}}
+
+{{< paragraph class="language-py" >}}
+Currently, batches must have a single set of timing information (event time,
+windows, etc...) that applies to every logical element in the batch. There is
+currently no mechanism to create batches that span multiple timestamps. However,
+it is possible to retrieve this timing information in Batched DoFn
+implementations. This information can be accessed by using the conventional
+`DoFn.*Param` attributes:
+{{< /paragraph >}}
+
+{{< highlight py >}}
+class RetrieveTimingDoFn(beam.DoFn):
+
+  def process_batch(
+    self,
+    batch: np.ndarray,
+    timestamp=beam.DoFn.TimestampParam,
+    pane_info=beam.DoFn.PaneInfoParam,
+   ) -> Iterator[np.ndarray]:
+     ...
+
+  def infer_output_type(self, input_type):
+    return input_type
+{{< /highlight >}}
+
+## 15 Transform service {#transform-service}
+
+The Apache Beam SDK versions 2.49.0 and later include a [Docker Compose](https://docs.docker.com/compose/)
+service named _Transform service_.
+
+The following diagram illustrates the basic architecture of the Transform service.
+
+![Diagram of the Transform service architecture](/images/transform_service.png)
+
+To use the Transform service, Docker must be available on the machine that starts the service.
+
+The Transform service has several primary use cases.
+
+### 15.1 Using the transform service to upgrade transforms {#transform-service-usage-upgrade}
+
+Transform service can be used to upgrade (or downgrade) the Beam SDK versions of supported individual transforms used by Beam pipelines without changing the Beam version of the pipelines.
+This feature is currently only available for Beam Java SDK 2.53.0 and later. Currently, the following transforms are available for upgrading:
+
+* BigQuery read transform (URN: _beam:transform:org.apache.beam:bigquery_read:v1_)
+* BigQuery write transform (URN: _beam:transform:org.apache.beam:bigquery_write:v1_)
+* Kafka read transform (URN: _beam:transform:org.apache.beam:kafka_read_with_metadata:v2_)
+* Kafka write transform (URN: _beam:transform:org.apache.beam:kafka_write:v2_)
+
+To use this feature, you can simply execute a Java pipeline with additional pipeline options that specify the URNs of the transforms you would like to upgrade and the Beam version you would like to upgrade the transforms to. All transforms in the pipeline with matching URNs will be upgraded.
+
+For example, to upgrade the BigQuery read transform for a pipeline run using Beam `2.53.0` to a future Beam version `2.xy.z`, you can specify the following additional pipelines options.
+
+{{< highlight java >}}
+--transformsToOverride=beam:transform:org.apache.beam:bigquery_read:v1 --transformServiceBeamVersion=2.xy.z
+{{< /highlight >}}
+
+{{< highlight py >}}
+This feature is currently not available for Python SDK.
+{{< /highlight >}}
+
+{{< highlight go >}}
+This feature is currently not available for Go SDK.
+{{< /highlight >}}
+
+Note that the framework will automatically download the relevant Docker containers and startup the transform service for you.
+
+Please see [here](https://cwiki.apache.org/confluence/display/BEAM/Transform+Service#TransformService-Upgradetransformswithoutupgradingthepipeline) for a full example that uses this feature to upgrade BigQuery read and write transforms.
+
+### 15.2 Using the Transform service for multi-language pipelines {#transform-service-usage-multi-language}
+
+Transform service implements the Beam expansion API. This allows Beam multi-language pipelines to use the transform service when expanding transforms available within the transform service.
+The main advantage here is that multi-language pipelines will be able to operate without installing support for additional language runtimes. For example, Beam Python pipelines that use Java transforms such as
+`KafkaIO` can operate without installing Java locally during job submission as long as Docker is available in the system.
+
+In some cases, Apache Beam SDKs can automatically start the Transform service.
+
+* The Java [`PythonExternalTransform` API](https://github.com/apache/beam/blob/master/sdks/java/extensions/python/src/main/java/org/apache/beam/sdk/extensions/python/PythonExternalTransform.java) automatically
+starts the Transform service when a Python runtime isn't available locally, but Docker is.
+
+* The Apache Beam Python multi-language wrappers might automatically start the Transform service when you're using Java transforms, a Java language runtime isn't available locally, and Docker is available locally.
+
+Beam users also have the option to [manually start](/documentation/programming-guide/#transform-service-usage-muanual) a transform service and use that as the expansion service used by multi-language pipelines.
+
+### 15.3 Manually starting the transform service {#transform-service-usage-muanual}
+
+A Beam Transform service instance can be manually started by using utilities provided with Apache Beam SDKs.
+
+{{< highlight java >}}
+java -jar beam-sdks-java-transform-service-app-<Beam version for the jar>.jar --port <port> --beam_version <Beam version for the transform service> --project_name <a unique ID for the transform service> --command up
+{{< /highlight >}}
+
+{{< highlight py >}}
+python -m apache_beam.utils.transform_service_launcher --port <port> --beam_version <Beam version for the transform service> --project_name <a unique ID for the transform service> --command up
+{{< /highlight >}}
+
+{{< highlight go >}}
+This feature is currently in development.
+{{< /highlight >}}
+
+To stop the transform service, use the following commands.
+
+{{< highlight java >}}
+java -jar beam-sdks-java-transform-service-app-<Beam version for the jar>.jar --port <port> --beam_version <Beam version for the transform service> --project_name <a unique ID for the transform service> --command down
+{{< /highlight >}}
+
+{{< highlight py >}}
+python -m apache_beam.utils.transform_service_launcher --port <port> --beam_version <Beam version for the transform service> --project_name <a unique ID for the transform service> --command down
+{{< /highlight >}}
+
+{{< highlight go >}}
+This feature is currently in development.
+{{< /highlight >}}
+
+### 15.4 Portable transforms included in the Transform service {#transform-service-included-transforms}
+
+Beam Transform service includes a number of transforms implemented in the Apache Beam Java and Python SDKs.
+
+Currently, the following transforms are included in the Transform service:
+
+* Java transforms: Google Cloud I/O connectors, the Kafka I/O connector, and the JDBC I/O connector
+
+* Python transforms: all portable transforms implemented within the Apache Beam Python SDK, such as
+  [RunInference](/documentation/transforms/python/elementwise/runinference/) and
+  [DataFrame](/documentation/dsls/dataframes/overview/) transforms.
+
+For a more comprehensive list of available transforms, see the
+[Transform service](https://cwiki.apache.org/confluence/display/BEAM/Transform+Service#TransformService-TransformsincludedintheTransformservice) developer guide.

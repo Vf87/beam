@@ -18,21 +18,31 @@
 """Tests common to all coder implementations."""
 # pytype: skip-file
 
+import base64
 import collections
 import enum
 import logging
 import math
+import os
+import pickle
+import subprocess
+import sys
+import textwrap
 import unittest
+from decimal import Decimal
 from typing import Any
-from typing import List
 from typing import NamedTuple
 
 import pytest
+from parameterized import param
+from parameterized import parameterized
 
-from apache_beam.coders import proto2_coder_test_messages_pb2 as test_message
 from apache_beam.coders import coders
+from apache_beam.coders import proto2_coder_test_messages_pb2 as test_message
 from apache_beam.coders import typecoders
 from apache_beam.internal import pickler
+from apache_beam.options.pipeline_options import PipelineOptions
+from apache_beam.options.pipeline_options_context import scoped_pipeline_options
 from apache_beam.runners import pipeline_context
 from apache_beam.transforms import userstate
 from apache_beam.transforms import window
@@ -51,7 +61,13 @@ try:
 except ImportError:
   dataclasses = None  # type: ignore
 
-MyNamedTuple = collections.namedtuple('A', ['x', 'y'])
+try:
+  import dill
+except ImportError:
+  dill = None
+
+MyNamedTuple = collections.namedtuple('A', ['x', 'y'])  # type: ignore[name-match]
+AnotherNamedTuple = collections.namedtuple('AnotherNamedTuple', ['x', 'y'])
 MyTypedNamedTuple = NamedTuple('MyTypedNamedTuple', [('f1', int), ('f2', str)])
 
 
@@ -98,28 +114,43 @@ if dataclasses is not None:
     a: Any
     b: int
 
+  @dataclasses.dataclass(frozen=True, kw_only=True)
+  class FrozenKwOnlyDataClass:
+    c: int
+    d: int
+
   @dataclasses.dataclass
   class UnFrozenDataClass:
     x: int
     y: int
 
+  @dataclasses.dataclass(frozen=True, kw_only=True)
+  class FrozenUnInitKwOnlyDataClass:
+    side: int
+    area: int = dataclasses.field(init=False)
+
+    def __post_init__(self):
+      # Hack to update an attribute in a frozen dataclass.
+      object.__setattr__(self, 'area', self.side**2)
+
 
 # These tests need to all be run in the same process due to the asserts
 # in tearDownClass.
 @pytest.mark.no_xdist
+@pytest.mark.uses_dill
 class CodersTest(unittest.TestCase):
 
   # These class methods ensure that we test each defined coder in both
   # nested and unnested context.
 
   # Common test values representing Python's built-in types.
-  test_values_deterministic: List[Any] = [
+  test_values_deterministic: list[Any] = [
       None,
       1,
       -1,
       1.5,
       b'str\0str',
-      u'unicode\0\u0101',
+      'unicode\0\u0101',
       (),
       (1, 2, 3),
       [],
@@ -157,9 +188,19 @@ class CodersTest(unittest.TestCase):
         coders.FastCoder,
         coders.ListLikeCoder,
         coders.ProtoCoder,
-        coders.ToBytesCoder
+        coders.ProtoPlusCoder,
+        coders.BigEndianShortCoder,
+        coders.ByteCoder,
+        coders.SinglePrecisionFloatCoder,
+        coders.ToBytesCoder,
+        coders.BigIntegerCoder,  # tested in DecimalCoder
+        coders.TimestampPrefixingOpaqueWindowCoder,
     ])
-    cls.seen_nested -= set([coders.ProtoCoder, CustomCoder])
+    if not dill:
+      standard -= set(
+          [coders.DillCoder, coders.DeterministicFastPrimitivesCoder])
+    cls.seen_nested -= set(
+        [coders.ProtoCoder, coders.ProtoPlusCoder, CustomCoder])
     assert not standard - cls.seen, str(standard - cls.seen)
     assert not cls.seen_nested - standard, str(cls.seen_nested - standard)
 
@@ -207,61 +248,153 @@ class CodersTest(unittest.TestCase):
     coder = coders.PickleCoder()
     self.check_coder(coder, *self.test_values)
 
+  def test_cloudpickle_pickle_coder(self):
+    cell_value = (lambda x: lambda: x)(0).__closure__[0]
+    self.check_coder(coders.CloudpickleCoder(), 'a', 1, cell_value)
+    self.check_coder(
+        coders.TupleCoder((coders.VarIntCoder(), coders.CloudpickleCoder())),
+        (1, cell_value))
+
   def test_memoizing_pickle_coder(self):
     coder = coders._MemoizingPickleCoder()
     self.check_coder(coder, *self.test_values)
 
-  def test_deterministic_coder(self):
-    coder = coders.FastPrimitivesCoder()
-    deterministic_coder = coders.DeterministicFastPrimitivesCoder(coder, 'step')
-    self.check_coder(deterministic_coder, *self.test_values_deterministic)
-    for v in self.test_values_deterministic:
-      self.check_coder(coders.TupleCoder((deterministic_coder, )), (v, ))
-    self.check_coder(
-        coders.TupleCoder(
-            (deterministic_coder, ) * len(self.test_values_deterministic)),
-        tuple(self.test_values_deterministic))
+  @parameterized.expand([
+      param(compat_version=None),
+      param(compat_version="2.67.0"),
+      param(compat_version="2.68.0"),
+  ])
+  def test_deterministic_coder(self, compat_version):
+    """ Test in process determinism for all special deterministic types
 
-    with self.assertRaises(TypeError):
+    - In SDK version <= 2.67.0 dill is used to encode "special types"
+    - In SDK version 2.68.0 cloudpickle is used to encode "special types" with
+    absolute filepaths in code objects and dynamic functions.
+    - In SDK version >=2.69.0 cloudpickle is used to encode "special types"
+    with relative filepaths in code objects and dynamic functions.
+    """
+    with scoped_pipeline_options(
+        PipelineOptions(update_compatibility_version=compat_version)):
+      coder = coders.FastPrimitivesCoder()
+      if not dill and compat_version == "2.67.0":
+        with self.assertRaises(RuntimeError):
+          coder.as_deterministic_coder(step_label="step")
+        self.skipTest('Dill not installed')
+      deterministic_coder = coder.as_deterministic_coder(step_label="step")
+
+      self.check_coder(deterministic_coder, *self.test_values_deterministic)
+      for v in self.test_values_deterministic:
+        self.check_coder(coders.TupleCoder((deterministic_coder, )), (v, ))
+      self.check_coder(
+          coders.TupleCoder(
+              (deterministic_coder, ) * len(self.test_values_deterministic)),
+          tuple(self.test_values_deterministic))
+
       self.check_coder(deterministic_coder, {})
-    with self.assertRaises(TypeError):
+      self.check_coder(deterministic_coder, {2: 'x', 1: 'y'})
+      with self.assertRaises(TypeError):
+        self.check_coder(deterministic_coder, {1: 'x', 'y': 2})
       self.check_coder(deterministic_coder, [1, {}])
+      with self.assertRaises(TypeError):
+        self.check_coder(deterministic_coder, [1, {1: 'x', 'y': 2}])
 
-    self.check_coder(
-        coders.TupleCoder((deterministic_coder, coder)), (1, {}), ('a', [{}]))
+      self.check_coder(
+          coders.TupleCoder((deterministic_coder, coder)), (1, {}), ('a', [{}]))
 
-    self.check_coder(deterministic_coder, test_message.MessageA(field1='value'))
+      self.check_coder(
+          deterministic_coder, test_message.MessageA(field1='value'))
 
-    self.check_coder(
-        deterministic_coder, [MyNamedTuple(1, 2), MyTypedNamedTuple(1, 'a')])
+      # Skip this test during cloudpickle. Dill monkey patches the __reduce__
+      # method for anonymous named tuples (MyNamedTuple) which is not
+      # pickleable. Since the test is parameterized the type gets colbbered.
+      if compat_version == "2.67.0":
+        self.check_coder(
+            deterministic_coder,
+            [MyNamedTuple(1, 2), MyTypedNamedTuple(1, 'a')])
 
-    if dataclasses is not None:
-      self.check_coder(deterministic_coder, FrozenDataClass(1, 2))
+      self.check_coder(
+          deterministic_coder,
+          [AnotherNamedTuple(1, 2), MyTypedNamedTuple(1, 'a')])
+
+      if dataclasses is not None:
+        self.check_coder(deterministic_coder, FrozenDataClass(1, 2))
+        self.check_coder(deterministic_coder, FrozenKwOnlyDataClass(c=1, d=2))
+        self.check_coder(
+            deterministic_coder, FrozenUnInitKwOnlyDataClass(side=11))
+
+        with self.assertRaises(TypeError):
+          self.check_coder(deterministic_coder, UnFrozenDataClass(1, 2))
+
+        with self.assertRaises(TypeError):
+          self.check_coder(
+              deterministic_coder, FrozenDataClass(UnFrozenDataClass(1, 2), 3))
+          with self.assertRaises(TypeError):
+            self.check_coder(
+                deterministic_coder,
+                AnotherNamedTuple(UnFrozenDataClass(1, 2), 3))
+
+      self.check_coder(deterministic_coder, list(MyEnum))
+      self.check_coder(deterministic_coder, list(MyIntEnum))
+      self.check_coder(deterministic_coder, list(MyIntFlag))
+      self.check_coder(deterministic_coder, list(MyFlag))
+
+      self.check_coder(
+          deterministic_coder,
+          [DefinesGetAndSetState(1), DefinesGetAndSetState((1, 2, 3))])
 
       with self.assertRaises(TypeError):
-        self.check_coder(deterministic_coder, UnFrozenDataClass(1, 2))
+        self.check_coder(deterministic_coder, DefinesGetState(1))
       with self.assertRaises(TypeError):
         self.check_coder(
-            deterministic_coder, FrozenDataClass(UnFrozenDataClass(1, 2), 3))
-      with self.assertRaises(TypeError):
-        self.check_coder(
-            deterministic_coder, MyNamedTuple(UnFrozenDataClass(1, 2), 3))
+            deterministic_coder, DefinesGetAndSetState({
+                1: 'x', 'y': 2
+            }))
 
-    self.check_coder(deterministic_coder, list(MyEnum))
-    self.check_coder(deterministic_coder, list(MyIntEnum))
-    self.check_coder(deterministic_coder, list(MyIntFlag))
-    self.check_coder(deterministic_coder, list(MyFlag))
+  @parameterized.expand([
+      param(compat_version=None),
+      param(compat_version="2.67.0"),
+      param(compat_version="2.68.0"),
+  ])
+  def test_deterministic_map_coder_is_update_compatible(self, compat_version):
+    """ Test in process determinism for map coder including when a component
+    coder uses DeterministicFastPrimitivesCoder for "special types".
 
-    self.check_coder(
-        deterministic_coder,
-        [DefinesGetAndSetState(1), DefinesGetAndSetState((1, 2, 3))])
+    - In SDK version <= 2.67.0 dill is used to encode "special types"
+    - In SDK version 2.68.0 cloudpickle is used to encode "special types" with
+    absolute filepaths in code objects and dynamic functions.
+    - In SDK version >=2.69.0 cloudpickle is used to encode "special types"
+    with relative file.
+    """
+    with scoped_pipeline_options(
+        PipelineOptions(update_compatibility_version=compat_version)):
+      values = [{
+          MyTypedNamedTuple(i, 'a'): MyTypedNamedTuple('a', i)
+          for i in range(10)
+      }]
 
-    with self.assertRaises(TypeError):
-      self.check_coder(deterministic_coder, DefinesGetState(1))
-    with self.assertRaises(TypeError):
-      self.check_coder(deterministic_coder, DefinesGetAndSetState({}))
+      coder = coders.MapCoder(
+          coders.FastPrimitivesCoder(), coders.FastPrimitivesCoder())
+
+      if not dill and compat_version == "2.67.0":
+        with self.assertRaises(RuntimeError):
+          coder.as_deterministic_coder(step_label="step")
+        self.skipTest('Dill not installed')
+
+      deterministic_coder = coder.as_deterministic_coder(step_label="step")
+
+      assert isinstance(
+          deterministic_coder._key_coder,
+          coders.DeterministicFastPrimitivesCoderV2 if compat_version
+          in (None, "2.68.0") else coders.DeterministicFastPrimitivesCoder)
+
+      self.check_coder(deterministic_coder, *values)
 
   def test_dill_coder(self):
+    if not dill:
+      with self.assertRaises(RuntimeError):
+        coders.DillCoder()
+      self.skipTest('Dill not installed')
+
     cell_value = (lambda x: lambda: x)(0).__closure__[0]
     self.check_coder(coders.DillCoder(), 'a', 1, cell_value)
     self.check_coder(
@@ -304,6 +437,20 @@ class CodersTest(unittest.TestCase):
             for k in range(0, int(math.log(MAX_64_BIT_INT)))
         ])
 
+  def test_varint32_coder(self):
+    # Small ints.
+    self.check_coder(coders.VarInt32Coder(), *range(-10, 10))
+    # Multi-byte encoding starts at 128
+    self.check_coder(coders.VarInt32Coder(), *range(120, 140))
+    # Large values
+    MAX_32_BIT_INT = 0x7fffffff
+    self.check_coder(
+        coders.VarIntCoder(),
+        *[
+            int(math.pow(-1, k) * math.exp(k))
+            for k in range(0, int(math.log(MAX_32_BIT_INT)))
+        ])
+
   def test_float_coder(self):
     self.check_coder(
         coders.FloatCoder(), *[float(0.1 * x) for x in range(-100, 100)])
@@ -333,6 +480,18 @@ class CodersTest(unittest.TestCase):
     self.check_coder(
         coders.TupleCoder((coders.IntervalWindowCoder(), )),
         (window.IntervalWindow(0, 10), ))
+
+  def test_paneinfo_window_coder(self):
+    self.check_coder(
+        coders.PaneInfoCoder(),
+        *[
+            windowed_value.PaneInfo(
+                is_first=y == 0,
+                is_last=y == 9,
+                timing=windowed_value.PaneInfoTiming.EARLY,
+                index=y,
+                nonspeculative_index=-1) for y in range(0, 10)
+        ])
 
   def test_timestamp_coder(self):
     self.check_coder(
@@ -374,16 +533,6 @@ class CodersTest(unittest.TestCase):
 
   def test_tuple_coder(self):
     kv_coder = coders.TupleCoder((coders.VarIntCoder(), coders.BytesCoder()))
-    # Verify cloud object representation
-    self.assertEqual({
-        '@type': 'kind:pair',
-        'is_pair_like': True,
-        'component_encodings': [
-            coders.VarIntCoder().as_cloud_object(),
-            coders.BytesCoder().as_cloud_object()
-        ],
-    },
-                     kv_coder.as_cloud_object())
     # Test binary representation
     self.assertEqual(b'\x04abc', kv_coder.encode((4, b'abc')))
     # Test unnested
@@ -394,7 +543,7 @@ class CodersTest(unittest.TestCase):
             coders.TupleCoder((coders.PickleCoder(), coders.VarIntCoder())),
             coders.StrUtf8Coder(),
             coders.BooleanCoder())), ((1, 2), 'a', True),
-        ((-2, 5), u'a\u0101' * 100, False), ((300, 1), 'abc\0' * 5, True))
+        ((-2, 5), 'a\u0101' * 100, False), ((300, 1), 'abc\0' * 5, True))
 
   def test_tuple_sequence_coder(self):
     int_tuple_coder = coders.TupleSequenceCoder(coders.VarIntCoder())
@@ -407,17 +556,10 @@ class CodersTest(unittest.TestCase):
     self.check_coder(coders.Base64PickleCoder(), 'a', 1, 1.5, (1, 2, 3))
 
   def test_utf8_coder(self):
-    self.check_coder(coders.StrUtf8Coder(), 'a', u'ab\u00FF', u'\u0101\0')
+    self.check_coder(coders.StrUtf8Coder(), 'a', 'ab\u00FF', '\u0101\0')
 
   def test_iterable_coder(self):
     iterable_coder = coders.IterableCoder(coders.VarIntCoder())
-    # Verify cloud object representation
-    self.assertEqual({
-        '@type': 'kind:stream',
-        'is_stream_like': True,
-        'component_encodings': [coders.VarIntCoder().as_cloud_object()]
-    },
-                     iterable_coder.as_cloud_object())
     # Test unnested
     self.check_coder(iterable_coder, [1], [-1, 0, 100])
     # Test nested
@@ -494,16 +636,6 @@ class CodersTest(unittest.TestCase):
   def test_windowed_value_coder(self):
     coder = coders.WindowedValueCoder(
         coders.VarIntCoder(), coders.GlobalWindowCoder())
-    # Verify cloud object representation
-    self.assertEqual({
-        '@type': 'kind:windowed_value',
-        'is_wrapper': True,
-        'component_encodings': [
-            coders.VarIntCoder().as_cloud_object(),
-            coders.GlobalWindowCoder().as_cloud_object(),
-        ],
-    },
-                     coder.as_cloud_object())
     # Test binary representation
     self.assertEqual(
         b'\x7f\xdf;dZ\x1c\xac\t\x00\x00\x00\x01\x0f\x01',
@@ -538,6 +670,8 @@ class CodersTest(unittest.TestCase):
   def test_param_windowed_value_coder(self):
     from apache_beam.transforms.window import IntervalWindow
     from apache_beam.utils.windowed_value import PaneInfo
+
+    # pylint: disable=too-many-function-args
     wv = windowed_value.create(
         b'',
         # Milliseconds to microseconds
@@ -585,16 +719,171 @@ class CodersTest(unittest.TestCase):
                 1, (window.IntervalWindow(11, 21), ),
                 PaneInfo(True, False, 1, 2, 3))))
 
+  @parameterized.expand([
+      param(compat_version=None),
+      param(compat_version="2.67.0"),
+      param(compat_version="2.68.0"),
+  ])
+  def test_cross_process_encoding_of_special_types_is_deterministic(
+      self, compat_version):
+    """Test cross-process determinism for all special deterministic types
+
+    - In SDK version <= 2.67.0 dill is used to encode "special types"
+    - In SDK version 2.68.0 cloudpickle is used to encode "special types" with
+    absolute filepaths in code objects and dynamic functions.
+    - In SDK version 2.69.0 cloudpickle is used to encode "special types" with
+    relative filepaths in code objects and dynamic functions.
+    """
+    is_using_dill = compat_version == "2.67.0"
+    if is_using_dill:
+      pytest.importorskip("dill")
+
+    if sys.executable is None:
+      self.skipTest('No Python interpreter found')
+
+    # pylint: disable=line-too-long
+    script = textwrap.dedent(
+        f'''\
+        import pickle
+        import sys
+        import collections
+        import enum
+        import logging
+
+        from apache_beam.coders import coders
+        from apache_beam.options.pipeline_options_context import scoped_pipeline_options
+        from apache_beam.options.pipeline_options import PipelineOptions
+        from apache_beam.coders.coders_test_common import MyNamedTuple
+        from apache_beam.coders.coders_test_common import MyTypedNamedTuple
+        from apache_beam.coders.coders_test_common import MyEnum
+        from apache_beam.coders.coders_test_common import MyIntEnum
+        from apache_beam.coders.coders_test_common import MyIntFlag
+        from apache_beam.coders.coders_test_common import MyFlag
+        from apache_beam.coders.coders_test_common import DefinesGetState
+        from apache_beam.coders.coders_test_common import DefinesGetAndSetState
+        from apache_beam.coders.coders_test_common import FrozenDataClass
+        from apache_beam.coders.coders_test_common import FrozenKwOnlyDataClass
+        from apache_beam.coders.coders_test_common import FrozenUnInitKwOnlyDataClass
+
+
+        from apache_beam.coders import proto2_coder_test_messages_pb2 as test_message
+
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            stream=sys.stderr,
+            force=True
+        )
+        
+        # Test cases for all special deterministic types
+        # NOTE: When this script run in a subprocess the module is considered
+        #  __main__. Dill cannot pickle enums in __main__ because it
+        # needs to define a way to create the type if it does not exist
+        # in the session, and reaches recursion depth limits.
+        test_cases = [
+            ("proto_message", test_message.MessageA(field1='value')),
+            ("named_tuple_simple", MyNamedTuple(1, 2)),
+            ("typed_named_tuple", MyTypedNamedTuple(1, 'a')),
+            ("named_tuple_list", [MyNamedTuple(1, 2), MyTypedNamedTuple(1, 'a')]),
+            ("enum_single", MyEnum.E1),
+            ("enum_list", list(MyEnum)),
+            ("int_enum_list", list(MyIntEnum)),
+            ("int_flag_list", list(MyIntFlag)),
+            ("flag_list", list(MyFlag)),
+            ("getstate_setstate_simple", DefinesGetAndSetState(1)),
+            ("getstate_setstate_complex", DefinesGetAndSetState((1, 2, 3))),
+            ("getstate_setstate_list", [DefinesGetAndSetState(1), DefinesGetAndSetState((1, 2, 3))]),
+        ]
+
+        
+        test_cases.extend([
+            ("frozen_dataclass", FrozenDataClass(1, 2)),
+            ("frozen_dataclass_list", [FrozenDataClass(1, 2), FrozenDataClass(3, 4)]),
+            ("frozen_kwonly_dataclass", FrozenKwOnlyDataClass(c=1, d=2)),
+            ("frozen_kwonly_dataclass_list", [FrozenKwOnlyDataClass(c=1, d=2), FrozenUnInitKwOnlyDataClass(side=3)]),
+        ])
+
+        compat_version = {'"'+ compat_version +'"' if compat_version else None}
+        with scoped_pipeline_options(PipelineOptions(update_compatibility_version=compat_version)):
+            coder = coders.FastPrimitivesCoder()
+            deterministic_coder = coder.as_deterministic_coder("step")
+            
+            results = dict()
+            for test_name, value in test_cases:
+                try:
+                    encoded = deterministic_coder.encode(value)
+                    results[test_name] = encoded
+                except Exception as e:
+                  logging.warning("Encoding failed with %s", e)
+                  sys.exit(1)
+            
+            sys.stdout.buffer.write(pickle.dumps(results))
+                
+        
+    ''')
+
+    def run_subprocess():
+      result = subprocess.run([sys.executable, '-c', script],
+                              capture_output=True,
+                              timeout=30,
+                              check=False)
+
+      self.assertEqual(
+          0, result.returncode, f"Subprocess failed: {result.stderr}")
+      return pickle.loads(result.stdout)
+
+    results1 = run_subprocess()
+    results2 = run_subprocess()
+
+    coder = coders.FastPrimitivesCoder()
+    deterministic_coder = coder.as_deterministic_coder("step")
+
+    for test_name in results1:
+
+      data1 = results1[test_name]
+      data2 = results2[test_name]
+
+      self.assertEqual(
+          data1, data2, f"Cross-process encoding differs for {test_name}")
+      self.assertGreater(len(data1), 1)
+
+      try:
+        decoded1 = deterministic_coder.decode(data1)
+        decoded2 = deterministic_coder.decode(data2)
+      except Exception as e:
+        logging.warning("Could not decode %s data due to %s", test_name, e)
+        continue
+
+      if test_name == "named_tuple_simple" and not is_using_dill:
+        # The absense of a compat_version means we are using the most recent
+        # implementation of the coder, which uses relative paths.
+        should_have_relative_path = not compat_version
+        named_tuple_type = type(decoded1)
+        self.assertEqual(
+            os.path.isabs(named_tuple_type._make.__code__.co_filename),
+            not should_have_relative_path)
+        self.assertEqual(
+            os.path.isabs(
+                named_tuple_type.__getnewargs__.__globals__['__file__']),
+            not should_have_relative_path)
+
+      self.assertEqual(
+          decoded1, decoded2, f"Cross-process decoding differs for {test_name}")
+      self.assertIsInstance(
+          decoded1,
+          type(decoded2),
+          f"Cross-process decoding differs for {test_name}")
+
   def test_proto_coder(self):
     # For instructions on how these test proto message were generated,
     # see coders_test.py
     ma = test_message.MessageA()
     mab = ma.field2.add()
     mab.field1 = True
-    ma.field1 = u'hello world'
+    ma.field1 = 'hello world'
 
     mb = test_message.MessageA()
-    mb.field1 = u'beam'
+    mb.field1 = 'beam'
 
     proto_coder = coders.ProtoCoder(ma.__class__)
     self.check_coder(proto_coder, ma)
@@ -605,8 +894,6 @@ class CodersTest(unittest.TestCase):
   def test_global_window_coder(self):
     coder = coders.GlobalWindowCoder()
     value = window.GlobalWindow()
-    # Verify cloud object representation
-    self.assertEqual({'@type': 'kind:global_window'}, coder.as_cloud_object())
     # Test binary representation
     self.assertEqual(b'', coder.encode(value))
     self.assertEqual(value, coder.decode(b''))
@@ -617,12 +904,6 @@ class CodersTest(unittest.TestCase):
 
   def test_length_prefix_coder(self):
     coder = coders.LengthPrefixCoder(coders.BytesCoder())
-    # Verify cloud object representation
-    self.assertEqual({
-        '@type': 'kind:length_prefix',
-        'component_encodings': [coders.BytesCoder().as_cloud_object()]
-    },
-                     coder.as_cloud_object())
     # Test binary representation
     self.assertEqual(b'\x00', coder.encode(b''))
     self.assertEqual(b'\x01a', coder.encode(b'a'))
@@ -653,7 +934,7 @@ class CodersTest(unittest.TestCase):
 
     # Test nested tuple observable.
     coder = coders.TupleCoder((coders.StrUtf8Coder(), iter_coder))
-    value = (u'123', observ)
+    value = ('123', observ)
     self.assertEqual(
         coder.get_impl().get_estimated_size_and_observables(value)[1],
         [(observ, elem_coder.get_impl())])
@@ -677,27 +958,34 @@ class CodersTest(unittest.TestCase):
         read_state=iterable_state_read,
         write_state=iterable_state_write,
         write_state_threshold=1)
-    context = pipeline_context.PipelineContext(
-        iterable_state_read=iterable_state_read,
-        iterable_state_write=iterable_state_write)
-    self.check_coder(
-        coder, [1, 2, 3], context=context, test_size_estimation=False)
+    # Note: do not use check_coder
+    # see https://github.com/cloudpipe/cloudpickle/issues/452
+    self._observe(coder)
+    self.assertEqual([1, 2, 3], coder.decode(coder.encode([1, 2, 3])))
     # Ensure that state was actually used.
     self.assertNotEqual(state, {})
-    self.check_coder(
-        coders.TupleCoder((coder, coder)), ([1], [2, 3]),
-        context=context,
-        test_size_estimation=False)
+    tupleCoder = coders.TupleCoder((coder, coder))
+    self._observe(tupleCoder)
+    self.assertEqual(([1], [2, 3]),
+                     tupleCoder.decode(tupleCoder.encode(([1], [2, 3]))))
 
   def test_nullable_coder(self):
     self.check_coder(coders.NullableCoder(coders.VarIntCoder()), None, 2 * 64)
 
   def test_map_coder(self):
-    self.check_coder(
-        coders.MapCoder(coders.VarIntCoder(), coders.StrUtf8Coder()), {
+    values = [
+        {
             1: "one", 300: "three hundred"
-        }, {}, {i: str(i)
-                for i in range(5000)})
+        },  # force yapf to be nice
+        {},
+        {
+            i: str(i)
+            for i in range(5000)
+        },
+    ]
+    map_coder = coders.MapCoder(coders.VarIntCoder(), coders.StrUtf8Coder())
+    self.check_coder(map_coder, *values)
+    self.check_coder(map_coder.as_deterministic_coder("label"), *values)
 
   def test_sharded_key_coder(self):
     key_and_coders = [(b'', b'\x00', coders.BytesCoder()),
@@ -710,12 +998,6 @@ class CodersTest(unittest.TestCase):
 
     for key, bytes_repr, key_coder in key_and_coders:
       coder = coders.ShardedKeyCoder(key_coder)
-      # Verify cloud object representation
-      self.assertEqual({
-          '@type': 'kind:sharded_key',
-          'component_encodings': [key_coder.as_cloud_object()]
-      },
-                       coder.as_cloud_object())
 
       # Test str repr
       self.assertEqual('%s' % coder, 'ShardedKeyCoder[%s]' % key_coder)
@@ -764,6 +1046,67 @@ class CodersTest(unittest.TestCase):
             coders.TimestampPrefixingWindowCoder(
                 coders.IntervalWindowCoder()), )),
         (window.IntervalWindow(0, 10), ))
+
+  def test_timestamp_prefixing_opaque_window_coder(self):
+    sdk_coder = coders.TimestampPrefixingWindowCoder(
+        coders.LengthPrefixCoder(coders.PickleCoder()))
+    safe_coder = coders.TimestampPrefixingOpaqueWindowCoder()
+    for w in [window.IntervalWindow(1, 123), window.GlobalWindow()]:
+      round_trip = sdk_coder.decode(
+          safe_coder.encode(safe_coder.decode(sdk_coder.encode(w))))
+      self.assertEqual(w, round_trip)
+
+  def test_decimal_coder(self):
+    test_coder = coders.DecimalCoder()
+
+    test_values = [
+        Decimal("-10.5"),
+        Decimal("-1"),
+        Decimal(),
+        Decimal("1"),
+        Decimal("13.258"),
+    ]
+
+    test_encodings = ("AZc", "AP8", "AAA", "AAE", "AzPK")
+
+    self.check_coder(test_coder, *test_values)
+
+    for idx, value in enumerate(test_values):
+      self.assertEqual(
+          test_encodings[idx],
+          base64.b64encode(test_coder.encode(value)).decode().rstrip("="))
+
+  def test_byte_coder(self):
+    test_coder = coders.ByteCoder()
+    test_values = [0, 80, 127, 128, 255]
+    test_encodings = ("AA", "UA", "fw", "gA", "/w")
+    self.check_coder(test_coder, *test_values)
+    for idx, value in enumerate(test_values):
+      self.assertEqual(
+          test_encodings[idx],
+          base64.b64encode(test_coder.encode(value)).decode().rstrip("="))
+
+  def test_OrderedUnionCoder(self):
+    test_coder = coders._OrderedUnionCoder((str, coders.StrUtf8Coder()),
+                                           (int, coders.VarIntCoder()),
+                                           fallback_coder=coders.FloatCoder())
+    self.check_coder(test_coder, 's')
+    self.check_coder(test_coder, 123)
+    self.check_coder(test_coder, 1.5)
+
+  def test_OrderedUnionCoderDeterministic(self):
+    # CustomCoder is not deterministic therefore test_coder is not
+    # deterministic
+    test_coder = coders._OrderedUnionCoder((str, coders.StrUtf8Coder()),
+                                           (int, CustomCoder()),
+                                           fallback_coder=coders.FloatCoder())
+
+    self.assertFalse(test_coder.is_deterministic())
+
+    test_coder = coders._OrderedUnionCoder((str, coders.StrUtf8Coder()),
+                                           (int, coders.VarIntCoder()),
+                                           fallback_coder=coders.FloatCoder())
+    self.assertTrue(test_coder.is_deterministic())
 
 
 if __name__ == '__main__':

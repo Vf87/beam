@@ -33,7 +33,7 @@ This section provides a walkthrough of a series of example Apache Beam pipelines
 {{< /paragraph >}}
 
 > **Note**: MobileGaming is not yet available for the Go SDK. There is an open issue for this
-([BEAM-4293](https://issues.apache.org/jira/browse/BEAM-4293)).
+([Issue 18806](https://github.com/apache/beam/issues/18806)).
 
 Every time a user plays an instance of our hypothetical mobile game, they generate a data event. Each data event consists of the following information:
 
@@ -60,7 +60,7 @@ Because some of our example pipelines use data files (like logs from the game se
 
 For pipelines that read unbounded game data from an unbounded source, the data source sets the intrinsic [timestamp](/documentation/programming-guide/#element-timestamps) for each PCollection element to the appropriate event time.
 
-The Mobile Gaming example pipelines vary in complexity, from simple batch analysis to more complex pipelines that can perform real-time analysis and abuse detection. This section walks you through each example and demonstrates how to use Beam features like windowing and triggers to expand your pipeline's capabilites.
+The Mobile Gaming example pipelines vary in complexity, from simple batch analysis to more complex pipelines that can perform real-time analysis and abuse detection. This section walks you through each example and demonstrates how to use Beam features like windowing and triggers to expand your pipeline's capabilities.
 
 ## UserScore: Basic Score Processing in Batch
 
@@ -363,7 +363,7 @@ The following code example shows the composite transform that handles abuse dete
 {{< code_sample "sdks/python/apache_beam/examples/complete/game/game_stats.py" abuse_detect >}}
 {{< /highlight >}}
 
-The abuse-detection transform generates a view of users supected to be spambots. Later in the pipeline, we use that view to filter out any such users when we calculate the team score per hour, again by using the side input mechanism. The following code example shows where we insert the spam filter, between windowing the scores into fixed windows and extracting the team scores:
+The abuse-detection transform generates a view of users suspected to be spambots. Later in the pipeline, we use that view to filter out any such users when we calculate the team score per hour, again by using the side input mechanism. The following code example shows where we insert the spam filter, between windowing the scores into fixed windows and extracting the team scores:
 
 {{< highlight java >}}
 {{< code_sample "examples/java/src/main/java/org/apache/beam/examples/complete/game/GameStats.java" DocInclude_FilterAndCalc >}}
@@ -412,7 +412,7 @@ We can use the resulting information to find, for example, what times of day our
 ## Next Steps
 
 * Take a self-paced tour through our [Learning Resources](/documentation/resources/learning-resources).
-* Dive in to some of our favorite [Videos and Podcasts](/documentation/resources/videos-and-podcasts).
+* Dive in to some of our favorite [Videos and Podcasts](/get-started/resources/videos-and-podcasts).
 * Join the Beam [users@](/community/contact-us) mailing list.
 
 Please don't hesitate to [reach out](/community/contact-us) if you encounter any issues!

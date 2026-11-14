@@ -23,7 +23,6 @@
 import uuid
 from threading import Lock
 from threading import Timer
-from typing import TYPE_CHECKING
 from typing import Any
 from typing import Iterable
 from typing import Optional
@@ -32,12 +31,13 @@ import apache_beam as beam
 from apache_beam import TimeDomain
 from apache_beam import pvalue
 from apache_beam.coders import typecoders
+from apache_beam.io.iobase import WatermarkEstimator
 from apache_beam.pipeline import AppliedPTransform
 from apache_beam.pipeline import PTransformOverride
 from apache_beam.runners.common import DoFnContext
 from apache_beam.runners.common import DoFnInvoker
 from apache_beam.runners.common import DoFnSignature
-from apache_beam.runners.common import OutputProcessor
+from apache_beam.runners.common import OutputHandler
 from apache_beam.runners.direct.evaluation_context import DirectStepContext
 from apache_beam.runners.direct.util import KeyedWorkItem
 from apache_beam.runners.direct.watermark_manager import WatermarkManager
@@ -46,9 +46,6 @@ from apache_beam.transforms.core import ProcessContinuation
 from apache_beam.transforms.ptransform import PTransform
 from apache_beam.transforms.trigger import _ReadModifyWriteStateTag
 from apache_beam.utils.windowed_value import WindowedValue
-
-if TYPE_CHECKING:
-  from apache_beam.iobase import WatermarkEstimator
 
 
 class SplittableParDoOverride(PTransformOverride):
@@ -121,7 +118,7 @@ class PairWithRestrictionFn(beam.DoFn):
   def start_bundle(self):
     self._invoker = DoFnInvoker.create_invoker(
         self._signature,
-        output_processor=_NoneShallPassOutputProcessor(),
+        output_handler=_NoneShallPassOutputHandler(),
         process_invocation=False)
 
   def process(self, element, window=beam.DoFn.WindowParam, *args, **kwargs):
@@ -142,7 +139,7 @@ class SplitRestrictionFn(beam.DoFn):
     signature = DoFnSignature(self._do_fn)
     self._invoker = DoFnInvoker.create_invoker(
         signature,
-        output_processor=_NoneShallPassOutputProcessor(),
+        output_handler=_NoneShallPassOutputHandler(),
         process_invocation=False)
 
   def process(self, element_and_restriction, *args, **kwargs):
@@ -268,12 +265,12 @@ class ProcessFn(beam.DoFn):
         'watermark_estimator_state')
     self.watermark_hold_tag = _ReadModifyWriteStateTag('watermark_hold')
     self._process_element_invoker = None
-    self._output_processor = _OutputProcessor()
+    self._output_processor = _OutputHandler()
 
     self.sdf_invoker = DoFnInvoker.create_invoker(
         DoFnSignature(self.sdf),
         context=DoFnContext('unused_context'),
-        output_processor=self._output_processor,
+        output_handler=self._output_processor,
         input_args=args_for_invoker,
         input_kwargs=kwargs_for_invoker)
 
@@ -536,21 +533,25 @@ class SDFProcessElementInvoker(object):
     yield result
 
 
-class _OutputProcessor(OutputProcessor):
+class _OutputHandler(OutputHandler):
   def __init__(self):
     self.output_iter = None
 
-  def process_outputs(
-      self, windowed_input_element, output_iter, watermark_estimator=None):
-    # type: (WindowedValue, Iterable[Any], Optional[WatermarkEstimator]) -> None
+  def handle_process_outputs(
+      self,
+      windowed_input_element: WindowedValue,
+      output_iter: Iterable[Any],
+      watermark_estimator: Optional[WatermarkEstimator] = None) -> None:
     self.output_iter = output_iter
 
   def reset(self):
     self.output_iter = None
 
 
-class _NoneShallPassOutputProcessor(OutputProcessor):
-  def process_outputs(
-      self, windowed_input_element, output_iter, watermark_estimator=None):
-    # type: (WindowedValue, Iterable[Any], Optional[WatermarkEstimator]) -> None
+class _NoneShallPassOutputHandler(OutputHandler):
+  def handle_process_outputs(
+      self,
+      windowed_input_element: WindowedValue,
+      output_iter: Iterable[Any],
+      watermark_estimator: Optional[WatermarkEstimator] = None) -> None:
     raise RuntimeError()

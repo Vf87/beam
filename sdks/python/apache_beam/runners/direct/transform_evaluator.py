@@ -19,26 +19,24 @@
 
 # pytype: skip-file
 
-import atexit
 import collections
 import logging
 import random
+import threading
 import time
+import weakref
+from collections import abc
 from typing import TYPE_CHECKING
 from typing import Any
-from typing import Dict
-from typing import List
-from typing import Tuple
-from typing import Type
 
 from apache_beam import coders
 from apache_beam import io
 from apache_beam import pvalue
 from apache_beam.internal import pickler
+from apache_beam.pipeline import AppliedPTransform
 from apache_beam.runners import common
 from apache_beam.runners.common import DoFnRunner
 from apache_beam.runners.common import DoFnState
-from apache_beam.runners.dataflow.native_io.iobase import _NativeWrite  # pylint: disable=protected-access
 from apache_beam.runners.direct.direct_runner import _DirectReadFromPubSub
 from apache_beam.runners.direct.direct_runner import _GroupByKeyOnly
 from apache_beam.runners.direct.direct_runner import _StreamingGroupAlsoByWindow
@@ -75,9 +73,8 @@ from apache_beam.utils.timestamp import MIN_TIMESTAMP
 from apache_beam.utils.timestamp import Timestamp
 
 if TYPE_CHECKING:
-  from apache_beam.io.gcp.pubsub import _PubSubSource
   from apache_beam.io.gcp.pubsub import PubsubMessage
-  from apache_beam.pipeline import AppliedPTransform
+  from apache_beam.io.gcp.pubsub import _PubSubSource
   from apache_beam.runners.direct.evaluation_context import EvaluationContext
 
 _LOGGER = logging.getLogger(__name__)
@@ -89,14 +86,13 @@ class TransformEvaluatorRegistry(object):
   Creates instances of TransformEvaluator for the application of a transform.
   """
 
-  _test_evaluators_overrides = {
-  }  # type: Dict[Type[core.PTransform], Type[_TransformEvaluator]]
+  _test_evaluators_overrides: dict[type[core.PTransform],
+                                   type['_TransformEvaluator']] = {}
 
-  def __init__(self, evaluation_context):
-    # type: (EvaluationContext) -> None
+  def __init__(self, evaluation_context: 'EvaluationContext') -> None:
     assert evaluation_context
     self._evaluation_context = evaluation_context
-    self._evaluators = {
+    self._evaluators: dict[type[core.PTransform], type[_TransformEvaluator]] = {
         io.Read: _BoundedReadEvaluator,
         _DirectReadFromPubSub: _PubSubReadEvaluator,
         core.Flatten: _FlattenEvaluator,
@@ -105,12 +101,11 @@ class TransformEvaluatorRegistry(object):
         _GroupByKeyOnly: _GroupByKeyOnlyEvaluator,
         _StreamingGroupByKeyOnly: _StreamingGroupByKeyOnlyEvaluator,
         _StreamingGroupAlsoByWindow: _StreamingGroupAlsoByWindowEvaluator,
-        _NativeWrite: _NativeWriteEvaluator,
         _TestStream: _TestStreamEvaluator,
         ProcessElements: _ProcessElementsEvaluator,
         _WatermarkController: _WatermarkControllerEvaluator,
         PairWithTiming: _PairWithTimingEvaluator,
-    }  # type: Dict[Type[core.PTransform], Type[_TransformEvaluator]]
+    }
     self._evaluators.update(self._test_evaluators_overrides)
     self._root_bundle_providers = {
         core.PTransform: DefaultRootBundleProvider,
@@ -171,11 +166,10 @@ class TransformEvaluatorRegistry(object):
     Returns:
       True if executor should execute applied_ptransform serially.
     """
-    if isinstance(applied_ptransform.transform,
-                  (_GroupByKeyOnly,
-                   _StreamingGroupByKeyOnly,
-                   _StreamingGroupAlsoByWindow,
-                   _NativeWrite)):
+    if isinstance(
+        applied_ptransform.transform,
+        (_GroupByKeyOnly, _StreamingGroupByKeyOnly,
+         _StreamingGroupAlsoByWindow)):
       return True
     elif (isinstance(applied_ptransform.transform, core.ParDo) and
           is_stateful_dofn(applied_ptransform.transform.dofn)):
@@ -233,13 +227,12 @@ class _TestStreamRootBundleProvider(RootBundleProvider):
 
 class _TransformEvaluator(object):
   """An evaluator of a specific application of a transform."""
-
-  def __init__(self,
-               evaluation_context, # type: EvaluationContext
-               applied_ptransform,  # type: AppliedPTransform
-               input_committed_bundle,
-               side_inputs
-              ):
+  def __init__(
+      self,
+      evaluation_context: 'EvaluationContext',
+      applied_ptransform: AppliedPTransform,
+      input_committed_bundle,
+      side_inputs):
     self._evaluation_context = evaluation_context
     self._applied_ptransform = applied_ptransform
     self._input_committed_bundle = input_committed_bundle
@@ -323,9 +316,7 @@ class _TransformEvaluator(object):
     """Processes a new element as part of the current bundle."""
     raise NotImplementedError('%s do not process elements.' % type(self))
 
-  def finish_bundle(self):
-    # type: () -> TransformResult
-
+  def finish_bundle(self) -> TransformResult:
     """Finishes the bundle and produces output."""
     pass
 
@@ -360,8 +351,7 @@ class _BoundedReadEvaluator(_TransformEvaluator):
       return self._split_list_into_bundles(
           output_pcollection,
           read_result,
-          _BoundedReadEvaluator.MAX_ELEMENT_PER_BUNDLE,
-          lambda _: 1)
+          _BoundedReadEvaluator.MAX_ELEMENT_PER_BUNDLE, lambda _: 1)
 
     if isinstance(self._source, io.iobase.BoundedSource):
       # Getting a RangeTracker for the default range of the source and reading
@@ -588,12 +578,46 @@ class _TestStreamEvaluator(_TransformEvaluator):
         self, self.bundles, unprocessed_bundles, None, {None: self.watermark})
 
 
+class _PubSubSubscriberClient(object):
+  """SubscriberClient state cached for one DirectRunner Pub/Sub read."""
+  def __init__(self, client):
+    self.client = client
+    self._temporary_subscription = None
+    self._closed = False
+    self._lock = threading.Lock()
+
+  def set_temporary_subscription(self, subscription):
+    self._temporary_subscription = subscription
+
+  def close(self):
+    if self._closed:
+      return
+    self._closed = True
+
+    try:
+      if self._temporary_subscription:
+        self.client.delete_subscription(
+            subscription=self._temporary_subscription)
+    except Exception:
+      _LOGGER.warning(
+          'Failed to delete temporary Pub/Sub subscription %s',
+          self._temporary_subscription,
+          exc_info=True)
+
+    try:
+      self.client.close()
+    except Exception:
+      _LOGGER.warning(
+          'Failed to close Pub/Sub subscriber client', exc_info=True)
+
+
 class _PubSubReadEvaluator(_TransformEvaluator):
   """TransformEvaluator for PubSub read."""
 
-  # A mapping of transform to _PubSubSubscriptionWrapper.
-  # TODO(BEAM-7750): Prevents garbage collection of pipeline instances.
-  _subscription_cache = {}  # type: Dict[AppliedPTransform, str]
+  # Weak-keyed per-transform caches avoid keeping completed pipelines alive.
+  _subscription_cache = weakref.WeakKeyDictionary()
+  _subscriber_client_cache = weakref.WeakKeyDictionary()
+  _subscriber_client_cache_lock = threading.Lock()
 
   def __init__(
       self,
@@ -608,7 +632,7 @@ class _PubSubReadEvaluator(_TransformEvaluator):
         input_committed_bundle,
         side_inputs)
 
-    self.source = self._applied_ptransform.transform._source  # type: _PubSubSource
+    self.source: _PubSubSource = self._applied_ptransform.transform._source
     if self.source.id_label:
       raise NotImplementedError(
           'DirectRunner: id_label is not supported for PubSub reads')
@@ -637,18 +661,46 @@ class _PubSubReadEvaluator(_TransformEvaluator):
     if short_sub_name:
       return pubsub.SubscriberClient.subscription_path(project, short_sub_name)
 
-    if transform in cls._subscription_cache:
-      return cls._subscription_cache[transform]
+    with cls._subscriber_client_cache_lock:
+      sub_name = cls._subscription_cache.get(transform)
+      if sub_name:
+        return sub_name
 
-    sub_client = pubsub.SubscriberClient()
-    sub_name = sub_client.subscription_path(
-        sub_project,
-        'beam_%d_%x' % (int(time.time()), random.randrange(1 << 32)))
-    topic_name = sub_client.topic_path(project, short_topic_name)
-    sub_client.create_subscription(sub_name, topic_name)
-    atexit.register(sub_client.delete_subscription, sub_name)
-    cls._subscription_cache[transform] = sub_name
-    return cls._subscription_cache[transform]
+      subscriber_client = cls._get_subscriber_client_state_unlocked(transform)
+
+    with subscriber_client._lock:
+      with cls._subscriber_client_cache_lock:
+        sub_name = cls._subscription_cache.get(transform)
+        if sub_name:
+          return sub_name
+
+      sub_client = subscriber_client.client
+      sub_name = sub_client.subscription_path(
+          sub_project,
+          'beam_%d_%x' % (int(time.time()), random.randrange(1 << 32)))
+      topic_name = sub_client.topic_path(project, short_topic_name)
+      sub_client.create_subscription(name=sub_name, topic=topic_name)
+      subscriber_client.set_temporary_subscription(sub_name)
+
+      with cls._subscriber_client_cache_lock:
+        cls._subscription_cache[transform] = sub_name
+
+      return sub_name
+
+  @classmethod
+  def _get_subscriber_client(cls, transform):
+    with cls._subscriber_client_cache_lock:
+      return cls._get_subscriber_client_state_unlocked(transform).client
+
+  @classmethod
+  def _get_subscriber_client_state_unlocked(cls, transform):
+    subscriber_client = cls._subscriber_client_cache.get(transform)
+    if subscriber_client is None:
+      from google.cloud import pubsub
+      subscriber_client = _PubSubSubscriberClient(pubsub.SubscriberClient())
+      cls._subscriber_client_cache[transform] = subscriber_client
+      weakref.finalize(transform, subscriber_client.close)
+    return subscriber_client
 
   def start_bundle(self):
     pass
@@ -656,10 +708,9 @@ class _PubSubReadEvaluator(_TransformEvaluator):
   def process_element(self, element):
     pass
 
-  def _read_from_pubsub(self, timestamp_attribute):
-    # type: (...) -> List[Tuple[Timestamp, PubsubMessage]]
+  def _read_from_pubsub(
+      self, timestamp_attribute) -> list[tuple[Timestamp, 'PubsubMessage']]:
     from apache_beam.io.gcp.pubsub import PubsubMessage
-    from google.cloud import pubsub
 
     def _get_element(message):
       parsed_message = PubsubMessage._from_message(message)
@@ -673,9 +724,18 @@ class _PubSubReadEvaluator(_TransformEvaluator):
             timestamp = Timestamp.from_rfc3339(rfc3339_or_milli)
           except ValueError as e:
             raise ValueError('Bad timestamp value: %s' % e)
+        if timestamp.precision() > Timestamp.MICROS_PRECISION:
+          # Element timestamps are limited to microsecond resolution, so
+          # ignore sub-microsecond digits, as the Dataflow service does.
+          timestamp = timestamp.to_precision(
+              Timestamp.MICROS_PRECISION, allow_lossy_conversion=True)
       else:
-        timestamp = Timestamp(
-            message.publish_time.seconds, message.publish_time.nanos // 1000)
+        if message.publish_time is None:
+          raise ValueError('No publish time present in message: %s' % message)
+        try:
+          timestamp = Timestamp.from_utc_datetime(message.publish_time)
+        except ValueError as e:
+          raise ValueError('Bad timestamp value for message %s: %s', message, e)
 
       return timestamp, parsed_message
 
@@ -683,21 +743,17 @@ class _PubSubReadEvaluator(_TransformEvaluator):
     # evaluator fails with an exception before emitting a bundle. However,
     # the DirectRunner currently doesn't retry work items anyway, so the
     # pipeline would enter an inconsistent state on any error.
-    sub_client = pubsub.SubscriberClient()
-    try:
-      response = sub_client.pull(
-          self._sub_name, max_messages=10, return_immediately=True)
-      results = [_get_element(rm.message) for rm in response.received_messages]
-      ack_ids = [rm.ack_id for rm in response.received_messages]
-      if ack_ids:
-        sub_client.acknowledge(self._sub_name, ack_ids)
-    finally:
-      sub_client.api.transport.channel.close()
+    sub_client = self._get_subscriber_client(self._applied_ptransform)
+    response = sub_client.pull(
+        subscription=self._sub_name, max_messages=10, timeout=30)
+    results = [_get_element(rm.message) for rm in response.received_messages]
+    ack_ids = [rm.ack_id for rm in response.received_messages]
+    if ack_ids:
+      sub_client.acknowledge(subscription=self._sub_name, ack_ids=ack_ids)
 
     return results
 
-  def finish_bundle(self):
-    # type: () -> TransformResult
+  def finish_bundle(self) -> TransformResult:
     data = self._read_from_pubsub(self.source.timestamp_attribute)
     if data:
       output_pcollection = list(self._outputs)[0]
@@ -774,8 +830,7 @@ class _TaggedReceivers(dict):
 
   class NullReceiver(common.Receiver):
     """Ignores undeclared outputs, default execution mode."""
-    def receive(self, element):
-      # type: (WindowedValue) -> None
+    def receive(self, element: WindowedValue) -> None:
       pass
 
   class _InMemoryReceiver(common.Receiver):
@@ -784,8 +839,7 @@ class _TaggedReceivers(dict):
       self._target = target
       self._tag = tag
 
-    def receive(self, element):
-      # type: (WindowedValue) -> None
+    def receive(self, element: WindowedValue) -> None:
       self._target[self._tag].append(element)
 
   def __missing__(self, key):
@@ -796,14 +850,13 @@ class _TaggedReceivers(dict):
 
 class _ParDoEvaluator(_TransformEvaluator):
   """TransformEvaluator for ParDo transform."""
-
-  def __init__(self,
-               evaluation_context, # type: EvaluationContext
-               applied_ptransform,  # type: AppliedPTransform
-               input_committed_bundle,
-               side_inputs,
-               perform_dofn_pickle_test=True
-              ):
+  def __init__(
+      self,
+      evaluation_context: 'EvaluationContext',
+      applied_ptransform: AppliedPTransform,
+      input_committed_bundle,
+      side_inputs,
+      perform_dofn_pickle_test=True):
     super().__init__(
         evaluation_context,
         applied_ptransform,
@@ -828,7 +881,7 @@ class _ParDoEvaluator(_TransformEvaluator):
 
     # TODO(aaltay): Consider storing the serialized form as an optimization.
     dofn = (
-        pickler.loads(pickler.dumps(transform.dofn))
+        pickler.roundtrip(transform.dofn)
         if self._perform_dofn_pickle_test else transform.dofn)
 
     args = transform.args if hasattr(transform, 'args') else []
@@ -922,7 +975,7 @@ class _GroupByKeyOnlyEvaluator(_TransformEvaluator):
     self.output_pcollection = list(self._outputs)[0]
 
     # The output type of a GroupByKey will be Tuple[Any, Any] or more specific.
-    # TODO(BEAM-2717): Infer coders earlier.
+    # TODO(https://github.com/apache/beam/issues/18490): Infer coders earlier.
     kv_type_hint = (
         self._applied_ptransform.outputs[None].element_type or
         self._applied_ptransform.transform.get_type_hints().input_types[0][0])
@@ -936,8 +989,7 @@ class _GroupByKeyOnlyEvaluator(_TransformEvaluator):
     assert not self.global_state.get_state(
         None, _GroupByKeyOnlyEvaluator.COMPLETION_TAG)
     if (isinstance(element, WindowedValue) and
-        isinstance(element.value, collections.Iterable) and
-        len(element.value) == 2):
+        isinstance(element.value, abc.Iterable) and len(element.value) == 2):
       k, v = element.value
       encoded_k = self.key_coder.encode(k)
       state = self._step_context.get_keyed_state(encoded_k)
@@ -1025,7 +1077,7 @@ class _StreamingGroupByKeyOnlyEvaluator(_TransformEvaluator):
 
   def process_element(self, element):
     if (isinstance(element, WindowedValue) and
-        isinstance(element.value, collections.Iterable) and
+        isinstance(element.value, collections.abc.Iterable) and
         len(element.value) == 2):
       k, v = element.value
       self.gbk_items[self.key_coder.encode(k)].append(v)
@@ -1118,77 +1170,6 @@ class _StreamingGroupAlsoByWindowEvaluator(_TransformEvaluator):
       bundles.append(bundle)
 
     return TransformResult(self, bundles, [], None, self.keyed_holds)
-
-
-class _NativeWriteEvaluator(_TransformEvaluator):
-  """TransformEvaluator for _NativeWrite transform."""
-
-  ELEMENTS_TAG = _ListStateTag('elements')
-
-  def __init__(
-      self,
-      evaluation_context,
-      applied_ptransform,
-      input_committed_bundle,
-      side_inputs):
-    assert not side_inputs
-    super().__init__(
-        evaluation_context,
-        applied_ptransform,
-        input_committed_bundle,
-        side_inputs)
-
-    assert applied_ptransform.transform.sink
-    self._sink = applied_ptransform.transform.sink
-
-  @property
-  def _is_final_bundle(self):
-    return (
-        self._execution_context.watermarks.input_watermark ==
-        WatermarkManager.WATERMARK_POS_INF)
-
-  @property
-  def _has_already_produced_output(self):
-    return (
-        self._execution_context.watermarks.output_watermark ==
-        WatermarkManager.WATERMARK_POS_INF)
-
-  def start_bundle(self):
-    self.global_state = self._step_context.get_keyed_state(None)
-
-  def process_timer(self, timer_firing):
-    # We do not need to emit a KeyedWorkItem to process_element().
-    pass
-
-  def process_element(self, element):
-    self.global_state.add_state(
-        None, _NativeWriteEvaluator.ELEMENTS_TAG, element)
-
-  def finish_bundle(self):
-    # finish_bundle will append incoming bundles in memory until all the bundles
-    # carrying data is processed. This is done to produce only a single output
-    # shard (some tests depends on this behavior). It is possible to have
-    # incoming empty bundles after the output is produced, these bundles will be
-    # ignored and would not generate additional output files.
-    # TODO(altay): Do not wait until the last bundle to write in a single shard.
-    if self._is_final_bundle:
-      elements = self.global_state.get_state(
-          None, _NativeWriteEvaluator.ELEMENTS_TAG)
-      if self._has_already_produced_output:
-        # Ignore empty bundles that arrive after the output is produced.
-        assert elements == []
-      else:
-        self._sink.pipeline_options = self._evaluation_context.pipeline_options
-        with self._sink.writer() as writer:
-          for v in elements:
-            writer.Write(v.value)
-      hold = WatermarkManager.WATERMARK_POS_INF
-    else:
-      hold = WatermarkManager.WATERMARK_NEG_INF
-      self.global_state.set_timer(
-          None, '', TimeDomain.WATERMARK, WatermarkManager.WATERMARK_POS_INF)
-
-    return TransformResult(self, [], [], None, {None: hold})
 
 
 class _ProcessElementsEvaluator(_TransformEvaluator):

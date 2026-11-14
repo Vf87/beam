@@ -51,6 +51,7 @@ from apache_beam.transforms.window import WindowedValue
 from apache_beam.transforms.window import WindowFn
 from apache_beam.utils.timestamp import MAX_TIMESTAMP
 from apache_beam.utils.timestamp import MIN_TIMESTAMP
+from apache_beam.utils.timestamp import Timestamp
 
 
 def context(element, timestamp):
@@ -61,9 +62,6 @@ class ReifyWindowsFn(core.DoFn):
   def process(self, element, window=core.DoFn.WindowParam):
     key, values = element
     yield "%s @ %s" % (key, window), values
-
-
-reify_windows = core.ParDo(ReifyWindowsFn())
 
 
 class TestCustomWindows(NonMergingWindowFn):
@@ -140,6 +138,21 @@ class WindowTest(unittest.TestCase):
     self.assertEqual([IntervalWindow(4.0, 7.5), IntervalWindow(1.5, 5.0)],
                      windowfn.assign(context('v', 4.5)))
 
+  def test_window_fns_reject_non_positive_parameters(self):
+    for value in (0, -5):
+      with self.subTest(window_fn='FixedWindows', size=value):
+        with self.assertRaisesRegex(ValueError, 'size'):
+          FixedWindows(size=value)
+      with self.subTest(window_fn='SlidingWindows', size=value):
+        with self.assertRaisesRegex(ValueError, 'size'):
+          SlidingWindows(size=value, period=5)
+      with self.subTest(window_fn='SlidingWindows', period=value):
+        with self.assertRaisesRegex(ValueError, 'period'):
+          SlidingWindows(size=10, period=value)
+      with self.subTest(window_fn='Sessions', gap_size=value):
+        with self.assertRaisesRegex(ValueError, 'size'):
+          Sessions(gap_size=value)
+
   def test_sessions_merging(self):
     windowfn = Sessions(10)
 
@@ -190,9 +203,22 @@ class WindowTest(unittest.TestCase):
           | 'w' >> WindowInto(SlidingWindows(period=2, size=4))
           | GroupByKey()
           | beam.MapTuple(lambda k, vs: (k, sorted(vs)))
-          | reify_windows)
+          | beam.ParDo(ReifyWindowsFn()))
       expected = [('key @ [-2.0, 2.0)', [1]), ('key @ [0.0, 4.0)', [1, 2, 3]),
                   ('key @ [2.0, 6.0)', [2, 3])]
+      assert_that(result, equal_to(expected))
+
+  def test_sliding_windows_period_longer_than_size(self):
+    with TestPipeline() as p:
+      pcoll = self.timestamped_key_values(p, 'key', 1, 2, 3, 4, 5, 6, 7, 8)
+      result = (
+          pcoll
+          | 'w' >> WindowInto(SlidingWindows(period=4, size=2))
+          | GroupByKey()
+          | beam.MapTuple(lambda k, vs: (k, sorted(vs)))
+          | beam.ParDo(ReifyWindowsFn()))
+      expected = [('key @ [0.0, 2.0)', [1]), ('key @ [4.0, 6.0)', [4, 5]),
+                  ('key @ [8.0, 10.0)', [8])]
       assert_that(result, equal_to(expected))
 
   def test_sessions(self):
@@ -204,7 +230,7 @@ class WindowTest(unittest.TestCase):
           | 'w' >> WindowInto(Sessions(10))
           | GroupByKey()
           | sort_values
-          | reify_windows)
+          | beam.ParDo(ReifyWindowsFn()))
       expected = [('key @ [1.0, 13.0)', [1, 2, 3]),
                   ('key @ [20.0, 45.0)', [20, 27, 35])]
       assert_that(result, equal_to(expected))
@@ -346,6 +372,18 @@ class WindowTest(unittest.TestCase):
       assert_that(
           result,
           equal_to([('key', [[[0]]]), ('key', [[[2]]]), ('key', [[[4]]])]))
+
+  def test_interval_window_lt_intersects_union(self):
+    w1 = IntervalWindow(10, 20)
+    w2 = IntervalWindow(15, 25)
+    w3 = IntervalWindow(30, 40)
+    self.assertTrue(w1 < w2)
+    self.assertFalse(w2 < w1)
+    self.assertTrue(w1.intersects(w2))
+    u = w1.union(w3)
+    self.assertEqual(u, IntervalWindow(10, 40))
+    self.assertEqual(u.start, Timestamp(10))
+    self.assertEqual(u.end, Timestamp(40))
 
 
 class RunnerApiTest(unittest.TestCase):

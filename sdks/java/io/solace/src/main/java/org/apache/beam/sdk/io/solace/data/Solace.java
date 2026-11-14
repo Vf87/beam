@@ -1,0 +1,759 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.beam.sdk.io.solace.data;
+
+import com.google.auto.value.AutoValue;
+import com.solacesystems.jcsmp.BytesMessage;
+import com.solacesystems.jcsmp.BytesXMLMessage;
+import com.solacesystems.jcsmp.JCSMPFactory;
+import com.solacesystems.jcsmp.TextMessage;
+import java.io.Serializable;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import org.apache.beam.sdk.io.solace.broker.SolaceUserPropertiesMapper;
+import org.apache.beam.sdk.schemas.AutoValueSchema;
+import org.apache.beam.sdk.schemas.annotations.DefaultSchema;
+import org.apache.beam.sdk.schemas.annotations.SchemaFieldNumber;
+import org.checkerframework.checker.nullness.qual.NonNull;
+import org.checkerframework.checker.nullness.qual.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Provides core data models and utilities for working with Solace messages in the context of Apache
+ * Beam pipelines. This class includes representations for Solace topics, queues, destinations, and
+ * message records, as well as a utility for converting Solace messages into Beam-compatible
+ * records.
+ */
+public class Solace {
+  /** Represents a Solace queue. */
+  public static class Queue {
+    private final String name;
+
+    private Queue(String name) {
+      this.name = name;
+    }
+
+    public static Queue fromName(String name) {
+      return new Queue(name);
+    }
+
+    public String getName() {
+      return name;
+    }
+  }
+
+  /** Represents a Solace topic. */
+  public static class Topic {
+    private final String name;
+
+    private Topic(String name) {
+      this.name = name;
+    }
+
+    public static Topic fromName(String name) {
+      return new Topic(name);
+    }
+
+    public String getName() {
+      return name;
+    }
+  }
+
+  /** Represents a Solace destination type. */
+  public enum DestinationType {
+    TOPIC,
+    QUEUE,
+    UNKNOWN
+  }
+
+  /** An immutable, typed value carried by a user-property map. */
+  @AutoValue
+  @DefaultSchema(AutoValueSchema.class)
+  public abstract static class UserPropertyValue {
+    public enum Kind {
+      NONE,
+      BOOLEAN,
+      BYTE,
+      SHORT,
+      INTEGER,
+      LONG,
+      FLOAT,
+      DOUBLE,
+      CHARACTER,
+      STRING,
+      BYTES,
+      DESTINATION
+    }
+
+    public abstract Kind getKind();
+
+    public abstract @Nullable Boolean getBoolean();
+
+    public abstract @Nullable Byte getByte();
+
+    public abstract @Nullable Short getShort();
+
+    public abstract @Nullable Integer getInteger();
+
+    public abstract @Nullable Long getLong();
+
+    public abstract @Nullable Float getFloat();
+
+    public abstract @Nullable Double getDouble();
+
+    public abstract @Nullable Character getCharacter();
+
+    public abstract @Nullable String getString();
+
+    public abstract @Nullable List<Byte> getBytes();
+
+    public abstract @Nullable Destination getDestination();
+
+    public static UserPropertyValue of() {
+      return builder(Kind.NONE).build();
+    }
+
+    public static UserPropertyValue of(Boolean value) {
+      return builder(Kind.BOOLEAN).setBoolean(value).build();
+    }
+
+    public static UserPropertyValue of(Byte value) {
+      return builder(Kind.BYTE).setByte(value).build();
+    }
+
+    public static UserPropertyValue of(Short value) {
+      return builder(Kind.SHORT).setShort(value).build();
+    }
+
+    public static UserPropertyValue of(Integer value) {
+      return builder(Kind.INTEGER).setInteger(value).build();
+    }
+
+    public static UserPropertyValue of(Long value) {
+      return builder(Kind.LONG).setLong(value).build();
+    }
+
+    public static UserPropertyValue of(Float value) {
+      return builder(Kind.FLOAT).setFloat(value).build();
+    }
+
+    public static UserPropertyValue of(Double value) {
+      return builder(Kind.DOUBLE).setDouble(value).build();
+    }
+
+    public static UserPropertyValue of(Character value) {
+      return builder(Kind.CHARACTER).setCharacter(value).build();
+    }
+
+    public static UserPropertyValue of(String value) {
+      return builder(Kind.STRING).setString(value).build();
+    }
+
+    public static UserPropertyValue of(List<Byte> value) {
+      return builder(Kind.BYTES).setBytes(List.copyOf(value)).build();
+    }
+
+    public static UserPropertyValue of(Destination destination) {
+      return builder(Kind.DESTINATION).setDestination(destination).build();
+    }
+
+    private static Builder builder(Kind kind) {
+      return new AutoValue_Solace_UserPropertyValue.Builder().setKind(kind);
+    }
+
+    @AutoValue.Builder
+    abstract static class Builder {
+      abstract Builder setKind(Kind value);
+
+      abstract Builder setBoolean(@Nullable Boolean value);
+
+      abstract Builder setByte(@Nullable Byte value);
+
+      abstract Builder setShort(@Nullable Short value);
+
+      abstract Builder setInteger(@Nullable Integer value);
+
+      abstract Builder setLong(@Nullable Long value);
+
+      abstract Builder setFloat(@Nullable Float value);
+
+      abstract Builder setDouble(@Nullable Double value);
+
+      abstract Builder setCharacter(@Nullable Character value);
+
+      abstract Builder setString(@Nullable String value);
+
+      abstract Builder setBytes(@Nullable List<Byte> value);
+
+      abstract Builder setDestination(@Nullable Destination value);
+
+      abstract UserPropertyValue build();
+    }
+  }
+
+  /** Represents a Solace message destination (either a Topic or a Queue). */
+  @AutoValue
+  @DefaultSchema(AutoValueSchema.class)
+  public abstract static class Destination implements Serializable {
+    /**
+     * Gets the name of the destination.
+     *
+     * @return The destination name.
+     */
+    public abstract String getName();
+
+    /**
+     * Gets the type of the destination (TOPIC, QUEUE or UNKNOWN).
+     *
+     * @return The destination type.
+     */
+    public abstract DestinationType getType();
+
+    public static Builder builder() {
+      return new AutoValue_Solace_Destination.Builder();
+    }
+
+    @AutoValue.Builder
+    public abstract static class Builder {
+      public abstract Builder setName(String name);
+
+      public abstract Builder setType(DestinationType type);
+
+      public abstract Destination build();
+    }
+  }
+
+  /** Represents a Solace message record with its associated metadata. */
+  @AutoValue
+  @DefaultSchema(AutoValueSchema.class)
+  public abstract static class Record {
+    /** Identifies how the record payload is represented in a JCSMP message. */
+    public enum PayloadType {
+      /** The legacy XML-data payload written with {@code BytesXMLMessage.writeBytes}. */
+      BYTES_XML,
+      /** A text payload written with {@code TextMessage.setText}. */
+      TEXT,
+      /** A binary payload written with {@code BytesMessage.setData}. */
+      BYTES;
+    }
+
+    /**
+     * Gets the unique identifier of the message, a string for an application-specific message
+     * identifier.
+     *
+     * <p>Mapped from {@link BytesXMLMessage#getApplicationMessageId()}
+     *
+     * @return The message ID, or null if not available.
+     */
+    @SchemaFieldNumber("0")
+    public abstract String getMessageId();
+
+    /**
+     * Gets the payload of the message as a byte array.
+     *
+     * <p>Mapped from {@link BytesXMLMessage#getBytes()}
+     *
+     * @return The message payload.
+     */
+    @SuppressWarnings("mutable")
+    @SchemaFieldNumber("1")
+    public abstract byte[] getPayload();
+
+    /**
+     * Gets the destination (topic or queue) to which the message was sent.
+     *
+     * <p>Mapped from {@link BytesXMLMessage#getDestination()}
+     *
+     * @return The destination, or null if not available.
+     */
+    @SchemaFieldNumber("2")
+    public abstract @Nullable Destination getDestination();
+
+    /**
+     * Gets the message expiration time in milliseconds since the Unix epoch.
+     *
+     * <p>A value of 0 indicates the message does not expire.
+     *
+     * <p>Mapped from {@link BytesXMLMessage#getExpiration()}
+     *
+     * @return The expiration timestamp.
+     */
+    @SchemaFieldNumber("3")
+    public abstract long getExpiration();
+
+    /**
+     * Gets the priority level of the message (0-255, higher is more important). -1 if not set.
+     *
+     * <p>Mapped from {@link BytesXMLMessage#getPriority()}
+     *
+     * @return The message priority.
+     */
+    @SchemaFieldNumber("4")
+    public abstract int getPriority();
+
+    /**
+     * Indicates whether the message has been redelivered due to a prior delivery failure.
+     *
+     * <p>Mapped from {@link BytesXMLMessage#getRedelivered()}
+     *
+     * @return True if redelivered, false otherwise.
+     */
+    @SchemaFieldNumber("5")
+    public abstract boolean getRedelivered();
+
+    /**
+     * Gets the destination to which replies to this message should be sent.
+     *
+     * <p>Mapped from {@link BytesXMLMessage#getReplyTo()}
+     *
+     * @return The reply-to destination, or null if not specified.
+     */
+    @SchemaFieldNumber("6")
+    public abstract @Nullable Destination getReplyTo();
+
+    /**
+     * Gets the timestamp (in milliseconds since the Unix epoch) when the message was received by
+     * the Solace broker.
+     *
+     * <p>Mapped from {@link BytesXMLMessage#getReceiveTimestamp()}
+     *
+     * @return The timestamp.
+     */
+    @SchemaFieldNumber("7")
+    public abstract @Nullable Long getReceiveTimestamp();
+
+    /**
+     * Gets the timestamp (in milliseconds since the Unix epoch) when the message was sent by the
+     * sender. Can be null if not provided.
+     *
+     * @return The sender timestamp, or null if not available.
+     */
+    @SchemaFieldNumber("8")
+    public abstract @Nullable Long getSenderTimestamp();
+
+    /**
+     * Gets the sequence number of the message (if applicable).
+     *
+     * <p>Mapped from {@link BytesXMLMessage#getSequenceNumber()}
+     *
+     * @return The sequence number, or null if not available.
+     */
+    @SchemaFieldNumber("9")
+    public abstract @Nullable Long getSequenceNumber();
+
+    /**
+     * The number of milliseconds before the message is discarded or moved to Dead Message Queue. A
+     * value of 0 means the message will never expire. The default value is 0.
+     *
+     * <p>Mapped from {@link BytesXMLMessage#getTimeToLive()}
+     *
+     * @return The time-to-live value.
+     */
+    @SchemaFieldNumber("10")
+    public abstract long getTimeToLive();
+
+    /**
+     * Gets the ID for the message within its replication group (if applicable).
+     *
+     * <p>Mapped from {@link BytesXMLMessage#getReplicationGroupMessageId()}
+     *
+     * <p>The ID for a particular message is only guaranteed to be the same for a particular copy of
+     * a message on a particular queue or topic endpoint within a replication group. The same
+     * message on different queues or topic endpoints within the same replication group may or may
+     * not have the same replication group message ID. See more at <a
+     * href="https://docs.solace.com/API/API-Developer-Guide/Detecting-Duplicate-Mess.htm">https://docs.solace.com/API/API-Developer-Guide/Detecting-Duplicate-Mess.htm</a>
+     *
+     * @return The replication group message ID, or null if not present.
+     */
+    @SchemaFieldNumber("11")
+    public abstract @Nullable String getReplicationGroupMessageId();
+
+    /**
+     * Gets the attachment data of the message as a byte array, if any. This might represent files
+     * or other binary content associated with the message.
+     *
+     * <p>Mapped from {@link BytesXMLMessage#getAttachmentByteBuffer()}
+     *
+     * @return The attachment data, or an empty byte array if no attachment is present.
+     */
+    @SuppressWarnings("mutable")
+    @SchemaFieldNumber("12")
+    public abstract byte[] getAttachmentBytes();
+
+    /** Gets the JCSMP payload representation used for this record. */
+    @SchemaFieldNumber("13")
+    public abstract PayloadType getPayloadType();
+
+    /**
+     * Gets the typed, SDK-independent user properties of the message. Non beam-schema compatible
+     * types are not supported (SDTMap and SDTStream)
+     *
+     * @return The user properties, or an empty map if the message carries none.
+     */
+    @SchemaFieldNumber("14")
+    public abstract Map<String, UserPropertyValue> getUserProperties();
+
+    /** Gets the payload decoded as UTF-8 when this record has type {@link PayloadType#TEXT}. */
+    public final String getText() {
+      if (getPayloadType() != PayloadType.TEXT) {
+        throw new IllegalStateException(
+            "Text is only available for records with payload type TEXT.");
+      }
+      return decodeUtf8(getPayload());
+    }
+
+    public static Builder builder() {
+      return new AutoValue_Solace_Record.Builder()
+          .setExpiration(0L)
+          .setPriority(-1)
+          .setRedelivered(false)
+          .setTimeToLive(0)
+          .setAttachmentBytes(new byte[0])
+          .setPayloadType(PayloadType.BYTES_XML)
+          .setUserProperties(Collections.emptyMap());
+    }
+
+    public abstract Builder toBuilder();
+
+    @AutoValue.Builder
+    public abstract static class Builder {
+      public abstract Builder setMessageId(String messageId);
+
+      public abstract Builder setPayload(byte[] payload);
+
+      public abstract Builder setPayloadType(PayloadType payloadType);
+
+      /** Sets a UTF-8 text payload and selects {@link PayloadType#TEXT}. */
+      public Builder setText(String text) {
+        byte[] payload = text == null ? new byte[0] : text.getBytes(StandardCharsets.UTF_8);
+        return setPayloadType(PayloadType.TEXT).setPayload(payload);
+      }
+
+      public abstract Builder setDestination(@Nullable Destination destination);
+
+      public abstract Builder setExpiration(long expiration);
+
+      public abstract Builder setPriority(int priority);
+
+      public abstract Builder setRedelivered(boolean redelivered);
+
+      public abstract Builder setReplyTo(@Nullable Destination replyTo);
+
+      public abstract Builder setReceiveTimestamp(@Nullable Long receiveTimestamp);
+
+      public abstract Builder setSenderTimestamp(@Nullable Long senderTimestamp);
+
+      public abstract Builder setSequenceNumber(@Nullable Long sequenceNumber);
+
+      public abstract Builder setTimeToLive(long timeToLive);
+
+      public abstract Builder setReplicationGroupMessageId(
+          @Nullable String replicationGroupMessageId);
+
+      public abstract Builder setAttachmentBytes(byte[] attachmentBytes);
+
+      public abstract Builder setUserProperties(Map<String, UserPropertyValue> userProperties);
+
+      public abstract Record build();
+    }
+
+    private static String decodeUtf8(byte[] payload) {
+      try {
+        return StandardCharsets.UTF_8
+            .newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(payload))
+            .toString();
+      } catch (CharacterCodingException e) {
+        throw new IllegalArgumentException("Text payload is not valid UTF-8.", e);
+      }
+    }
+  }
+
+  /**
+   * The result of writing a message to Solace. This will be returned by the {@link
+   * org.apache.beam.sdk.io.solace.SolaceIO.Write} connector.
+   *
+   * <p>This class provides a builder to create instances, but you will probably not need it. The
+   * write connector will create and return instances of {@link Solace.PublishResult}.
+   *
+   * <p>If the message has been published, {@link Solace.PublishResult#getPublished()} will be true.
+   * If it is false, it means that the message could not be published, and {@link
+   * Solace.PublishResult#getError()} will contain more details about why the message could not be
+   * published.
+   */
+  @AutoValue
+  @DefaultSchema(AutoValueSchema.class)
+  public abstract static class PublishResult {
+    /** The message id of the message that was published. */
+    @SchemaFieldNumber("0")
+    public abstract String getMessageId();
+
+    /** Whether the message was published or not. */
+    @SchemaFieldNumber("1")
+    public abstract boolean getPublished();
+
+    /**
+     * The publishing latency in nanoseconds. This is the difference between the time the message
+     * was created, and the time the message was published. It is only available if the {@link
+     * CorrelationKey} class is used as correlation key of the messages, and null otherwise.
+     */
+    @SchemaFieldNumber("2")
+    public abstract @Nullable Long getLatencyNanos();
+
+    /** The error details if the message could not be published. */
+    @SchemaFieldNumber("3")
+    public abstract @Nullable String getError();
+
+    public static Builder builder() {
+      return new AutoValue_Solace_PublishResult.Builder();
+    }
+
+    @AutoValue.Builder
+    public abstract static class Builder {
+      public abstract Builder setMessageId(String messageId);
+
+      public abstract Builder setPublished(boolean published);
+
+      public abstract Builder setLatencyNanos(Long latencyNanos);
+
+      public abstract Builder setError(String error);
+
+      public abstract PublishResult build();
+    }
+  }
+
+  /**
+   * The correlation key is an object that is passed back to the client during the event broker ack
+   * or nack.
+   *
+   * <p>In the streaming writer is optionally used to calculate publish latencies, by calculating
+   * the time difference between the creation of the correlation key, and the time of the ack.
+   *
+   * @deprecated No longer used by {@link org.apache.beam.sdk.io.solace.SolaceIO.Write}; internal
+   *     per-bundle correlation keys are created via {@link
+   *     org.apache.beam.sdk.io.solace.broker.PublishResultHandler#correlationKey}.
+   */
+  @Deprecated
+  @AutoValue
+  @DefaultSchema(AutoValueSchema.class)
+  public abstract static class CorrelationKey {
+    @SchemaFieldNumber("0")
+    public abstract String getMessageId();
+
+    @SchemaFieldNumber("1")
+    public abstract long getPublishMonotonicNanos();
+
+    public static Builder builder() {
+      return new AutoValue_Solace_CorrelationKey.Builder();
+    }
+
+    @AutoValue.Builder
+    public abstract static class Builder {
+      public abstract Builder setMessageId(String messageId);
+
+      public abstract Builder setPublishMonotonicNanos(long nanos);
+
+      public abstract CorrelationKey build();
+    }
+  }
+
+  /**
+   * A utility class for mapping {@link BytesXMLMessage} instances to {@link Solace.Record} objects.
+   * This simplifies the process of converting raw Solace messages into a format suitable for use
+   * within Apache Beam pipelines.
+   */
+  public static class SolaceRecordMapper {
+    private static final Logger LOG = LoggerFactory.getLogger(SolaceRecordMapper.class);
+
+    /**
+     * Maps a {@link BytesXMLMessage} (if not null) to a {@link Solace.Record}.
+     *
+     * <p>Extracts relevant information from the message, including payload, metadata, and
+     * destination details.
+     *
+     * @param msg The Solace message to map.
+     * @return A Solace Record representing the message, or null if the input message was null.
+     */
+    public static @Nullable Record toRecord(@Nullable BytesXMLMessage msg) {
+      if (msg == null) {
+        return null;
+      }
+
+      Destination replyTo = getDestination(msg.getCorrelationId(), msg.getReplyTo());
+      Destination destination = getDestination(msg.getCorrelationId(), msg.getDestination());
+      Map<String, UserPropertyValue> userProperties =
+          SolaceUserPropertiesMapper.toUserPropertyValueMap(msg.getProperties());
+
+      Record.Builder recordBuilder = decodePayload(msg);
+      return recordBuilder
+          .setMessageId(msg.getApplicationMessageId())
+          .setDestination(destination)
+          .setExpiration(msg.getExpiration())
+          .setPriority(msg.getPriority())
+          .setRedelivered(msg.getRedelivered())
+          .setReplyTo(replyTo)
+          .setReceiveTimestamp(msg.getReceiveTimestamp())
+          .setSenderTimestamp(msg.getSenderTimestamp())
+          .setSequenceNumber(msg.getSequenceNumber())
+          .setTimeToLive(msg.getTimeToLive())
+          .setReplicationGroupMessageId(
+              msg.getReplicationGroupMessageId() != null
+                  ? msg.getReplicationGroupMessageId().toString()
+                  : null)
+          .setUserProperties(userProperties)
+          .build();
+    }
+
+    private static @Nullable Destination getDestination(
+        String msgId, com.solacesystems.jcsmp.Destination originalDestinationField) {
+      if (originalDestinationField == null) {
+        return null;
+      }
+      Destination.Builder destinationBuilder =
+          Destination.builder().setName(originalDestinationField.getName());
+      if (originalDestinationField instanceof com.solacesystems.jcsmp.Topic) {
+        destinationBuilder.setType(DestinationType.TOPIC);
+      } else if (originalDestinationField instanceof com.solacesystems.jcsmp.Queue) {
+        destinationBuilder.setType(DestinationType.QUEUE);
+      } else {
+        LOG.error(
+            "SolaceIO: Unknown destination type type for message {}, setting to {}",
+            msgId,
+            DestinationType.UNKNOWN.name());
+        destinationBuilder.setType(DestinationType.UNKNOWN);
+      }
+      return destinationBuilder.build();
+    }
+
+    /**
+     * Maps a {@link Record} to a {@link BytesXMLMessage}.
+     *
+     * <p>Only the fields common to both a {@link Record} and a {@link BytesXMLMessage} are set: the
+     * payload (according to the record's {@link Record.PayloadType}), the sender timestamp
+     * (defaulting to the current time when the record does not provide one) and the application
+     * message id. Publishing-specific fields such as delivery mode or correlation key are not
+     * handled here and must be set by the caller.
+     *
+     * @param record the {@link Record} to map.
+     * @return a JCSMP {@link BytesXMLMessage} carrying the record's common fields.
+     */
+    public static BytesXMLMessage toMessage(Record record) {
+      BytesXMLMessage msg = encodePayload(record);
+
+      Long senderTimestamp = record.getSenderTimestamp();
+      if (senderTimestamp == null) {
+        senderTimestamp = System.currentTimeMillis();
+      }
+      msg.setSenderTimestamp(senderTimestamp);
+      msg.setApplicationMessageId(record.getMessageId());
+
+      if (!record.getUserProperties().isEmpty()) {
+        msg.setProperties(SolaceUserPropertiesMapper.toSDTMap(record.getUserProperties()));
+      }
+
+      return msg;
+    }
+
+    /**
+     * Reads the payload from a {@link Solace.Record} into a partially-populated {@link
+     * BytesXMLMessage}.
+     *
+     * @param record the Solace record.
+     * @return a {@link BytesXMLMessage} with the payload set based on the record's payload type.
+     */
+    private static BytesXMLMessage encodePayload(Record record) {
+      switch (record.getPayloadType()) {
+        case TEXT:
+          TextMessage text = JCSMPFactory.onlyInstance().createMessage(TextMessage.class);
+          text.setText(record.getText());
+          return text;
+        case BYTES:
+          BytesMessage bytes = JCSMPFactory.onlyInstance().createMessage(BytesMessage.class);
+          bytes.setData(record.getPayload());
+          return bytes;
+        case BYTES_XML:
+          BytesXMLMessage xml = JCSMPFactory.onlyInstance().createBytesXMLMessage();
+          xml.writeBytes(record.getPayload());
+          if (record.getAttachmentBytes().length != 0) {
+            xml.writeAttachment(record.getAttachmentBytes());
+          }
+          return xml;
+        default:
+          throw new IllegalArgumentException(
+              "Unsupported payload type: " + record.getPayloadType());
+      }
+    }
+
+    /**
+     * Reads the payload from a {@link BytesXMLMessage} into a partially-populated {@link
+     * Record.Builder}.
+     *
+     * @param msg the JCSMP message.
+     * @return a {@link Record.Builder} with the payload and payload type set based on the message
+     *     type.
+     */
+    private static Record.Builder decodePayload(@NonNull BytesXMLMessage msg) {
+      if (msg instanceof TextMessage) {
+        String text = ((TextMessage) msg).getText();
+        byte[] payload = text == null ? new byte[0] : text.getBytes(StandardCharsets.UTF_8);
+        return Record.builder().setPayloadType(Record.PayloadType.TEXT).setPayload(payload);
+      }
+
+      if (msg instanceof BytesMessage) {
+        byte[] data = ((BytesMessage) msg).getData();
+        byte[] payload = data == null ? new byte[0] : data;
+        return Record.builder().setPayloadType(Record.PayloadType.BYTES).setPayload(payload);
+      }
+
+      // BYTES_XML fallback
+      byte[] payload = readBytes(msg);
+      byte[] attachment = readAttachment(msg);
+      return Record.builder()
+          .setPayloadType(Record.PayloadType.BYTES_XML)
+          .setPayload(payload)
+          .setAttachmentBytes(attachment);
+    }
+
+    private static byte[] readBytes(BytesXMLMessage msg) {
+      if (msg.getContentLength() == 0) {
+        return new byte[0];
+      }
+      return Arrays.copyOf(msg.getBytes(), msg.getContentLength());
+    }
+
+    private static byte[] readAttachment(BytesXMLMessage msg) {
+      if (msg.getAttachmentContentLength() == 0) {
+        return new byte[0];
+      }
+
+      ByteBuffer buffer = msg.getAttachmentByteBuffer();
+      byte[] attachment = new byte[buffer.remaining()];
+      buffer.get(attachment);
+      return attachment;
+    }
+  }
+}

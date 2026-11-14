@@ -19,6 +19,7 @@ package org.apache.beam.runners.flink;
 
 import org.apache.beam.sdk.options.ApplicationNameOptions;
 import org.apache.beam.sdk.options.Default;
+import org.apache.beam.sdk.options.DefaultValueFactory;
 import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.FileStagingOptions;
 import org.apache.beam.sdk.options.PipelineOptions;
@@ -32,16 +33,20 @@ import org.apache.beam.sdk.options.StreamingOptions;
  * requiring flink on the classpath (e.g. to use with the direct runner).
  */
 public interface FlinkPipelineOptions
-    extends PipelineOptions, ApplicationNameOptions, StreamingOptions, FileStagingOptions {
+    extends PipelineOptions,
+        ApplicationNameOptions,
+        StreamingOptions,
+        FileStagingOptions,
+        VersionDependentFlinkPipelineOptions {
 
   String AUTO = "[auto]";
   String PIPELINED = "PIPELINED";
   String EXACTLY_ONCE = "EXACTLY_ONCE";
 
   /**
-   * The url of the Flink JobManager on which to execute pipelines. This can either be the the
-   * address of a cluster JobManager, in the form "host:port" or one of the special Strings
-   * "[local]", "[collection]" or "[auto]". "[local]" will start a local Flink Cluster in the JVM,
+   * The url of the Flink JobManager on which to execute pipelines. This can either be the address
+   * of a cluster JobManager, in the form "host:port" or one of the special Strings "[local]",
+   * "[collection]" or "[auto]". "[local]" will start a local Flink Cluster in the JVM,
    * "[collection]" will execute the pipeline on Java Collections while "[auto]" will let the system
    * decide where to execute the pipeline based on the environment.
    */
@@ -107,7 +112,7 @@ public interface FlinkPipelineOptions
   @Description(
       "Sets the expected behaviour for tasks in case that they encounter an error in their "
           + "checkpointing procedure. If this is set to true, the task will fail on checkpointing error. "
-          + "If this is set to false, the task will only decline a the checkpoint and continue running. ")
+          + "If this is set to false, the task will only decline the checkpoint and continue running. ")
   @Default.Boolean(true)
   Boolean getFailOnCheckpointingErrors();
 
@@ -121,6 +126,22 @@ public interface FlinkPipelineOptions
   boolean getFinishBundleBeforeCheckpointing();
 
   void setFinishBundleBeforeCheckpointing(boolean finishBundleBeforeCheckpointing);
+
+  @Description(
+      "If set, Unaligned checkpoints contain in-flight data (i.e., data stored in buffers) as part of the "
+          + "checkpoint state, allowing checkpoint barriers to overtake these buffers. Thus, the checkpoint duration "
+          + "becomes independent of the current throughput as checkpoint barriers are effectively not embedded into the "
+          + "stream of data anymore")
+  @Default.Boolean(false)
+  boolean getUnalignedCheckpointEnabled();
+
+  void setUnalignedCheckpointEnabled(boolean unalignedCheckpointEnabled);
+
+  @Description("Forces unaligned checkpoints, particularly allowing them for iterative jobs.")
+  @Default.Boolean(false)
+  boolean getForceUnalignedCheckpointEnabled();
+
+  void setForceUnalignedCheckpointEnabled(boolean forceUnalignedCheckpointEnabled);
 
   @Description(
       "Shuts down sources which have been idle for the configured time of milliseconds. Once a source has been "
@@ -143,6 +164,20 @@ public interface FlinkPipelineOptions
   void setNumberOfExecutionRetries(Integer retries);
 
   @Description(
+      "Set job check interval in seconds under detached mode in method waitUntilFinish, "
+          + "by default it is 5 seconds")
+  @Default.Integer(5)
+  int getJobCheckIntervalInSecs();
+
+  void setJobCheckIntervalInSecs(int seconds);
+
+  @Description("Specifies if the pipeline is submitted in attached or detached mode")
+  @Default.Boolean(true)
+  boolean getAttachedMode();
+
+  void setAttachedMode(boolean attachedMode);
+
+  @Description(
       "Sets the delay in milliseconds between executions. A value of {@code -1} "
           + "indicates that the default value should be used.")
   @Default.Long(-1L)
@@ -156,6 +191,12 @@ public interface FlinkPipelineOptions
 
   void setObjectReuse(Boolean reuse);
 
+  @Description("Sets the behavior of operator chaining.")
+  @Default.Boolean(true)
+  Boolean getOperatorChaining();
+
+  void setOperatorChaining(Boolean chaining);
+
   /**
    * State backend to store Beam's state during computation. Note: Only applicable when executing in
    * streaming mode.
@@ -168,7 +209,9 @@ public interface FlinkPipelineOptions
           + "Defaults to the flink cluster's state.backend configuration.")
   Class<? extends FlinkStateBackendFactory> getStateBackendFactory();
 
-  /** @deprecated Please use setStateBackend below. */
+  /**
+   * @deprecated Please use setStateBackend below.
+   */
   @Deprecated
   void setStateBackendFactory(Class<? extends FlinkStateBackendFactory> stateBackendFactory);
 
@@ -204,17 +247,50 @@ public interface FlinkPipelineOptions
 
   void setRetainExternalizedCheckpointsOnCancellation(Boolean retainOnCancellation);
 
-  @Description("The maximum number of elements in a bundle.")
-  @Default.Long(1000)
+  @Description(
+      "The maximum number of elements in a bundle. Default values are 1000 for a streaming job and 1,000,000 for batch")
+  @Default.InstanceFactory(MaxBundleSizeFactory.class)
   Long getMaxBundleSize();
 
   void setMaxBundleSize(Long size);
 
-  @Description("The maximum time to wait before finalising a bundle (in milliseconds).")
-  @Default.Long(1000)
+  /**
+   * Maximum bundle size factory. For a streaming job it's desireable to keep bundle size small to
+   * optimize latency. In batch, we optimize for throughput and hence bundle size is kept large.
+   */
+  class MaxBundleSizeFactory implements DefaultValueFactory<Long> {
+    @Override
+    public Long create(PipelineOptions options) {
+      if (options.as(StreamingOptions.class).isStreaming()) {
+        return 1000L;
+      } else {
+        return 5000L;
+      }
+    }
+  }
+
+  @Description(
+      "The maximum time to wait before finalising a bundle (in milliseconds). Default values are 1000 for streaming and 10,000 for batch.")
+  @Default.InstanceFactory(MaxBundleTimeFactory.class)
   Long getMaxBundleTimeMills();
 
   void setMaxBundleTimeMills(Long time);
+
+  /**
+   * Maximum bundle time factory. For a streaming job it's desireable to keep the value small to
+   * optimize latency. In batch, we optimize for throughput and hence bundle time size is kept
+   * larger.
+   */
+  class MaxBundleTimeFactory implements DefaultValueFactory<Long> {
+    @Override
+    public Long create(PipelineOptions options) {
+      if (options.as(StreamingOptions.class).isStreaming()) {
+        return 1000L;
+      } else {
+        return 10000L;
+      }
+    }
+  }
 
   @Description(
       "Interval in milliseconds for sending latency tracking marks from the sources to the sinks. "
@@ -229,11 +305,17 @@ public interface FlinkPipelineOptions
 
   void setAutoWatermarkInterval(Long interval);
 
+  /**
+   * Flink mode for data exchange of batch pipelines.
+   *
+   * @deprecated Only effective for Flink DataSet API and removed in Flink 2.0.
+   */
+  @Deprecated
   @Description(
       "Flink mode for data exchange of batch pipelines. "
           + "Reference {@link org.apache.flink.api.common.ExecutionMode}. "
           + "Set this to BATCH_FORCED if pipelines get blocked, see "
-          + "https://issues.apache.org/jira/browse/FLINK-10672")
+          + "https://issues.apache.org/jira/browse/FLINK-10672.")
   @Default.String(PIPELINED)
   String getExecutionModeForBatch();
 
@@ -284,6 +366,78 @@ public interface FlinkPipelineOptions
   Boolean getFasterCopy();
 
   void setFasterCopy(Boolean fasterCopy);
+
+  @Description(
+      "Batch only. Prefix every record exchanged or sorted by Flink with its encoded length, so "
+          + "that Flink can copy records (e.g. when spilling sorted data to disk) without "
+          + "decoding and re-encoding them. Has no effect in streaming mode. "
+          + "Enabled by default; set to false to disable.")
+  @Default.Boolean(true)
+  Boolean getLengthPrefixBatchRecords();
+
+  void setLengthPrefixBatchRecords(Boolean lengthPrefixBatchRecords);
+
+  @Description(
+      "Batch only. Decode the values of records sent to GroupByKey and Combine operators lazily, "
+          + "so that records are passed from the network to Flink's sorter without decoding and "
+          + "re-encoding their values. Has no effect in streaming mode, nor in batch mode unless "
+          + "--useDataStreamForBatch is set. Enabled by default; set to false to disable.")
+  @Default.Boolean(true)
+  Boolean getLazyBatchGroupingInputs();
+
+  void setLazyBatchGroupingInputs(Boolean lazyBatchGroupingInputs);
+
+  @Description(
+      "Batch only. Use a dedicated operator for the final step of GroupByKey and Combine in the "
+          + "global window with the default trigger. It relies on Flink sorting the input by key "
+          + "and does not use keyed state or timers. Has no effect in streaming mode, nor in "
+          + "batch mode unless --useDataStreamForBatch is set. "
+          + "Enabled by default; set to false to disable.")
+  @Default.Boolean(true)
+  Boolean getSortedBatchCombine();
+
+  void setSortedBatchCombine(Boolean sortedBatchCombine);
+
+  @Description(
+      "Directory containing Flink YAML configuration files. "
+          + "These properties will be set to all jobs submitted to Flink and take precedence "
+          + "over configurations in FLINK_CONF_DIR.")
+  String getFlinkConfDir();
+
+  void setFlinkConfDir(String confDir);
+
+  @Description(
+      "Set the maximum size of input split when data is read from a filesystem. 0 implies no max size.")
+  @Default.Long(0)
+  Long getFileInputSplitMaxSizeMB();
+
+  void setFileInputSplitMaxSizeMB(Long fileInputSplitMaxSizeMB);
+
+  @Description(
+      "Static split assignment threshold in MiB per source reader for bounded sources in Flink "
+          + "DataStream mode. The default of 0 always uses lazy assignment. A positive value "
+          + "selects static round-robin assignment for sources with a known, positive estimate "
+          + "below the threshold and lazy assignment otherwise. Any negative value always uses "
+          + "static assignment.")
+  @Default.Long(0)
+  Long getSourceStaticSplitThresholdMb();
+
+  void setSourceStaticSplitThresholdMb(Long thresholdMb);
+
+  @Description(
+      "Allow drain operation for flink pipelines that contain RequiresStableInput operator. Note that at time of draining,"
+          + "the RequiresStableInput contract might be violated if there any processing related failures in the DoFn operator.")
+  @Default.Boolean(false)
+  Boolean getEnableStableInputDrain();
+
+  void setEnableStableInputDrain(Boolean enableStableInputDrain);
+
+  @Description(
+      "Set a slot sharing group for all bounded sources. This is required when using Datastream to have the same scheduling behaviour as the Dataset API.")
+  @Default.Boolean(true)
+  Boolean getForceSlotSharingGroup();
+
+  void setForceSlotSharingGroup(Boolean enableStableInputDrain);
 
   static FlinkPipelineOptions defaults() {
     return PipelineOptionsFactory.as(FlinkPipelineOptions.class);

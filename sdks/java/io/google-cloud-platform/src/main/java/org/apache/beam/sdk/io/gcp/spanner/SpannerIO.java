@@ -19,24 +19,52 @@ package org.apache.beam.sdk.io.gcp.spanner;
 
 import static java.util.stream.Collectors.toList;
 import static org.apache.beam.sdk.io.gcp.spanner.MutationUtils.isPointDelete;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.DEFAULT_CHANGE_STREAM_NAME;
+import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.DEFAULT_HEARTBEAT_MILLIS;
+import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.DEFAULT_INCLUSIVE_END_AT;
+import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.DEFAULT_INCLUSIVE_START_AT;
+import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.DEFAULT_REAL_TIME_CHECKPOINT_INTERVAL;
+import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.DEFAULT_RPC_PRIORITY;
+import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.DEFAULT_WATERMARK_REFRESH_RATE;
+import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.LOW_LATENCY_DEFAULT_HEARTBEAT_MILLIS;
+import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.LOW_LATENCY_REAL_TIME_CHECKPOINT_INTERVAL;
+import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.MAX_INCLUSIVE_END_AT;
+import static org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants.THROUGHPUT_WINDOW_SECONDS;
+import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
+import com.google.api.gax.retrying.RetrySettings;
+import com.google.api.gax.rpc.StatusCode.Code;
+import com.google.auth.Credentials;
 import com.google.auto.value.AutoValue;
+import com.google.cloud.NoCredentials;
 import com.google.cloud.ServiceFactory;
 import com.google.cloud.Timestamp;
 import com.google.cloud.spanner.AbortedException;
+import com.google.cloud.spanner.CommitResponse;
+import com.google.cloud.spanner.DatabaseClient;
+import com.google.cloud.spanner.DatabaseId;
+import com.google.cloud.spanner.Dialect;
 import com.google.cloud.spanner.ErrorCode;
 import com.google.cloud.spanner.KeySet;
 import com.google.cloud.spanner.Mutation;
 import com.google.cloud.spanner.Mutation.Op;
+import com.google.cloud.spanner.Options;
+import com.google.cloud.spanner.Options.RpcPriority;
 import com.google.cloud.spanner.PartitionOptions;
+import com.google.cloud.spanner.ReadOnlyTransaction;
+import com.google.cloud.spanner.ResultSet;
 import com.google.cloud.spanner.Spanner;
 import com.google.cloud.spanner.SpannerException;
 import com.google.cloud.spanner.SpannerOptions;
 import com.google.cloud.spanner.Statement;
 import com.google.cloud.spanner.Struct;
 import com.google.cloud.spanner.TimestampBound;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.spanner.v1.DirectedReadOptions;
+import io.opentelemetry.api.OpenTelemetry;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -45,22 +73,49 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.apache.beam.runners.core.metrics.GcpResourceIdentifiers;
 import org.apache.beam.runners.core.metrics.MonitoringInfoConstants;
 import org.apache.beam.runners.core.metrics.ServiceCallMetric;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
+import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.SerializableCoder;
+import org.apache.beam.sdk.extensions.gcp.options.GcpOptions;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamMetrics;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.ChangeStreamsConstants;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.MetadataSpannerConfigFactory;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.action.ActionFactory;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.cache.CacheFactory;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.dao.DaoFactory;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.dao.PartitionMetadataTableNames;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.dofn.CleanUpReadChangeStreamDoFn;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.dofn.DetectNewPartitionsDoFn;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.dofn.InitializeDoFn;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.dofn.PostProcessingMetricsDoFn;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.dofn.ReadChangeStreamPartitionDoFn;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.estimator.BytesThroughputEstimator;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.estimator.SizeEstimator;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.mapper.MapperFactory;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.model.DataChangeRecord;
+import org.apache.beam.sdk.io.gcp.spanner.changestreams.model.PartitionMetadata;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Distribution;
+import org.apache.beam.sdk.metrics.Lineage;
 import org.apache.beam.sdk.metrics.Metrics;
+import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.options.SdkHarnessOptions;
+import org.apache.beam.sdk.options.StreamingOptions;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Flatten;
+import org.apache.beam.sdk.transforms.Impulse;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -68,14 +123,19 @@ import org.apache.beam.sdk.transforms.Reshuffle;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.Wait;
+import org.apache.beam.sdk.transforms.WithTimestamps;
 import org.apache.beam.sdk.transforms.display.DisplayData;
+import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.DefaultTrigger;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
+import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.util.BackOff;
 import org.apache.beam.sdk.util.FluentBackoff;
+import org.apache.beam.sdk.util.OutputBuilderSupplier;
 import org.apache.beam.sdk.util.Sleeper;
+import org.apache.beam.sdk.values.OutputBuilder;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollection.IsBounded;
@@ -88,11 +148,18 @@ import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Stopwatch;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.primitives.UnsignedBytes;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Stopwatch;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheBuilder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheLoader;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.LoadingCache;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.primitives.UnsignedBytes;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -100,18 +167,20 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Experimental {@link PTransform Transforms} for reading from and writing to <a
- * href="https://cloud.google.com/spanner">Google Cloud Spanner</a>.
+ *
  *
  * <h3>Reading from Cloud Spanner</h3>
  *
- * <p>To read from Cloud Spanner, apply {@link SpannerIO.Read} transformation. It will return a
- * {@link PCollection} of {@link Struct Structs}, where each element represents an individual row
- * returned from the read operation. Both Query and Read APIs are supported. See more information
- * about <a href="https://cloud.google.com/spanner/docs/reads">reading from Cloud Spanner</a>
+ * <h4>Bulk reading of a single query or table</h4>
  *
- * <p>To execute a <strong>query</strong>, specify a {@link SpannerIO.Read#withQuery(Statement)} or
- * {@link SpannerIO.Read#withQuery(String)} during the construction of the transform.
+ * <p>To perform a single read from Cloud Spanner, construct a {@link Read} transform using {@link
+ * SpannerIO#read() SpannerIO.read()}. It will return a {@link PCollection} of {@link Struct
+ * Structs}, where each element represents an individual row returned from the read operation. Both
+ * Query and Read APIs are supported. See more information about <a
+ * href="https://cloud.google.com/spanner/docs/reads">reading from Cloud Spanner</a>
+ *
+ * <p>To execute a <strong>Query</strong>, specify a {@link Read#withQuery(Statement)} or {@link
+ * Read#withQuery(String)} during the construction of the transform.
  *
  * <pre>{@code
  * PCollection<Struct> rows = p.apply(
@@ -121,8 +190,17 @@ import org.slf4j.LoggerFactory;
  *         .withQuery("SELECT id, name, email FROM users"));
  * }</pre>
  *
- * <p>To use the Read API, specify a {@link SpannerIO.Read#withTable(String) table name} and a
- * {@link SpannerIO.Read#withColumns(List) list of columns}.
+ * <p>Reads by default use the <a
+ * href="https://cloud.google.com/spanner/docs/reads#read_data_in_parallel">PartitionQuery API</a>
+ * which enforces some limitations on the type of queries that can be used so that the data can be
+ * read in parallel. If the query is not supported by the PartitionQuery API, then you can specify a
+ * non-partitioned read by setting {@link Read#withBatching(boolean) withBatching(false)}. If the
+ * amount of data being read by a non-partitioned read is very large, it may be useful to add a
+ * {@link Reshuffle#viaRandomKey()} transform on the output so that the downstream transforms can
+ * run in parallel.
+ *
+ * <p>To read an entire <strong>Table</strong>, use {@link Read#withTable(String)} and optionally
+ * specify a {@link Read#withColumns(List) list of columns}.
  *
  * <pre>{@code
  * PCollection<Struct> rows = p.apply(
@@ -133,18 +211,31 @@ import org.slf4j.LoggerFactory;
  *        .withColumns("id", "name", "email"));
  * }</pre>
  *
- * <p>To optimally read using index, specify the index name using {@link SpannerIO.Read#withIndex}.
+ * <p>To read using an <strong>Index</strong>, specify the index name using {@link
+ * Read#withIndex(String)}.
+ *
+ * <pre>{@code
+ * PCollection<Struct> rows = p.apply(
+ *    SpannerIO.read()
+ *        .withInstanceId(instanceId)
+ *        .withDatabaseId(dbId)
+ *        .withTable("users")
+ *        .withIndex("users_by_name")
+ *        .withColumns("id", "name", "email"));
+ * }</pre>
+ *
+ * <h4>Read consistency</h4>
  *
  * <p>The transform is guaranteed to be executed on a consistent snapshot of data, utilizing the
  * power of read only transactions. Staleness of data can be controlled using {@link
- * SpannerIO.Read#withTimestampBound} or {@link SpannerIO.Read#withTimestamp(Timestamp)} methods. <a
- * href="https://cloud.google.com/spanner/docs/transactions">Read more</a> about transactions in
- * Cloud Spanner.
+ * Read#withTimestampBound} or {@link Read#withTimestamp(Timestamp)} methods. <a
+ * href="https://cloud.google.com/spanner/docs/transactions#read-only_transactions">Read more</a>
+ * about transactions in Cloud Spanner.
  *
  * <p>It is possible to read several {@link PCollection PCollections} within a single transaction.
  * Apply {@link SpannerIO#createTransaction()} transform, that lazily creates a transaction. The
  * result of this transformation can be passed to read operation using {@link
- * SpannerIO.Read#withTransaction(PCollectionView)}.
+ * Read#withTransaction(PCollectionView)}.
  *
  * <pre>{@code
  * SpannerConfig spannerConfig = ...
@@ -167,11 +258,33 @@ import org.slf4j.LoggerFactory;
  *        .withTransaction(tx));
  * }</pre>
  *
+ * <h4>Bulk reading of multiple queries or tables</h4>
+ *
+ * You can perform multiple consistent reads on a set of tables or using a set of queries by
+ * constructing a {@link ReadAll} transform using {@link SpannerIO#readAll() SpannerIO.readAll()}.
+ * This transform takes a {@link PCollection} of {@link ReadOperation} elements, and performs the
+ * partitioned read on each of them using the same Read Only Transaction for consistent results.
+ *
+ * <p>Note that this transform should <strong>not</strong> be used in Streaming pipelines. This is
+ * because the same Read Only Transaction, which is created once when the pipeline is first
+ * executed, will be used for all reads. The data being read will therefore become stale, and if no
+ * reads are made for more than 1 hour, the transaction will automatically timeout and be closed by
+ * the Spanner server, meaning that any subsequent reads will fail.
+ *
+ * <pre>{@code
+ * // Build a collection of ReadOperations.
+ * PCollection<ReadOperation> reads = ...
+ *
+ * PCollection<Struct> rows = reads.apply(
+ *     SpannerIO.readAll()
+ *         .withInstanceId(instanceId)
+ *         .withDatabaseId(dbId)
+ * }</pre>
+ *
  * <h3>Writing to Cloud Spanner</h3>
  *
- * <p>The Cloud Spanner {@link SpannerIO.Write} transform writes to Cloud Spanner by executing a
- * collection of input row {@link Mutation Mutations}. The mutations are grouped into batches for
- * efficiency.
+ * <p>The Cloud Spanner {@link Write} transform writes to Cloud Spanner by executing a collection of
+ * input row {@link Mutation Mutations}. The mutations are grouped into batches for efficiency.
  *
  * <p>To configure the write transform, create an instance using {@link #write()} and then specify
  * the destination Cloud Spanner instance ({@link Write#withInstanceId(String)} and destination
@@ -189,10 +302,10 @@ import org.slf4j.LoggerFactory;
  *
  * <p>The {@link SpannerWriteResult SpannerWriteResult} object contains the results of the
  * transform, including a {@link PCollection} of MutationGroups that failed to write, and a {@link
- * PCollection} that can be used in batch pipelines as a completion signal to {@link
- * org.apache.beam.sdk.transforms.Wait Wait.OnSignal} to indicate when all input has been written.
- * Note that in streaming pipelines, this signal will never be triggered as the input is unbounded
- * and this {@link PCollection} is using the {@link GlobalWindow}.
+ * PCollection} that can be used in batch pipelines as a completion signal to {@link Wait
+ * Wait.OnSignal} to indicate when all input has been written. Note that in streaming pipelines,
+ * this signal will never be triggered as the input is unbounded and this {@link PCollection} is
+ * using the {@link GlobalWindow}.
  *
  * <h3>Batching and Grouping</h3>
  *
@@ -200,15 +313,15 @@ import org.slf4j.LoggerFactory;
  * grouped into batches. The default maximum size of the batch is set to 1MB or 5000 mutated cells,
  * or 500 rows (whichever is reached first). To override this use {@link
  * Write#withBatchSizeBytes(long) withBatchSizeBytes()}, {@link Write#withMaxNumMutations(long)
- * withMaxNumMutations()} or {@link Write#withMaxNumMutations(long) withMaxNumRows()}. Setting
- * either to a small value or zero disables batching.
+ * withMaxNumMutations()} or {@link Write#withMaxNumRows(long) withMaxNumRows()}. Setting either to
+ * a small value or zero disables batching.
  *
  * <p>Note that the <a
  * href="https://cloud.google.com/spanner/quotas#limits_for_creating_reading_updating_and_deleting_data">maximum
- * size of a single transaction</a> is 20,000 mutated cells - including cells in indexes. If you
- * have a large number of indexes and are getting exceptions with message: <tt>INVALID_ARGUMENT: The
- * transaction contains too many mutations</tt> you will need to specify a smaller number of {@code
- * MaxNumMutations}.
+ * number of mutations in a single transaction</a> is 80,000 mutations - including mutations in
+ * indexes. If you have a large number of indexes and are getting exceptions with message:
+ * <tt>INVALID_ARGUMENT: The transaction contains too many mutations</tt> you will need to specify a
+ * smaller number of {@code MaxNumMutations}.
  *
  * <p>The batches written are obtained from by grouping enough {@link Mutation Mutations} from the
  * Bundle provided by Beam to form several batches. This group of {@link Mutation Mutations} is then
@@ -323,14 +436,27 @@ import org.slf4j.LoggerFactory;
  *
  * <h3>Streaming Support</h3>
  *
- * <p>{@link SpannerIO.Write} can be used as a streaming sink, however as with batch mode note that
- * the write order of individual {@link Mutation}/{@link MutationGroup} objects is not guaranteed.
+ * <p>{@link Write} can be used as a streaming sink, however as with batch mode note that the write
+ * order of individual {@link Mutation}/{@link MutationGroup} objects is not guaranteed.
+ *
+ * <p>{@link Read} and {@link ReadAll} can be used in Streaming pipelines to read a set of Facts on
+ * pipeline startup.
+ *
+ * <p>{@link ReadAll} should not be used on an unbounded {@code PCollection<ReadOperation>}, for the
+ * reasons stated above.
+ *
+ * <h3>Updates to the I/O connector code</h3>
+ *
+ * For any significant significant updates to this I/O connector, please consider involving
+ * corresponding code reviewers mentioned <a
+ * href="https://github.com/apache/beam/blob/master/sdks/java/io/google-cloud-platform/OWNERS">
+ * here</a>.
  */
-@Experimental(Kind.SOURCE_SINK)
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class SpannerIO {
+
   private static final Logger LOG = LoggerFactory.getLogger(SpannerIO.class);
 
   private static final long DEFAULT_BATCH_SIZE_BYTES = 1024L * 1024L; // 1 MB
@@ -340,6 +466,12 @@ public class SpannerIO {
   private static final int DEFAULT_MAX_NUM_ROWS = 500;
   // Multiple of mutation size to use to gather and sort mutations
   private static final int DEFAULT_GROUPING_FACTOR = 1000;
+
+  // Size of caches for read/write ServiceCallMetric objects .
+  // This is a reasonable limit, as for reads, each worker will process very few different table
+  // read requests, and for writes, batching will ensure that write operations for the same
+  // table occur at the same time (within a bundle).
+  static final int METRICS_CACHE_SIZE = 100;
 
   /**
    * Creates an uninitialized instance of {@link Read}. Before use, the {@link Read} must be
@@ -367,12 +499,19 @@ public class SpannerIO {
         .build();
   }
 
+  public static Read readWithSchema() {
+    return read()
+        .withBeamRowConverters(
+            TypeDescriptor.of(Struct.class),
+            StructUtils.structToBeamRow(),
+            StructUtils.structFromBeamRow());
+  }
+
   /**
    * Returns a transform that creates a batch transaction. By default, {@link
    * TimestampBound#strong()} transaction is created, to override this use {@link
    * CreateTransaction#withTimestampBound(TimestampBound)}.
    */
-  @Experimental
   public static CreateTransaction createTransaction() {
     return new AutoValue_SpannerIO_CreateTransaction.Builder()
         .setSpannerConfig(SpannerConfig.create())
@@ -385,7 +524,6 @@ public class SpannerIO {
    * configured with a {@link Write#withInstanceId} and {@link Write#withDatabaseId} that identify
    * the Cloud Spanner database being written.
    */
-  @Experimental
   public static Write write() {
     return new AutoValue_SpannerIO_Write.Builder()
         .setSpannerConfig(SpannerConfig.create())
@@ -393,6 +531,28 @@ public class SpannerIO {
         .setMaxNumMutations(DEFAULT_MAX_NUM_MUTATIONS)
         .setMaxNumRows(DEFAULT_MAX_NUM_ROWS)
         .setFailureMode(FailureMode.FAIL_FAST)
+        .setCommitStats(false)
+        .build();
+  }
+
+  /**
+   * Creates an uninitialized instance of {@link ReadChangeStream}. Before use, the {@link
+   * ReadChangeStream} must be configured with a {@link ReadChangeStream#withProjectId}, {@link
+   * ReadChangeStream#withInstanceId}, and {@link ReadChangeStream#withDatabaseId} that identify the
+   * Cloud Spanner database being written. It must also be configured with the start time and the
+   * change stream name.
+   */
+  public static ReadChangeStream readChangeStream() {
+    return new AutoValue_SpannerIO_ReadChangeStream.Builder()
+        .setSpannerConfig(SpannerConfig.create())
+        .setChangeStreamName(DEFAULT_CHANGE_STREAM_NAME)
+        .setRpcPriority(DEFAULT_RPC_PRIORITY)
+        .setInclusiveStartAt(DEFAULT_INCLUSIVE_START_AT)
+        .setInclusiveEndAt(DEFAULT_INCLUSIVE_END_AT)
+        .setRealTimeCheckpointInterval(DEFAULT_REAL_TIME_CHECKPOINT_INTERVAL)
+        .setHeartbeatMillis(DEFAULT_HEARTBEAT_MILLIS)
+        .setCancelQueryOnHeartbeat(false)
+        .setPerChangeRecordOpenTelemetryTracing(false)
         .build();
   }
 
@@ -411,13 +571,14 @@ public class SpannerIO {
 
     @AutoValue.Builder
     abstract static class Builder {
+
       abstract Builder setSpannerConfig(SpannerConfig spannerConfig);
 
       abstract Builder setTransaction(PCollectionView<Transaction> transaction);
 
       abstract Builder setTimestampBound(TimestampBound timestampBound);
 
-      abstract Builder setBatching(Boolean batching);
+      abstract Builder setBatching(boolean batching);
 
       abstract ReadAll build();
     }
@@ -474,6 +635,84 @@ public class SpannerIO {
       return withEmulatorHost(ValueProvider.StaticValueProvider.of(emulatorHost));
     }
 
+    /** Specifies the SpannerOptions experimental host (setExperimentalHost). */
+    public ReadAll withExperimentalHost(ValueProvider<String> experimentalHost) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withExperimentalHost(experimentalHost));
+    }
+
+    public ReadAll withExperimentalHost(String experimentalHost) {
+      return withExperimentalHost(ValueProvider.StaticValueProvider.of(experimentalHost));
+    }
+
+    /** Specifies the directed read options for Cloud Spanner. */
+    public ReadAll withDirectedReadOptions(DirectedReadOptions directedReadOptions) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withDirectedReadOptions(directedReadOptions));
+    }
+
+    /** Specifies the directed read options for Cloud Spanner. */
+    public ReadAll withDirectedReadOptions(ValueProvider<DirectedReadOptions> directedReadOptions) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withDirectedReadOptions(directedReadOptions));
+    }
+
+    /** Specifies the directed read options for Cloud Spanner from a string representation. */
+    public ReadAll withDirectedReadOptions(String directedReadOptions) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withDirectedReadOptions(directedReadOptions));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public ReadAll withUsingPlainTextChannel(ValueProvider<Boolean> plainText) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withUsingPlainTextChannel(plainText));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public ReadAll withUsingPlainTextChannel(boolean plainText) {
+      return withUsingPlainTextChannel(ValueProvider.StaticValueProvider.of(plainText));
+    }
+
+    /**
+     * Specifies certificate paths to use for mTLS channel.
+     *
+     * <p>Note: These parameters are only valid when using Spanner Omni (set via {@code
+     * withExperimentalHost}).
+     *
+     * @param certPath Path to the client certificate file.
+     * @param keyPath Path to the client certificate key file.
+     */
+    public ReadAll withClientCert(ValueProvider<String> certPath, ValueProvider<String> keyPath) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withClientCert(certPath, keyPath));
+    }
+
+    /**
+     * Specifies certificate paths to use for mTLS channel.
+     *
+     * <p>Note: These parameters are only valid when using Spanner Omni (set via {@code
+     * withExperimentalHost}).
+     *
+     * @param certPath Path to the client certificate file.
+     * @param keyPath Path to the client certificate key file.
+     */
+    public ReadAll withClientCert(String certPath, String keyPath) {
+      return withClientCert(
+          ValueProvider.StaticValueProvider.of(certPath),
+          ValueProvider.StaticValueProvider.of(keyPath));
+    }
+
     /** Specifies the Cloud Spanner database. */
     public ReadAll withDatabaseId(ValueProvider<String> databaseId) {
       SpannerConfig config = getSpannerConfig();
@@ -499,17 +738,38 @@ public class SpannerIO {
     }
 
     /**
-     * By default Batch API is used to read data from Cloud Spanner. It is useful to disable
-     * batching when the underlying query is not root-partitionable.
+     * By default the <a
+     * href="https://cloud.google.com/spanner/docs/reads#read_data_in_parallel">PartitionQuery
+     * API</a> is used to read data from Cloud Spanner. It is useful to disable batching when the
+     * underlying query is not root-partitionable.
      */
     public ReadAll withBatching(boolean batching) {
       return toBuilder().setBatching(batching).build();
     }
 
-    abstract Boolean getBatching();
+    public ReadAll withLowPriority() {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withRpcPriority(RpcPriority.LOW));
+    }
+
+    public ReadAll withHighPriority() {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withRpcPriority(RpcPriority.HIGH));
+    }
+
+    abstract boolean getBatching();
 
     @Override
     public PCollection<Struct> expand(PCollection<ReadOperation> input) {
+
+      if (PCollection.IsBounded.UNBOUNDED == input.isBounded()) {
+        // Warn that SpannerIO.ReadAll should not be used on unbounded inputs.
+        LOG.warn(
+            "SpannerIO.ReadAll({}) is being applied to an unbounded input. "
+                + "This is not supported and can lead to runtime failures.",
+            this.getName());
+      }
+
       PTransform<PCollection<ReadOperation>, PCollection<Struct>> readTransform;
       if (getBatching()) {
         readTransform =
@@ -522,11 +782,52 @@ public class SpannerIO {
           .apply("Reshuffle", Reshuffle.viaRandomKey())
           .apply("Read from Cloud Spanner", readTransform);
     }
+
+    /** Helper function to create ServiceCallMetrics. */
+    static ServiceCallMetric buildServiceCallMetricForReadOp(
+        SpannerConfig config, ReadOperation op) {
+
+      HashMap<String, String> baseLabels = buildServiceCallMetricLabels(config);
+      baseLabels.put(MonitoringInfoConstants.Labels.METHOD, "Read");
+
+      if (op.getQuery() != null) {
+        String queryName = op.getQueryName();
+        if (queryName == null || queryName.isEmpty()) {
+          // if queryName is not specified, use a hash of the SQL statement string.
+          queryName = String.format("UNNAMED_QUERY#%08x", op.getQuery().getSql().hashCode());
+        }
+
+        baseLabels.put(
+            MonitoringInfoConstants.Labels.RESOURCE,
+            GcpResourceIdentifiers.spannerQuery(
+                baseLabels.get(MonitoringInfoConstants.Labels.SPANNER_PROJECT_ID),
+                config.getInstanceId().get(),
+                config.getDatabaseId().get(),
+                queryName));
+        baseLabels.put(MonitoringInfoConstants.Labels.SPANNER_QUERY_NAME, queryName);
+      } else {
+        baseLabels.put(
+            MonitoringInfoConstants.Labels.RESOURCE,
+            GcpResourceIdentifiers.spannerTable(
+                baseLabels.get(MonitoringInfoConstants.Labels.SPANNER_PROJECT_ID),
+                config.getInstanceId().get(),
+                config.getDatabaseId().get(),
+                op.getTable()));
+        baseLabels.put(MonitoringInfoConstants.Labels.TABLE_ID, op.getTable());
+      }
+      return new ServiceCallMetric(MonitoringInfoConstants.Urns.API_REQUEST_COUNT, baseLabels);
+    }
   }
 
   /** Implementation of {@link #read}. */
   @AutoValue
   public abstract static class Read extends PTransform<PBegin, PCollection<Struct>> {
+
+    interface ToBeamRowFunction
+        extends SerializableFunction<Schema, SerializableFunction<Struct, Row>> {}
+
+    interface FromBeamRowFunction
+        extends SerializableFunction<Schema, SerializableFunction<Row, Struct>> {}
 
     abstract SpannerConfig getSpannerConfig();
 
@@ -538,7 +839,13 @@ public class SpannerIO {
 
     abstract @Nullable PartitionOptions getPartitionOptions();
 
-    abstract Boolean getBatching();
+    abstract boolean getBatching();
+
+    abstract @Nullable TypeDescriptor<Struct> getTypeDescriptor();
+
+    abstract @Nullable ToBeamRowFunction getToBeamRowFn();
+
+    abstract @Nullable FromBeamRowFunction getFromBeamRowFn();
 
     abstract Builder toBuilder();
 
@@ -555,9 +862,26 @@ public class SpannerIO {
 
       abstract Builder setPartitionOptions(PartitionOptions partitionOptions);
 
-      abstract Builder setBatching(Boolean batching);
+      abstract Builder setBatching(boolean batching);
+
+      abstract Builder setTypeDescriptor(TypeDescriptor<Struct> typeDescriptor);
+
+      abstract Builder setToBeamRowFn(ToBeamRowFunction toRowFn);
+
+      abstract Builder setFromBeamRowFn(FromBeamRowFunction fromRowFn);
 
       abstract Read build();
+    }
+
+    public Read withBeamRowConverters(
+        TypeDescriptor<Struct> typeDescriptor,
+        ToBeamRowFunction toRowFn,
+        FromBeamRowFunction fromRowFn) {
+      return toBuilder()
+          .setTypeDescriptor(typeDescriptor)
+          .setToBeamRowFn(toRowFn)
+          .setFromBeamRowFn(fromRowFn)
+          .build();
     }
 
     /** Specifies the Cloud Spanner configuration. */
@@ -616,6 +940,84 @@ public class SpannerIO {
 
     public Read withEmulatorHost(String emulatorHost) {
       return withEmulatorHost(ValueProvider.StaticValueProvider.of(emulatorHost));
+    }
+
+    /** Specifies the SpannerOptions experimental host (setExperimentalHost). */
+    public Read withExperimentalHost(ValueProvider<String> experimentalHost) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withExperimentalHost(experimentalHost));
+    }
+
+    public Read withExperimentalHost(String experimentalHost) {
+      return withExperimentalHost(ValueProvider.StaticValueProvider.of(experimentalHost));
+    }
+
+    /** Specifies the directed read options for Cloud Spanner. */
+    public Read withDirectedReadOptions(DirectedReadOptions directedReadOptions) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withDirectedReadOptions(directedReadOptions));
+    }
+
+    /** Specifies the directed read options for Cloud Spanner. */
+    public Read withDirectedReadOptions(ValueProvider<DirectedReadOptions> directedReadOptions) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withDirectedReadOptions(directedReadOptions));
+    }
+
+    /** Specifies the directed read options for Cloud Spanner from a string representation. */
+    public Read withDirectedReadOptions(String directedReadOptions) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withDirectedReadOptions(directedReadOptions));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public Read withUsingPlainTextChannel(ValueProvider<Boolean> plainText) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withUsingPlainTextChannel(plainText));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public Read withUsingPlainTextChannel(boolean plainText) {
+      return withUsingPlainTextChannel(ValueProvider.StaticValueProvider.of(plainText));
+    }
+
+    /**
+     * Specifies certificate paths to use for mTLS channel.
+     *
+     * <p>Note: These parameters are only valid when using Spanner Omni (set via {@code
+     * withExperimentalHost}).
+     *
+     * @param certPath Path to the client certificate file.
+     * @param keyPath Path to the client certificate key file.
+     */
+    public Read withClientCert(ValueProvider<String> certPath, ValueProvider<String> keyPath) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withClientCert(certPath, keyPath));
+    }
+
+    /**
+     * Specifies certificate paths to use for mTLS channel.
+     *
+     * <p>Note: These parameters are only valid when using Spanner Omni (set via {@code
+     * withExperimentalHost}).
+     *
+     * @param certPath Path to the client certificate file.
+     * @param keyPath Path to the client certificate key file.
+     */
+    public Read withClientCert(String certPath, String keyPath) {
+      return withClientCert(
+          ValueProvider.StaticValueProvider.of(certPath),
+          ValueProvider.StaticValueProvider.of(keyPath));
     }
 
     /** If true the uses Cloud Spanner batch API. */
@@ -677,8 +1079,31 @@ public class SpannerIO {
       return withReadOperation(getReadOperation().withIndex(index));
     }
 
+    /**
+     * Note that {@link PartitionOptions} are currently ignored. See <a
+     * href="https://cloud.google.com/spanner/docs/reference/rpc/google.spanner.v1#google.spanner.v1.PartitionOptions">
+     * PartitionOptions in RPC documents</a>
+     */
     public Read withPartitionOptions(PartitionOptions partitionOptions) {
       return withReadOperation(getReadOperation().withPartitionOptions(partitionOptions));
+    }
+
+    public Read withLowPriority() {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withRpcPriority(RpcPriority.LOW));
+    }
+
+    public Read withHighPriority() {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withRpcPriority(RpcPriority.HIGH));
+    }
+
+    private SpannerSourceDef createSourceDef() {
+      if (getReadOperation().getQuery() != null) {
+        return SpannerQuerySourceDef.create(getSpannerConfig(), getReadOperation().getQuery());
+      }
+      return SpannerTableSourceDef.create(
+          getSpannerConfig(), getReadOperation().getTable(), getReadOperation().getColumns());
     }
 
     @Override
@@ -691,6 +1116,10 @@ public class SpannerIO {
 
       if (getReadOperation().getQuery() != null) {
         // TODO: validate query?
+        if (getReadOperation().getTable() != null) {
+          throw new IllegalArgumentException(
+              "Both query and table cannot be specified at the same time for SpannerIO.read().");
+        }
       } else if (getReadOperation().getTable() != null) {
         // Assume read
         checkNotNull(
@@ -703,7 +1132,14 @@ public class SpannerIO {
                 + " list of columns to set with withColumns method");
       } else {
         throw new IllegalArgumentException(
-            "SpannerIO.read() requires configuring query or read operation.");
+            "SpannerIO.read() requires query OR table to set with withTable OR withQuery method.");
+      }
+
+      final SpannerSourceDef sourceDef = createSourceDef();
+
+      Schema beamSchema = null;
+      if (getTypeDescriptor() != null && getToBeamRowFn() != null && getFromBeamRowFn() != null) {
+        beamSchema = sourceDef.getBeamSchema();
       }
 
       ReadAll readAll =
@@ -712,7 +1148,19 @@ public class SpannerIO {
               .withTimestampBound(getTimestampBound())
               .withBatching(getBatching())
               .withTransaction(getTransaction());
-      return input.apply(Create.of(getReadOperation())).apply("Execute query", readAll);
+
+      PCollection<Struct> rows =
+          input.apply(Create.of(getReadOperation())).apply("Execute query", readAll);
+
+      if (beamSchema != null) {
+        rows.setSchema(
+            beamSchema,
+            getTypeDescriptor(),
+            getToBeamRowFn().apply(beamSchema),
+            getFromBeamRowFn().apply(beamSchema));
+      }
+
+      return rows;
     }
 
     SerializableFunction<Struct, Row> getFormatFn() {
@@ -725,6 +1173,7 @@ public class SpannerIO {
   }
 
   static class ReadRows extends PTransform<PBegin, PCollection<Row>> {
+
     Read read;
     Schema schema;
 
@@ -744,6 +1193,32 @@ public class SpannerIO {
                       (SerializableFunction<Struct, Row>)
                           struct -> StructUtils.structToBeamRow(struct, schema)))
           .setRowSchema(schema);
+    }
+  }
+
+  static class ChangeStreamRead extends PTransform<PBegin, PCollection<String>> {
+
+    ReadChangeStream readChangeStream;
+
+    public ChangeStreamRead(ReadChangeStream readChangeStream) {
+      this.readChangeStream = readChangeStream;
+    }
+
+    @Override
+    public PCollection<String> expand(PBegin input) {
+      return input
+          .apply(readChangeStream)
+          .apply("DataChangeRecordToStringJSON", ParDo.of(new DataChangeRecordToJsonFn()));
+    }
+  }
+
+  private static class DataChangeRecordToJsonFn extends DoFn<DataChangeRecord, String> {
+    private static Gson gson = new GsonBuilder().disableHtmlEscaping().create();
+
+    @ProcessElement
+    public void process(@Element DataChangeRecord input, OutputReceiver<String> receiver) {
+      String modJsonString = gson.toJson(input, DataChangeRecord.class);
+      receiver.output(modJsonString);
     }
   }
 
@@ -841,6 +1316,67 @@ public class SpannerIO {
       return withEmulatorHost(ValueProvider.StaticValueProvider.of(emulatorHost));
     }
 
+    /** Specifies the SpannerOptions experimental host (setExperimentalHost). */
+    public CreateTransaction withExperimentalHost(ValueProvider<String> experimentalHost) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withExperimentalHost(experimentalHost));
+    }
+
+    public CreateTransaction withExperimentalHost(String experimentalHost) {
+      return withExperimentalHost(ValueProvider.StaticValueProvider.of(experimentalHost));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public CreateTransaction withUsingPlainTextChannel(ValueProvider<Boolean> plainText) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withUsingPlainTextChannel(plainText));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public CreateTransaction withUsingPlainTextChannel(boolean plainText) {
+      return withUsingPlainTextChannel(ValueProvider.StaticValueProvider.of(plainText));
+    }
+
+    /**
+     * Specifies certificate paths to use for mTLS channel.
+     *
+     * <p>Note: These parameters are only valid when using Spanner Omni (set via {@code
+     * withExperimentalHost}).
+     *
+     * @param certPath Path to the client certificate file.
+     * @param keyPath Path to the client certificate key file.
+     */
+    public CreateTransaction withClientCert(
+        ValueProvider<String> certPath, ValueProvider<String> keyPath) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withClientCert(certPath, keyPath));
+    }
+
+    /**
+     * Specifies certificate paths to use for mTLS channel.
+     *
+     * <p>Note: These parameters are only valid when using Spanner Omni (set via {@code
+     * withExperimentalHost}).
+     *
+     * @param certPath Path to the client certificate file.
+     * @param keyPath Path to the client certificate key file.
+     */
+    public CreateTransaction withClientCert(String certPath, String keyPath) {
+      return withClientCert(
+          ValueProvider.StaticValueProvider.of(certPath),
+          ValueProvider.StaticValueProvider.of(keyPath));
+    }
+
     @VisibleForTesting
     CreateTransaction withServiceFactory(ServiceFactory<Spanner, SpannerOptions> serviceFactory) {
       SpannerConfig config = getSpannerConfig();
@@ -893,6 +1429,10 @@ public class SpannerIO {
 
     abstract OptionalInt getGroupingFactor();
 
+    abstract @Nullable PCollectionView<Dialect> getDialectView();
+
+    abstract boolean getCommitStats();
+
     abstract Builder toBuilder();
 
     @AutoValue.Builder
@@ -911,6 +1451,10 @@ public class SpannerIO {
       abstract Builder setSchemaReadySignal(PCollection<?> schemaReadySignal);
 
       abstract Builder setGroupingFactor(int groupingFactor);
+
+      abstract Builder setDialectView(PCollectionView<Dialect> dialect);
+
+      abstract Builder setCommitStats(boolean commitStats);
 
       abstract Write build();
     }
@@ -964,6 +1508,18 @@ public class SpannerIO {
       return withHost(ValueProvider.StaticValueProvider.of(host));
     }
 
+    /** Specifies whether OpenTelemetry tracing is enabled. */
+    public Write withEnableOpenTelemetryTracing(boolean enableOpenTelemetryTracing) {
+      return withEnableOpenTelemetryTracing(
+          ValueProvider.StaticValueProvider.of(enableOpenTelemetryTracing));
+    }
+
+    /** Specifies whether OpenTelemetry tracing is enabled. */
+    public Write withEnableOpenTelemetryTracing(ValueProvider<Boolean> enableOpenTelemetryTracing) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withEnableOpenTelemetryTracing(enableOpenTelemetryTracing));
+    }
+
     /** Specifies the Cloud Spanner emulator host. */
     public Write withEmulatorHost(ValueProvider<String> emulatorHost) {
       SpannerConfig config = getSpannerConfig();
@@ -974,6 +1530,70 @@ public class SpannerIO {
       return withEmulatorHost(ValueProvider.StaticValueProvider.of(emulatorHost));
     }
 
+    /** Specifies the SpannerOptions experimental host (setExperimentalHost). */
+    public Write withExperimentalHost(ValueProvider<String> experimentalHost) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withExperimentalHost(experimentalHost));
+    }
+
+    public Write withExperimentalHost(String experimentalHost) {
+      return withExperimentalHost(ValueProvider.StaticValueProvider.of(experimentalHost));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public Write withUsingPlainTextChannel(ValueProvider<Boolean> plainText) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withUsingPlainTextChannel(plainText));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public Write withUsingPlainTextChannel(boolean plainText) {
+      return withUsingPlainTextChannel(ValueProvider.StaticValueProvider.of(plainText));
+    }
+
+    /**
+     * Specifies certificate paths to use for mTLS channel.
+     *
+     * <p>Note: These parameters are only valid when using Spanner Omni (set via {@code
+     * withExperimentalHost}).
+     *
+     * @param certPath Path to the client certificate file.
+     * @param keyPath Path to the client certificate key file.
+     */
+    public Write withClientCert(ValueProvider<String> certPath, ValueProvider<String> keyPath) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withClientCert(certPath, keyPath));
+    }
+
+    /**
+     * Specifies certificate paths to use for mTLS channel.
+     *
+     * <p>Note: These parameters are only valid when using Spanner Omni (set via {@code
+     * withExperimentalHost}).
+     *
+     * @param certPath Path to the client certificate file.
+     * @param keyPath Path to the client certificate key file.
+     */
+    public Write withClientCert(String certPath, String keyPath) {
+      return withClientCert(
+          ValueProvider.StaticValueProvider.of(certPath),
+          ValueProvider.StaticValueProvider.of(keyPath));
+    }
+
+    public Write withDialectView(PCollectionView<Dialect> dialect) {
+      return toBuilder().setDialectView(dialect).build();
+    }
+
     /**
      * Specifies the deadline for the Commit API call. Default is 15 secs. DEADLINE_EXCEEDED errors
      * will prompt a backoff/retry until the value of {@link #withMaxCumulativeBackoff(Duration)} is
@@ -982,6 +1602,53 @@ public class SpannerIO {
     public Write withCommitDeadline(Duration commitDeadline) {
       SpannerConfig config = getSpannerConfig();
       return withSpannerConfig(config.withCommitDeadline(commitDeadline));
+    }
+
+    /**
+     * Specifies max commit delay for the Commit API call for throughput optimized writes. If not
+     * set, Spanner might set a small delay if it thinks that will amortize the cost of the writes.
+     * For more information about the feature, <a
+     * href="https://cloud.google.com/spanner/docs/throughput-optimized-writes#default-behavior">see
+     * documentation</a>
+     */
+    public Write withMaxCommitDelay(long millis) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withMaxCommitDelay(millis));
+    }
+
+    /**
+     * Specifies whether transactions should be excluded from being recorded in change streams with
+     * the DDL option {@code allow_txn_exclusion=true}. This does not exclude the transaction from
+     * being recorded in the change streams with the DDL option {@code allow_txn_exclusion} being
+     * false or unset.
+     */
+    public Write withExcludeTxnFromChangeStreams(boolean excludeTxnFromChangeStreams) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withExcludeTxnFromChangeStreams(excludeTxnFromChangeStreams));
+    }
+
+    /**
+     * Specifies whether transactions should be excluded from being recorded in change streams with
+     * the DDL option {@code allow_txn_exclusion=true}. This does not exclude the transaction from
+     * being recorded in the change streams with the DDL option {@code allow_txn_exclusion} being
+     * false or unset.
+     */
+    public Write withExcludeTxnFromChangeStreams(
+        ValueProvider<Boolean> excludeTxnFromChangeStreams) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withExcludeTxnFromChangeStreams(excludeTxnFromChangeStreams));
+    }
+
+    /** Specifies the transaction tag to use for write transactions. */
+    public Write withTransactionTag(String transactionTag) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withTransactionTag(transactionTag));
+    }
+
+    /** Specifies the transaction tag to use for write transactions. */
+    public Write withTransactionTag(ValueProvider<String> transactionTag) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withTransactionTag(transactionTag));
     }
 
     /**
@@ -1059,6 +1726,24 @@ public class SpannerIO {
       return toBuilder().setGroupingFactor(groupingFactor).build();
     }
 
+    public Write withLowPriority() {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withRpcPriority(RpcPriority.LOW));
+    }
+
+    public Write withHighPriority() {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withRpcPriority(RpcPriority.HIGH));
+    }
+
+    /**
+     * Returns a {@link WriteWithResults} transform that enables {@link Options#commitStats()} and
+     * emits a {@link WriteResults} for each batch of mutations written to Cloud Spanner.
+     */
+    public WriteWithResults withWriteResults() {
+      return new WriteWithResults(toBuilder().setCommitStats(true).build());
+    }
+
     @Override
     public SpannerWriteResult expand(PCollection<Mutation> input) {
       getSpannerConfig().validate();
@@ -1097,18 +1782,78 @@ public class SpannerIO {
     }
   }
 
+  /**
+   * A {@link PTransform} that writes {@link Mutation} objects to Google Cloud Spanner with {@link
+   * Options#commitStats()} enabled and emits a {@link WriteResults} for each committed batch.
+   */
+  public static class WriteWithResults
+      extends PTransform<PCollection<Mutation>, PCollection<WriteResults>> {
+
+    private final Write spec;
+
+    WriteWithResults(Write spec) {
+      this.spec = spec;
+    }
+
+    /** Same transform but can be applied to {@link PCollection} of {@link MutationGroup}. */
+    public WriteGroupedWithResults grouped() {
+      return new WriteGroupedWithResults(spec);
+    }
+
+    @Override
+    public PCollection<WriteResults> expand(PCollection<Mutation> input) {
+      spec.getSpannerConfig().validate();
+
+      return input
+          .apply("To mutation group", ParDo.of(new ToMutationGroupFn()))
+          .apply("Write mutations to Cloud Spanner", new WriteGroupedWithResults(spec));
+    }
+
+    @Override
+    public void populateDisplayData(DisplayData.Builder builder) {
+      super.populateDisplayData(builder);
+      spec.populateDisplayDataWithParamaters(builder);
+    }
+  }
+
+  /** Same as {@link WriteWithResults} but supports grouped mutations. */
+  public static class WriteGroupedWithResults
+      extends PTransform<PCollection<MutationGroup>, PCollection<WriteResults>> {
+
+    private final Write spec;
+
+    public WriteGroupedWithResults(Write spec) {
+      this.spec = spec;
+    }
+
+    @Override
+    public PCollection<WriteResults> expand(PCollection<MutationGroup> input) {
+      SpannerWriteResult result = input.apply(new WriteGrouped(spec));
+      return checkStateNotNull(
+          result.getWriteResults(),
+          "WriteResults PCollection must be present when commitStats is enabled.");
+    }
+
+    @Override
+    public void populateDisplayData(DisplayData.Builder builder) {
+      super.populateDisplayData(builder);
+      spec.populateDisplayDataWithParamaters(builder);
+    }
+  }
+
   static class WriteRows extends PTransform<PCollection<Row>, PDone> {
+
     private final Write write;
-    private final Mutation.Op operation;
+    private final Op operation;
     private final String table;
 
-    private WriteRows(Write write, Mutation.Op operation, String table) {
+    private WriteRows(Write write, Op operation, String table) {
       this.write = write;
       this.operation = operation;
       this.table = table;
     }
 
-    public static WriteRows of(Write write, Mutation.Op operation, String table) {
+    public static WriteRows of(Write write, Op operation, String table) {
       return new WriteRows(write, operation, table);
     }
 
@@ -1126,6 +1871,7 @@ public class SpannerIO {
   /** Same as {@link Write} but supports grouped mutations. */
   public static class WriteGrouped
       extends PTransform<PCollection<MutationGroup>, SpannerWriteResult> {
+
     private final Write spec;
     private static final TupleTag<MutationGroup> BATCHABLE_MUTATIONS_TAG =
         new TupleTag<MutationGroup>("batchableMutations") {};
@@ -1133,6 +1879,8 @@ public class SpannerIO {
         new TupleTag<Iterable<MutationGroup>>("unbatchableMutations") {};
 
     private static final TupleTag<Void> MAIN_OUT_TAG = new TupleTag<Void>("mainOut") {};
+    private static final TupleTag<WriteResults> WRITE_RESULTS_TAG =
+        new TupleTag<WriteResults>("writeResults") {};
     private static final TupleTag<MutationGroup> FAILED_MUTATIONS_TAG =
         new TupleTag<MutationGroup>("failedMutations") {};
     private static final SerializableCoder<MutationGroup> CODER =
@@ -1140,6 +1888,15 @@ public class SpannerIO {
 
     public WriteGrouped(Write spec) {
       this.spec = spec;
+    }
+
+    /**
+     * Returns a {@link WriteGroupedWithResults} transform that enables {@link
+     * Options#commitStats()} and emits a {@link WriteResults} for each batch of mutations written
+     * to Cloud Spanner.
+     */
+    public WriteGroupedWithResults withWriteResults() {
+      return new WriteGroupedWithResults(spec.toBuilder().setCommitStats(true).build());
     }
 
     @Override
@@ -1151,6 +1908,15 @@ public class SpannerIO {
     @Override
     public SpannerWriteResult expand(PCollection<MutationGroup> input) {
       PCollection<Iterable<MutationGroup>> batches;
+      PCollectionView<Dialect> dialectView = spec.getDialectView();
+
+      if (dialectView == null) {
+        dialectView =
+            input
+                .getPipeline()
+                .apply("CreateSingleton", Create.of(Dialect.GOOGLE_STANDARD_SQL))
+                .apply("As PCollectionView", View.asSingleton());
+      }
 
       if (spec.getBatchSizeBytes() <= 1
           || spec.getMaxNumMutations() <= 1
@@ -1172,7 +1938,8 @@ public class SpannerIO {
             schemaSeed
                 .apply(
                     "Read information schema",
-                    ParDo.of(new ReadSpannerSchema(spec.getSpannerConfig())))
+                    ParDo.of(new ReadSpannerSchema(spec.getSpannerConfig(), dialectView))
+                        .withSideInputs(dialectView))
                 .apply("Schema View", View.asSingleton());
 
         // Split the mutations into batchable and unbatchable mutations.
@@ -1230,12 +1997,19 @@ public class SpannerIO {
               "Write batches to Spanner",
               ParDo.of(
                       new WriteToSpannerFn(
-                          spec.getSpannerConfig(), spec.getFailureMode(), FAILED_MUTATIONS_TAG))
-                  .withOutputTags(MAIN_OUT_TAG, TupleTagList.of(FAILED_MUTATIONS_TAG)));
+                          spec.getSpannerConfig(),
+                          spec.getFailureMode(),
+                          FAILED_MUTATIONS_TAG,
+                          spec.getCommitStats(),
+                          WRITE_RESULTS_TAG))
+                  .withOutputTags(
+                      MAIN_OUT_TAG, TupleTagList.of(FAILED_MUTATIONS_TAG).and(WRITE_RESULTS_TAG)));
 
       return new SpannerWriteResult(
           input.getPipeline(),
           result.get(MAIN_OUT_TAG),
+          spec.getCommitStats() ? result.get(WRITE_RESULTS_TAG) : null,
+          spec.getCommitStats() ? WRITE_RESULTS_TAG : null,
           result.get(FAILED_MUTATIONS_TAG),
           FAILED_MUTATIONS_TAG);
     }
@@ -1262,7 +2036,567 @@ public class SpannerIO {
     }
   }
 
+  @AutoValue
+  public abstract static class ReadChangeStream
+      extends PTransform<PBegin, PCollection<DataChangeRecord>> {
+
+    abstract SpannerConfig getSpannerConfig();
+
+    abstract String getChangeStreamName();
+
+    abstract @Nullable List<String> getTvfNameList();
+
+    abstract @Nullable String getMetadataInstance();
+
+    abstract @Nullable String getMetadataDatabase();
+
+    abstract @Nullable String getMetadataTable();
+
+    abstract Timestamp getInclusiveStartAt();
+
+    abstract @Nullable Timestamp getInclusiveEndAt();
+
+    abstract @Nullable RpcPriority getRpcPriority();
+
+    /**
+     * @deprecated This configuration has no effect, as tracing is not available
+     */
+    @Deprecated
+    abstract @Nullable Double getTraceSampleProbability();
+
+    abstract @Nullable Duration getWatermarkRefreshRate();
+
+    abstract @Nullable ValueProvider<String> getExperimentalHost();
+
+    abstract @Nullable ValueProvider<Boolean> getPlainText();
+
+    abstract @Nullable ValueProvider<String> getClientCertPath();
+
+    abstract @Nullable ValueProvider<String> getClientCertKeyPath();
+
+    abstract Duration getRealTimeCheckpointInterval();
+
+    abstract int getHeartbeatMillis();
+
+    abstract boolean getCancelQueryOnHeartbeat();
+
+    abstract boolean getPerChangeRecordOpenTelemetryTracing();
+
+    abstract Builder toBuilder();
+
+    @AutoValue.Builder
+    abstract static class Builder {
+
+      abstract Builder setSpannerConfig(SpannerConfig spannerConfig);
+
+      abstract Builder setChangeStreamName(String changeStreamName);
+
+      abstract Builder setTvfNameList(List<String> tvfNameList);
+
+      abstract Builder setMetadataInstance(String metadataInstance);
+
+      abstract Builder setMetadataDatabase(String metadataDatabase);
+
+      abstract Builder setMetadataTable(String metadataTable);
+
+      abstract Builder setInclusiveStartAt(Timestamp inclusiveStartAt);
+
+      abstract Builder setInclusiveEndAt(Timestamp inclusiveEndAt);
+
+      abstract Builder setRpcPriority(RpcPriority rpcPriority);
+
+      abstract Builder setTraceSampleProbability(Double probability);
+
+      abstract Builder setWatermarkRefreshRate(Duration refreshRate);
+
+      abstract Builder setExperimentalHost(ValueProvider<String> experimentalHost);
+
+      abstract Builder setPlainText(ValueProvider<Boolean> plainText);
+
+      abstract Builder setClientCertPath(ValueProvider<String> clientCertPath);
+
+      abstract Builder setClientCertKeyPath(ValueProvider<String> clientCertKeyPath);
+
+      abstract Builder setPerChangeRecordOpenTelemetryTracing(boolean enableOpenTelemetryTracing);
+
+      /**
+       * When caught up to real-time, checkpoint processing of change stream this often. This sets a
+       * bound on latency of processing if a steady trickle of elements prevents the heartbeat
+       * interval from triggering.
+       */
+      abstract Builder setRealTimeCheckpointInterval(Duration realTimeCheckpointInterval);
+
+      /** Heartbeat interval for all change stream queries. */
+      abstract Builder setHeartbeatMillis(int heartbeatMillis);
+
+      abstract Builder setCancelQueryOnHeartbeat(boolean cancelQueryOnHeartbeat);
+
+      abstract ReadChangeStream build();
+    }
+
+    /** Specifies the Cloud Spanner configuration. */
+    public ReadChangeStream withSpannerConfig(SpannerConfig spannerConfig) {
+      return toBuilder().setSpannerConfig(spannerConfig).build();
+    }
+
+    /** Specifies the Cloud Spanner project. */
+    public ReadChangeStream withProjectId(String projectId) {
+      return withProjectId(ValueProvider.StaticValueProvider.of(projectId));
+    }
+
+    /** Specifies the Cloud Spanner project. */
+    public ReadChangeStream withProjectId(ValueProvider<String> projectId) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withProjectId(projectId));
+    }
+
+    /** Specifies the Cloud Spanner instance. */
+    public ReadChangeStream withInstanceId(String instanceId) {
+      return withInstanceId(ValueProvider.StaticValueProvider.of(instanceId));
+    }
+
+    /** Specifies the Cloud Spanner instance. */
+    public ReadChangeStream withInstanceId(ValueProvider<String> instanceId) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withInstanceId(instanceId));
+    }
+
+    /** Specifies the Cloud Spanner database. */
+    public ReadChangeStream withDatabaseId(String databaseId) {
+      return withDatabaseId(ValueProvider.StaticValueProvider.of(databaseId));
+    }
+
+    /** Specifies the Cloud Spanner database. */
+    public ReadChangeStream withDatabaseId(ValueProvider<String> databaseId) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withDatabaseId(databaseId));
+    }
+
+    /**
+     * Specifies whether OpenTelemetry tracing should start trace and span on each change record.
+     * Spanner Client library tracing can be enabled via the SpannerConfig passed to
+     * withSpannerConfig.
+     */
+    public ReadChangeStream withPerChangeRecordOpenTelemetryTracing(boolean openTelemetryTracing) {
+      return toBuilder().setPerChangeRecordOpenTelemetryTracing(openTelemetryTracing).build();
+    }
+
+    /** Specifies the change stream name. */
+    public ReadChangeStream withChangeStreamName(String changeStreamName) {
+      return toBuilder().setChangeStreamName(changeStreamName).build();
+    }
+
+    /** Specifies the list of TVF names to query and union. */
+    public ReadChangeStream withTvfNameList(List<String> tvfNameList) {
+      return toBuilder().setTvfNameList(tvfNameList).build();
+    }
+
+    /** Specifies the metadata database. */
+    public ReadChangeStream withMetadataInstance(String metadataInstance) {
+      return toBuilder().setMetadataInstance(metadataInstance).build();
+    }
+
+    /** Specifies the metadata database. */
+    public ReadChangeStream withMetadataDatabase(String metadataDatabase) {
+      return toBuilder().setMetadataDatabase(metadataDatabase).build();
+    }
+
+    /** Specifies the metadata table name. */
+    public ReadChangeStream withMetadataTable(String metadataTable) {
+      return toBuilder().setMetadataTable(metadataTable).build();
+    }
+
+    /** Specifies the time that the change stream should be read from. */
+    public ReadChangeStream withInclusiveStartAt(Timestamp timestamp) {
+      return toBuilder().setInclusiveStartAt(timestamp).build();
+    }
+
+    /** Specifies the end time of the change stream. */
+    public ReadChangeStream withInclusiveEndAt(Timestamp timestamp) {
+      return toBuilder().setInclusiveEndAt(timestamp).build();
+    }
+
+    /** Specifies the priority of the change stream queries. */
+    public ReadChangeStream withRpcPriority(RpcPriority rpcPriority) {
+      return toBuilder().setRpcPriority(rpcPriority).build();
+    }
+
+    /**
+     * Specifies the sample probability of tracing requests.
+     *
+     * @deprecated This configuration has no effect, as tracing is not available.
+     */
+    @Deprecated
+    public ReadChangeStream withTraceSampleProbability(Double probability) {
+      return toBuilder().setTraceSampleProbability(probability).build();
+    }
+
+    public ReadChangeStream withWatermarkRefreshRate(Duration refreshRate) {
+      return toBuilder().setWatermarkRefreshRate(refreshRate).build();
+    }
+
+    /** Specifies the experimental host to set on SpannerOptions (setExperimentalHost). */
+    public ReadChangeStream withExperimentalHost(ValueProvider<String> experimentalHost) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withExperimentalHost(experimentalHost));
+    }
+
+    /** Specifies the experimental host to set on SpannerOptions (setExperimentalHost). */
+    public ReadChangeStream withExperimentalHost(String experimentalHost) {
+      return withExperimentalHost(ValueProvider.StaticValueProvider.of(experimentalHost));
+    }
+
+    /** Specifies the directed read options for change stream queries. */
+    public ReadChangeStream withDirectedReadOptions(DirectedReadOptions directedReadOptions) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withDirectedReadOptions(directedReadOptions));
+    }
+
+    /** Specifies the directed read options for change stream queries. */
+    public ReadChangeStream withDirectedReadOptions(
+        ValueProvider<DirectedReadOptions> directedReadOptions) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withDirectedReadOptions(directedReadOptions));
+    }
+
+    /**
+     * Specifies the directed read options for change stream queries from a string representation
+     * (e.g., JSON string or "us-central1:READ_ONLY").
+     */
+    public ReadChangeStream withDirectedReadOptions(String directedReadOptions) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withDirectedReadOptions(directedReadOptions));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public ReadChangeStream withUsingPlainTextChannel(ValueProvider<Boolean> plainText) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withUsingPlainTextChannel(plainText));
+    }
+
+    /**
+     * Specifies whether to use plaintext channel.
+     *
+     * <p>Note: This parameter is only valid when using an experimental host (set via {@code
+     * withExperimentalHost}).
+     */
+    public ReadChangeStream withUsingPlainTextChannel(boolean plainText) {
+      return withUsingPlainTextChannel(ValueProvider.StaticValueProvider.of(plainText));
+    }
+
+    /**
+     * Specifies certificate paths to use for mTLS channel.
+     *
+     * <p>Note: These parameters are only valid when using Spanner Omni (set via {@code
+     * withExperimentalHost}).
+     *
+     * @param certPath Path to the client certificate file.
+     * @param keyPath Path to the client certificate key file.
+     */
+    public ReadChangeStream withClientCert(
+        ValueProvider<String> certPath, ValueProvider<String> keyPath) {
+      SpannerConfig config = getSpannerConfig();
+      return withSpannerConfig(config.withClientCert(certPath, keyPath));
+    }
+
+    /**
+     * Specifies certificate paths to use for mTLS channel.
+     *
+     * <p>Note: These parameters are only valid when using Spanner Omni (set via {@code
+     * withExperimentalHost}).
+     *
+     * @param certPath Path to the client certificate file.
+     * @param keyPath Path to the client certificate key file.
+     */
+    public ReadChangeStream withClientCert(String certPath, String keyPath) {
+      return withClientCert(
+          ValueProvider.StaticValueProvider.of(certPath),
+          ValueProvider.StaticValueProvider.of(keyPath));
+    }
+
+    /**
+     * Configures low latency experiment for readChangeStream transform. Example usage:
+     *
+     * <pre>{@code
+     * PCollection<Struct> rows = p.apply(
+     *    SpannerIO.readChangeStream()
+     *    .withSpannerConfig(
+     *       SpannerConfig.create()
+     *         .withProjectId(projectId)
+     *         .withInstanceId(instanceId)
+     *         .withDatabaseId(dbId))
+     *    .withChangeStreamName(changeStreamName)
+     *    .withMetadataInstance(metadataInstanceId)
+     *    .withMetadataDatabase(metadataDatabase)
+     *    .withInclusiveStartAt(Timestamp.now()))
+     *    .withLowLatency();
+     * }</pre>
+     */
+    public ReadChangeStream withLowLatency() {
+      // Set both the realtime end timestamp and the heartbeat interval.
+      // Heartbeats might not trigger if data arrives continuously (e.g. every 50ms),
+      // which could delay the bundle completion up to the runner's default split time (often 5s).
+      // Since end-to-end processing requires the bundle to finish and commit,
+      // adding a realtime end timeout of 1s bounds this delay and improves latency.
+      return toBuilder()
+          .setHeartbeatMillis(LOW_LATENCY_DEFAULT_HEARTBEAT_MILLIS)
+          .setCancelQueryOnHeartbeat(true)
+          .setRealTimeCheckpointInterval(LOW_LATENCY_REAL_TIME_CHECKPOINT_INTERVAL)
+          .build();
+    }
+
+    @Override
+    public PCollection<DataChangeRecord> expand(PBegin input) {
+      checkArgument(
+          getSpannerConfig() != null,
+          "SpannerIO.readChangeStream() requires the spanner config to be set.");
+      checkArgument(
+          getSpannerConfig().getProjectId() != null,
+          "SpannerIO.readChangeStream() requires the project ID to be set.");
+      checkArgument(
+          getSpannerConfig().getInstanceId() != null,
+          "SpannerIO.readChangeStream() requires the instance ID to be set.");
+      checkArgument(
+          getSpannerConfig().getDatabaseId() != null,
+          "SpannerIO.readChangeStream() requires the database ID to be set.");
+      checkArgument(
+          getChangeStreamName() != null,
+          "SpannerIO.readChangeStream() requires the name of the change stream to be set.");
+      checkArgument(
+          getInclusiveStartAt() != null,
+          "SpannerIO.readChangeStream() requires the start time to be set.");
+      // Inclusive end at is defaulted to ChangeStreamsContants.MAX_INCLUSIVE_END_AT
+      checkArgument(
+          getInclusiveEndAt() != null,
+          "SpannerIO.readChangeStream() requires the end time to be set. If you'd like to process the stream without an end time, you can omit this parameter.");
+      if (getMetadataInstance() != null) {
+        checkArgument(
+            getMetadataDatabase() != null,
+            "SpannerIO.readChangeStream() requires the metadata database to be set if metadata instance is set.");
+      }
+
+      // Start time must be before end time
+      if (getInclusiveEndAt() != null
+          && getInclusiveStartAt().toSqlTimestamp().after(getInclusiveEndAt().toSqlTimestamp())) {
+        throw new IllegalArgumentException("Start time cannot be after end time.");
+      }
+
+      final DatabaseId changeStreamDatabaseId =
+          DatabaseId.of(
+              getSpannerConfig().getProjectId().get(),
+              getSpannerConfig().getInstanceId().get(),
+              getSpannerConfig().getDatabaseId().get());
+      final String partitionMetadataInstanceId =
+          MoreObjects.firstNonNull(
+              getMetadataInstance(), changeStreamDatabaseId.getInstanceId().getInstance());
+      final String partitionMetadataDatabaseId =
+          MoreObjects.firstNonNull(getMetadataDatabase(), changeStreamDatabaseId.getDatabase());
+
+      final SpannerConfig changeStreamSpannerConfig = buildChangeStreamSpannerConfig();
+      final SpannerConfig partitionMetadataSpannerConfig =
+          MetadataSpannerConfigFactory.create(
+              changeStreamSpannerConfig, partitionMetadataInstanceId, partitionMetadataDatabaseId);
+      final Dialect changeStreamDatabaseDialect =
+          getDialect(changeStreamSpannerConfig, input.getPipeline().getOptions());
+      final Dialect metadataDatabaseDialect =
+          getDialect(partitionMetadataSpannerConfig, input.getPipeline().getOptions());
+      LOG.info(
+          "The Spanner database {} has dialect {}",
+          changeStreamDatabaseId,
+          changeStreamDatabaseDialect);
+      PartitionMetadataTableNames partitionMetadataTableNames =
+          Optional.ofNullable(getMetadataTable())
+              .map(
+                  table ->
+                      PartitionMetadataTableNames.fromExistingTable(
+                          partitionMetadataDatabaseId, table))
+              .orElse(PartitionMetadataTableNames.generateRandom(partitionMetadataDatabaseId));
+      final String changeStreamName = getChangeStreamName();
+      final Timestamp startTimestamp = getInclusiveStartAt();
+      // Uses (Timestamp.MAX - 1ns) at max for end timestamp to indicate this connector is expected
+      // to run forever.
+      final Timestamp endTimestamp =
+          getInclusiveEndAt().compareTo(MAX_INCLUSIVE_END_AT) > 0
+              ? MAX_INCLUSIVE_END_AT
+              : getInclusiveEndAt();
+      final List<String> tvfNameList = getTvfNameList();
+      final MapperFactory mapperFactory = new MapperFactory(changeStreamDatabaseDialect);
+      final ChangeStreamMetrics metrics = new ChangeStreamMetrics();
+      final RpcPriority rpcPriority = MoreObjects.firstNonNull(getRpcPriority(), RpcPriority.HIGH);
+      final SpannerAccessor spannerAccessor =
+          SpannerAccessor.getOrCreate(
+              changeStreamSpannerConfig,
+              input.getPipeline().getOptions().as(SdkHarnessOptions.class).getOpenTelemetry());
+      final boolean isMutableChangeStream =
+          isMutableChangeStream(
+              spannerAccessor.getDatabaseClient(), changeStreamDatabaseDialect, changeStreamName);
+      LOG.info("The change stream {} is mutable: {}", changeStreamName, isMutableChangeStream);
+      List<String> quoteEscapedTvfNameList = null;
+      if (tvfNameList != null && !tvfNameList.isEmpty()) {
+        if (!isMutableChangeStream) {
+          throw new IllegalArgumentException(
+              "tvfNameList is only supported for change streams with MUTABLE_KEY_RANGE mode");
+        }
+        // TODO: if !per_placement_tvf=true, throw exception.
+        quoteEscapedTvfNameList = new ArrayList<>();
+        for (String tvfName : tvfNameList) {
+          quoteEscapedTvfNameList.add(escapeQuotes(tvfName));
+        }
+        checkTvfExistence(spannerAccessor.getDatabaseClient(), quoteEscapedTvfNameList);
+      }
+      final DaoFactory daoFactory =
+          new DaoFactory(
+              changeStreamSpannerConfig,
+              changeStreamName,
+              quoteEscapedTvfNameList,
+              partitionMetadataSpannerConfig,
+              partitionMetadataTableNames,
+              rpcPriority,
+              input.getPipeline().getOptions().getJobName(),
+              changeStreamDatabaseDialect,
+              metadataDatabaseDialect,
+              isMutableChangeStream);
+      final ActionFactory actionFactory = new ActionFactory();
+
+      final Duration watermarkRefreshRate =
+          MoreObjects.firstNonNull(getWatermarkRefreshRate(), DEFAULT_WATERMARK_REFRESH_RATE);
+      final CacheFactory cacheFactory = new CacheFactory(daoFactory, watermarkRefreshRate);
+
+      final long heartbeatMillis = getHeartbeatMillis();
+
+      final InitializeDoFn initializeDoFn =
+          new InitializeDoFn(
+              daoFactory, mapperFactory, startTimestamp, endTimestamp, heartbeatMillis);
+      final DetectNewPartitionsDoFn detectNewPartitionsDoFn =
+          new DetectNewPartitionsDoFn(
+              daoFactory, mapperFactory, actionFactory, cacheFactory, metrics);
+
+      final ReadChangeStreamPartitionDoFn readChangeStreamPartitionDoFn =
+          new ReadChangeStreamPartitionDoFn(
+              daoFactory,
+              mapperFactory,
+              actionFactory,
+              metrics,
+              getRealTimeCheckpointInterval(),
+              getCancelQueryOnHeartbeat(),
+              getPerChangeRecordOpenTelemetryTracing());
+      final PostProcessingMetricsDoFn postProcessingMetricsDoFn =
+          new PostProcessingMetricsDoFn(metrics);
+
+      LOG.info(
+          "Partition metadata table that will be used is {}",
+          partitionMetadataTableNames.getTableName());
+
+      final PCollection<byte[]> impulseOut = input.apply(Impulse.create());
+      final PCollection<PartitionMetadata> partitionsOut =
+          impulseOut
+              .apply("Initialize the connector", ParDo.of(initializeDoFn))
+              .apply("Detect new partitions", ParDo.of(detectNewPartitionsDoFn));
+      final Coder<PartitionMetadata> partitionMetadataCoder = partitionsOut.getCoder();
+      final SizeEstimator<PartitionMetadata> partitionMetadataSizeEstimator =
+          new SizeEstimator<>(partitionMetadataCoder);
+      final long averagePartitionBytesSize =
+          partitionMetadataSizeEstimator.sizeOf(ChangeStreamsConstants.SAMPLE_PARTITION);
+      detectNewPartitionsDoFn.setAveragePartitionBytesSize(averagePartitionBytesSize);
+
+      final PCollection<DataChangeRecord> dataChangeRecordsOut =
+          partitionsOut
+              .apply("Read change stream partition", ParDo.of(readChangeStreamPartitionDoFn))
+              .apply("Gather metrics", ParDo.of(postProcessingMetricsDoFn));
+      final Coder<DataChangeRecord> dataChangeRecordCoder = dataChangeRecordsOut.getCoder();
+      final SizeEstimator<DataChangeRecord> dataChangeRecordSizeEstimator =
+          new SizeEstimator<>(dataChangeRecordCoder);
+      final BytesThroughputEstimator<DataChangeRecord> throughputEstimator =
+          new BytesThroughputEstimator<>(THROUGHPUT_WINDOW_SECONDS, dataChangeRecordSizeEstimator);
+      readChangeStreamPartitionDoFn.setThroughputEstimator(throughputEstimator);
+
+      impulseOut
+          .apply(WithTimestamps.of(e -> GlobalWindow.INSTANCE.maxTimestamp()))
+          .apply(Wait.on(dataChangeRecordsOut))
+          .apply(ParDo.of(new CleanUpReadChangeStreamDoFn(daoFactory)));
+      return dataChangeRecordsOut;
+    }
+
+    @VisibleForTesting
+    SpannerConfig buildChangeStreamSpannerConfig() {
+      SpannerConfig changeStreamSpannerConfig = getSpannerConfig();
+      // Set default retryable errors for ReadChangeStream
+      if (changeStreamSpannerConfig.getRetryableCodes() == null) {
+        ImmutableSet<Code> defaultRetryableCodes = ImmutableSet.of(Code.UNAVAILABLE, Code.ABORTED);
+        changeStreamSpannerConfig =
+            changeStreamSpannerConfig.toBuilder().setRetryableCodes(defaultRetryableCodes).build();
+      }
+      // Set default retry timeouts for ReadChangeStream
+      if (changeStreamSpannerConfig.getExecuteStreamingSqlRetrySettings() == null) {
+        changeStreamSpannerConfig =
+            changeStreamSpannerConfig.toBuilder()
+                .setExecuteStreamingSqlRetrySettings(
+                    RetrySettings.newBuilder()
+                        .setTotalTimeout(org.threeten.bp.Duration.ofMinutes(5))
+                        .setInitialRpcTimeout(org.threeten.bp.Duration.ofMinutes(5))
+                        .setMaxRpcTimeout(org.threeten.bp.Duration.ofMinutes(5))
+                        .build())
+                .build();
+      }
+      return changeStreamSpannerConfig;
+    }
+  }
+
+  /** If credentials are not set in spannerConfig, uses the credentials from pipeline options. */
+  @VisibleForTesting
+  static SpannerConfig buildSpannerConfigWithCredential(
+      SpannerConfig spannerConfig, PipelineOptions pipelineOptions) {
+    if (spannerConfig.getCredentials() == null && pipelineOptions != null) {
+      boolean isExperimentalHostEmpty =
+          spannerConfig.getExperimentalHost() == null
+              || (spannerConfig.getExperimentalHost().isAccessible()
+                  && Strings.isNullOrEmpty(spannerConfig.getExperimentalHost().get()));
+      if (isExperimentalHostEmpty) {
+        final Credentials credentials = pipelineOptions.as(GcpOptions.class).getGcpCredential();
+        if (credentials != null) {
+          spannerConfig = spannerConfig.withCredentials(credentials);
+        }
+      } else {
+        spannerConfig = spannerConfig.withCredentials(NoCredentials.getInstance());
+      }
+    }
+    return spannerConfig;
+  }
+
+  private static Dialect getDialect(SpannerConfig spannerConfig, PipelineOptions pipelineOptions) {
+    // Allow passing the credential from pipeline options to the getDialect() call.
+    SpannerConfig spannerConfigWithCredential =
+        buildSpannerConfigWithCredential(spannerConfig, pipelineOptions);
+    OpenTelemetry otel = null;
+    if (pipelineOptions != null) {
+      otel = pipelineOptions.as(SdkHarnessOptions.class).getOpenTelemetry();
+    }
+    try (SpannerAccessor sa = SpannerAccessor.getOrCreate(spannerConfigWithCredential, otel)) {
+      DatabaseClient databaseClient = sa.getDatabaseClient();
+      return databaseClient.getDialect();
+    }
+  }
+
+  /**
+   * Interface to display the name of the metadata table on Dataflow UI. This is only used for
+   * internal purpose. This should not be used to pass the name of the metadata table.
+   */
+  public interface SpannerChangeStreamOptions extends StreamingOptions {
+
+    /** Returns the name of the metadata table. */
+    String getMetadataTable();
+
+    /** Specifies the name of the metadata table. */
+    void setMetadataTable(String table);
+  }
+
   private static class ToMutationGroupFn extends DoFn<Mutation, MutationGroup> {
+
     @ProcessElement
     public void processElement(ProcessContext c) {
       Mutation value = c.element();
@@ -1296,6 +2630,8 @@ public class SpannerIO {
     private long sortableNumCells = 0;
     // total number of rows mutated in mutationsToSort
     private long sortableNumRows = 0;
+    // minimum timestamp of elements currently in mutationsToSort
+    private @Nullable Instant minBundleTimestamp = null;
 
     GatherSortCreateBatchesFn(
         long maxBatchSizeBytes,
@@ -1324,11 +2660,13 @@ public class SpannerIO {
       sortableSizeBytes = 0;
       sortableNumCells = 0;
       sortableNumRows = 0;
+      minBundleTimestamp = null;
     }
 
     @FinishBundle
     public synchronized void finishBundle(FinishBundleContext c) throws Exception {
-      sortAndOutputBatches(new OutputReceiverForFinishBundle(c));
+      Instant outputTimestamp = minBundleTimestamp != null ? minBundleTimestamp : Instant.now();
+      sortAndOutputBatches(new OutputReceiverForFinishBundle(c, outputTimestamp));
     }
 
     private synchronized void sortAndOutputBatches(OutputReceiver<Iterable<MutationGroup>> out)
@@ -1412,6 +2750,12 @@ public class SpannerIO {
           sortAndOutputBatches(out);
         }
 
+        Instant elementTimestamp = c.timestamp();
+        if (elementTimestamp != null
+            && (minBundleTimestamp == null || elementTimestamp.isBefore(minBundleTimestamp))) {
+          minBundleTimestamp = elementTimestamp;
+        }
+
         mutationsToSort.add(
             new MutationGroupContainer(
                 mg, groupSize, groupCells, groupRows, encoder.encodeTableNameAndKey(mg.primary())));
@@ -1450,25 +2794,39 @@ public class SpannerIO {
       }
     }
 
-    // TODO(BEAM-1287): Remove this when FinishBundle has added support for an {@link
-    // OutputReceiver}
+    // TODO(https://github.com/apache/beam/issues/18203): Remove this when FinishBundle has added
+    // support for an {@link OutputReceiver}
     private static class OutputReceiverForFinishBundle
         implements OutputReceiver<Iterable<MutationGroup>> {
 
-      private final FinishBundleContext c;
+      private final OutputBuilderSupplier outputBuilderSupplier;
+      private final DoFn<MutationGroup, Iterable<MutationGroup>>.FinishBundleContext context;
 
-      OutputReceiverForFinishBundle(FinishBundleContext c) {
-        this.c = c;
+      OutputReceiverForFinishBundle(FinishBundleContext context, Instant timestamp) {
+        this.context = context;
+        this.outputBuilderSupplier =
+            new OutputBuilderSupplier() {
+              @Override
+              public <OutputT> WindowedValues.Builder<OutputT> builder(OutputT value) {
+                return WindowedValues.<OutputT>builder()
+                    .setValue(value)
+                    .setTimestamp(timestamp)
+                    .setPaneInfo(PaneInfo.NO_FIRING)
+                    .setWindow(GlobalWindow.INSTANCE);
+              }
+            };
       }
 
       @Override
-      public void output(Iterable<MutationGroup> output) {
-        outputWithTimestamp(output, Instant.now());
-      }
-
-      @Override
-      public void outputWithTimestamp(Iterable<MutationGroup> output, Instant timestamp) {
-        c.output(output, timestamp, GlobalWindow.INSTANCE);
+      public OutputBuilder<Iterable<MutationGroup>> builder(Iterable<MutationGroup> value) {
+        return outputBuilderSupplier
+            .builder(value)
+            .setReceiver(
+                wv -> {
+                  for (BoundedWindow window : wv.getWindows()) {
+                    context.output(wv.getValue(), wv.getTimestamp(), window);
+                  }
+                });
       }
     }
   }
@@ -1477,7 +2835,7 @@ public class SpannerIO {
    * Filters MutationGroups larger than the batch size to the output tagged with {@code
    * UNBATCHABLE_MUTATIONS_TAG}.
    *
-   * <p>Testing notes: As batching does not occur during full pipline testing, this DoFn must be
+   * <p>Testing notes: As batching does not occur during full pipeline testing, this DoFn must be
    * tested in isolation.
    */
   @VisibleForTesting
@@ -1506,7 +2864,7 @@ public class SpannerIO {
       this.maxNumRows = maxNumRows;
     }
 
-    @DoFn.ProcessElement
+    @ProcessElement
     public void processElement(ProcessContext c) {
       MutationGroup mg = c.element();
       if (mg.primary().getOperation() == Op.DELETE && !isPointDelete(mg.primary())) {
@@ -1539,13 +2897,18 @@ public class SpannerIO {
 
     // SpannerAccessor can not be serialized so must be initialized at runtime in setup().
     private transient SpannerAccessor spannerAccessor;
-
+    // resolved at runtime for metrics report purpose. SpannerConfig may not have projectId set.
+    private transient String projectId;
     /* Number of times an aborted write to spanner could be retried */
     private static final int ABORTED_RETRY_ATTEMPTS = 5;
     /* Error string in Aborted exception during schema change */
-    private final String errString =
+    private final String schemaChangeErrString =
         "Transaction aborted. "
             + "Database schema probably changed during transaction, retry may succeed.";
+
+    /* Error string in Aborted exception for concurrent transaction in Spanner Emulator */
+    private final String emulatorErrorString =
+        "The emulator only supports one transaction at a time.";
 
     @VisibleForTesting static Sleeper sleeper = Sleeper.DEFAULT;
 
@@ -1575,24 +2938,55 @@ public class SpannerIO {
         Metrics.counter(WriteGrouped.class, "spanner_write_retries");
 
     private final TupleTag<MutationGroup> failedTag;
+    private final boolean commitStats;
+    private final @Nullable TupleTag<WriteResults> writeResultsTag;
 
     // Fluent Backoff is not serializable so create at runtime in setup().
     private transient FluentBackoff bundleWriteBackoff;
+    private transient LoadingCache<String, ServiceCallMetric> writeMetricsByTableName;
 
     WriteToSpannerFn(
         SpannerConfig spannerConfig, FailureMode failureMode, TupleTag<MutationGroup> failedTag) {
+      this(spannerConfig, failureMode, failedTag, false, null);
+    }
+
+    WriteToSpannerFn(
+        SpannerConfig spannerConfig,
+        FailureMode failureMode,
+        TupleTag<MutationGroup> failedTag,
+        boolean commitStats,
+        @Nullable TupleTag<WriteResults> writeResultsTag) {
       this.spannerConfig = spannerConfig;
       this.failureMode = failureMode;
       this.failedTag = failedTag;
+      this.commitStats = commitStats;
+      this.writeResultsTag = writeResultsTag;
     }
 
     @Setup
-    public void setup() {
-      spannerAccessor = SpannerAccessor.getOrCreate(spannerConfig);
+    public void setup(PipelineOptions options) {
+      OpenTelemetry otel = options.as(SdkHarnessOptions.class).getOpenTelemetry();
+      spannerAccessor = SpannerAccessor.getOrCreate(spannerConfig, otel);
       bundleWriteBackoff =
           FluentBackoff.DEFAULT
               .withMaxCumulativeBackoff(spannerConfig.getMaxCumulativeBackoff().get())
               .withInitialBackoff(spannerConfig.getMaxCumulativeBackoff().get().dividedBy(60));
+
+      // Use a LoadingCache for metrics as there can be different tables being written to which
+      // result in different service call metrics labels. ServiceCallMetric items are created
+      // on-demand and added to the cache.
+      writeMetricsByTableName =
+          CacheBuilder.newBuilder()
+              .maximumSize(METRICS_CACHE_SIZE)
+              .build(
+                  new CacheLoader<String, ServiceCallMetric>() {
+                    @Override
+                    public ServiceCallMetric load(String tableName) {
+                      return buildWriteServiceCallMetric(spannerConfig, tableName);
+                    }
+                  });
+
+      projectId = resolveSpannerProjectId(spannerConfig);
     }
 
     @Teardown
@@ -1602,23 +2996,27 @@ public class SpannerIO {
 
     @ProcessElement
     public void processElement(ProcessContext c) throws Exception {
-      Iterable<MutationGroup> mutations = c.element();
+      List<MutationGroup> mutations = ImmutableList.copyOf(c.element());
 
       // Batch upsert rows.
       try {
         mutationGroupBatchesReceived.inc();
-        mutationGroupsReceived.inc(Iterables.size(mutations));
+        mutationGroupsReceived.inc(mutations.size());
         Iterable<Mutation> batch = Iterables.concat(mutations);
-        writeMutations(batch);
+        CommitResponse response = writeMutations(batch);
         mutationGroupBatchesWriteSuccess.inc();
-        mutationGroupsWriteSuccess.inc(Iterables.size(mutations));
+        mutationGroupsWriteSuccess.inc(mutations.size());
+        if (commitStats && writeResultsTag != null) {
+          c.output(writeResultsTag, WriteResults.fromCommitResponse(response));
+        }
         return;
       } catch (SpannerException e) {
         mutationGroupBatchesWriteFail.inc();
         if (failureMode == FailureMode.REPORT_FAILURES) {
           // fall through and retry individual mutationGroups.
         } else if (failureMode == FailureMode.FAIL_FAST) {
-          mutationGroupsWriteFail.inc(Iterables.size(mutations));
+          mutationGroupsWriteFail.inc(mutations.size());
+          LOG.error("Failed to write a batch of mutation groups", e);
           throw e;
         } else {
           throw new IllegalArgumentException("Unknown failure mode " + failureMode);
@@ -1629,11 +3027,14 @@ public class SpannerIO {
       for (MutationGroup mg : mutations) {
         try {
           spannerWriteRetries.inc();
-          writeMutations(mg);
+          CommitResponse response = writeMutations(mg);
           mutationGroupsWriteSuccess.inc();
+          if (commitStats && writeResultsTag != null) {
+            c.output(writeResultsTag, WriteResults.fromCommitResponse(response));
+          }
         } catch (SpannerException e) {
           mutationGroupsWriteFail.inc();
-          LOG.warn("Failed to write the mutation group: " + mg, e);
+          LOG.warn("Failed to write the mutation group: {}", mg, e);
           c.output(failedTag, mg);
         }
       }
@@ -1643,64 +3044,107 @@ public class SpannerIO {
      Spanner aborts all inflight transactions during a schema change. Client is expected
      to retry silently. These must not be counted against retry backoff.
     */
-    private void spannerWriteWithRetryIfSchemaChange(Iterable<Mutation> batch)
+    private CommitResponse spannerWriteWithRetryIfSchemaChange(List<Mutation> batch)
         throws SpannerException {
+      Set<String> tableNames = batch.stream().map(Mutation::getTable).collect(Collectors.toSet());
       for (int retry = 1; ; retry++) {
-        ServiceCallMetric serviceCallMetric =
-            createServiceCallMetric(
-                this.spannerConfig.getProjectId().toString(),
-                this.spannerConfig.getDatabaseId().toString(),
-                this.spannerConfig.getInstanceId().toString(),
-                "Write");
         try {
-          spannerAccessor.getDatabaseClient().writeAtLeastOnce(batch);
-          serviceCallMetric.call("ok");
-          return;
+          CommitResponse response =
+              spannerAccessor
+                  .getDatabaseClient()
+                  .writeAtLeastOnceWithOptions(batch, getTransactionOptions());
+          // Get names of all tables in batch of mutations.
+          reportServiceCallMetricsForBatch(tableNames, "ok");
+          for (String tableName : tableNames) {
+            Lineage.getSinks()
+                .add(
+                    "spanner",
+                    ImmutableList.of(
+                        projectId,
+                        spannerAccessor.getInstanceConfigId(),
+                        spannerConfig.getInstanceId().get(),
+                        spannerConfig.getDatabaseId().get(),
+                        tableName));
+          }
+          return response;
         } catch (AbortedException e) {
-          serviceCallMetric.call(e.getErrorCode().getGrpcStatusCode().toString());
+          reportServiceCallMetricsForBatch(
+              tableNames, e.getErrorCode().getGrpcStatusCode().toString());
           if (retry >= ABORTED_RETRY_ATTEMPTS) {
             throw e;
           }
-          if (e.isRetryable() || e.getMessage().contains(errString)) {
+          if (e.isRetryable()
+              || e.getMessage().contains(schemaChangeErrString)
+              || e.getMessage().contains(emulatorErrorString)) {
             continue;
           }
           throw e;
         } catch (SpannerException e) {
-          serviceCallMetric.call(e.getErrorCode().getGrpcStatusCode().toString());
+          reportServiceCallMetricsForBatch(
+              tableNames, e.getErrorCode().getGrpcStatusCode().toString());
           throw e;
         }
       }
     }
 
-    private ServiceCallMetric createServiceCallMetric(
-        String projectId, String databaseId, String tableId, String method) {
-      HashMap<String, String> baseLabels = new HashMap<>();
-      baseLabels.put(MonitoringInfoConstants.Labels.PTRANSFORM, "");
-      baseLabels.put(MonitoringInfoConstants.Labels.SERVICE, "Spanner");
-      baseLabels.put(MonitoringInfoConstants.Labels.METHOD, method);
+    private Options.TransactionOption[] getTransactionOptions() {
+      return Stream.of(
+              spannerConfig.getRpcPriority() != null && spannerConfig.getRpcPriority().get() != null
+                  ? Options.priority(spannerConfig.getRpcPriority().get())
+                  : null,
+              spannerConfig.getMaxCommitDelay() != null
+                      && spannerConfig.getMaxCommitDelay().get() != null
+                  ? Options.maxCommitDelay(
+                      java.time.Duration.ofMillis(
+                          spannerConfig.getMaxCommitDelay().get().getMillis()))
+                  : null,
+              commitStats ? Options.commitStats() : null,
+              spannerConfig.getExcludeTxnFromChangeStreams() != null
+                      && Boolean.TRUE.equals(spannerConfig.getExcludeTxnFromChangeStreams().get())
+                  ? Options.excludeTxnFromChangeStreams()
+                  : null,
+              spannerConfig.getTransactionTag() != null
+                      && !Strings.isNullOrEmpty(spannerConfig.getTransactionTag().get())
+                  ? Options.tag(spannerConfig.getTransactionTag().get())
+                  : null)
+          .filter(Objects::nonNull)
+          .toArray(Options.TransactionOption[]::new);
+    }
+
+    private void reportServiceCallMetricsForBatch(Set<String> tableNames, String statusCode) {
+      for (String tableName : tableNames) {
+        writeMetricsByTableName.getUnchecked(tableName).call(statusCode);
+      }
+    }
+
+    private static ServiceCallMetric buildWriteServiceCallMetric(
+        SpannerConfig config, String tableId) {
+      HashMap<String, String> baseLabels = buildServiceCallMetricLabels(config);
+      baseLabels.put(MonitoringInfoConstants.Labels.METHOD, "Write");
       baseLabels.put(
           MonitoringInfoConstants.Labels.RESOURCE,
-          GcpResourceIdentifiers.spannerTable(projectId, databaseId, tableId));
-      baseLabels.put(MonitoringInfoConstants.Labels.SPANNER_PROJECT_ID, projectId);
-      baseLabels.put(MonitoringInfoConstants.Labels.SPANNER_DATABASE_ID, databaseId);
-      baseLabels.put(MonitoringInfoConstants.Labels.SPANNER_INSTANCE_ID, tableId);
-      ServiceCallMetric serviceCallMetric =
-          new ServiceCallMetric(MonitoringInfoConstants.Urns.API_REQUEST_COUNT, baseLabels);
-      return serviceCallMetric;
+          GcpResourceIdentifiers.spannerTable(
+              baseLabels.get(MonitoringInfoConstants.Labels.SPANNER_PROJECT_ID),
+              config.getInstanceId().get(),
+              config.getDatabaseId().get(),
+              tableId));
+      baseLabels.put(MonitoringInfoConstants.Labels.TABLE_ID, tableId);
+      return new ServiceCallMetric(MonitoringInfoConstants.Urns.API_REQUEST_COUNT, baseLabels);
     }
 
     /** Write the Mutations to Spanner, handling DEADLINE_EXCEEDED with backoff/retries. */
-    private void writeMutations(Iterable<Mutation> mutations) throws SpannerException, IOException {
+    private CommitResponse writeMutations(Iterable<Mutation> mutationIterable)
+        throws SpannerException, IOException {
       BackOff backoff = bundleWriteBackoff.backoff();
-      long mutationsSize = Iterables.size(mutations);
+      List<Mutation> mutations = ImmutableList.copyOf(mutationIterable);
 
       while (true) {
         Stopwatch timer = Stopwatch.createStarted();
         // loop is broken on success, timeout backoff/retry attempts exceeded, or other failure.
         try {
-          spannerWriteWithRetryIfSchemaChange(mutations);
+          CommitResponse response = spannerWriteWithRetryIfSchemaChange(mutations);
           spannerWriteSuccess.inc();
-          return;
+          return response;
         } catch (SpannerException exception) {
           if (exception.getErrorCode() == ErrorCode.DEADLINE_EXCEEDED) {
             spannerWriteTimeouts.inc();
@@ -1711,17 +3155,16 @@ public class SpannerIO {
               LOG.error(
                   "DEADLINE_EXCEEDED writing batch of {} mutations to Cloud Spanner. "
                       + "Aborting after too many retries.",
-                  mutationsSize);
+                  mutations.size());
               spannerWriteFail.inc();
               throw exception;
             }
             LOG.info(
                 "DEADLINE_EXCEEDED writing batch of {} mutations to Cloud Spanner, "
-                    + "retrying after backoff of {}ms\n"
-                    + "({})",
-                mutationsSize,
+                    + "retrying after backoff of {}ms",
+                mutations.size(),
                 sleepTimeMsecs,
-                exception.getMessage());
+                exception);
             spannerWriteRetries.inc();
             try {
               sleeper.sleep(sleepTimeMsecs);
@@ -1741,4 +3184,129 @@ public class SpannerIO {
   }
 
   private SpannerIO() {} // Prevent construction.
+
+  private static HashMap<String, String> buildServiceCallMetricLabels(SpannerConfig config) {
+    HashMap<String, String> baseLabels = new HashMap<>();
+    baseLabels.put(MonitoringInfoConstants.Labels.PTRANSFORM, "");
+    baseLabels.put(MonitoringInfoConstants.Labels.SERVICE, "Spanner");
+    baseLabels.put(
+        MonitoringInfoConstants.Labels.SPANNER_PROJECT_ID, resolveSpannerProjectId(config));
+    baseLabels.put(
+        MonitoringInfoConstants.Labels.SPANNER_INSTANCE_ID, config.getInstanceId().get());
+    baseLabels.put(
+        MonitoringInfoConstants.Labels.SPANNER_DATABASE_ID, config.getDatabaseId().get());
+    return baseLabels;
+  }
+
+  static String resolveSpannerProjectId(SpannerConfig config) {
+    return config.getProjectId() == null
+            || config.getProjectId().get() == null
+            || config.getProjectId().get().isEmpty()
+        ? SpannerOptions.getDefaultProjectId()
+        : config.getProjectId().get();
+  }
+
+  @VisibleForTesting
+  static String escapeQuotes(String str) {
+    return str.replace("'", "").replace("\"", "").replace("`", "");
+  }
+
+  @VisibleForTesting
+  static void checkTvfExistence(
+      DatabaseClient databaseClient, List<String> quoteEscapedTvfNameList) {
+    if (quoteEscapedTvfNameList == null || quoteEscapedTvfNameList.isEmpty()) {
+      return;
+    }
+    Dialect dialect = databaseClient.getDialect();
+    try (ReadOnlyTransaction tx = databaseClient.readOnlyTransaction()) {
+      StringBuilder sql =
+          new StringBuilder(
+              "SELECT routine_name FROM information_schema.routines WHERE routine_type LIKE '%FUNCTION' AND routine_name IN (");
+      for (int i = 0; i < quoteEscapedTvfNameList.size(); i++) {
+        if (dialect == Dialect.POSTGRESQL) {
+          sql.append("$").append(i + 1);
+        } else {
+          sql.append("@p").append(i);
+        }
+        if (i < quoteEscapedTvfNameList.size() - 1) {
+          sql.append(", ");
+        }
+      }
+      sql.append(")");
+      Statement.Builder builder = Statement.newBuilder(sql.toString());
+      for (int i = 0; i < quoteEscapedTvfNameList.size(); i++) {
+        if (dialect == Dialect.POSTGRESQL) {
+          builder.bind("p" + (i + 1)).to(quoteEscapedTvfNameList.get(i));
+        } else {
+          builder.bind("p" + i).to(quoteEscapedTvfNameList.get(i));
+        }
+      }
+      Statement statement = builder.build();
+      ResultSet resultSet = tx.executeQuery(statement);
+      java.util.Set<String> foundNames = new java.util.HashSet<>();
+      while (resultSet.next()) {
+        foundNames.add(resultSet.getString(0));
+      }
+      for (String tvfName : quoteEscapedTvfNameList) {
+        if (!foundNames.contains(tvfName)) {
+          throw new IllegalArgumentException(
+              "TVF specified: " + tvfName + " is not found in the existing TVF's: " + foundNames);
+        }
+      }
+    }
+  }
+
+  @VisibleForTesting
+  static boolean isMutableChangeStream(
+      DatabaseClient databaseClient, Dialect dialect, String changeStreamName) {
+    String fetchedPartitionMode = fetchPartitionMode(databaseClient, dialect, changeStreamName);
+    if (fetchedPartitionMode.isEmpty()
+        || fetchedPartitionMode.equalsIgnoreCase("IMMUTABLE_KEY_RANGE")) {
+      return false;
+    }
+    return true;
+  }
+
+  private static String fetchPartitionMode(
+      DatabaseClient databaseClient, Dialect dialect, String changeStreamName) {
+    try (ReadOnlyTransaction tx = databaseClient.readOnlyTransaction()) {
+      Statement statement;
+      if (dialect == Dialect.POSTGRESQL) {
+        statement =
+            Statement.newBuilder(
+                    "select option_value\n"
+                        + "from information_schema.change_stream_options\n"
+                        + "where change_stream_name = $1 and option_name = 'partition_mode'")
+                .bind("p1")
+                .to(changeStreamName)
+                .build();
+      } else {
+        statement =
+            Statement.newBuilder(
+                    "select option_value\n"
+                        + "from information_schema.change_stream_options\n"
+                        + "where change_stream_name = @changeStreamName and  option_name = 'partition_mode'")
+                .bind("changeStreamName")
+                .to(changeStreamName)
+                .build();
+      }
+      ResultSet resultSet = tx.executeQuery(statement);
+      while (resultSet.next()) {
+        String value = resultSet.getString(0);
+        if (value != null) {
+          return value;
+        }
+      }
+      return "";
+    } catch (RuntimeException e) {
+      // Log the failure (with stack trace) but rethrow so the caller still observes
+      // the error.
+      LOG.warn(
+          "Failed to fetch partition_mode for change stream '{}', dialect={} - will propagate exception",
+          changeStreamName,
+          dialect,
+          e);
+      throw e;
+    }
+  }
 }

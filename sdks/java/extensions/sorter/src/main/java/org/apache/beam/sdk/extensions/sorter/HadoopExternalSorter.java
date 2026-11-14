@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.extensions.sorter;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -145,7 +145,7 @@ class HadoopExternalSorter extends ExternalSorter {
   }
 
   /** An {@link Iterator} producing the sorted data. */
-  private class SortedRecordsIterator implements Iterator<KV<byte[], byte[]>> {
+  private final class SortedRecordsIterator implements Iterator<KV<byte[], byte[]>> {
     private RawKeyValueIterator iterator;
 
     /** Next {@link KV} to return from {@link #next()}. */

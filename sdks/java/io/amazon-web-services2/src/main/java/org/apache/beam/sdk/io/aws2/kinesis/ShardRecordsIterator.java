@@ -17,8 +17,9 @@
  */
 package org.apache.beam.sdk.io.aws2.kinesis;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -34,6 +35,7 @@ import software.amazon.kinesis.common.InitialPositionInStream;
  * ShardRecordsIterator#readNextBatch()}. Client has to confirm processed records by calling {@link
  * ShardRecordsIterator#ackRecord(KinesisRecord)} method.
  */
+@SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "Initialization is safe.")
 class ShardRecordsIterator {
 
   private static final Logger LOG = LoggerFactory.getLogger(ShardRecordsIterator.class);
@@ -130,8 +132,12 @@ class ShardRecordsIterator {
     return shardId;
   }
 
+  String getStreamName() {
+    return streamName;
+  }
+
   List<ShardRecordsIterator> findSuccessiveShardRecordIterators() throws TransientKinesisException {
-    List<Shard> shards = kinesis.listShards(streamName);
+    List<Shard> shards = kinesis.listShardsFollowingClosedShard(streamName, shardId);
     List<ShardRecordsIterator> successiveShardRecordIterators = new ArrayList<>();
     for (Shard shard : shards) {
       if (shardId.equals(shard.parentShardId())) {

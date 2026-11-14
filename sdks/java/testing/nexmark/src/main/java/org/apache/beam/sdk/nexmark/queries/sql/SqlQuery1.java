@@ -20,7 +20,6 @@ package org.apache.beam.sdk.nexmark.queries.sql;
 import org.apache.beam.sdk.extensions.sql.SqlTransform;
 import org.apache.beam.sdk.nexmark.model.Bid;
 import org.apache.beam.sdk.nexmark.model.Event;
-import org.apache.beam.sdk.nexmark.model.Event.Type;
 import org.apache.beam.sdk.nexmark.model.sql.SelectEvent;
 import org.apache.beam.sdk.nexmark.queries.NexmarkQueryTransform;
 import org.apache.beam.sdk.nexmark.queries.NexmarkQueryUtil;
@@ -36,7 +35,7 @@ import org.apache.beam.sdk.values.Row;
  * Query 1, 'Currency Conversion'. Convert each bid value from dollars to euros. In CQL syntax:
  *
  * <pre>
- * SELECT Istream(auction, DOLTOEUR(price), bidder, datetime)
+ * SELECT Istream(auction, DOLTOEUR(price), bidder, `datetime`)
  * FROM bid [ROWS UNBOUNDED];
  * </pre>
  *
@@ -47,7 +46,7 @@ public class SqlQuery1 extends NexmarkQueryTransform<Bid> {
 
   private static final PTransform<PInput, PCollection<Row>> QUERY =
       SqlTransform.query(
-              "SELECT auction, bidder, DolToEur(price) as price, dateTime, extra FROM PCOLLECTION")
+              "SELECT auction, bidder, DolToEur(price) as price, `dateTime`, extra FROM PCOLLECTION")
           .registerUdf("DolToEur", new DolToEur());
 
   /** Dollar to Euro conversion. */
@@ -66,7 +65,7 @@ public class SqlQuery1 extends NexmarkQueryTransform<Bid> {
   public PCollection<Bid> expand(PCollection<Event> allEvents) {
     return allEvents
         .apply(Filter.by(NexmarkQueryUtil.IS_BID))
-        .apply(getName() + ".SelectEvent", new SelectEvent(Type.BID))
+        .apply(getName() + ".SelectEvent", new SelectEvent(Event.Type.BID))
         .apply(QUERY)
         .apply(Convert.fromRows(Bid.class));
   }

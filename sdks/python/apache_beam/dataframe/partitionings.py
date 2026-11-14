@@ -15,9 +15,8 @@
 # limitations under the License.
 
 import random
+from collections.abc import Iterable
 from typing import Any
-from typing import Iterable
-from typing import Tuple
 from typing import TypeVar
 
 import numpy as np
@@ -32,9 +31,7 @@ class Partitioning(object):
   def __repr__(self):
     return self.__class__.__name__
 
-  def is_subpartitioning_of(self, other):
-    # type: (Partitioning) -> bool
-
+  def is_subpartitioning_of(self, other: 'Partitioning') -> bool:
     """Returns whether self is a sub-partition of other.
 
     Specifically, returns whether something partitioned by self is necissarily
@@ -48,9 +45,8 @@ class Partitioning(object):
   def __le__(self, other):
     return not self.is_subpartitioning_of(other)
 
-  def partition_fn(self, df, num_partitions):
-    # type: (Frame, int) -> Iterable[Tuple[Any, Frame]]
-
+  def partition_fn(self, df: Frame,
+                   num_partitions: int) -> Iterable[tuple[Any, Frame]]:
     """A callable that actually performs the partitioning of a Frame df.
 
     This will be invoked via a FlatMap in conjunction with a GroupKey to
@@ -103,7 +99,7 @@ class Index(Partitioning):
         return False
       else:
         return all(level in self._levels for level in other._levels)
-    elif isinstance(other, Arbitrary):
+    elif isinstance(other, (Arbitrary, JoinIndex)):
       return False
     else:
       raise ValueError(f"Encountered unknown type {other!r}")
@@ -173,6 +169,61 @@ class Singleton(Partitioning):
 
   def check(self, dfs):
     return len(dfs) <= 1
+
+
+class JoinIndex(Partitioning):
+  """A partitioning that lets two frames be joined.
+  This can either be a hash partitioning on the full index, or a common
+  ancestor with no intervening re-indexing/re-partitioning.
+
+  It fits into the partial ordering as
+
+      Index() < JoinIndex(x) < JoinIndex() < Arbitrary()
+
+  with
+
+      JoinIndex(x) and JoinIndex(y)
+
+  being incomparable for nontrivial x != y.
+
+  Expressions desiring to make use of this index should simply declare a
+  requirement of JoinIndex().
+  """
+  def __init__(self, ancestor=None):
+    self._ancestor = ancestor
+
+  def __repr__(self):
+    if self._ancestor:
+      return 'JoinIndex[%s]' % self._ancestor
+    else:
+      return 'JoinIndex'
+
+  def __eq__(self, other):
+    if type(self) != type(other):
+      return False
+    elif self._ancestor is None:
+      return other._ancestor is None
+    elif other._ancestor is None:
+      return False
+    else:
+      return self._ancestor == other._ancestor
+
+  def __hash__(self):
+    return hash((type(self), self._ancestor))
+
+  def is_subpartitioning_of(self, other):
+    if isinstance(other, Arbitrary):
+      return False
+    elif isinstance(other, JoinIndex):
+      return self._ancestor is None or self == other
+    else:
+      return True
+
+  def test_partition_fn(self, df):
+    return Index().test_partition_fn(df)
+
+  def check(self, dfs):
+    return True
 
 
 class Arbitrary(Partitioning):

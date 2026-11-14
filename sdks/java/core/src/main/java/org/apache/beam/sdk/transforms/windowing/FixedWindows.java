@@ -17,6 +17,7 @@
  */
 package org.apache.beam.sdk.transforms.windowing;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.Objects;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.transforms.display.DisplayData;
@@ -35,6 +36,12 @@ import org.joda.time.Instant;
  *   Window.<Integer>into(FixedWindows.of(Duration.standardMinutes(10))));
  * }</pre>
  */
+@SuppressFBWarnings(
+    value = "CT_CONSTRUCTOR_THROW",
+    justification =
+        "Pre-existing finding, not triaged yet."
+            + " Making the class final or moving the throwing code"
+            + " into a static factory method may fix it.")
 public class FixedWindows extends PartitioningWindowFn<Object, IntervalWindow> {
 
   /** Size of this window. */
@@ -79,7 +86,7 @@ public class FixedWindows extends PartitioningWindowFn<Object, IntervalWindow> {
 
     // The global window is inclusive of max timestamp, while interval window excludes its
     // upper bound
-    Instant endOfGlobalWindow = GlobalWindow.INSTANCE.maxTimestamp().plus(1);
+    Instant endOfGlobalWindow = GlobalWindow.INSTANCE.maxTimestamp().plus(Duration.millis(1));
 
     // The end of the window is either start + size if that is within the allowable range, otherwise
     // the end of the global window. Truncating the window drives many other

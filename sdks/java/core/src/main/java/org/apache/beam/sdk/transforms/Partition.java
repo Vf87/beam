@@ -78,7 +78,7 @@ import org.apache.beam.sdk.values.TupleTagList;
  * @param <T> the type of the elements of the input and output {@code PCollection}s
  */
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class Partition<T> extends PTransform<PCollection<T>, PCollectionList<T>> {
 
@@ -192,7 +192,7 @@ public class Partition<T> extends PTransform<PCollection<T>, PCollectionList<T>>
     this.partitionDoFn = partitionDoFn;
   }
 
-  private static class PartitionDoFn<X> extends DoFn<X, Void> {
+  private static final class PartitionDoFn<X> extends DoFn<X, Void> {
     private final int numPartitions;
     private final TupleTagList outputTags;
     private final Contextful<Contextful.Fn<X, Integer>> ctxFn;

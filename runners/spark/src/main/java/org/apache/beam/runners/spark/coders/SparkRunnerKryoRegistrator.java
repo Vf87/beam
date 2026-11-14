@@ -21,16 +21,17 @@ import com.esotericsoftware.kryo.Kryo;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import org.apache.beam.runners.spark.io.MicrobatchSource;
-import org.apache.beam.runners.spark.stateful.SparkGroupAlsoByWindowViaWindowSet.StateAndTimers;
+import org.apache.beam.runners.spark.stateful.StateAndTimers;
 import org.apache.beam.runners.spark.translation.ValueAndCoderKryoSerializer;
 import org.apache.beam.runners.spark.translation.ValueAndCoderLazySerializable;
 import org.apache.beam.runners.spark.util.ByteArray;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.HashBasedTable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.HashBasedTable;
 import org.apache.spark.serializer.KryoRegistrator;
-import scala.collection.mutable.WrappedArray;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
  * Custom {@link KryoRegistrator}s for Beam's Spark runner needs and registering used class in spark
@@ -42,7 +43,7 @@ import scala.collection.mutable.WrappedArray;
  * spark.kryo.registrator} configuration.
  */
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class SparkRunnerKryoRegistrator implements KryoRegistrator {
 
@@ -61,16 +62,40 @@ public class SparkRunnerKryoRegistrator implements KryoRegistrator {
     kryo.register(PaneInfo.class);
     kryo.register(StateAndTimers.class);
     kryo.register(TupleTag.class);
-    kryo.register(WrappedArray.ofRef.class);
+    // Scala 2.12 uses WrappedArray$ofRef, Scala 2.13 renamed it to ArraySeq$ofRef
+    Class<?> scalaArrayClass =
+        findFirstAvailableClass(
+            "scala.collection.mutable.ArraySeq$ofRef",
+            "scala.collection.mutable.WrappedArray$ofRef");
+    if (scalaArrayClass == null) {
+      throw new IllegalStateException(
+          "Neither scala.collection.mutable.ArraySeq$ofRef (Scala 2.13) nor "
+              + "scala.collection.mutable.WrappedArray$ofRef (Scala 2.12) was found on the "
+              + "classpath. Cannot register Scala wrapped arrays with Kryo.");
+    }
+    kryo.register(scalaArrayClass);
 
     try {
       kryo.register(
-          Class.forName("org.apache.beam.sdk.util.WindowedValue$TimestampedValueInGlobalWindow"));
+          Class.forName(
+              "org.apache.beam.sdk.values.WindowedValues$TimestampedValueInGlobalWindow"));
       kryo.register(
           Class.forName(
-              "org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.HashBasedTable$Factory"));
+              "org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.HashBasedTable$Factory"));
     } catch (ClassNotFoundException e) {
       throw new IllegalStateException("Unable to register classes with kryo.", e);
     }
+  }
+
+  @VisibleForTesting
+  static @Nullable Class<?> findFirstAvailableClass(String... classNames) {
+    for (String name : classNames) {
+      try {
+        return Class.forName(name);
+      } catch (ClassNotFoundException ignored) {
+        // try the next candidate
+      }
+    }
+    return null;
   }
 }

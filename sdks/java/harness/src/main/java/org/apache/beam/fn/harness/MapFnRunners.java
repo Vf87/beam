@@ -17,19 +17,14 @@
  */
 package org.apache.beam.fn.harness;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables.getOnlyElement;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables.getOnlyElement;
 
 import java.io.IOException;
-import java.util.Map;
-import org.apache.beam.model.pipeline.v1.RunnerApi.Components;
-import org.apache.beam.model.pipeline.v1.RunnerApi.PCollection;
 import org.apache.beam.model.pipeline.v1.RunnerApi.PTransform;
-import org.apache.beam.runners.core.construction.RehydratedComponents;
 import org.apache.beam.sdk.fn.data.FnDataReceiver;
 import org.apache.beam.sdk.function.ThrowingFunction;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.sdk.util.WindowedValue.WindowedValueCoder;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 
 /**
  * Utilities to create {@code PTransformRunners} which execute simple map functions.
@@ -40,13 +35,10 @@ import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterable
  * <p>TODO: Add support for DoFns which are actually user supplied map/lambda functions instead of
  * using the {@link FnApiDoFnRunner} instance.
  */
-@SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-})
 public abstract class MapFnRunners {
 
   /** Create a {@link MapFnRunners} where the map function consumes elements directly. */
-  public static <InputT, OutputT> PTransformRunnerFactory<?> forValueMapFnFactory(
+  public static <InputT, OutputT> PTransformRunnerFactory forValueMapFnFactory(
       ValueMapFnFactory<InputT, OutputT> fnFactory) {
     return new Factory<>(new CompressedValueOnlyMapperFactory<>(fnFactory));
   }
@@ -59,7 +51,7 @@ public abstract class MapFnRunners {
    * WindowedValueMapFnFactory} will be in exactly one {@link
    * org.apache.beam.sdk.transforms.windowing.BoundedWindow window}.
    */
-  public static <InputT, OutputT> PTransformRunnerFactory<?> forWindowedValueMapFnFactory(
+  public static <InputT, OutputT> PTransformRunnerFactory forWindowedValueMapFnFactory(
       WindowedValueMapFnFactory<InputT, OutputT> fnFactory) {
     return new Factory<>(new ExplodedWindowedValueMapperFactory<>(fnFactory));
   }
@@ -82,54 +74,26 @@ public abstract class MapFnRunners {
   }
 
   /** A factory for {@link MapFnRunners}s. */
-  private static class Factory<InputT, OutputT>
-      implements PTransformRunnerFactory<Mapper<InputT, OutputT>> {
+  private static class Factory<InputT, OutputT> implements PTransformRunnerFactory {
 
-    private final MapperFactory mapperFactory;
+    private final MapperFactory<InputT, OutputT> mapperFactory;
 
     private Factory(MapperFactory<InputT, OutputT> mapperFactory) {
       this.mapperFactory = mapperFactory;
     }
 
     @Override
-    public Mapper<InputT, OutputT> createRunnerForPTransform(Context context) throws IOException {
-
-      FnDataReceiver<WindowedValue<InputT>> consumer =
-          (FnDataReceiver)
-              context.getPCollectionConsumer(
-                  getOnlyElement(context.getPTransform().getOutputsMap().values()));
+    public void addRunnerForPTransform(Context context) throws IOException {
+      FnDataReceiver<WindowedValue<OutputT>> consumer =
+          context.getPCollectionConsumer(
+              getOnlyElement(context.getPTransform().getOutputsMap().values()));
 
       Mapper<InputT, OutputT> mapper =
           mapperFactory.create(context.getPTransformId(), context.getPTransform(), consumer);
 
-      RehydratedComponents components =
-          RehydratedComponents.forComponents(
-              Components.newBuilder().putAllCoders(context.getCoders()).build());
       String pCollectionId =
           Iterables.getOnlyElement(context.getPTransform().getInputsMap().values());
-      context.addPCollectionConsumer(
-          pCollectionId,
-          (FnDataReceiver) (FnDataReceiver<WindowedValue<InputT>>) mapper::map,
-          getValueCoder(components, context.getPCollections(), pCollectionId));
-      return mapper;
-    }
-
-    private org.apache.beam.sdk.coders.Coder<?> getValueCoder(
-        RehydratedComponents components,
-        Map<String, PCollection> pCollections,
-        String pCollectionId)
-        throws IOException {
-      if (!pCollections.containsKey(pCollectionId)) {
-        throw new IllegalArgumentException(
-            String.format("Missing PCollection for id: %s", pCollectionId));
-      }
-
-      org.apache.beam.sdk.coders.Coder<?> coder =
-          components.getCoder(pCollections.get(pCollectionId).getCoderId());
-      if (coder instanceof WindowedValueCoder) {
-        coder = ((WindowedValueCoder<InputT>) coder).getValueCoder();
-      }
-      return coder;
+      context.addPCollectionConsumer(pCollectionId, mapper::map);
     }
   }
 

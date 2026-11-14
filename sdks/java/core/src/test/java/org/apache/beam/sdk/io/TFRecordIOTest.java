@@ -59,6 +59,7 @@ import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.FileIO.ReadableFile;
 import org.apache.beam.sdk.io.TFRecordIO.TFRecordCodec;
 import org.apache.beam.sdk.io.fs.MatchResult.Metadata;
+import org.apache.beam.sdk.testing.BeamParallelJunit4Runner;
 import org.apache.beam.sdk.testing.NeedsRunner;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
@@ -67,10 +68,9 @@ import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Charsets;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.BaseEncoding;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.ByteStreams;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.BaseEncoding;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.ByteStreams;
 import org.apache.commons.lang3.SystemUtils;
 import org.junit.Rule;
 import org.junit.Test;
@@ -78,10 +78,9 @@ import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
 
 /** Tests for TFRecordIO Read and Write transforms. */
-@RunWith(JUnit4.class)
+@RunWith(BeamParallelJunit4Runner.class)
 public class TFRecordIOTest {
 
   /*
@@ -165,7 +164,7 @@ public class TFRecordIOTest {
 
   @Test
   public void testWriteDisplayData() {
-    // TODO: Java core test failing on windows, https://issues.apache.org/jira/browse/BEAM-10739
+    // TODO: Java core test failing on windows, https://github.com/apache/beam/issues/20469
     assumeFalse(SystemUtils.IS_OS_WINDOWS);
     TFRecordIO.Write write =
         TFRecordIO.write()
@@ -212,7 +211,7 @@ public class TFRecordIOTest {
   @Category(NeedsRunner.class)
   public void testReadInvalidRecord() throws Exception {
     expectedException.expectMessage("Not a valid TFRecord. Fewer than 12 bytes.");
-    runTestRead("bar".getBytes(Charsets.UTF_8), new String[0]);
+    runTestRead("bar".getBytes(StandardCharsets.UTF_8), new String[0]);
   }
 
   @Test
@@ -445,14 +444,14 @@ public class TFRecordIOTest {
   static class ByteArrayToString extends DoFn<byte[], String> {
     @ProcessElement
     public void processElement(ProcessContext c) {
-      c.output(new String(c.element(), Charsets.UTF_8));
+      c.output(new String(c.element(), StandardCharsets.UTF_8));
     }
   }
 
   static class StringToByteArray extends DoFn<String, byte[]> {
     @ProcessElement
     public void processElement(ProcessContext c) {
-      c.output(c.element().getBytes(Charsets.UTF_8));
+      c.output(c.element().getBytes(StandardCharsets.UTF_8));
     }
   }
 

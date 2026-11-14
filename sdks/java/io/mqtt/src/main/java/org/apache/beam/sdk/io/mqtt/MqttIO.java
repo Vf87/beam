@@ -17,40 +17,48 @@
  */
 package org.apache.beam.sdk.io.mqtt;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.auto.value.AutoValue;
+import com.hivemq.client.mqtt.MqttGlobalPublishFilter;
+import com.hivemq.client.mqtt.datatypes.MqttQos;
+import com.hivemq.client.mqtt.mqtt3.Mqtt3BlockingClient;
+import com.hivemq.client.mqtt.mqtt3.Mqtt3Client;
+import com.hivemq.client.mqtt.mqtt3.Mqtt3ClientBuilder;
+import com.hivemq.client.mqtt.mqtt3.message.publish.Mqtt3Publish;
 import java.io.IOException;
 import java.io.Serializable;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.coders.ByteArrayCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.io.UnboundedSource;
 import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.schemas.AutoValueSchema;
+import org.apache.beam.sdk.schemas.NoSuchSchemaException;
+import org.apache.beam.sdk.schemas.annotations.DefaultSchema;
+import org.apache.beam.sdk.schemas.annotations.SchemaFieldDescription;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.SerializableFunction;
+import org.apache.beam.sdk.transforms.SerializableFunctions;
 import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
 import org.checkerframework.checker.nullness.qual.Nullable;
-import org.fusesource.mqtt.client.BlockingConnection;
-import org.fusesource.mqtt.client.MQTT;
-import org.fusesource.mqtt.client.Message;
-import org.fusesource.mqtt.client.QoS;
-import org.fusesource.mqtt.client.Topic;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
@@ -78,6 +86,48 @@ import org.slf4j.LoggerFactory;
  *
  * }</pre>
  *
+ * <h3>Reading with Metadata from a MQTT broker</h3>
+ *
+ * <p>The {@code readWithMetadata} method extends the functionality of the basic {@code read} method
+ * by returning a {@link PCollection} of metadata that includes both the topic name and the payload.
+ * The metadata is encapsulated in a container class {@link MqttRecord} that includes the topic name
+ * and payload. This allows you to implement business logic that can differ depending on the topic
+ * from which the message was received.
+ *
+ * <pre>{@code
+ * PCollection<MqttRecord> records = pipeline.apply(
+ *   MqttIO.readWithMetadata()
+ *    .withConnectionConfiguration(MqttIO.ConnectionConfiguration.create(
+ *      "tcp://host:11883",
+ *      "my_topic_pattern"))
+ *
+ * }</pre>
+ *
+ * <p>By using the topic information, you can apply different processing logic depending on the
+ * source topic, enhancing the flexibility of message processing.
+ *
+ * <h4>Example</h4>
+ *
+ * <pre>{@code
+ * pipeline
+ *   .apply(MqttIO.readWithMetadata()
+ *     .withConnectionConfiguration(MqttIO.ConnectionConfiguration.create(
+ *       "tcp://host:1883", "my_topic_pattern")))
+ *   .apply(ParDo.of(new DoFn<MqttRecord, Void>() {
+ *     @ProcessElement
+ *     public void processElement(ProcessContext c) {
+ *       MqttRecord record = c.element();
+ *       String topic = record.getTopic();
+ *       byte[] payload = record.getPayload();
+ *       // Apply business logic based on the topic
+ *       if (topic.equals("important_topic")) {
+ *         // Special processing for important_topic
+ *       }
+ *     }
+ *   }));
+ *
+ * }</pre>
+ *
  * <h3>Writing to a MQTT broker</h3>
  *
  * <p>MqttIO sink supports writing {@code byte[]} to a topic on a MQTT broker.
@@ -99,37 +149,77 @@ import org.slf4j.LoggerFactory;
  *       "my_topic"))
  *
  * }</pre>
+ *
+ * <h3>Dynamic Writing to a MQTT Broker</h3>
+ *
+ * <p>MqttIO also supports dynamic writing to multiple topics based on the data. You can specify a
+ * function to determine the target topic for each message. The following example demonstrates how
+ * to configure dynamic topic writing:
+ *
+ * <pre>{@code
+ * pipeline
+ *   .apply(...)  // Provide PCollection<InputT>
+ *   .apply(
+ *     MqttIO.<InputT>dynamicWrite()
+ *       .withConnectionConfiguration(
+ *         MqttIO.ConnectionConfiguration.create("tcp://host:11883"))
+ *       .withTopicFn(<Function to determine the topic dynamically>)
+ *       .withPayloadFn(<Function to extract the payload>));
+ * }</pre>
+ *
+ * <p>This dynamic writing capability allows for more flexible MQTT message routing based on the
+ * message content, enabling scenarios where messages are directed to different topics.
  */
-@Experimental(Kind.SOURCE_SINK)
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class MqttIO {
 
   private static final Logger LOG = LoggerFactory.getLogger(MqttIO.class);
   private static final int MQTT_3_1_MAX_CLIENT_ID_LENGTH = 23;
 
-  public static Read read() {
-    return new AutoValue_MqttIO_Read.Builder()
+  public static Read<byte[]> read() {
+    return new AutoValue_MqttIO_Read.Builder<byte[]>()
         .setMaxReadTime(null)
+        .setWithMetadata(false)
         .setMaxNumRecords(Long.MAX_VALUE)
         .build();
   }
 
-  public static Write write() {
-    return new AutoValue_MqttIO_Write.Builder().setRetained(false).build();
+  public static Read<MqttRecord> readWithMetadata() {
+    return new AutoValue_MqttIO_Read.Builder<MqttRecord>()
+        .setMaxReadTime(null)
+        .setWithMetadata(true)
+        .setMaxNumRecords(Long.MAX_VALUE)
+        .build();
+  }
+
+  public static Write<byte[]> write() {
+    return new AutoValue_MqttIO_Write.Builder<byte[]>()
+        .setRetained(false)
+        .setPayloadFn(SerializableFunctions.identity())
+        .setDynamic(false)
+        .build();
+  }
+
+  public static <InputT> Write<InputT> dynamicWrite() {
+    return new AutoValue_MqttIO_Write.Builder<InputT>().setRetained(false).setDynamic(true).build();
   }
 
   private MqttIO() {}
 
   /** A POJO describing a MQTT connection. */
+  @DefaultSchema(AutoValueSchema.class)
   @AutoValue
   public abstract static class ConnectionConfiguration implements Serializable {
 
+    @SchemaFieldDescription("The MQTT broker URI.")
     abstract String getServerUri();
 
-    abstract String getTopic();
+    @SchemaFieldDescription("The MQTT topic pattern.")
+    abstract @Nullable String getTopic();
 
+    @SchemaFieldDescription("The client ID prefix, which is used to construct a unique client ID.")
     abstract @Nullable String getClientId();
 
     abstract @Nullable String getUsername();
@@ -170,6 +260,11 @@ public class MqttIO {
           .build();
     }
 
+    public static ConnectionConfiguration create(String serverUri) {
+      checkArgument(serverUri != null, "serverUri can not be null");
+      return new AutoValue_MqttIO_ConnectionConfiguration.Builder().setServerUri(serverUri).build();
+    }
+
     /** Set up the MQTT broker URI. */
     public ConnectionConfiguration withServerUri(String serverUri) {
       checkArgument(serverUri != null, "serverUri can not be null");
@@ -200,40 +295,51 @@ public class MqttIO {
 
     private void populateDisplayData(DisplayData.Builder builder) {
       builder.add(DisplayData.item("serverUri", getServerUri()));
-      builder.add(DisplayData.item("topic", getTopic()));
+      builder.addIfNotNull(DisplayData.item("topic", getTopic()));
       builder.addIfNotNull(DisplayData.item("clientId", getClientId()));
       builder.addIfNotNull(DisplayData.item("username", getUsername()));
     }
 
-    private MQTT createClient() throws Exception {
+    private Mqtt3BlockingClient createClient() throws Exception {
       LOG.debug("Creating MQTT client to {}", getServerUri());
-      MQTT client = new MQTT();
-      client.setHost(getServerUri());
+      URI uri = new URI(getServerUri());
+      String host = uri.getHost();
+      int port = uri.getPort();
+      if (port == -1) {
+        port = "ssl".equals(uri.getScheme()) || "tls".equals(uri.getScheme()) ? 8883 : 1883;
+      }
+
+      Mqtt3ClientBuilder builder = Mqtt3Client.builder().serverHost(host).serverPort(port);
+
+      if ("ssl".equals(uri.getScheme()) || "tls".equals(uri.getScheme())) {
+        builder = builder.sslWithDefaultConfig();
+      }
+
+      String clientId = getClientId();
+      if (clientId == null) {
+        clientId = UUID.randomUUID().toString();
+      } else {
+        clientId = clientId + "-" + UUID.randomUUID().toString();
+      }
+      clientId = clientId.substring(0, Math.min(clientId.length(), MQTT_3_1_MAX_CLIENT_ID_LENGTH));
+      LOG.debug("MQTT client id set to {}", clientId);
+      builder = builder.identifier(clientId);
+
       if (getUsername() != null) {
         LOG.debug("MQTT client uses username {}", getUsername());
-        client.setUserName(getUsername());
-        client.setPassword(getPassword());
+        var auth = builder.simpleAuth().username(getUsername());
+        if (getPassword() != null) {
+          auth = auth.password(getPassword().getBytes(StandardCharsets.UTF_8));
+        }
+        builder = auth.applySimpleAuth();
       }
-      if (getClientId() != null) {
-        String clientId = getClientId() + "-" + UUID.randomUUID().toString();
-        clientId =
-            clientId.substring(0, Math.min(clientId.length(), MQTT_3_1_MAX_CLIENT_ID_LENGTH));
-        LOG.debug("MQTT client id set to {}", clientId);
-        client.setClientId(clientId);
-      } else {
-        String clientId = UUID.randomUUID().toString();
-        clientId =
-            clientId.substring(0, Math.min(clientId.length(), MQTT_3_1_MAX_CLIENT_ID_LENGTH));
-        LOG.debug("MQTT client id set to random value {}", clientId);
-        client.setClientId(clientId);
-      }
-      return client;
+      return builder.buildBlocking();
     }
   }
 
   /** A {@link PTransform} to read from a MQTT broker. */
   @AutoValue
-  public abstract static class Read extends PTransform<PBegin, PCollection<byte[]>> {
+  public abstract static class Read<T> extends PTransform<PBegin, PCollection<T>> {
 
     abstract @Nullable ConnectionConfiguration connectionConfiguration();
 
@@ -241,21 +347,29 @@ public class MqttIO {
 
     abstract @Nullable Duration maxReadTime();
 
-    abstract Builder builder();
+    abstract Builder<T> builder();
+
+    abstract boolean withMetadata();
+
+    abstract @Nullable Coder<T> coder();
 
     @AutoValue.Builder
-    abstract static class Builder {
-      abstract Builder setConnectionConfiguration(ConnectionConfiguration config);
+    abstract static class Builder<T> {
+      abstract Builder<T> setConnectionConfiguration(ConnectionConfiguration config);
 
-      abstract Builder setMaxNumRecords(long maxNumRecords);
+      abstract Builder<T> setMaxNumRecords(long maxNumRecords);
 
-      abstract Builder setMaxReadTime(Duration maxReadTime);
+      abstract Builder<T> setMaxReadTime(Duration maxReadTime);
 
-      abstract Read build();
+      abstract Builder<T> setWithMetadata(boolean withMetadata);
+
+      abstract Builder<T> setCoder(Coder<T> coder);
+
+      abstract Read<T> build();
     }
 
     /** Define the MQTT connection configuration used to connect to the MQTT broker. */
-    public Read withConnectionConfiguration(ConnectionConfiguration configuration) {
+    public Read<T> withConnectionConfiguration(ConnectionConfiguration configuration) {
       checkArgument(configuration != null, "configuration can not be null");
       return builder().setConnectionConfiguration(configuration).build();
     }
@@ -265,7 +379,7 @@ public class MqttIO {
      * records is lower than {@code Long.MAX_VALUE}, the {@link Read} will provide a bounded {@link
      * PCollection}.
      */
-    public Read withMaxNumRecords(long maxNumRecords) {
+    public Read<T> withMaxNumRecords(long maxNumRecords) {
       return builder().setMaxNumRecords(maxNumRecords).build();
     }
 
@@ -273,16 +387,33 @@ public class MqttIO {
      * Define the max read time (duration) while the {@link Read} will receive messages. When this
      * max read time is not null, the {@link Read} will provide a bounded {@link PCollection}.
      */
-    public Read withMaxReadTime(Duration maxReadTime) {
+    public Read<T> withMaxReadTime(Duration maxReadTime) {
       return builder().setMaxReadTime(maxReadTime).build();
     }
 
     @Override
-    public PCollection<byte[]> expand(PBegin input) {
-      org.apache.beam.sdk.io.Read.Unbounded<byte[]> unbounded =
-          org.apache.beam.sdk.io.Read.from(new UnboundedMqttSource(this));
+    @SuppressWarnings("unchecked")
+    public PCollection<T> expand(PBegin input) {
+      checkArgument(connectionConfiguration() != null, "connectionConfiguration can not be null");
+      checkArgument(connectionConfiguration().getTopic() != null, "topic can not be null");
 
-      PTransform<PBegin, PCollection<byte[]>> transform = unbounded;
+      Coder<T> coder;
+      if (withMetadata()) {
+        try {
+          coder =
+              (Coder<T>) input.getPipeline().getSchemaRegistry().getSchemaCoder(MqttRecord.class);
+        } catch (NoSuchSchemaException e) {
+          throw new RuntimeException(e.getMessage());
+        }
+      } else {
+        coder = (Coder<T>) ByteArrayCoder.of();
+      }
+
+      org.apache.beam.sdk.io.Read.Unbounded<T> unbounded =
+          org.apache.beam.sdk.io.Read.from(
+              new UnboundedMqttSource<>(this.builder().setCoder(coder).build()));
+
+      PTransform<PBegin, PCollection<T>> transform = unbounded;
 
       if (maxNumRecords() < Long.MAX_VALUE || maxReadTime() != null) {
         transform = unbounded.withMaxReadTime(maxReadTime()).withMaxNumRecords(maxNumRecords());
@@ -310,33 +441,28 @@ public class MqttIO {
   static class MqttCheckpointMark implements UnboundedSource.CheckpointMark, Serializable {
 
     @VisibleForTesting String clientId;
-    @VisibleForTesting Instant oldestMessageTimestamp = Instant.now();
-    @VisibleForTesting transient List<Message> messages = new ArrayList<>();
+    @VisibleForTesting transient List<Mqtt3Publish> messages = new ArrayList<>();
 
-    public MqttCheckpointMark() {}
-
-    public MqttCheckpointMark(String id) {
-      clientId = id;
+    public MqttCheckpointMark(String id, List<Mqtt3Publish> messages) {
+      this.clientId = id;
+      this.messages = messages;
     }
 
-    public void add(Message message, Instant timestamp) {
-      if (timestamp.isBefore(oldestMessageTimestamp)) {
-        oldestMessageTimestamp = timestamp;
-      }
-      messages.add(message);
+    @VisibleForTesting
+    MqttCheckpointMark(String id) {
+      this.clientId = id;
     }
 
     @Override
     public void finalizeCheckpoint() {
       LOG.debug("Finalizing checkpoint acknowledging pending messages for client ID {}", clientId);
-      for (Message message : messages) {
+      for (Mqtt3Publish message : messages) {
         try {
-          message.ack();
+          message.acknowledge();
         } catch (Exception e) {
           LOG.warn("Can't ack message for client ID {}", clientId, e);
         }
       }
-      oldestMessageTimestamp = Instant.now();
       messages.clear();
     }
 
@@ -352,7 +478,6 @@ public class MqttIO {
       if (other instanceof MqttCheckpointMark) {
         MqttCheckpointMark that = (MqttCheckpointMark) other;
         return Objects.equals(this.clientId, that.clientId)
-            && Objects.equals(this.oldestMessageTimestamp, that.oldestMessageTimestamp)
             && Objects.deepEquals(this.messages, that.messages);
       } else {
         return false;
@@ -361,32 +486,80 @@ public class MqttIO {
 
     @Override
     public int hashCode() {
-      return Objects.hash(clientId, oldestMessageTimestamp, messages);
+      return Objects.hash(clientId, messages);
+    }
+
+    static class Preparer {
+      @VisibleForTesting String clientId;
+      @VisibleForTesting Instant oldestMessageTimestamp = Instant.now();
+      @VisibleForTesting transient List<Mqtt3Publish> messages = new ArrayList<>();
+
+      public Preparer(MqttCheckpointMark checkpointMark) {
+        clientId = checkpointMark.clientId;
+        messages = checkpointMark.messages;
+      }
+
+      public Preparer(String id) {
+        clientId = id;
+      }
+
+      public Preparer() {}
+
+      public void add(Mqtt3Publish message, Instant timestamp) {
+        if (timestamp.isBefore(oldestMessageTimestamp)) {
+          oldestMessageTimestamp = timestamp;
+        }
+        messages.add(message);
+      }
+
+      MqttCheckpointMark newCheckpoint() {
+        List<Mqtt3Publish> currentMessages = messages;
+        messages = new ArrayList<>();
+        oldestMessageTimestamp = Instant.now();
+        return new MqttCheckpointMark(clientId, currentMessages);
+      }
     }
   }
 
   @VisibleForTesting
-  static class UnboundedMqttSource extends UnboundedSource<byte[], MqttCheckpointMark> {
+  static class UnboundedMqttSource<T> extends UnboundedSource<T, MqttCheckpointMark> {
 
-    private final Read spec;
+    private final Read<T> spec;
 
-    public UnboundedMqttSource(Read spec) {
+    public UnboundedMqttSource(Read<T> spec) {
       this.spec = spec;
     }
 
     @Override
-    public UnboundedReader<byte[]> createReader(
-        PipelineOptions options, MqttCheckpointMark checkpointMark) {
-      return new UnboundedMqttReader(this, checkpointMark);
+    @SuppressWarnings("unchecked")
+    public UnboundedReader<T> createReader(
+        PipelineOptions options, @Nullable MqttCheckpointMark checkpointMark) {
+      final UnboundedMqttReader<T> unboundedMqttReader;
+      MqttCheckpointMark.Preparer preparer =
+          checkpointMark == null
+              ? new MqttCheckpointMark.Preparer()
+              : new MqttCheckpointMark.Preparer(checkpointMark);
+      if (spec.withMetadata()) {
+        unboundedMqttReader =
+            new UnboundedMqttReader<>(
+                this,
+                preparer,
+                message ->
+                    (T) MqttRecord.of(message.getTopic().toString(), message.getPayloadAsBytes()));
+      } else {
+        unboundedMqttReader = new UnboundedMqttReader<>(this, preparer);
+      }
+
+      return unboundedMqttReader;
     }
 
     @Override
-    public List<UnboundedMqttSource> split(int desiredNumSplits, PipelineOptions options) {
+    public List<UnboundedMqttSource<T>> split(int desiredNumSplits, PipelineOptions options) {
       // MQTT is based on a pub/sub pattern
       // so, if we create several subscribers on the same topic, they all will receive the same
       // message, resulting to duplicate messages in the PCollection.
       // So, for MQTT, we limit to number of split ot 1 (unique source).
-      return Collections.singletonList(new UnboundedMqttSource(spec));
+      return Collections.singletonList(new UnboundedMqttSource<>(spec));
     }
 
     @Override
@@ -400,44 +573,64 @@ public class MqttIO {
     }
 
     @Override
-    public Coder<byte[]> getOutputCoder() {
-      return ByteArrayCoder.of();
+    public Coder<T> getOutputCoder() {
+      return checkNotNull(this.spec.coder(), "coder can not be null");
     }
   }
 
   @VisibleForTesting
-  static class UnboundedMqttReader extends UnboundedSource.UnboundedReader<byte[]> {
+  static class UnboundedMqttReader<T> extends UnboundedSource.UnboundedReader<T> {
 
-    private final UnboundedMqttSource source;
+    private final UnboundedMqttSource<T> source;
 
-    private MQTT client;
-    private BlockingConnection connection;
-    private byte[] current;
+    private Mqtt3BlockingClient client;
+    private Mqtt3BlockingClient.Mqtt3Publishes publishes;
+    private String clientId = "";
+    private T current;
     private Instant currentTimestamp;
-    private MqttCheckpointMark checkpointMark;
+    private final MqttCheckpointMark.Preparer checkpointPreparer;
+    private SerializableFunction<Mqtt3Publish, T> extractFn;
 
-    public UnboundedMqttReader(UnboundedMqttSource source, MqttCheckpointMark checkpointMark) {
+    public UnboundedMqttReader(
+        UnboundedMqttSource<T> source, MqttCheckpointMark.Preparer checkpointPreparer) {
       this.source = source;
       this.current = null;
-      if (checkpointMark != null) {
-        this.checkpointMark = checkpointMark;
+      if (checkpointPreparer != null) {
+        this.checkpointPreparer = checkpointPreparer;
       } else {
-        this.checkpointMark = new MqttCheckpointMark();
+        this.checkpointPreparer = new MqttCheckpointMark.Preparer();
       }
+      this.extractFn = message -> (T) message.getPayloadAsBytes();
+    }
+
+    public UnboundedMqttReader(
+        UnboundedMqttSource<T> source,
+        MqttCheckpointMark.Preparer checkpointPreparer,
+        SerializableFunction<Mqtt3Publish, T> extractFn) {
+      this(source, checkpointPreparer);
+      this.extractFn = extractFn;
     }
 
     @Override
     public boolean start() throws IOException {
       LOG.debug("Starting MQTT reader ...");
-      Read spec = source.spec;
+      Read<T> spec = source.spec;
       try {
         client = spec.connectionConfiguration().createClient();
-        LOG.debug("Reader client ID is {}", client.getClientId());
-        checkpointMark.clientId = client.getClientId().toString();
-        connection = client.blockingConnection();
-        connection.connect();
-        connection.subscribe(
-            new Topic[] {new Topic(spec.connectionConfiguration().getTopic(), QoS.AT_LEAST_ONCE)});
+        this.clientId = client.getConfig().getClientIdentifier().map(Object::toString).orElse("");
+        LOG.debug("Reader client ID is {}", clientId);
+        checkpointPreparer.clientId = clientId;
+        client.connect();
+
+        // Subscribe and get the publishes stream with manual acks enabled
+        publishes = client.publishes(MqttGlobalPublishFilter.ALL, true);
+
+        client
+            .subscribeWith()
+            .topicFilter(spec.connectionConfiguration().getTopic())
+            .qos(MqttQos.AT_LEAST_ONCE)
+            .send();
+
         return advance();
       } catch (Exception e) {
         throw new IOException(e);
@@ -447,14 +640,15 @@ public class MqttIO {
     @Override
     public boolean advance() throws IOException {
       try {
-        LOG.trace("MQTT reader (client ID {}) waiting message ...", client.getClientId());
-        Message message = connection.receive(1, TimeUnit.SECONDS);
-        if (message == null) {
+        LOG.trace("MQTT reader (client ID {}) waiting message ...", clientId);
+        Optional<Mqtt3Publish> messageOpt = publishes.receive(1, TimeUnit.SECONDS);
+        if (!messageOpt.isPresent()) {
           return false;
         }
-        current = message.getPayload();
+        Mqtt3Publish message = messageOpt.get();
+        current = this.extractFn.apply(message);
         currentTimestamp = Instant.now();
-        checkpointMark.add(message, currentTimestamp);
+        checkpointPreparer.add(message, currentTimestamp);
       } catch (Exception e) {
         throw new IOException(e);
       }
@@ -463,28 +657,39 @@ public class MqttIO {
 
     @Override
     public void close() throws IOException {
-      LOG.debug("Closing MQTT reader (client ID {})", client.getClientId());
-      try {
-        if (connection != null) {
-          connection.disconnect();
+      LOG.debug("Closing MQTT reader (client ID {})", clientId);
+      if (publishes != null) {
+        try {
+          publishes.close();
+        } catch (Exception e) {
+          LOG.warn("Error closing publishes stream", e);
+        } finally {
+          publishes = null;
         }
-      } catch (Exception e) {
-        throw new IOException(e);
+      }
+      if (client != null) {
+        try {
+          client.disconnect();
+        } catch (Exception e) {
+          throw new IOException(e);
+        } finally {
+          client = null;
+        }
       }
     }
 
     @Override
     public Instant getWatermark() {
-      return checkpointMark.oldestMessageTimestamp;
+      return checkpointPreparer.oldestMessageTimestamp;
     }
 
     @Override
     public UnboundedSource.CheckpointMark getCheckpointMark() {
-      return checkpointMark;
+      return checkpointPreparer.newCheckpoint();
     }
 
     @Override
-    public byte[] getCurrent() {
+    public T getCurrent() {
       if (current == null) {
         throw new NoSuchElementException();
       }
@@ -500,34 +705,55 @@ public class MqttIO {
     }
 
     @Override
-    public UnboundedMqttSource getCurrentSource() {
+    public UnboundedMqttSource<T> getCurrentSource() {
       return source;
     }
   }
 
   /** A {@link PTransform} to write and send a message to a MQTT server. */
   @AutoValue
-  public abstract static class Write extends PTransform<PCollection<byte[]>, PDone> {
-
+  public abstract static class Write<InputT> extends PTransform<PCollection<InputT>, PDone> {
     abstract @Nullable ConnectionConfiguration connectionConfiguration();
+
+    abstract @Nullable SerializableFunction<InputT, String> topicFn();
+
+    abstract @Nullable SerializableFunction<InputT, byte[]> payloadFn();
+
+    abstract boolean dynamic();
 
     abstract boolean retained();
 
-    abstract Builder builder();
+    abstract Builder<InputT> builder();
 
     @AutoValue.Builder
-    abstract static class Builder {
-      abstract Builder setConnectionConfiguration(ConnectionConfiguration configuration);
+    abstract static class Builder<InputT> {
+      abstract Builder<InputT> setConnectionConfiguration(ConnectionConfiguration configuration);
 
-      abstract Builder setRetained(boolean retained);
+      abstract Builder<InputT> setRetained(boolean retained);
 
-      abstract Write build();
+      abstract Builder<InputT> setTopicFn(SerializableFunction<InputT, String> topicFn);
+
+      abstract Builder<InputT> setPayloadFn(SerializableFunction<InputT, byte[]> payloadFn);
+
+      abstract Builder<InputT> setDynamic(boolean dynamic);
+
+      abstract Write<InputT> build();
     }
 
     /** Define MQTT connection configuration used to connect to the MQTT broker. */
-    public Write withConnectionConfiguration(ConnectionConfiguration configuration) {
+    public Write<InputT> withConnectionConfiguration(ConnectionConfiguration configuration) {
       checkArgument(configuration != null, "configuration can not be null");
       return builder().setConnectionConfiguration(configuration).build();
+    }
+
+    public Write<InputT> withTopicFn(SerializableFunction<InputT, String> topicFn) {
+      checkArgument(dynamic(), "withTopicFn can not use in non-dynamic write");
+      return builder().setTopicFn(topicFn).build();
+    }
+
+    public Write<InputT> withPayloadFn(SerializableFunction<InputT, byte[]> payloadFn) {
+      checkArgument(dynamic(), "withPayloadFn can not use in non-dynamic write");
+      return builder().setPayloadFn(payloadFn).build();
     }
 
     /**
@@ -540,14 +766,8 @@ public class MqttIO {
      * @param retained Whether or not the messaging engine should retain the message.
      * @return The {@link Write} {@link PTransform} with the corresponding retained configuration.
      */
-    public Write withRetained(boolean retained) {
+    public Write<InputT> withRetained(boolean retained) {
       return builder().setRetained(retained).build();
-    }
-
-    @Override
-    public PDone expand(PCollection<byte[]> input) {
-      input.apply(ParDo.of(new WriteFn(this)));
-      return PDone.in(input.getPipeline());
     }
 
     @Override
@@ -556,39 +776,75 @@ public class MqttIO {
       builder.add(DisplayData.item("retained", retained()));
     }
 
-    private static class WriteFn extends DoFn<byte[], Void> {
+    @Override
+    public PDone expand(PCollection<InputT> input) {
+      checkArgument(connectionConfiguration() != null, "connectionConfiguration can not be null");
+      if (dynamic()) {
+        checkArgument(
+            connectionConfiguration().getTopic() == null, "DynamicWrite can not have static topic");
+        checkArgument(topicFn() != null, "topicFn can not be null");
+      } else {
+        checkArgument(connectionConfiguration().getTopic() != null, "topic can not be null");
+      }
+      checkArgument(payloadFn() != null, "payloadFn can not be null");
 
-      private final Write spec;
+      input.apply(ParDo.of(new WriteFn<>(this)));
+      return PDone.in(input.getPipeline());
+    }
 
-      private transient MQTT client;
-      private transient BlockingConnection connection;
+    private static class WriteFn<InputT> extends DoFn<InputT, Void> {
 
-      public WriteFn(Write spec) {
+      private final Write<InputT> spec;
+      private final SerializableFunction<InputT, String> topicFn;
+      private final SerializableFunction<InputT, byte[]> payloadFn;
+      private final boolean retained;
+
+      private transient Mqtt3BlockingClient client;
+
+      public WriteFn(Write<InputT> spec) {
         this.spec = spec;
+        if (spec.dynamic()) {
+          this.topicFn = spec.topicFn();
+        } else {
+          String topic = spec.connectionConfiguration().getTopic();
+          this.topicFn = ignore -> topic;
+        }
+        this.payloadFn = spec.payloadFn();
+        this.retained = spec.retained();
       }
 
       @Setup
       public void createMqttClient() throws Exception {
         LOG.debug("Starting MQTT writer");
-        client = spec.connectionConfiguration().createClient();
-        LOG.debug("MQTT writer client ID is {}", client.getClientId());
-        connection = client.blockingConnection();
-        connection.connect();
+        this.client = this.spec.connectionConfiguration().createClient();
+        String clientId = client.getConfig().getClientIdentifier().map(Object::toString).orElse("");
+        LOG.debug("MQTT writer client ID is {}", clientId);
+        this.client.connect();
       }
 
       @ProcessElement
       public void processElement(ProcessContext context) throws Exception {
-        byte[] payload = context.element();
+        InputT element = context.element();
+        byte[] payload = this.payloadFn.apply(element);
+        String topic = this.topicFn.apply(element);
         LOG.debug("Sending message {}", new String(payload, StandardCharsets.UTF_8));
-        connection.publish(
-            spec.connectionConfiguration().getTopic(), payload, QoS.AT_LEAST_ONCE, false);
+
+        client
+            .publishWith()
+            .topic(topic)
+            .payload(payload)
+            .qos(MqttQos.AT_LEAST_ONCE)
+            .retain(this.retained)
+            .send();
       }
 
       @Teardown
       public void closeMqttClient() throws Exception {
-        if (connection != null) {
-          LOG.debug("Disconnecting MQTT connection (client ID {})", client.getClientId());
-          connection.disconnect();
+        if (this.client != null) {
+          String clientId =
+              client.getConfig().getClientIdentifier().map(Object::toString).orElse("");
+          LOG.debug("Disconnecting MQTT connection (client ID {})", clientId);
+          this.client.disconnect();
         }
       }
     }

@@ -41,7 +41,8 @@ class JavaJarJobServerStub(JavaJarJobServer):
     return '/path/to/jar'
 
   @staticmethod
-  def local_jar(url):
+  def local_jar(url, jar_cache_dir=None):
+    logging.debug("url({%s}), jar_cache_dir({%s})", url, jar_cache_dir)
     return url
 
 
@@ -61,8 +62,8 @@ class JavaJarJobServerTest(unittest.TestCase):
         subprocess_cmd,
         [
             '/path/to/java',
-            '-jar',
             '-Dsome.property=value',
+            '-jar',
             '/path/to/jar',
             '--artifacts-dir',
             '/path/to/artifacts/',

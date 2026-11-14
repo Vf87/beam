@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-"""Unittest for GCP Bigtable testing."""
+"""Integration tests for bigtableio."""
 # pytype: skip-file
 
 import datetime
@@ -25,8 +25,8 @@ import string
 import unittest
 import uuid
 from typing import TYPE_CHECKING
-from typing import List
 
+import pytest
 import pytz
 
 import apache_beam as beam
@@ -35,13 +35,13 @@ from apache_beam.metrics.metric import MetricsFilter
 from apache_beam.options.pipeline_options import PipelineOptions
 from apache_beam.runners.runner import PipelineState
 from apache_beam.testing.test_pipeline import TestPipeline
+from apache_beam.utils import retry
 
 # Protect against environments where bigtable library is not available.
 # pylint: disable=wrong-import-order, wrong-import-position
 try:
   from google.cloud._helpers import _datetime_from_microseconds
   from google.cloud._helpers import _microseconds_from_datetime
-  from google.cloud._helpers import UTC
   from google.cloud.bigtable import row, column_family, Client
 except ImportError:
   Client = None
@@ -52,9 +52,9 @@ except ImportError:
 if TYPE_CHECKING:
   import google.cloud.bigtable.instance
 
-EXISTING_INSTANCES = []  # type: List[google.cloud.bigtable.instance.Instance]
-LABEL_KEY = u'python-bigtable-beam'
-label_stamp = datetime.datetime.utcnow().replace(tzinfo=UTC)
+EXISTING_INSTANCES: list['google.cloud.bigtable.instance.Instance'] = []
+LABEL_KEY = 'python-bigtable-beam'
+label_stamp = datetime.datetime.now(datetime.timezone.utc)
 label_stamp_micros = _microseconds_from_datetime(label_stamp)
 LABELS = {LABEL_KEY: str(label_stamp_micros)}
 
@@ -67,9 +67,7 @@ class GenerateTestRows(beam.PTransform):
 
   """
   def __init__(self, number, project_id=None, instance_id=None, table_id=None):
-    # TODO(BEAM-6158): Revert the workaround once we can pickle super() on py3.
-    # super().__init__()
-    beam.PTransform.__init__(self)
+    super().__init__()
     self.number = number
     self.rand = random.choice(string.ascii_letters + string.digits)
     self.column_family_id = 'cf1'
@@ -109,13 +107,13 @@ class BigtableIOWriteTest(unittest.TestCase):
 
   """
   DEFAULT_TABLE_PREFIX = "python-test"
-  instance_id = DEFAULT_TABLE_PREFIX + "-" + str(uuid.uuid4())[:8]
-  cluster_id = DEFAULT_TABLE_PREFIX + "-" + str(uuid.uuid4())[:8]
-  table_id = DEFAULT_TABLE_PREFIX + "-" + str(uuid.uuid4())[:8]
   number = 500
   LOCATION_ID = "us-east1-b"
 
   def setUp(self):
+    self.instance_id = self.DEFAULT_TABLE_PREFIX + "-" + str(uuid.uuid4())[:8]
+    self.cluster_id = self.DEFAULT_TABLE_PREFIX + "-" + str(uuid.uuid4())[:8]
+    self.table_id = self.DEFAULT_TABLE_PREFIX + "-" + str(uuid.uuid4())[:8]
     try:
       from google.cloud.bigtable import enums
       self.STORAGE_TYPE = enums.StorageType.HDD
@@ -139,7 +137,18 @@ class BigtableIOWriteTest(unittest.TestCase):
           self.cluster_id,
           self.LOCATION_ID,
           default_storage_type=self.STORAGE_TYPE)
-      self.instance.create(clusters=[cluster])
+
+      @retry.with_exponential_backoff(
+          num_retries=3,
+          initial_delay_secs=5,
+          retry_filter=retry.
+          retry_on_server_errors_timeout_or_quota_issues_filter)
+      def _create_instance():
+        operation = self.instance.create(clusters=[cluster])
+        operation.result(timeout=300)  # Wait up to 5 min.
+
+      _create_instance()
+
     self.table = self.instance.table(self.table_id)
 
     if not self.table.exists():
@@ -154,7 +163,7 @@ class BigtableIOWriteTest(unittest.TestCase):
 
     def age_in_hours(micros):
       return (
-          datetime.datetime.utcnow().replace(tzinfo=UTC) -
+          datetime.datetime.now(datetime.timezone.utc) -
           (_datetime_from_microseconds(micros))).total_seconds() // 3600
 
     CLEAN_INSTANCE = [
@@ -171,6 +180,7 @@ class BigtableIOWriteTest(unittest.TestCase):
     if self.instance.exists():
       self.instance.delete()
 
+  @pytest.mark.it_postcommit
   def test_bigtable_write(self):
     number = self.number
     pipeline_args = self.test_pipeline.options_list

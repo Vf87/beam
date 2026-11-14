@@ -34,9 +34,9 @@ import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.state.Timers;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.WindowFn;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.FluentIterable;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.FluentIterable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
@@ -46,7 +46,6 @@ import org.joda.time.Instant;
  * <p>These contexts are highly interdependent and share many fields; it is inadvisable to create
  * them via any means other than this factory class.
  */
-@SuppressWarnings({"nullness", "keyfor"}) // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
 public class TriggerStateMachineContextFactory<W extends BoundedWindow> {
 
   private final WindowFn<?, W> windowFn;
@@ -256,17 +255,17 @@ public class TriggerStateMachineContextFactory<W extends BoundedWindow> {
     }
   }
 
+  private StateNamespace namespaceFor(W window, int triggerIndex) {
+    return StateNamespaces.windowAndTrigger(windowCoder, window, triggerIndex);
+  }
+
   private class StateAccessorImpl implements StateAccessor<Object> {
     protected final int triggerIndex;
     protected final StateNamespace windowNamespace;
 
     public StateAccessorImpl(W window, ExecutableTriggerStateMachine trigger) {
       this.triggerIndex = trigger.getTriggerIndex();
-      this.windowNamespace = namespaceFor(window);
-    }
-
-    protected StateNamespace namespaceFor(W window) {
-      return StateNamespaces.windowAndTrigger(windowCoder, window, triggerIndex);
+      this.windowNamespace = namespaceFor(window, triggerIndex);
     }
 
     @Override
@@ -295,7 +294,8 @@ public class TriggerStateMachineContextFactory<W extends BoundedWindow> {
         StateTag<StateT> address) {
       ImmutableMap.Builder<W, StateT> builder = ImmutableMap.builder();
       for (W mergingWindow : activeToBeMerged) {
-        StateT stateForWindow = stateInternals.state(namespaceFor(mergingWindow), address);
+        StateT stateForWindow =
+            stateInternals.state(namespaceFor(mergingWindow, triggerIndex), address);
         builder.put(mergingWindow, stateForWindow);
       }
       return builder.build();
@@ -309,6 +309,9 @@ public class TriggerStateMachineContextFactory<W extends BoundedWindow> {
     private final Timers timers;
     private final TriggerInfoImpl triggerInfo;
 
+    // A context and its TriggerInfo refer to each other, so the TriggerInfo necessarily sees this
+    // context before its fields are all assigned. It only stores the reference for later use.
+    @SuppressWarnings({"nullness:assignment", "nullness:argument"})
     private TriggerContextImpl(
         W window,
         Timers timers,
@@ -372,6 +375,9 @@ public class TriggerStateMachineContextFactory<W extends BoundedWindow> {
     private final TriggerInfoImpl triggerInfo;
     private final Instant eventTimestamp;
 
+    // A context and its TriggerInfo refer to each other, so the TriggerInfo necessarily sees this
+    // context before its fields are all assigned. It only stores the reference for later use.
+    @SuppressWarnings({"nullness:assignment", "nullness:argument"})
     private OnElementContextImpl(
         W window,
         Timers timers,
@@ -447,6 +453,9 @@ public class TriggerStateMachineContextFactory<W extends BoundedWindow> {
     private final Timers timers;
     private final MergingTriggerInfoImpl triggerInfo;
 
+    // A context and its TriggerInfo refer to each other, so the TriggerInfo necessarily sees this
+    // context before its fields are all assigned. It only stores the reference for later use.
+    @SuppressWarnings({"nullness:assignment", "nullness:argument"})
     private OnMergeContextImpl(
         W window,
         Timers timers,

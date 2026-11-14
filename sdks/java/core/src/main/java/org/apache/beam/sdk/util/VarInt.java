@@ -21,6 +21,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.CodedOutputStream;
 
 /**
  * Variable-length encoding for integers.
@@ -42,13 +43,61 @@ public class VarInt {
 
   /** Encodes the given value onto the stream. */
   public static void encode(long v, OutputStream stream) throws IOException {
-    do {
-      // Encode next 7 bits + terminator bit
-      long bits = v & 0x7F;
-      v >>>= 7;
-      byte b = (byte) (bits | ((v != 0) ? 0x80 : 0));
-      stream.write(b);
-    } while (v != 0);
+    if ((v & ~0x7F) == 0) {
+      stream.write((byte) v);
+      return;
+    }
+    stream.write((byte) (v | 0x80));
+    v >>>= 7;
+    if ((v & ~0x7F) == 0) {
+      stream.write((byte) v);
+      return;
+    }
+    stream.write((byte) (v | 0x80));
+    v >>>= 7;
+    if ((v & ~0x7F) == 0) {
+      stream.write((byte) v);
+      return;
+    }
+    stream.write((byte) (v | 0x80));
+    v >>>= 7;
+    if ((v & ~0x7F) == 0) {
+      stream.write((byte) v);
+      return;
+    }
+    stream.write((byte) (v | 0x80));
+    v >>>= 7;
+    if ((v & ~0x7F) == 0) {
+      stream.write((byte) v);
+      return;
+    }
+    stream.write((byte) (v | 0x80));
+    v >>>= 7;
+    if ((v & ~0x7F) == 0) {
+      stream.write((byte) v);
+      return;
+    }
+    stream.write((byte) (v | 0x80));
+    v >>>= 7;
+    if ((v & ~0x7F) == 0) {
+      stream.write((byte) v);
+      return;
+    }
+    stream.write((byte) (v | 0x80));
+    v >>>= 7;
+    if ((v & ~0x7F) == 0) {
+      stream.write((byte) v);
+      return;
+    }
+    stream.write((byte) (v | 0x80));
+    v >>>= 7;
+    if ((v & ~0x7F) == 0) {
+      stream.write((byte) v);
+      return;
+    }
+    stream.write((byte) (v | 0x80));
+    v >>>= 7;
+    stream.write((byte) v);
   }
 
   /** Decodes an integer value from the given stream. */
@@ -88,16 +137,11 @@ public class VarInt {
 
   /** Returns the length of the encoding of the given value (in bytes). */
   public static int getLength(int v) {
-    return getLength(convertIntToLongNoSignExtend(v));
+    return CodedOutputStream.computeUInt32SizeNoTag(v);
   }
 
   /** Returns the length of the encoding of the given value (in bytes). */
   public static int getLength(long v) {
-    int result = 0;
-    do {
-      result++;
-      v >>>= 7;
-    } while (v != 0);
-    return result;
+    return CodedOutputStream.computeUInt64SizeNoTag(v);
   }
 }

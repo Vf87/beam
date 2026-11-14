@@ -17,13 +17,12 @@
  */
 package org.apache.beam.sdk.extensions.protobuf;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-
 import com.google.protobuf.Descriptors;
 import com.google.protobuf.Descriptors.EnumValueDescriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.Descriptors.OneofDescriptor;
 import com.google.protobuf.Message;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -42,9 +41,12 @@ import org.apache.beam.sdk.schemas.logicaltypes.EnumerationType;
 import org.apache.beam.sdk.schemas.logicaltypes.NanosDuration;
 import org.apache.beam.sdk.schemas.logicaltypes.NanosInstant;
 import org.apache.beam.sdk.schemas.logicaltypes.OneOfType;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Maps;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Sets;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Maps;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
  * This class provides utilities for inferring a Beam schema from a protocol buffer.
@@ -126,7 +128,7 @@ import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Sets;
  * </ul>
  */
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 class ProtoSchemaTranslator {
   public static final String SCHEMA_OPTION_META_NUMBER = "beam:option:proto:meta:number";
@@ -139,6 +141,24 @@ class ProtoSchemaTranslator {
   /** Option prefix for options on fields. */
   public static final String SCHEMA_OPTION_FIELD_PREFIX = "beam:option:proto:field:";
 
+  /**
+   * A HashMap containing the sentinel values (null values) of schemas in the process of being
+   * inferenced, to prevent circular references.
+   */
+  private static Map<Descriptors.Descriptor, @Nullable Schema> alreadyVisitedSchemas =
+      new HashMap<Descriptors.Descriptor, @Nullable Schema>();
+
+  /**
+   * Returns {@code true} if the proto field converts to a nullable Beam field type, {@code false}
+   * otherwise.
+   */
+  static boolean isNullable(FieldDescriptor fieldDescriptor) {
+    // Set nullable for fields with presence (proto3 optional, message, group, extension,
+    // oneof-contained or explicit presence -- proto2 optional or required), but not
+    // "required" (to exclude proto2 required).
+    return fieldDescriptor.hasPresence() && !fieldDescriptor.isRequired();
+  }
+
   /** Attach a proto field number to a type. */
   static Field withFieldNumber(Field field, int number) {
     return field.withOptions(
@@ -150,48 +170,85 @@ class ProtoSchemaTranslator {
     return field.getOptions().getValue(SCHEMA_OPTION_META_NUMBER);
   }
 
-  /** Return a Beam scheam representing a proto class. */
+  /** Return a Beam schema representing a proto class. */
   static Schema getSchema(Class<? extends Message> clazz) {
     return getSchema(ProtobufUtil.getDescriptorForClass(clazz));
   }
 
-  static Schema getSchema(Descriptors.Descriptor descriptor) {
-    Set<Integer> oneOfFields = Sets.newHashSet();
+  static synchronized Schema getSchema(Descriptors.Descriptor descriptor) {
+    if (alreadyVisitedSchemas.containsKey(descriptor)) {
+      @Nullable Schema existingSchema = alreadyVisitedSchemas.get(descriptor);
+      if (existingSchema == null) {
+        String name = descriptor.getFullName();
+        if ("google.protobuf.Struct".equals(name)) {
+          throw new UnsupportedOperationException("Infer schema of Struct type is not supported.");
+        }
+        throw new IllegalArgumentException(
+            "Cannot infer schema with a circular reference. Proto Field: " + name);
+      }
+      return existingSchema;
+    }
+    alreadyVisitedSchemas.put(descriptor, null);
+    /* OneOfComponentFields refers to the field number in the protobuf where the component subfields
+     * are. This is needed to prevent double inclusion of the component fields.*/
+    Set<Integer> oneOfComponentFields = Sets.newHashSet();
+    /* OneOfFieldLocation stores the field number of the first field in the OneOf. Using this, we can use the location
+    of the first field in the OneOf as the location of the entire OneOf.*/
+    Map<Integer, Field> oneOfFieldLocation = Maps.newHashMap();
     List<Field> fields = Lists.newArrayListWithCapacity(descriptor.getFields().size());
-    for (OneofDescriptor oneofDescriptor : descriptor.getOneofs()) {
+
+    // In proto3, an optional field is internally implemented by wrapping it in a synthetic oneof.
+    // The Descriptor.getRealOneOfs() method is then used to retrieve only the "real" oneofs that
+    // you explicitly defined, filtering out these automatically generated ones.
+    // https://github.com/protocolbuffers/protobuf/blob/main/docs/implementing_proto3_presence.md#updating-a-
+    for (OneofDescriptor oneofDescriptor : descriptor.getRealOneofs()) {
       List<Field> subFields = Lists.newArrayListWithCapacity(oneofDescriptor.getFieldCount());
       Map<String, Integer> enumIds = Maps.newHashMap();
       for (FieldDescriptor fieldDescriptor : oneofDescriptor.getFields()) {
-        oneOfFields.add(fieldDescriptor.getNumber());
+        oneOfComponentFields.add(fieldDescriptor.getNumber());
         // Store proto field number in a field option.
         FieldType fieldType = beamFieldTypeFromProtoField(fieldDescriptor);
         subFields.add(
             withFieldNumber(
                 Field.nullable(fieldDescriptor.getName(), fieldType), fieldDescriptor.getNumber()));
-        checkArgument(
+        Preconditions.checkArgument(
             enumIds.putIfAbsent(fieldDescriptor.getName(), fieldDescriptor.getNumber()) == null);
       }
       FieldType oneOfType = FieldType.logicalType(OneOfType.create(subFields, enumIds));
-      fields.add(Field.of(oneofDescriptor.getName(), oneOfType));
+      oneOfFieldLocation.put(
+          oneofDescriptor.getFields().get(0).getNumber(),
+          Field.nullable(oneofDescriptor.getName(), oneOfType));
     }
 
     for (Descriptors.FieldDescriptor fieldDescriptor : descriptor.getFields()) {
-      if (!oneOfFields.contains(fieldDescriptor.getNumber())) {
+      int fieldDescriptorNumber = fieldDescriptor.getNumber();
+      if (!oneOfComponentFields.contains(fieldDescriptorNumber)) {
         // Store proto field number in metadata.
         FieldType fieldType = beamFieldTypeFromProtoField(fieldDescriptor);
         fields.add(
-            withFieldNumber(
-                    Field.of(fieldDescriptor.getName(), fieldType), fieldDescriptor.getNumber())
+            withFieldNumber(Field.of(fieldDescriptor.getName(), fieldType), fieldDescriptorNumber)
                 .withOptions(getFieldOptions(fieldDescriptor)));
+        /* Note that descriptor.getFields() returns an iterator in the order of the fields in the .proto file, not
+         * in field number order. Therefore we can safely insert the OneOfField at the field of its first component.*/
+      } else {
+        Field oneOfField = oneOfFieldLocation.get(fieldDescriptorNumber);
+        if (oneOfField != null) {
+          fields.add(oneOfField);
+        }
       }
     }
-    return Schema.builder()
-        .addFields(fields)
-        .setOptions(
-            getSchemaOptions(descriptor)
-                .setOption(
-                    SCHEMA_OPTION_META_TYPE_NAME, FieldType.STRING, descriptor.getFullName()))
-        .build();
+
+    Schema generatedSchema =
+        Schema.builder()
+            .addFields(fields)
+            .setOptions(
+                getSchemaOptions(descriptor)
+                    .setOption(
+                        SCHEMA_OPTION_META_TYPE_NAME, FieldType.STRING, descriptor.getFullName()))
+            .build();
+    alreadyVisitedSchemas.put(descriptor, generatedSchema);
+
+    return generatedSchema;
   }
 
   private static FieldType beamFieldTypeFromProtoField(
@@ -300,18 +357,19 @@ class ProtoSchemaTranslator {
             fieldType = FieldType.logicalType(new NanosDuration());
             break;
           case "google.protobuf.Any":
-            throw new RuntimeException("Any not yet supported");
+            throw new UnsupportedOperationException("Any not yet supported");
           default:
             fieldType = FieldType.row(getSchema(protoFieldDescriptor.getMessageType()));
-        }
-        // all messages are nullable in Proto
-        if (protoFieldDescriptor.isOptional()) {
-          fieldType = fieldType.withNullable(true);
         }
         break;
       default:
         throw new RuntimeException("Field type not matched.");
     }
+
+    if (isNullable(protoFieldDescriptor)) {
+      fieldType = fieldType.withNullable(true);
+    }
+
     return fieldType;
   }
 
@@ -328,34 +386,37 @@ class ProtoSchemaTranslator {
     Schema.Options.Builder optionsBuilder = Schema.Options.builder();
     for (Map.Entry<FieldDescriptor, Object> entry : allFields.entrySet()) {
       FieldDescriptor fieldDescriptor = entry.getKey();
-      FieldType fieldType = beamFieldTypeFromProtoField(fieldDescriptor);
-
-      switch (fieldType.getTypeName()) {
-        case BYTE:
-        case BYTES:
-        case INT16:
-        case INT32:
-        case INT64:
-        case DECIMAL:
-        case FLOAT:
-        case DOUBLE:
-        case STRING:
-        case BOOLEAN:
-        case LOGICAL_TYPE:
-        case ROW:
-        case ARRAY:
-        case ITERABLE:
-          Field field = Field.of("OPTION", fieldType);
-          ProtoDynamicMessageSchema schema = ProtoDynamicMessageSchema.forSchema(Schema.of(field));
-          optionsBuilder.setOption(
-              prefix + fieldDescriptor.getFullName(),
-              fieldType,
-              schema.createConverter(field).convertFromProtoValue(entry.getValue()));
-          break;
-        case MAP:
-        case DATETIME:
-        default:
-          throw new IllegalStateException("These datatypes are not possible in extentions.");
+      try {
+        FieldType fieldType = beamFieldTypeFromProtoField(fieldDescriptor);
+        switch (fieldType.getTypeName()) {
+          case BYTE:
+          case BYTES:
+          case INT16:
+          case INT32:
+          case INT64:
+          case DECIMAL:
+          case FLOAT:
+          case DOUBLE:
+          case STRING:
+          case BOOLEAN:
+          case LOGICAL_TYPE:
+          case ROW:
+          case ARRAY:
+          case ITERABLE:
+            @SuppressWarnings("unchecked")
+            ProtoBeamConverter.ProtoToBeamConverter<Object, Object> protoToBeamConverter =
+                ProtoBeamConverter.createProtoToBeamConverter(fieldType);
+            Object value = protoToBeamConverter.convert(entry.getValue());
+            optionsBuilder.setOption(prefix + fieldDescriptor.getFullName(), fieldType, value);
+            break;
+          case MAP:
+          case DATETIME:
+          default:
+            throw new IllegalStateException("These datatypes are not possible in extentions.");
+        }
+      } catch (RuntimeException e) {
+        throw new RuntimeException(
+            Strings.lenientFormat("Failed to parse option for %s", fieldDescriptor.getName()), e);
       }
     }
     return optionsBuilder;

@@ -41,22 +41,6 @@ public interface LoadTestOptions extends PipelineOptions, ApplicationNameOptions
 
   void setStepOptions(String stepOptions);
 
-  @Description("Whether the results should be published to BigQuery database")
-  @Default.Boolean(false)
-  Boolean getPublishToBigQuery();
-
-  void setPublishToBigQuery(Boolean publishToBigQuery);
-
-  @Description("BigQuery dataset name")
-  String getBigQueryDataset();
-
-  void setBigQueryDataset(String dataset);
-
-  @Description("BigQuery table name")
-  String getBigQueryTable();
-
-  void setBigQueryTable(String tableName);
-
   @Description("Timeout for a load test expressed in minutes")
   @Default.Integer(240)
   Integer getLoadTestTimeout();
@@ -64,26 +48,22 @@ public interface LoadTestOptions extends PipelineOptions, ApplicationNameOptions
   void setLoadTestTimeout(Integer timeout);
 
   @Description("Window duration. If not set global windows will be used.")
-  @Nullable
-  Long getInputWindowDurationSec();
+  @Nullable Long getInputWindowDurationSec();
 
   void setInputWindowDurationSec(Long windowSizeSec);
 
   @Description("InfluxDB measurement to publish results to.")
-  @Nullable
-  String getInfluxMeasurement();
+  @Nullable String getInfluxMeasurement();
 
   void setInfluxMeasurement(@Nullable String measurement);
 
   @Description("InfluxDB host.")
-  @Nullable
-  String getInfluxHost();
+  @Nullable String getInfluxHost();
 
   void setInfluxHost(@Nullable String host);
 
   @Description("InfluxDB database.")
-  @Nullable
-  String getInfluxDatabase();
+  @Nullable String getInfluxDatabase();
 
   void setInfluxDatabase(@Nullable String database);
 
@@ -94,8 +74,7 @@ public interface LoadTestOptions extends PipelineOptions, ApplicationNameOptions
   void setPublishToInfluxDB(Boolean publishToInfluxDB);
 
   @Description("Additional tags for Influx data")
-  @Nullable
-  Map<String, String> getInfluxTags();
+  @Nullable Map<String, String> getInfluxTags();
 
   void setInfluxTags(Map<String, String> influxTags);
 

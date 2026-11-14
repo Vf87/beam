@@ -18,8 +18,8 @@
 package org.apache.beam.sdk.io.hadoop.format;
 
 import java.util.Objects;
-import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.coders.DefaultCoder;
+import org.apache.beam.sdk.extensions.avro.coders.AvroCoder;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -60,7 +60,7 @@ public class Employee {
     if (this == o) {
       return true;
     }
-    if (o == null || getClass() != o.getClass()) {
+    if (!(o instanceof Employee)) {
       return false;
     }
 

@@ -32,29 +32,44 @@ def mainClass = project.findProperty(mainClassProperty)
 def loadTestArgsProperty = "loadTest.args"
 
 def runnerProperty = "runner"
-def withDataflowWorkerJarProperty = "withDataflowWorkerJar"
+
+def sdkLocationOverrideProperty = "sdkLocationOverride"
+
+def requirementsTxtFileProperty = "loadTest.requirementsTxtFile"
 
 task run(type: Exec, dependsOn: installGcpTest) {
     def loadTestArgs = project.findProperty(loadTestArgsProperty) ?: ""
 
     def runnerArg = project.findProperty(runnerProperty) ?: ""
     if (runnerArg == 'DataflowRunner' || runnerArg == 'TestDataflowRunner') {
-        dependsOn ':sdks:python:sdist'
-        loadTestArgs +=" --sdk_location=${files(configurations.distTarBall.files).singleFile}"
+        def sdkLocationOverride = Boolean.parseBoolean(project.findProperty(sdkLocationOverrideProperty) ?: 'true')
+        if (sdkLocationOverride) {
+            dependsOn ':sdks:python:sdist'
+            loadTestArgs +=" --sdk_location=${files(configurations.distTarBall.files).singleFile}"
+        }
+        if (!loadTestArgs.contains('--sdk_container_image') && !loadTestArgs.contains('--worker_harness_container_image')) {
+            loadTestArgs +=" --sdk_container_image=gcr.io/apache-beam-testing/beam-sdk/beam_python${project.ext.pythonVersion}_sdk:${project.sdk_version}"
+        }
+    } else if (loadTestArgs.contains('--environment_type=DOCKER') && !loadTestArgs.contains('--environment_config')) {
+        loadTestArgs +=" --environment_config=gcr.io/apache-beam-testing/beam-sdk/beam_python${project.ext.pythonVersion}_sdk:${project.sdk_version}"
     }
 
-    String withDataflowWorkerJarArg = project.findProperty(withDataflowWorkerJarProperty).toString() ?: ""
-    if (withDataflowWorkerJarArg.toLowerCase() == 'true') {
-        dependsOn ':runners:google-cloud-dataflow-java:worker:shadowJar'
-        loadTestArgs +=" --dataflow_worker_jar=${project(":runners:google-cloud-dataflow-java:worker").shadowJar.archivePath}"
-    }
-
+    String requirementsTxtFileArg = project.findProperty(requirementsTxtFileProperty) ?: null
+    if (requirementsTxtFileArg != null) {
+    doFirst {
+        exec {
+          setWorkingDir "${project.rootDir}/sdks/python"
+          executable 'sh'
+          args '-c', "${project.ext.envdir}/bin/python -m pip install -r ${requirementsTxtFileArg}"
+        }
+     }
+   }
     setWorkingDir "${project.rootDir}/sdks/python"
     commandLine 'sh', '-c', "${project.ext.envdir}/bin/python -m ${mainClass} --test-pipeline-options=\"${parseOptions(loadTestArgs)}\" --ignore-files \'.*py3\\d?\\.py\$\'"
     ignoreExitValue true
 
     doLast {
-        if (execResult.exitValue != 0) {
+        if (executionResult.get().exitValue != 0) {
             throw new GradleException('error occurred')
         }
     }

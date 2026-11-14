@@ -1,0 +1,171 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.beam.sdk.io.solace;
+
+import com.solacesystems.jcsmp.DeliveryMode;
+import com.solacesystems.jcsmp.Destination;
+import com.solacesystems.jcsmp.JCSMPException;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Queue;
+import org.apache.beam.sdk.io.solace.broker.MessageProducer;
+import org.apache.beam.sdk.io.solace.broker.PublishResultHandler;
+import org.apache.beam.sdk.io.solace.data.Solace.PublishResult;
+import org.apache.beam.sdk.io.solace.data.Solace.Record;
+import org.apache.beam.sdk.transforms.SerializableFunction;
+
+public abstract class MockProducer implements MessageProducer {
+  private static final List<Record> PUBLISHED_RECORDS =
+      Collections.synchronizedList(new ArrayList<>());
+
+  public static List<Record> getPublishedRecords() {
+    synchronized (PUBLISHED_RECORDS) {
+      return new ArrayList<>(PUBLISHED_RECORDS);
+    }
+  }
+
+  public static void clearPublishedRecords() {
+    PUBLISHED_RECORDS.clear();
+  }
+
+  final PublishResultHandler handler;
+
+  public MockProducer(PublishResultHandler handler) {
+    this.handler = handler;
+  }
+
+  @Override
+  public int publishBatch(
+      List<Record> records,
+      boolean useCorrelationKeyLatency,
+      SerializableFunction<Record, Destination> destinationFn,
+      DeliveryMode deliveryMode,
+      Queue<PublishResult> resultsQueue) {
+    for (Record record : records) {
+      this.publishSingleMessage(
+          record,
+          destinationFn.apply(record),
+          useCorrelationKeyLatency,
+          deliveryMode,
+          resultsQueue);
+    }
+    return records.size();
+  }
+
+  @Override
+  public boolean isClosed() {
+    return false;
+  }
+
+  @Override
+  public void close() {}
+
+  private static Object correlationKey(
+      Record msg, boolean useCorrelationKeyLatency, Queue<PublishResult> resultsQueue) {
+    Long publishMonotonicNanos = useCorrelationKeyLatency ? System.nanoTime() : null;
+    return PublishResultHandler.correlationKey(
+        msg.getMessageId(), publishMonotonicNanos, resultsQueue);
+  }
+
+  public static class MockSuccessProducer extends MockProducer {
+    public MockSuccessProducer(PublishResultHandler handler) {
+      super(handler);
+    }
+
+    @Override
+    public void publishSingleMessage(
+        Record msg,
+        Destination topicOrQueue,
+        boolean useCorrelationKeyLatency,
+        DeliveryMode deliveryMode,
+        Queue<PublishResult> resultsQueue) {
+      PUBLISHED_RECORDS.add(msg);
+      handler.responseReceivedEx(correlationKey(msg, useCorrelationKeyLatency, resultsQueue));
+    }
+  }
+
+  public static class MockFailedProducer extends MockProducer {
+    public MockFailedProducer(PublishResultHandler handler) {
+      super(handler);
+    }
+
+    @Override
+    public void publishSingleMessage(
+        Record msg,
+        Destination topicOrQueue,
+        boolean useCorrelationKeyLatency,
+        DeliveryMode deliveryMode,
+        Queue<PublishResult> resultsQueue) {
+      handler.handleErrorEx(
+          correlationKey(msg, useCorrelationKeyLatency, resultsQueue),
+          new JCSMPException("Some JCSMPException"),
+          Instant.now().toEpochMilli());
+    }
+  }
+
+  public static class MockDelayedProducer extends MockProducer {
+    private final long delayMs;
+
+    public MockDelayedProducer(PublishResultHandler handler, long delayMs) {
+      super(handler);
+      this.delayMs = delayMs;
+    }
+
+    public MockDelayedProducer(PublishResultHandler handler) {
+      this(handler, 100);
+    }
+
+    @Override
+    public void publishSingleMessage(
+        Record msg,
+        Destination topicOrQueue,
+        boolean useCorrelationKeyLatency,
+        DeliveryMode deliveryMode,
+        Queue<PublishResult> resultsQueue) {
+      Object key = correlationKey(msg, useCorrelationKeyLatency, resultsQueue);
+      new Thread(
+              () -> {
+                try {
+                  Thread.sleep(delayMs);
+                } catch (InterruptedException e) {
+                  Thread.currentThread().interrupt();
+                }
+                handler.responseReceivedEx(key);
+              })
+          .start();
+    }
+  }
+
+  public static class MockExceptionProducer extends MockProducer {
+    public MockExceptionProducer(PublishResultHandler handler) {
+      super(handler);
+    }
+
+    @Override
+    public void publishSingleMessage(
+        Record msg,
+        Destination topicOrQueue,
+        boolean useCorrelationKeyLatency,
+        DeliveryMode deliveryMode,
+        Queue<PublishResult> resultsQueue) {
+      throw new RuntimeException("Simulated synchronous publish failure");
+    }
+  }
+}

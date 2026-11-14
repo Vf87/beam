@@ -30,8 +30,12 @@ import unittest
 import mock
 
 from apache_beam.io import localfilesystem
+from apache_beam.io.aws import s3filesystem
+from apache_beam.io.aws import s3io
 from apache_beam.io.filesystem import BeamIOError
 from apache_beam.io.filesystems import FileSystems
+from apache_beam.io.gcp import gcsfilesystem
+from apache_beam.io.gcp import gcsio
 
 
 def _gen_fake_join(separator):
@@ -51,7 +55,7 @@ class FileSystemsTest(unittest.TestCase):
 
   def test_get_scheme(self):
     self.assertIsNone(FileSystems.get_scheme('/abc/cdf'))
-    self.assertIsNone(FileSystems.get_scheme('c:\\abc\cdf'))  # pylint: disable=anomalous-backslash-in-string
+    self.assertIsNone(FileSystems.get_scheme('c:\\abc\\cdf'))
     self.assertEqual(FileSystems.get_scheme('gs://abc/cdf'), 'gs')
 
   def test_get_filesystem(self):
@@ -59,10 +63,30 @@ class FileSystemsTest(unittest.TestCase):
         isinstance(
             FileSystems.get_filesystem('/tmp'),
             localfilesystem.LocalFileSystem))
-    self.assertTrue(isinstance(FileSystems.get_filesystem('c:\\abc\def'),  # pylint: disable=anomalous-backslash-in-string
-                               localfilesystem.LocalFileSystem))
+    self.assertTrue(
+        isinstance(
+            FileSystems.get_filesystem('c:\\abc\\def'),
+            localfilesystem.LocalFileSystem))
+    self.assertTrue(
+        isinstance(
+            FileSystems.get_filesystem('gs://bucket/file'),
+            gcsfilesystem.GCSFileSystem))
+    self.assertTrue(
+        isinstance(
+            FileSystems.get_filesystem('s3://bucket/file'),
+            s3filesystem.S3FileSystem))
     with self.assertRaises(ValueError):
       FileSystems.get_filesystem('error://abc/def')
+
+  def test_missing_cloud_dependencies_raise_runtime_error(self):
+    with mock.patch.object(gcsio, 'GCS_INSTALLED', False):
+      with self.assertRaisesRegex(RuntimeError,
+                                  'GCP dependencies are not installed'):
+        gcsio.GcsIO()
+    with mock.patch.object(s3io, 'BOTO3_INSTALLED', False):
+      with self.assertRaisesRegex(RuntimeError,
+                                  'AWS dependencies are not installed'):
+        s3io.S3IO(options={})
 
   @mock.patch('apache_beam.io.localfilesystem.os')
   def test_unix_path_join(self, *unused_mocks):

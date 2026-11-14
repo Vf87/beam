@@ -21,8 +21,6 @@ For internal use only; no backward-compatibility guarantees.
 """
 # pytype: skip-file
 
-from typing import Tuple
-
 import apache_beam as beam
 from apache_beam.portability.api import beam_runner_api_pb2
 from apache_beam.runners.interactive import cache_manager as cache
@@ -75,9 +73,8 @@ class WriteCache:
 
     # Copy cache writing subgraph from the template to the pipeline proto.
     for pcoll_id in template.components.pcollections:
-      if (pcoll_id in self._pipeline.components.pcollections or
-          pcoll_id in write_input_placeholder.ignorable_components.pcollections
-          ):
+      if (pcoll_id in self._pipeline.components.pcollections or pcoll_id
+          in write_input_placeholder.ignorable_components.pcollections):
         continue
       self._pipeline.components.pcollections[pcoll_id].CopyFrom(
           template.components.pcollections[pcoll_id])
@@ -88,10 +85,10 @@ class WriteCache:
       self._pipeline.components.coders[coder_id].CopyFrom(
           template.components.coders[coder_id])
     for windowing_strategy_id in template.components.windowing_strategies:
-      if (windowing_strategy_id in
-          self._pipeline.components.windowing_strategies or
-          windowing_strategy_id in
-          write_input_placeholder.ignorable_components.windowing_strategies):
+      if (windowing_strategy_id
+          in self._pipeline.components.windowing_strategies or
+          windowing_strategy_id
+          in write_input_placeholder.ignorable_components.windowing_strategies):
         continue
       self._pipeline.components.windowing_strategies[
           windowing_strategy_id].CopyFrom(
@@ -106,8 +103,8 @@ class WriteCache:
           template.components.transforms[transform_id])
     for top_level_transform in template.components.transforms[
         template_root_transform_id].subtransforms:
-      if (top_level_transform in
-          write_input_placeholder.ignorable_components.transforms):
+      if (top_level_transform
+          in write_input_placeholder.ignorable_components.transforms):
         continue
       self._pipeline.components.transforms[
           root_transform_id].subtransforms.append(top_level_transform)
@@ -125,7 +122,7 @@ class WriteCache:
           inputs[key] = input_id
 
   def _build_runner_api_template(
-      self) -> Tuple[beam_runner_api_pb2.Pipeline, '_PCollectionPlaceHolder']:
+      self) -> tuple[beam_runner_api_pb2.Pipeline, '_PCollectionPlaceHolder']:
     pph = _PCollectionPlaceHolder(self._cacheable.pcoll, self._context)
     transform = _WriteCacheTransform(self._cache_manager, self._key)
     _ = pph.placeholder_pcoll | 'sink_cache_' + self._key >> transform

@@ -43,18 +43,17 @@ import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.TimestampedValue;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.runners.Enclosed;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
 
 /** Test the various NEXMark queries yield results coherent with their models. */
 @RunWith(Enclosed.class)
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class SqlBoundedSideInputJoinTest {
 
@@ -213,19 +212,11 @@ public class SqlBoundedSideInputJoinTest {
     }
   }
 
-  @RunWith(JUnit4.class)
+  @RunWith(org.apache.beam.sdk.testing.BeamParallelJunit4Runner.class)
   public static class SqlBoundedSideInputJoinTestCalcite extends SqlBoundedSideInputJoinTestCases {
     @Override
     protected SqlBoundedSideInputJoin getQuery(NexmarkConfiguration configuration) {
       return SqlBoundedSideInputJoin.calciteSqlBoundedSideInputJoin(configuration);
-    }
-  }
-
-  @RunWith(JUnit4.class)
-  public static class SqlBoundedSideInputJoinTestZetaSql extends SqlBoundedSideInputJoinTestCases {
-    @Override
-    protected SqlBoundedSideInputJoin getQuery(NexmarkConfiguration configuration) {
-      return SqlBoundedSideInputJoin.zetaSqlBoundedSideInputJoin(configuration);
     }
   }
 }

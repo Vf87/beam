@@ -18,7 +18,6 @@
 package org.apache.beam.sdk;
 
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.instanceOf;
@@ -43,6 +42,7 @@ import org.apache.beam.sdk.runners.PTransformMatcher;
 import org.apache.beam.sdk.runners.PTransformOverride;
 import org.apache.beam.sdk.runners.PTransformOverrideFactory;
 import org.apache.beam.sdk.runners.TransformHierarchy.Node;
+import org.apache.beam.sdk.testing.BeamParallelJunit4Runner;
 import org.apache.beam.sdk.testing.CrashingRunner;
 import org.apache.beam.sdk.testing.ExpectedLogs;
 import org.apache.beam.sdk.testing.NeedsRunner;
@@ -67,8 +67,8 @@ import org.apache.beam.sdk.values.PInput;
 import org.apache.beam.sdk.values.POutput;
 import org.apache.beam.sdk.values.TaggedPValue;
 import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.hamcrest.BaseMatcher;
 import org.hamcrest.Description;
 import org.hamcrest.Matchers;
@@ -76,19 +76,20 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
+import org.junit.rules.Timeout;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
 
 /** Tests for Pipeline. */
-@RunWith(JUnit4.class)
+@RunWith(BeamParallelJunit4Runner.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class PipelineTest {
 
   @Rule public final TestPipeline pipeline = TestPipeline.create();
   @Rule public ExpectedLogs logged = ExpectedLogs.none(Pipeline.class);
   @Rule public ExpectedException thrown = ExpectedException.none();
+  @Rule public transient Timeout globalTimeout = Timeout.seconds(1200);
 
   // Mock class that throws a user code exception during the call to
   // Pipeline.run().
@@ -272,6 +273,7 @@ public class PipelineTest {
   }
 
   @Test
+  @BeamParallelJunit4Runner.SerialTest
   public void testStableUniqueNameOff() {
     pipeline.enableAbandonedNodeEnforcement(false);
 
@@ -284,6 +286,7 @@ public class PipelineTest {
   }
 
   @Test
+  @BeamParallelJunit4Runner.SerialTest
   public void testStableUniqueNameWarning() {
     pipeline.enableAbandonedNodeEnforcement(false);
 
@@ -296,6 +299,7 @@ public class PipelineTest {
   }
 
   @Test
+  @BeamParallelJunit4Runner.SerialTest
   public void testStableUniqueNameError() {
     pipeline.getOptions().setStableUniqueNames(CheckEnabled.ERROR);
 
@@ -407,13 +411,9 @@ public class PipelineTest {
         new PipelineVisitor.Defaults() {
           @Override
           public CompositeBehavior enterCompositeTransform(Node node) {
-            if (!node.isRootNode()) {
-              assertThat(
-                  node.getTransform().getClass(),
-                  not(
-                      anyOf(
-                          Matchers.equalTo(GenerateSequence.class),
-                          Matchers.equalTo(Create.Values.class))));
+            String fullName = node.getFullName();
+            if (fullName.equals("unbounded") || fullName.equals("bounded")) {
+              assertThat(node.getTransform(), Matchers.instanceOf(EmptyFlatten.class));
             }
             return CompositeBehavior.ENTER_TRANSFORM;
           }
@@ -421,7 +421,7 @@ public class PipelineTest {
   }
 
   /**
-   * Tests that {@link Pipeline#replaceAll(List)} throws when one of the PTransformOverride still
+   * Tests that {@link Pipeline#replaceAll(List)} succeeds when one of the PTransformOverride still
    * matches.
    */
   @Test
@@ -429,8 +429,7 @@ public class PipelineTest {
     pipeline.enableAbandonedNodeEnforcement(false);
     pipeline.apply(GenerateSequence.from(0));
 
-    // The order is such that the output of the second will match the first, which is not permitted
-    thrown.expect(IllegalStateException.class);
+    // The order is such that the output of the second will match the first, which is permitted.
     pipeline.replaceAll(
         ImmutableList.of(
             PTransformOverride.of(

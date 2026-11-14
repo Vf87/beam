@@ -17,22 +17,44 @@
  */
 package org.apache.beam.sdk.schemas.utils;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.sdk.util.ByteBuddyUtils.getClassLoadingStrategy;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Parameter;
+import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
+import java.lang.reflect.TypeVariable;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
+import net.bytebuddy.ByteBuddy;
+import net.bytebuddy.asm.AsmVisitorWrapper.ForDeclaredMethods;
+import net.bytebuddy.description.method.MethodDescription.ForLoadedMethod;
+import net.bytebuddy.description.type.TypeDescription.ForLoadedType;
+import net.bytebuddy.dynamic.DynamicType;
+import net.bytebuddy.dynamic.scaffold.InstrumentedType;
+import net.bytebuddy.implementation.Implementation;
+import net.bytebuddy.implementation.bytecode.ByteCodeAppender;
+import net.bytebuddy.implementation.bytecode.ByteCodeAppender.Size;
+import net.bytebuddy.implementation.bytecode.Duplication;
+import net.bytebuddy.implementation.bytecode.Removal;
+import net.bytebuddy.implementation.bytecode.StackManipulation;
+import net.bytebuddy.implementation.bytecode.TypeCreation;
+import net.bytebuddy.implementation.bytecode.assign.TypeCasting;
+import net.bytebuddy.implementation.bytecode.collection.ArrayAccess;
+import net.bytebuddy.implementation.bytecode.constant.IntegerConstant;
+import net.bytebuddy.implementation.bytecode.member.MethodInvocation;
+import net.bytebuddy.implementation.bytecode.member.MethodReturn;
+import net.bytebuddy.implementation.bytecode.member.MethodVariableAccess;
+import net.bytebuddy.jar.asm.ClassWriter;
+import net.bytebuddy.matcher.ElementMatchers;
 import org.apache.beam.sdk.schemas.FieldValueTypeInformation;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.SchemaUserTypeCreator;
@@ -40,60 +62,80 @@ import org.apache.beam.sdk.schemas.utils.ByteBuddyUtils.DefaultTypeConversionsFa
 import org.apache.beam.sdk.schemas.utils.ByteBuddyUtils.InjectPackageStrategy;
 import org.apache.beam.sdk.schemas.utils.ByteBuddyUtils.TypeConversion;
 import org.apache.beam.sdk.schemas.utils.ByteBuddyUtils.TypeConversionsFactory;
+import org.apache.beam.sdk.util.Preconditions;
 import org.apache.beam.sdk.util.common.ReflectHelpers;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.ByteBuddy;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.asm.AsmVisitorWrapper;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.description.method.MethodDescription.ForLoadedMethod;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.description.type.TypeDescription.ForLoadedType;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.dynamic.DynamicType;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.dynamic.loading.ClassLoadingStrategy;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.dynamic.scaffold.InstrumentedType;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.Implementation;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.ByteCodeAppender;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.ByteCodeAppender.Size;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.Duplication;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.Removal;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.StackManipulation;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.TypeCreation;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.assign.TypeCasting;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.collection.ArrayAccess;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.constant.IntegerConstant;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.member.MethodInvocation;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.member.MethodReturn;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.member.MethodVariableAccess;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.jar.asm.ClassWriter;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.matcher.ElementMatchers;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Utilities for managing AutoValue schemas. */
-@Experimental(Kind.SCHEMAS)
-@SuppressWarnings({
-  "nullness", // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-  "rawtypes"
-})
+@SuppressWarnings({"rawtypes"})
 public class AutoValueUtils {
-  public static Class getBaseAutoValueClass(Class<?> clazz) {
-    int lastDot = clazz.getName().lastIndexOf('.');
-    String baseName = clazz.getName().substring(lastDot + 1, clazz.getName().length());
-    return baseName.startsWith("AutoValue_") ? clazz.getSuperclass() : clazz;
+
+  private static final String AUTO_VALUE_GENERATED_PREFIX = "AutoValue_";
+
+  /**
+   * Walk the class hierarchy upwards and find the topmost {@link TypeDescriptor} whose super class
+   * is not generated (whose class name doesn't contain the {@code AutoValue_} prefix).
+   */
+  private static TypeDescriptor<?> findFirstGeneratedAutoValue(TypeDescriptor<?> typeDescriptor) {
+    Class<?> rawType = typeDescriptor.getRawType();
+    for (Class superClass = rawType.getSuperclass();
+        superClass != null && superClass.getName().contains(AUTO_VALUE_GENERATED_PREFIX);
+        superClass = superClass.getSuperclass()) {
+      rawType = superClass;
+    }
+    return typeDescriptor.getSupertype((Class) rawType);
   }
 
-  private static Class getAutoValueGenerated(Class<?> clazz) {
-    String generatedClassName = getAutoValueGeneratedName(clazz.getName());
+  @SuppressWarnings("unchecked")
+  public static @Nullable TypeDescriptor<?> getBaseAutoValueClass(
+      TypeDescriptor<?> typeDescriptor) {
+    if (!typeDescriptor.getRawType().getName().contains(AUTO_VALUE_GENERATED_PREFIX)) {
+      // fast path for types which aren't autogenerated
+      return typeDescriptor;
+    }
+    // AutoValue extensions may be nested
+    TypeDescriptor<?> firstGeneratedTypeDescriptor = findFirstGeneratedAutoValue(typeDescriptor);
+    return Optional.ofNullable(firstGeneratedTypeDescriptor.getRawType().getSuperclass())
+        .map(superClass -> firstGeneratedTypeDescriptor.getSupertype((Class) superClass))
+        .orElse(null);
+  }
+
+  @SuppressWarnings("unchecked")
+  public static TypeDescriptor<?> getAutoValueGenerated(TypeDescriptor<?> typeDescriptor) {
+    String generatedClassName = getAutoValueGeneratedName(typeDescriptor.getRawType().getName());
     try {
-      return Class.forName(generatedClassName);
+      return typeDescriptor.getSubtype((Class) Class.forName(generatedClassName));
     } catch (ClassNotFoundException e) {
       throw new IllegalStateException("AutoValue generated class not found: " + generatedClassName);
     }
   }
 
-  private static @Nullable Class getAutoValueGeneratedBuilder(Class<?> clazz) {
-    // TODO: Handle extensions. Find the class with the maximum number of $ character prefixexs.
-    String builderName = getAutoValueGeneratedName(clazz.getName()) + "$Builder";
+  public static @Nullable TypeDescriptor<?> getAutoValueGeneratedBuilder(
+      TypeDescriptor<?> typeDescriptor) {
+    TypeDescriptor generated = getAutoValueGenerated(typeDescriptor);
+    TypeDescriptor firstGenerated = findFirstGeneratedAutoValue(generated);
+    String builderName = firstGenerated.getRawType().getName() + "$Builder";
     try {
-      return Class.forName(builderName);
+      Class builderClass = Class.forName(builderName);
+      Type genericSuperClass = builderClass.getGenericSuperclass();
+      if (builderClass.getTypeParameters().length != 0 && genericSuperClass != null) {
+        // we need to get hold of a parameterized type version of the builder class - here's one way
+        // of doing it:
+        TypeDescriptor resolved = TypeDescriptor.of(genericSuperClass).getSubtype(builderClass);
+        for (int i = 0; i < builderClass.getTypeParameters().length; i++) {
+          TypeVariable typeVariable = builderClass.getTypeParameters()[i];
+          Type actualType =
+              ((ParameterizedType) typeDescriptor.getType()).getActualTypeArguments()[i];
+          // Autovalue's builder's type variables correspond 1:1 to their enclosing class' signature
+          // even to the point of having the same name, let's blindly unify them
+          resolved = resolved.where(typeVariable, actualType);
+        }
+        return resolved;
+      } else {
+        return TypeDescriptor.of(builderClass);
+      }
     } catch (ClassNotFoundException e) {
       return null;
     }
@@ -111,19 +153,22 @@ public class AutoValueUtils {
    * Try to find an accessible constructor for creating an AutoValue class. Otherwise return null.
    */
   public static @Nullable SchemaUserTypeCreator getConstructorCreator(
-      Class<?> clazz, Schema schema, FieldValueTypeSupplier fieldValueTypeSupplier) {
-    Class<?> generatedClass = getAutoValueGenerated(clazz);
-    List<FieldValueTypeInformation> schemaTypes = fieldValueTypeSupplier.get(clazz, schema);
+      TypeDescriptor<?> typeDescriptor,
+      Schema schema,
+      FieldValueTypeSupplier fieldValueTypeSupplier) {
+    TypeDescriptor<?> generatedTypeDescriptor = getAutoValueGenerated(typeDescriptor);
+    List<FieldValueTypeInformation> schemaTypes =
+        fieldValueTypeSupplier.get(typeDescriptor, schema);
     Optional<Constructor<?>> constructor =
-        Arrays.stream(generatedClass.getDeclaredConstructors())
+        Arrays.stream(generatedTypeDescriptor.getRawType().getDeclaredConstructors())
             .filter(c -> !Modifier.isPrivate(c.getModifiers()))
-            .filter(c -> matchConstructor(c, schemaTypes))
+            .filter(c -> matchConstructor(generatedTypeDescriptor, c, schemaTypes))
             .findAny();
     return constructor
         .map(
             c ->
                 JavaBeanUtils.getConstructorCreator(
-                    generatedClass,
+                    generatedTypeDescriptor,
                     c,
                     schema,
                     fieldValueTypeSupplier,
@@ -132,7 +177,9 @@ public class AutoValueUtils {
   }
 
   private static boolean matchConstructor(
-      Constructor<?> constructor, List<FieldValueTypeInformation> getterTypes) {
+      TypeDescriptor typeDescriptor,
+      Constructor<?> constructor,
+      List<FieldValueTypeInformation> getterTypes) {
     if (constructor.getParameters().length != getterTypes.size()) {
       return false;
     }
@@ -141,12 +188,35 @@ public class AutoValueUtils {
         getterTypes.stream()
             .collect(
                 Collectors.toMap(
-                    f -> ReflectUtils.stripGetterPrefix(f.getMethod().getName()),
+                    f ->
+                        ReflectUtils.stripGetterPrefix(
+                            Preconditions.checkArgumentNotNull(
+                                    f.getMethod(), JavaBeanUtils.GETTER_WITH_NULL_METHOD_ERROR)
+                                .getName()),
                     Function.identity()));
 
+    boolean valid = true;
     // Verify that constructor parameters match (name and type) the inferred schema.
     for (Parameter parameter : constructor.getParameters()) {
-      FieldValueTypeInformation type = typeMap.getOrDefault(parameter.getName(), null);
+      FieldValueTypeInformation type = typeMap.get(parameter.getName());
+      if (type == null
+          || !type.getType().equals(typeDescriptor.resolveType(parameter.getParameterizedType()))) {
+        valid = false;
+        break;
+      }
+    }
+    if (valid) {
+      return valid;
+    }
+
+    // Extensions add a $ suffix
+    for (Parameter parameter : constructor.getParameters()) {
+      String name = parameter.getName();
+      if (!name.endsWith("$")) {
+        return false;
+      }
+      name = name.substring(0, name.length() - 1);
+      FieldValueTypeInformation type = typeMap.get(name);
       if (type == null || type.getRawType() != parameter.getType()) {
         return false;
       }
@@ -159,29 +229,37 @@ public class AutoValueUtils {
    * Try to find an accessible builder class for creating an AutoValue class. Otherwise return null.
    */
   public static @Nullable SchemaUserTypeCreator getBuilderCreator(
-      Class<?> clazz, Schema schema, FieldValueTypeSupplier fieldValueTypeSupplier) {
-    Class<?> builderClass = getAutoValueGeneratedBuilder(clazz);
-    if (builderClass == null) {
+      TypeDescriptor<?> typeDescriptor,
+      Schema schema,
+      FieldValueTypeSupplier fieldValueTypeSupplier) {
+    TypeDescriptor<?> builderTypeDescriptor = getAutoValueGeneratedBuilder(typeDescriptor);
+    if (builderTypeDescriptor == null) {
       return null;
     }
 
-    Map<String, FieldValueTypeInformation> setterTypes =
-        ReflectUtils.getMethods(builderClass).stream()
-            .filter(ReflectUtils::isSetter)
-            .map(FieldValueTypeInformation::forSetter)
-            .collect(Collectors.toMap(FieldValueTypeInformation::getName, Function.identity()));
+    Map<String, FieldValueTypeInformation> setterTypes = new HashMap<>();
+
+    ReflectUtils.getMethods(builderTypeDescriptor.getRawType()).stream()
+        .filter(ReflectUtils::isSetter)
+        .map(m -> FieldValueTypeInformation.forSetter(builderTypeDescriptor, m))
+        .forEach(fv -> setterTypes.putIfAbsent(fv.getName(), fv));
 
     List<FieldValueTypeInformation> setterMethods =
         Lists.newArrayList(); // The builder methods to call in order.
-    List<FieldValueTypeInformation> schemaTypes = fieldValueTypeSupplier.get(clazz, schema);
+    List<FieldValueTypeInformation> schemaTypes =
+        fieldValueTypeSupplier.get(typeDescriptor, schema);
     for (FieldValueTypeInformation type : schemaTypes) {
-      String autoValueFieldName = ReflectUtils.stripGetterPrefix(type.getMethod().getName());
+      String autoValueFieldName =
+          ReflectUtils.stripGetterPrefix(
+              Preconditions.checkArgumentNotNull(
+                      type.getMethod(), JavaBeanUtils.GETTER_WITH_NULL_METHOD_ERROR)
+                  .getName());
 
       FieldValueTypeInformation setterType = setterTypes.get(autoValueFieldName);
       if (setterType == null) {
         throw new RuntimeException(
             "AutoValue builder class "
-                + builderClass
+                + builderTypeDescriptor
                 + " did not contain "
                 + "a setter for "
                 + autoValueFieldName);
@@ -190,16 +268,17 @@ public class AutoValueUtils {
     }
 
     Method buildMethod =
-        ReflectUtils.getMethods(builderClass).stream()
+        ReflectUtils.getMethods(builderTypeDescriptor.getRawType()).stream()
             .filter(m -> m.getName().equals("build"))
             .findAny()
             .orElseThrow(() -> new RuntimeException("No build method in builder"));
-    return createBuilderCreator(builderClass, setterMethods, buildMethod, schema, schemaTypes);
+    return createBuilderCreator(
+        builderTypeDescriptor.getRawType(), setterMethods, buildMethod, schema, schemaTypes);
   }
 
   private static final ByteBuddy BYTE_BUDDY = new ByteBuddy();
 
-  static SchemaUserTypeCreator createBuilderCreator(
+  private static SchemaUserTypeCreator createBuilderCreator(
       Class<?> builderClass,
       List<FieldValueTypeInformation> setterMethods,
       Method buildMethod,
@@ -214,9 +293,9 @@ public class AutoValueUtils {
               .intercept(
                   new BuilderCreateInstruction(types, setterMethods, builderClass, buildMethod));
       return builder
-          .visit(new AsmVisitorWrapper.ForDeclaredMethods().writerFlags(ClassWriter.COMPUTE_FRAMES))
+          .visit(new ForDeclaredMethods().writerFlags(ClassWriter.COMPUTE_FRAMES))
           .make()
-          .load(ReflectHelpers.findClassLoader(), ClassLoadingStrategy.Default.INJECTION)
+          .load(ReflectHelpers.findClassLoader(), getClassLoadingStrategy(builderClass))
           .getLoaded()
           .getDeclaredConstructor()
           .newInstance();
@@ -230,7 +309,6 @@ public class AutoValueUtils {
   }
 
   static class BuilderCreateInstruction implements Implementation {
-    private final List<FieldValueTypeInformation> types;
     private final List<FieldValueTypeInformation> setters;
     private final Class<?> builderClass;
     private final Method buildMethod;
@@ -240,7 +318,6 @@ public class AutoValueUtils {
         List<FieldValueTypeInformation> setters,
         Class<?> builderClass,
         Method buildMethod) {
-      this.types = types;
       this.setters = setters;
       this.builderClass = builderClass;
       this.buildMethod = buildMethod;
@@ -272,11 +349,10 @@ public class AutoValueUtils {
 
         TypeConversion<Type> convertType = typeConversionsFactory.createTypeConversion(true);
         for (int i = 0; i < setters.size(); ++i) {
-          Method setterMethod = checkNotNull(setters.get(i).getMethod());
-          Parameter parameter = setterMethod.getParameters()[0];
+          FieldValueTypeInformation setterType = setters.get(i);
+          Method setterMethod = Preconditions.checkStateNotNull(setterType.getMethod());
           ForLoadedType convertedType =
-              new ForLoadedType(
-                  (Class) convertType.convert(TypeDescriptor.of(parameter.getParameterizedType())));
+              new ForLoadedType((Class) convertType.convert(setterType.getType()));
 
           StackManipulation readParameter =
               new StackManipulation.Compound(
@@ -291,7 +367,7 @@ public class AutoValueUtils {
                   Duplication.SINGLE,
                   typeConversionsFactory
                       .createSetterConversions(readParameter)
-                      .convert(TypeDescriptor.of(parameter.getType())),
+                      .convert(setterType.getType()),
                   MethodInvocation.invoke(new ForLoadedMethod(setterMethod)),
                   Removal.SINGLE);
         }

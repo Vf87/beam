@@ -30,18 +30,23 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.Map;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
-import org.apache.beam.sdk.schemas.logicaltypes.PassThroughLogicalType;
+import org.apache.beam.sdk.schemas.logicaltypes.EnumerationType;
+import org.apache.beam.sdk.schemas.logicaltypes.VariableString;
 import org.apache.beam.sdk.util.RowJson.RowJsonDeserializer;
 import org.apache.beam.sdk.util.RowJson.RowJsonDeserializer.NullBehavior;
 import org.apache.beam.sdk.util.RowJson.RowJsonSerializer;
 import org.apache.beam.sdk.util.RowJson.UnsupportedRowJsonException;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.hamcrest.Matcher;
 import org.hamcrest.Matchers;
 import org.joda.time.DateTime;
+import org.joda.time.DateTimeZone;
+import org.joda.time.ReadableInstant;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.runners.Enclosed;
@@ -78,7 +83,8 @@ public class RowJsonTest {
           makeArrayOfArraysTestCase(),
           makeNestedRowTestCase(),
           makeDoublyNestedRowTestCase(),
-          makeNullsTestCase());
+          makeNullsTestCase(),
+          makeMapFieldTestCase());
     }
 
     private static Object[] makeFlatRowTestCase() {
@@ -93,6 +99,7 @@ public class RowJsonTest {
               .addBooleanField("f_boolean")
               .addStringField("f_string")
               .addDecimalField("f_decimal")
+              .addDateTimeField("f_timestamp")
               .build();
 
       String rowString =
@@ -105,7 +112,8 @@ public class RowJsonTest {
               + "\"f_double\" : 62.2,\n"
               + "\"f_boolean\" : true,\n"
               + "\"f_string\" : \"hello\",\n"
-              + "\"f_decimal\" : 123.12\n"
+              + "\"f_decimal\" : 123.12,\n"
+              + "\"f_timestamp\" : \"2021-11-18T08:45:38.000Z\"\n"
               + "}";
 
       Row expectedRow =
@@ -119,24 +127,26 @@ public class RowJsonTest {
                   62.2d,
                   true,
                   "hello",
-                  new BigDecimal("123.12"))
+                  new BigDecimal("123.12"),
+                  new DateTime(2021, 11, 18, 8, 45, 38, DateTimeZone.UTC).toInstant())
               .build();
 
       return new Object[] {"Flat row", schema, rowString, expectedRow};
     }
 
     private static Object[] makeLogicalTypeTestCase() {
+      EnumerationType enumType = EnumerationType.create("ZERO", "ONE", "TWO");
       Schema schema =
           Schema.builder()
-              .addLogicalTypeField(
-                  "f_passThroughString",
-                  new PassThroughLogicalType<String>(
-                      "SqlCharType", FieldType.STRING, "", FieldType.STRING) {})
+              .addLogicalTypeField("f_passThroughString", VariableString.of(10))
+              .addLogicalTypeField("f_enum", enumType)
               .build();
 
-      String rowString = "{\n" + "\"f_passThroughString\" : \"hello\"\n" + "}";
+      // fixed string will do padding
+      String rowString =
+          "{\n" + "\"f_passThroughString\" : \"hello\",\n" + "\"f_enum\" : 1\n" + "}";
 
-      Row expectedRow = Row.withSchema(schema).addValues("hello").build();
+      Row expectedRow = Row.withSchema(schema).addValues("hello", enumType.valueOf("ONE")).build();
 
       return new Object[] {"Logical Types", schema, rowString, expectedRow};
     }
@@ -241,6 +251,21 @@ public class RowJsonTest {
       return new Object[] {"Nulls", schema, rowString, expectedRow};
     }
 
+    private static Object[] makeMapFieldTestCase() {
+      Schema schema =
+          Schema.builder().addMapField("f_map", FieldType.STRING, FieldType.INT32).build();
+
+      String rowString = "{\n" + "\"f_map\" : {\"key1\": 1, \"key2\": 2}\n" + "}";
+
+      Map<String, Integer> expectedMap = new HashMap<>();
+      expectedMap.put("key1", 1);
+      expectedMap.put("key2", 2);
+
+      Row expectedRow = Row.withSchema(schema).addValues(expectedMap).build();
+
+      return new Object[] {"Map field", schema, rowString, expectedRow};
+    }
+
     @Test
     public void testDeserialize() throws IOException {
       Row parsedRow =
@@ -325,7 +350,8 @@ public class RowJsonTest {
     private static final Double DOUBLE_VALUE = 1.02d;
     private static final String DOUBLE_STRING = "1.02";
     private static final String DATETIME_STRING = "2014-09-27T20:30:00.450Z";
-    private static final DateTime DATETIME_VALUE = DateTime.parse(DATETIME_STRING);
+    private static final ReadableInstant DATETIME_VALUE =
+        DateTime.parse(DATETIME_STRING).toInstant();
 
     @Rule public ExpectedException thrown = ExpectedException.none();
 
@@ -546,6 +572,13 @@ public class RowJsonTest {
     public void testSupportedFloatConversions() throws Exception {
       testSupportedConversion(FieldType.FLOAT, FLOAT_STRING, FLOAT_VALUE);
       testSupportedConversion(FieldType.FLOAT, SHORT_STRING, (float) SHORT_VALUE);
+
+      // Integral literals a float still represents exactly: 2^24 is the largest contiguous one,
+      // and Integer.MIN_VALUE is exact because it is a power of two. Both are accepted today and
+      // must stay accepted -- they are what keeps the fix from being an across-the-board reject.
+      testSupportedConversion(FieldType.FLOAT, "16777216", 16777216.0f);
+      testSupportedConversion(
+          FieldType.FLOAT, String.valueOf(Integer.MIN_VALUE), (float) Integer.MIN_VALUE);
     }
 
     @Test
@@ -553,11 +586,25 @@ public class RowJsonTest {
       testSupportedConversion(FieldType.DOUBLE, DOUBLE_STRING, DOUBLE_VALUE);
       testSupportedConversion(FieldType.DOUBLE, FLOAT_STRING, (double) FLOAT_VALUE);
       testSupportedConversion(FieldType.DOUBLE, INT_STRING, (double) INT_VALUE);
+
+      // Integral literals beyond int range that a double still represents exactly. Epoch millis
+      // is the everyday case; 2^31 is the exact boundary where the old asInt() truncation kicked
+      // in, and 2^53 is the largest contiguous integral double.
+      testSupportedConversion(FieldType.DOUBLE, "1609459200000", 1609459200000.0d);
+      testSupportedConversion(FieldType.DOUBLE, "-1609459200000", -1609459200000.0d);
+      testSupportedConversion(FieldType.DOUBLE, "2147483648", 2147483648.0d);
+      testSupportedConversion(FieldType.DOUBLE, "9007199254740992", 9007199254740992.0d);
     }
 
     @Test
     public void testSupportedDatetimeConversions() throws Exception {
       testSupportedConversion(FieldType.DATETIME, quoted(DATETIME_STRING), DATETIME_VALUE);
+    }
+
+    @Test
+    public void testSupportedDatetimeWithSpaceConversions() throws Exception {
+      String datetimeWithSpace = DATETIME_STRING.replace('T', ' ');
+      testSupportedConversion(FieldType.DATETIME, quoted(datetimeWithSpace), DATETIME_VALUE);
     }
 
     private void testSupportedConversion(
@@ -648,6 +695,35 @@ public class RowJsonTest {
       testUnsupportedConversion(FieldType.DOUBLE, quoted(DOUBLE_STRING));
       testUnsupportedConversion(FieldType.DOUBLE, BOOLEAN_TRUE_STRING);
       testUnsupportedConversion(FieldType.DOUBLE, LONG_STRING); // too large to fit
+    }
+
+    // The three cases below get a method each on purpose. testUnsupportedConversion relies on the
+    // ExpectedException rule, which is satisfied by the first exception to leave the test method,
+    // so a second call in the same body never runs and the assertion would be silently dead.
+
+    @Test
+    public void testUnsupportedFloatConversionAtIntegerMaxValue() throws Exception {
+      // Integer.MAX_VALUE, and the guard against "fixing" this extractor with an int round-trip.
+      // (float) 2147483647 rounds up to 2147483648, and narrowing 2147483648 back to int
+      // saturates at Integer.MAX_VALUE, so the round-trip wrongly accepts it and stores
+      // 2147483648.0. INT_STRING in testUnsupportedFloatConversions is far smaller and does not
+      // exercise this -- and, being the fourth call in that method, never runs anyway.
+      testUnsupportedConversion(FieldType.FLOAT, "2147483647");
+    }
+
+    @Test
+    public void testUnsupportedDoubleConversionJustPastContiguousRange() throws Exception {
+      // 2^53 + 1, the first integer a double cannot represent.
+      testUnsupportedConversion(FieldType.DOUBLE, "9007199254740993");
+    }
+
+    @Test
+    public void testUnsupportedDoubleConversionAtLongMaxValue() throws Exception {
+      // Long.MAX_VALUE, and the guard against "fixing" this extractor by swapping asInt() for
+      // asLong(). (double) Long.MAX_VALUE rounds up to 2^63, and narrowing 2^63 back to long
+      // saturates at Long.MAX_VALUE, so a long round-trip wrongly accepts it and stores
+      // 9223372036854775808. LONG_STRING above is 2^63 - 2 and does not exercise this.
+      testUnsupportedConversion(FieldType.DOUBLE, "9223372036854775807");
     }
 
     private void testUnsupportedConversion(FieldType fieldType, String jsonFieldValue)

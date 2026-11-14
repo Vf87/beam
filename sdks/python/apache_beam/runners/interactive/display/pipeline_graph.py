@@ -25,20 +25,19 @@ This module is experimental. No backwards-compatibility guarantees.
 import collections
 import logging
 import threading
-from typing import DefaultDict
-from typing import Dict
 from typing import Iterator
-from typing import List
-from typing import Tuple
 from typing import Union
-
-import pydot
 
 import apache_beam as beam
 from apache_beam.portability.api import beam_runner_api_pb2
 from apache_beam.runners.interactive import interactive_environment as ie
 from apache_beam.runners.interactive import pipeline_instrument as inst
 from apache_beam.runners.interactive.display import pipeline_graph_renderer
+
+try:
+  import pydot
+except ImportError:
+  pass
 
 # pylint does not understand context
 # pylint:disable=dangerous-default-value
@@ -48,7 +47,7 @@ class PipelineGraph(object):
   """Creates a DOT representing the pipeline. Thread-safe. Runner agnostic."""
   def __init__(
       self,
-      pipeline,  # type: Union[beam_runner_api_pb2.Pipeline, beam.Pipeline]
+      pipeline: Union[beam_runner_api_pb2.Pipeline, beam.Pipeline],
       default_vertex_attrs={'shape': 'box'},
       default_edge_attrs=None,
       render_option=None):
@@ -71,7 +70,7 @@ class PipelineGraph(object):
           rendered. See display.pipeline_graph_renderer for available options.
     """
     self._lock = threading.Lock()
-    self._graph = None  # type: pydot.Dot
+    self._graph: pydot.Dot = None
     self._pipeline_instrument = None
     if isinstance(pipeline, beam.Pipeline):
       self._pipeline_instrument = inst.PipelineInstrument(
@@ -90,10 +89,10 @@ class PipelineGraph(object):
           (beam_runner_api_pb2.Pipeline, beam.Pipeline, type(pipeline)))
 
     # A dict from PCollection ID to a list of its consuming Transform IDs
-    self._consumers = collections.defaultdict(
-        list)  # type: DefaultDict[str, List[str]]
+    self._consumers: collections.defaultdict[
+        str, list[str]] = collections.defaultdict(list)
     # A dict from PCollection ID to its producing Transform ID
-    self._producers = {}  # type: Dict[str, str]
+    self._producers: dict[str, str] = {}
 
     for transform_id, transform_proto in self._top_level_transforms():
       for pcoll_id in transform_proto.inputs.values():
@@ -113,8 +112,7 @@ class PipelineGraph(object):
 
     self._renderer = pipeline_graph_renderer.get_renderer(render_option)
 
-  def get_dot(self):
-    # type: () -> str
+  def get_dot(self) -> str:
     return self._get_graph().to_string()
 
   def display_graph(self):
@@ -122,7 +120,7 @@ class PipelineGraph(object):
     rendered_graph = self._renderer.render_pipeline_graph(self)
     if ie.current_env().is_in_notebook:
       try:
-        from IPython.core import display
+        from IPython import display
         display.display(display.HTML(rendered_graph))
       except ImportError:  # Unlikely to happen when is_in_notebook.
         logging.warning(
@@ -130,9 +128,8 @@ class PipelineGraph(object):
             'environment is in a notebook. Cannot display the '
             'pipeline graph.')
 
-  def _top_level_transforms(self):
-    # type: () -> Iterator[Tuple[str, beam_runner_api_pb2.PTransform]]
-
+  def _top_level_transforms(
+      self) -> Iterator[tuple[str, beam_runner_api_pb2.PTransform]]:
     """Yields all top level PTransforms (subtransforms of the root PTransform).
 
     Yields: (str, PTransform proto) ID, proto pair of top level PTransforms.

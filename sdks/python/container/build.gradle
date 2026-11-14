@@ -18,50 +18,78 @@
 
 plugins { id 'org.apache.beam.module' }
 applyGoNature()
+applyPythonNature()
 
 description = "Apache Beam :: SDKs :: Python :: Container"
-
-// Disable gogradle's dependency resolution so it uses Go modules instead.
-installDependencies.enabled = false
-resolveBuildDependencies.enabled = false
-resolveTestDependencies.enabled = false
+int min_python_version=project.ext.minPythonVersion
+int max_python_version=project.ext.maxPythonVersion
 
 configurations {
   sdkSourceTarball
-  sdkHarnessLauncher
+  pythonHarnessLauncher
 }
 
 dependencies {
-  golang {
-    // TODO(herohde): use "./" prefix to prevent gogradle use base github path, for now.
-    // TODO(herohde): get the pkg subdirectory only, if possible. We spend mins pulling cmd/beamctl deps.
-    build name: './github.com/apache/beam/sdks/go', dir: project(':sdks:go').projectDir
-    test name: './github.com/apache/beam/sdks/go', dir: project(':sdks:go').projectDir
-  }
   sdkSourceTarball project(path: ":sdks:python", configuration: "distTarBall")
 }
 
-golang {
-  packagePath = 'github.com/apache/beam/sdks/v2/python/container'
-  goBuild {
-    // Build for linux and mac.
-    targetPlatform = ['linux-amd64', 'darwin-amd64']
-    outputLocation = './build/target/launcher/${GOOS}_${GOARCH}/boot'
+goBuild {
+  goTargets = '*.go' // only build the immediate directory.
+  outputLocation = './build/target/launcher/${GOOS}_${GOARCH}/boot'
+}
+
+tasks.register("buildAll") {
+  for(int ver=min_python_version; ver<=max_python_version; ++ver) {
+      dependsOn ':sdks:python:container:py3' + ver + ':docker'
   }
 }
 
-task buildAll {
-  dependsOn ':sdks:python:container:py36:docker'
-  dependsOn ':sdks:python:container:py37:docker'
-  dependsOn ':sdks:python:container:py38:docker'
+for(int i=min_python_version; i<=max_python_version; ++i) {
+  String min_version = "3" + min_python_version
+  String cur = "3" + i
+  String prev = "3" + (i-1)
+  tasks.register("push" + cur) {
+    if (cur != min_version) {
+      // Enforce ordering to allow the prune step to happen between runs.
+      // This will ensure we don't use up too much space (especially in CI environments)
+      if (!project.hasProperty("skip-python-3" + prev + "-images")) {
+        mustRunAfter(":sdks:python:container:push" + prev)
+      }
+    }
+    dependsOn ':sdks:python:container:py' + cur + ':docker'
+    // 3.14 does not have dependencies for ML yet.
+    if (project.hasProperty("include-ml") && cur != "314") {
+      dependsOn ':sdks:python:container:ml:push' + cur
+    }
+    if (project.hasProperty("include-distroless")) {
+      dependsOn ':sdks:python:container:distroless:push' + cur
+    }
+
+    doLast {
+      if (project.hasProperty("prune-images")) {
+        exec {
+          executable("docker")
+          args("system", "prune", "-a", "--force")
+        }
+      }
+    }
+  }
 }
 
-task pushAll {
-  dependsOn ':sdks:python:container:py36:dockerPush'
-  dependsOn ':sdks:python:container:py37:dockerPush'
-  dependsOn ':sdks:python:container:py38:dockerPush'
+tasks.register("pushAll") {
+  for(int ver=min_python_version; ver<=max_python_version; ++ver) {
+      if (!project.hasProperty("skip-python-3" + ver + "-images")) {
+        dependsOn ':sdks:python:container:push3' + ver
+      }
+  }
+}
+
+tasks.register("generatePythonRequirementsAll") {
+  for(int ver=min_python_version; ver<=max_python_version; ++ver) {
+      dependsOn ':sdks:python:container:py3' + ver + ':generatePythonRequirements'
+  }
 }
 
 artifacts {
-  sdkHarnessLauncher file: file('./build/target/launcher'), builtBy: goBuild
+  pythonHarnessLauncher file: file('./build/target/launcher'), builtBy: goBuild
 }

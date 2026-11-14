@@ -34,11 +34,11 @@ import org.apache.beam.sdk.coders.InstantCoder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.sdk.util.WindowedValue.WindowedValueCoder;
 import org.apache.beam.sdk.values.KV;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.primitives.Ints;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues.WindowedValueCoder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.primitives.Ints;
 
 /**
  * A sink that writes to a shuffle dataset.
@@ -46,8 +46,8 @@ import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.primitives.Ints;
  * @param <T> the type of the elements written to the sink
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class ShuffleSink<T> extends Sink<WindowedValue<T>> {
   enum ShuffleKind {
@@ -66,7 +66,6 @@ public class ShuffleSink<T> extends Sink<WindowedValue<T>> {
 
   final PipelineOptions options;
 
-  private final BatchModeExecutionContext executionContext;
   private final DataflowOperationContext operationContext;
   private ExecutionStateTracker tracker;
   private ExecutionState writeState;
@@ -102,7 +101,6 @@ public class ShuffleSink<T> extends Sink<WindowedValue<T>> {
     this.shuffleWriterConfig = shuffleWriterConfig;
     this.shuffleKind = shuffleKind;
     this.options = options;
-    this.executionContext = executionContext;
     this.operationContext = operationContext;
     this.writeState = operationContext.newExecutionState("write-shuffle");
     this.tracker = executionContext.getExecutionStateTracker();
@@ -196,7 +194,7 @@ public class ShuffleSink<T> extends Sink<WindowedValue<T>> {
     private long seqNum = 0;
     // How many bytes were written to a given shuffle session.
     private final Counter<Long, ?> perDatasetBytesCounter;
-    private final RandomAccessData chunk;
+    private RandomAccessData chunk;
     private boolean closed = false;
 
     ShuffleSinkWriter(
@@ -207,13 +205,15 @@ public class ShuffleSink<T> extends Sink<WindowedValue<T>> {
       this.writer = writer;
       this.perDatasetBytesCounter =
           counterFactory.longSum(CounterName.named("dax-shuffle-" + datasetId + "-written-bytes"));
-      // Initialize the chunk with the minimum size so we do not have to
-      // "grow" the internal byte[] up to the minimum chunk size.
-      this.chunk = new RandomAccessData(MIN_OUTPUT_CHUNK_SIZE);
     }
 
     @Override
-    public long add(WindowedValue<T> windowedElem) throws IOException {
+    public synchronized long add(WindowedValue<T> windowedElem) throws IOException {
+      if (this.chunk == null) {
+        // Initialize the chunk with the minimum size so we do not have to
+        // "grow" the internal byte[] up to the minimum chunk size.
+        this.chunk = new RandomAccessData(MIN_OUTPUT_CHUNK_SIZE);
+      }
       T elem = windowedElem.getValue();
       long bytes = 0;
       if (shardByKey) {
@@ -303,17 +303,24 @@ public class ShuffleSink<T> extends Sink<WindowedValue<T>> {
     }
 
     @Override
-    public void close() throws IOException {
+    public synchronized void close() throws IOException {
       try (Closeable trackedCloseState = tracker.enterState(writeState)) {
-        outputChunk();
+        if (chunk != null) {
+          outputChunk();
+        }
         writer.close();
       } finally {
+        if (writer instanceof ApplianceShuffleWriter) {
+          ((ApplianceShuffleWriter) writer).destroySynchronized();
+        }
+        chunk = null;
+        writer = null;
         closed = true;
       }
     }
 
     @Override
-    public void abort() throws IOException {
+    public synchronized void abort() throws IOException {
       if (!closed) {
         // ShuffleWriter extends AutoCloseable, so it may not be idempotent. Only close if it has
         // not already been closed.
@@ -330,9 +337,9 @@ public class ShuffleSink<T> extends Sink<WindowedValue<T>> {
       // Move forward enough bytes so we can prefix the size on after performing the write
       int initialChunkSize = chunk.size();
       chunk.resetTo(initialChunkSize + Ints.BYTES);
+
       coder.encode(value, chunk.asOutputStream(), Context.OUTER);
       int elementSize = chunk.size() - initialChunkSize - Ints.BYTES;
-
       byte[] internalBytes = chunk.array();
       internalBytes[initialChunkSize] = (byte) ((elementSize >>> 24) & 0xFF);
       internalBytes[initialChunkSize + 1] = (byte) ((elementSize >>> 16) & 0xFF);

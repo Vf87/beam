@@ -17,7 +17,7 @@
  */
 package org.apache.beam.runners.core;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
@@ -56,13 +56,16 @@ import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.util.IdentitySideInputWindowFn;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.CausedByDrain;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionView;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Before;
@@ -78,7 +81,7 @@ import org.mockito.MockitoAnnotations;
 /** Tests for {@link SimplePushbackSideInputDoFnRunner}. */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class SimplePushbackSideInputDoFnRunnerTest {
   @Mock StepContext mockStepContext;
@@ -114,7 +117,7 @@ public class SimplePushbackSideInputDoFnRunnerTest {
             .apply(Window.into(new IdentitySideInputWindowFn()))
             .apply(Sum.integersGlobally().asSingletonView());
 
-    underlying = new TestDoFnRunner<>(VarIntCoder.of());
+    underlying = new TestDoFnRunner<>();
 
     DoFn<KV<String, Integer>, Integer> fn = new MyDoFn();
 
@@ -181,7 +184,7 @@ public class SimplePushbackSideInputDoFnRunnerTest {
         createRunner(ImmutableList.of(singletonView));
 
     WindowedValue<Integer> oneWindow =
-        WindowedValue.of(
+        WindowedValues.of(
             2,
             new Instant(-2),
             new IntervalWindow(new Instant(-500L), new Instant(0L)),
@@ -201,7 +204,7 @@ public class SimplePushbackSideInputDoFnRunnerTest {
         createRunner(ImmutableList.of(singletonView));
 
     WindowedValue<Integer> multiWindow =
-        WindowedValue.of(
+        WindowedValues.of(
             2,
             new Instant(-2),
             ImmutableList.of(
@@ -231,7 +234,7 @@ public class SimplePushbackSideInputDoFnRunnerTest {
     IntervalWindow bigWindow =
         new IntervalWindow(BoundedWindow.TIMESTAMP_MIN_VALUE, new Instant(250L));
     WindowedValue<Integer> multiWindow =
-        WindowedValue.of(
+        WindowedValues.of(
             2,
             new Instant(-2),
             ImmutableList.of(littleWindow, bigWindow, GlobalWindow.INSTANCE),
@@ -240,13 +243,14 @@ public class SimplePushbackSideInputDoFnRunnerTest {
         runner.processElementInReadyWindows(multiWindow);
     assertThat(
         multiWindowPushback,
-        containsInAnyOrder(WindowedValue.timestampedValueInGlobalWindow(2, new Instant(-2L))));
+        containsInAnyOrder(WindowedValues.timestampedValueInGlobalWindow(2, new Instant(-2L))));
     assertThat(
         underlying.inputElems,
         containsInAnyOrder(
-            WindowedValue.of(
+            WindowedValues.of(
                 2, new Instant(-2), ImmutableList.of(littleWindow), PaneInfo.NO_FIRING),
-            WindowedValue.of(2, new Instant(-2), ImmutableList.of(bigWindow), PaneInfo.NO_FIRING)));
+            WindowedValues.of(
+                2, new Instant(-2), ImmutableList.of(bigWindow), PaneInfo.NO_FIRING)));
   }
 
   @Test
@@ -258,7 +262,7 @@ public class SimplePushbackSideInputDoFnRunnerTest {
     SimplePushbackSideInputDoFnRunner<Integer, Integer> runner = createRunner(views);
 
     WindowedValue<Integer> multiWindow =
-        WindowedValue.of(
+        WindowedValues.of(
             2,
             new Instant(-2),
             ImmutableList.of(
@@ -279,7 +283,7 @@ public class SimplePushbackSideInputDoFnRunnerTest {
     SimplePushbackSideInputDoFnRunner<Integer, Integer> runner = createRunner(ImmutableList.of());
 
     WindowedValue<Integer> multiWindow =
-        WindowedValue.of(
+        WindowedValues.of(
             2,
             new Instant(-2),
             ImmutableList.of(
@@ -310,9 +314,10 @@ public class SimplePushbackSideInputDoFnRunnerTest {
         "",
         null,
         window,
-        new Instant(timestamp),
-        new Instant(timestamp),
-        TimeDomain.EVENT_TIME);
+        timestamp,
+        timestamp,
+        TimeDomain.EVENT_TIME,
+        CausedByDrain.CAUSED_BY_DRAIN);
 
     assertThat(
         underlying.firedTimers,
@@ -322,19 +327,15 @@ public class SimplePushbackSideInputDoFnRunnerTest {
                 StateNamespaces.window(IntervalWindow.getCoder(), window),
                 timestamp,
                 timestamp,
-                TimeDomain.EVENT_TIME)));
+                TimeDomain.EVENT_TIME,
+                CausedByDrain.CAUSED_BY_DRAIN)));
   }
 
   private static class TestDoFnRunner<InputT, OutputT> implements DoFnRunner<InputT, OutputT> {
-    private final Coder<InputT> inputCoder;
     List<WindowedValue<InputT>> inputElems;
     List<TimerData> firedTimers;
     private boolean started = false;
     private boolean finished = false;
-
-    TestDoFnRunner(Coder<InputT> inputCoder) {
-      this.inputCoder = inputCoder;
-    }
 
     @Override
     public DoFn<InputT, OutputT> getFn() {
@@ -361,7 +362,8 @@ public class SimplePushbackSideInputDoFnRunnerTest {
         BoundedWindow window,
         Instant timestamp,
         Instant outputTimestamp,
-        TimeDomain timeDomain) {
+        TimeDomain timeDomain,
+        CausedByDrain causedByDrain) {
       firedTimers.add(
           TimerData.of(
               timerId,
@@ -369,13 +371,17 @@ public class SimplePushbackSideInputDoFnRunnerTest {
               StateNamespaces.window(IntervalWindow.getCoder(), (IntervalWindow) window),
               timestamp,
               outputTimestamp,
-              timeDomain));
+              timeDomain,
+              causedByDrain));
     }
 
     @Override
     public void finishBundle() {
       finished = true;
     }
+
+    @Override
+    public <KeyT extends @Nullable Object> void finishKey(KeyT key) {}
 
     @Override
     public <KeyT> void onWindowExpiration(BoundedWindow window, Instant timestamp, KeyT key) {}
@@ -396,8 +402,8 @@ public class SimplePushbackSideInputDoFnRunnerTest {
     MetricsContainerImpl container = new MetricsContainerImpl("any");
     MetricsEnvironment.setCurrentContainer(container);
 
-    timerInternals.advanceInputWatermark(new Instant(BoundedWindow.TIMESTAMP_MAX_VALUE));
-    timerInternals.advanceOutputWatermark(new Instant(BoundedWindow.TIMESTAMP_MAX_VALUE));
+    timerInternals.advanceInputWatermark(BoundedWindow.TIMESTAMP_MAX_VALUE);
+    timerInternals.advanceOutputWatermark(BoundedWindow.TIMESTAMP_MAX_VALUE);
 
     PushbackSideInputDoFnRunner runner =
         createRunner(statefulRunner, ImmutableList.of(singletonView));
@@ -408,7 +414,7 @@ public class SimplePushbackSideInputDoFnRunnerTest {
         .thenReturn(true);
 
     WindowedValue<Integer> multiWindow =
-        WindowedValue.of(
+        WindowedValues.of(
             1,
             new Instant(0),
             ImmutableList.of(new IntervalWindow(new Instant(0), new Instant(0L + WINDOW_SIZE))),
@@ -445,18 +451,24 @@ public class SimplePushbackSideInputDoFnRunnerTest {
 
     // first element, key is hello, WINDOW_1
     runner.processElementInReadyWindows(
-        WindowedValue.of(KV.of("hello", 1), elementTime, WINDOW_1, PaneInfo.NO_FIRING));
+        WindowedValues.of(KV.of("hello", 1), elementTime, WINDOW_1, PaneInfo.NO_FIRING));
 
     assertEquals(1, (int) stateInternals.state(windowNamespace(WINDOW_1), stateTag).read());
 
     // second element, key is hello, WINDOW_2
     runner.processElementInReadyWindows(
-        WindowedValue.of(
-            KV.of("hello", 1), elementTime.plus(WINDOW_SIZE), WINDOW_2, PaneInfo.NO_FIRING));
+        WindowedValues.of(
+            KV.of("hello", 1),
+            elementTime.plus(Duration.millis(WINDOW_SIZE)),
+            WINDOW_2,
+            PaneInfo.NO_FIRING));
 
     runner.processElementInReadyWindows(
-        WindowedValue.of(
-            KV.of("hello", 1), elementTime.plus(WINDOW_SIZE), WINDOW_2, PaneInfo.NO_FIRING));
+        WindowedValues.of(
+            KV.of("hello", 1),
+            elementTime.plus(Duration.millis(WINDOW_SIZE)),
+            WINDOW_2,
+            PaneInfo.NO_FIRING));
 
     assertEquals(2, (int) stateInternals.state(windowNamespace(WINDOW_2), stateTag).read());
 
@@ -467,9 +479,9 @@ public class SimplePushbackSideInputDoFnRunnerTest {
         timerInternals,
         WINDOW_1
             .maxTimestamp()
-            .plus(ALLOWED_LATENESS)
-            .plus(StatefulDoFnRunner.TimeInternalsCleanupTimer.GC_DELAY_MS)
-            .plus(1), // so the watermark is past the GC horizon, not on it
+            .plus(Duration.millis(ALLOWED_LATENESS))
+            .plus(Duration.millis(StatefulDoFnRunner.TimeInternalsCleanupTimer.GC_DELAY_MS))
+            .plus(Duration.millis(1)), // so the watermark is past the GC horizon, not on it
         runner);
 
     assertTrue(
@@ -483,9 +495,9 @@ public class SimplePushbackSideInputDoFnRunnerTest {
         timerInternals,
         WINDOW_2
             .maxTimestamp()
-            .plus(ALLOWED_LATENESS)
-            .plus(StatefulDoFnRunner.TimeInternalsCleanupTimer.GC_DELAY_MS)
-            .plus(1), // so the watermark is past the GC horizon, not on it
+            .plus(Duration.millis(ALLOWED_LATENESS))
+            .plus(Duration.millis(StatefulDoFnRunner.TimeInternalsCleanupTimer.GC_DELAY_MS))
+            .plus(Duration.millis(1)), // so the watermark is past the GC horizon, not on it
         runner);
 
     assertTrue(
@@ -511,7 +523,8 @@ public class SimplePushbackSideInputDoFnRunnerTest {
           window,
           timer.getTimestamp(),
           timer.getOutputTimestamp(),
-          timer.getDomain());
+          timer.getDomain(),
+          timer.causedByDrain());
     }
   }
 
@@ -527,7 +540,8 @@ public class SimplePushbackSideInputDoFnRunnerTest {
     public final StateSpec<ValueState<Integer>> intState = StateSpecs.value(VarIntCoder.of());
 
     @ProcessElement
-    public void processElement(ProcessContext c, @StateId(stateId) ValueState<Integer> state) {
+    public void processElement(
+        @SuppressWarnings("unused") ProcessContext c, @StateId(stateId) ValueState<Integer> state) {
       Integer currentValue = MoreObjects.firstNonNull(state.read(), 0);
       state.write(currentValue + 1);
     }

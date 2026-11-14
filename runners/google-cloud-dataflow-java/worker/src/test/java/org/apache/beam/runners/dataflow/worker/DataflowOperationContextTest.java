@@ -49,8 +49,8 @@ import org.apache.beam.runners.dataflow.worker.profiler.ScopedProfiler;
 import org.apache.beam.runners.dataflow.worker.profiler.ScopedProfiler.ProfileScope;
 import org.apache.beam.sdk.metrics.MetricsContainer;
 import org.apache.beam.sdk.testing.RestoreSystemProperties;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Joiner;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.hamcrest.Matchers;
 import org.joda.time.Duration;
@@ -80,8 +80,6 @@ public class DataflowOperationContextTest {
     @Mock private MetricsContainer metricsContainer;
 
     private DataflowExecutionStateRegistry stateRegistry = new BatchModeExecutionStateRegistry();
-
-    @Mock private ScopedProfiler scopedProfiler;
 
     @Mock private ProfileScope emptyScope;
     @Mock private ProfileScope profileScope;
@@ -307,11 +305,13 @@ public class DataflowOperationContextTest {
 
       String infoLines =
           Joiner.on("\n").join(Iterables.filter(lines, line -> line.contains("\"INFO\"")));
+      // Match on the thread name rather than the full Thread.toString() prefix: JDK 21+ inserts
+      // the thread id (Thread[#51,backgroundThread,...] vs Thread[backgroundThread,...]).
       if (hasFullThreadDump) {
         assertThat(
             infoLines,
             Matchers.allOf(
-                Matchers.containsString("Thread[backgroundThread,"),
+                Matchers.containsString("backgroundThread,"),
                 Matchers.containsString(
                     "org.apache.beam.runners.dataflow.worker.DataflowOperationContext"),
                 Matchers.not(Matchers.containsString(SimpleDoFnRunner.class.getName()))));
@@ -320,7 +320,7 @@ public class DataflowOperationContextTest {
             infoLines,
             Matchers.not(
                 Matchers.anyOf(
-                    Matchers.containsString("Thread[backgroundThread,"),
+                    Matchers.containsString("backgroundThread,"),
                     Matchers.containsString(
                         "org.apache.beam.runners.dataflow.worker.DataflowOperationContext"))));
       }

@@ -19,6 +19,7 @@ package org.apache.beam.sdk.schemas.utils;
 
 import static org.apache.beam.sdk.schemas.utils.TestJavaBeans.BEAN_WITH_BOXED_FIELDS_SCHEMA;
 import static org.apache.beam.sdk.schemas.utils.TestJavaBeans.BEAN_WITH_BYTE_ARRAY_SCHEMA;
+import static org.apache.beam.sdk.schemas.utils.TestJavaBeans.JAVA_TIME_BEAN_SCHEMA;
 import static org.apache.beam.sdk.schemas.utils.TestJavaBeans.NESTED_ARRAY_BEAN_SCHEMA;
 import static org.apache.beam.sdk.schemas.utils.TestJavaBeans.NESTED_BEAN_SCHEMA;
 import static org.apache.beam.sdk.schemas.utils.TestJavaBeans.NESTED_COLLECTION_BEAN_SCHEMA;
@@ -44,6 +45,7 @@ import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.utils.ByteBuddyUtils.DefaultTypeConversionsFactory;
 import org.apache.beam.sdk.schemas.utils.TestJavaBeans.BeanWithBoxedFields;
 import org.apache.beam.sdk.schemas.utils.TestJavaBeans.BeanWithByteArray;
+import org.apache.beam.sdk.schemas.utils.TestJavaBeans.JavaTimeBean;
 import org.apache.beam.sdk.schemas.utils.TestJavaBeans.NestedArrayBean;
 import org.apache.beam.sdk.schemas.utils.TestJavaBeans.NestedBean;
 import org.apache.beam.sdk.schemas.utils.TestJavaBeans.NestedCollectionBean;
@@ -52,18 +54,21 @@ import org.apache.beam.sdk.schemas.utils.TestJavaBeans.NullableBean;
 import org.apache.beam.sdk.schemas.utils.TestJavaBeans.PrimitiveArrayBean;
 import org.apache.beam.sdk.schemas.utils.TestJavaBeans.PrimitiveMapBean;
 import org.apache.beam.sdk.schemas.utils.TestJavaBeans.SimpleBean;
+import org.apache.beam.sdk.values.TypeDescriptor;
+import org.checkerframework.checker.nullness.qual.NonNull;
 import org.joda.time.DateTime;
 import org.junit.Test;
 
 /** Tests for the {@link JavaBeanUtils} class. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class JavaBeanUtilsTest {
   @Test
   public void testNullable() {
     Schema schema =
-        JavaBeanUtils.schemaFromJavaBeanClass(NullableBean.class, GetterTypeSupplier.INSTANCE);
+        JavaBeanUtils.schemaFromJavaBeanClass(
+            new TypeDescriptor<NullableBean>() {}, GetterTypeSupplier.INSTANCE);
     assertTrue(schema.getField("str").getType().getNullable());
     assertFalse(schema.getField("anInt").getType().getNullable());
   }
@@ -71,14 +76,24 @@ public class JavaBeanUtilsTest {
   @Test
   public void testSimpleBean() {
     Schema schema =
-        JavaBeanUtils.schemaFromJavaBeanClass(SimpleBean.class, GetterTypeSupplier.INSTANCE);
+        JavaBeanUtils.schemaFromJavaBeanClass(
+            new TypeDescriptor<SimpleBean>() {}, GetterTypeSupplier.INSTANCE);
     SchemaTestUtils.assertSchemaEquivalent(SIMPLE_BEAN_SCHEMA, schema);
+  }
+
+  @Test
+  public void testJavaTimeBean() {
+    Schema schema =
+        JavaBeanUtils.schemaFromJavaBeanClass(
+            new TypeDescriptor<JavaTimeBean>() {}, GetterTypeSupplier.INSTANCE);
+    SchemaTestUtils.assertSchemaEquivalent(JAVA_TIME_BEAN_SCHEMA, schema);
   }
 
   @Test
   public void testNestedBean() {
     Schema schema =
-        JavaBeanUtils.schemaFromJavaBeanClass(NestedBean.class, GetterTypeSupplier.INSTANCE);
+        JavaBeanUtils.schemaFromJavaBeanClass(
+            new TypeDescriptor<NestedBean>() {}, GetterTypeSupplier.INSTANCE);
     SchemaTestUtils.assertSchemaEquivalent(NESTED_BEAN_SCHEMA, schema);
   }
 
@@ -86,14 +101,15 @@ public class JavaBeanUtilsTest {
   public void testPrimitiveArray() {
     Schema schema =
         JavaBeanUtils.schemaFromJavaBeanClass(
-            PrimitiveArrayBean.class, GetterTypeSupplier.INSTANCE);
+            new TypeDescriptor<PrimitiveArrayBean>() {}, GetterTypeSupplier.INSTANCE);
     SchemaTestUtils.assertSchemaEquivalent(PRIMITIVE_ARRAY_BEAN_SCHEMA, schema);
   }
 
   @Test
   public void testNestedArray() {
     Schema schema =
-        JavaBeanUtils.schemaFromJavaBeanClass(NestedArrayBean.class, GetterTypeSupplier.INSTANCE);
+        JavaBeanUtils.schemaFromJavaBeanClass(
+            new TypeDescriptor<NestedArrayBean>() {}, GetterTypeSupplier.INSTANCE);
     SchemaTestUtils.assertSchemaEquivalent(NESTED_ARRAY_BEAN_SCHEMA, schema);
   }
 
@@ -101,21 +117,23 @@ public class JavaBeanUtilsTest {
   public void testNestedCollection() {
     Schema schema =
         JavaBeanUtils.schemaFromJavaBeanClass(
-            NestedCollectionBean.class, GetterTypeSupplier.INSTANCE);
+            new TypeDescriptor<NestedCollectionBean>() {}, GetterTypeSupplier.INSTANCE);
     SchemaTestUtils.assertSchemaEquivalent(NESTED_COLLECTION_BEAN_SCHEMA, schema);
   }
 
   @Test
   public void testPrimitiveMap() {
     Schema schema =
-        JavaBeanUtils.schemaFromJavaBeanClass(PrimitiveMapBean.class, GetterTypeSupplier.INSTANCE);
+        JavaBeanUtils.schemaFromJavaBeanClass(
+            new TypeDescriptor<PrimitiveMapBean>() {}, GetterTypeSupplier.INSTANCE);
     SchemaTestUtils.assertSchemaEquivalent(PRIMITIVE_MAP_BEAN_SCHEMA, schema);
   }
 
   @Test
   public void testNestedMap() {
     Schema schema =
-        JavaBeanUtils.schemaFromJavaBeanClass(NestedMapBean.class, GetterTypeSupplier.INSTANCE);
+        JavaBeanUtils.schemaFromJavaBeanClass(
+            new TypeDescriptor<NestedMapBean>() {}, GetterTypeSupplier.INSTANCE);
     SchemaTestUtils.assertSchemaEquivalent(NESTED_MAP_BEAN_SCHEMA, schema);
   }
 
@@ -135,11 +153,11 @@ public class JavaBeanUtilsTest {
     simpleBean.setBigDecimal(new BigDecimal(42));
     simpleBean.setStringBuilder(new StringBuilder("stringBuilder"));
 
-    List<FieldValueGetter> getters =
+    List<FieldValueGetter<@NonNull SimpleBean, Object>> getters =
         JavaBeanUtils.getGetters(
-            SimpleBean.class,
+            new TypeDescriptor<SimpleBean>() {},
             SIMPLE_BEAN_SCHEMA,
-            new JavaBeanSchema.GetterTypeSupplier(),
+            new GetterTypeSupplier(),
             new DefaultTypeConversionsFactory());
     assertEquals(12, getters.size());
     assertEquals("str", getters.get(0).name());
@@ -169,7 +187,7 @@ public class JavaBeanUtilsTest {
     SimpleBean simpleBean = new SimpleBean();
     List<FieldValueSetter> setters =
         JavaBeanUtils.getSetters(
-            SimpleBean.class,
+            new TypeDescriptor<SimpleBean>() {},
             SIMPLE_BEAN_SCHEMA,
             new SetterTypeSupplier(),
             new DefaultTypeConversionsFactory());
@@ -213,9 +231,9 @@ public class JavaBeanUtilsTest {
     bean.setaLong(44L);
     bean.setaBoolean(true);
 
-    List<FieldValueGetter> getters =
+    List<FieldValueGetter<@NonNull BeanWithBoxedFields, Object>> getters =
         JavaBeanUtils.getGetters(
-            BeanWithBoxedFields.class,
+            new TypeDescriptor<BeanWithBoxedFields>() {},
             BEAN_WITH_BOXED_FIELDS_SCHEMA,
             new JavaBeanSchema.GetterTypeSupplier(),
             new DefaultTypeConversionsFactory());
@@ -231,7 +249,7 @@ public class JavaBeanUtilsTest {
     BeanWithBoxedFields bean = new BeanWithBoxedFields();
     List<FieldValueSetter> setters =
         JavaBeanUtils.getSetters(
-            BeanWithBoxedFields.class,
+            new TypeDescriptor<BeanWithBoxedFields>() {},
             BEAN_WITH_BOXED_FIELDS_SCHEMA,
             new SetterTypeSupplier(),
             new DefaultTypeConversionsFactory());
@@ -254,7 +272,7 @@ public class JavaBeanUtilsTest {
     BeanWithByteArray bean = new BeanWithByteArray();
     List<FieldValueSetter> setters =
         JavaBeanUtils.getSetters(
-            BeanWithByteArray.class,
+            new TypeDescriptor<BeanWithByteArray>() {},
             BEAN_WITH_BYTE_ARRAY_SCHEMA,
             new SetterTypeSupplier(),
             new DefaultTypeConversionsFactory());

@@ -19,13 +19,15 @@
 package org.apache.beam.gradle
 
 import org.gradle.api.Project
-
 class Repositories {
 
   static void register(Project project) {
+    def mirrorUrl = project.findProperty("mavenCentralMirrorUrl")
+    boolean isCi = System.getenv("GITHUB_ACTIONS") != null || System.getenv("JENKINS_HOME") != null
+    def useMirror = isCi && mirrorUrl
 
     project.repositories {
-      maven { url project.offlineRepositoryRoot }
+      maven { url project.rootProject.file(project.offlineRepositoryRoot) }
 
       // To run gradle in offline mode, one must first invoke
       // 'updateOfflineRepository' to create an offline repo
@@ -36,40 +38,35 @@ class Repositories {
         return
       }
 
-      mavenCentral()
-      mavenLocal()
-      jcenter()
-
-      // For pentaho dependencies.
-      maven {
-        url "https://public.nexus.pentaho.org/repository/proxy-public-3rd-party-release"
-        content { includeGroup "org.pentaho" }
+      if (!useMirror) {
+        mavenCentral()
+      } else {
+        maven { url mirrorUrl }
       }
-
-      // Release staging repository
-      maven { url "https://oss.sonatype.org/content/repositories/staging/" }
-
-      // Apache nightly snapshots
-      maven { url "https://repository.apache.org/snapshots" }
-
-      // Apache release snapshots
-      maven { url "https://repository.apache.org/content/repositories/releases" }
+      mavenLocal()
 
       // For Confluent Kafka dependencies
       maven {
         url "https://packages.confluent.io/maven/"
         content { includeGroup "io.confluent" }
       }
-    }
 
-    // plugin to support repository authentication via ~/.m2/settings.xml
-    // https://github.com/mark-vieira/gradle-maven-settings-plugin/
-    project.apply plugin: 'net.linguica.maven-settings'
+      // Apache nightly snapshots
+      maven {
+        url "https://repository.apache.org/snapshots"
+        mavenContent {
+          snapshotsOnly()
+        }
+      }
+
+      // Apache release snapshots
+      maven { url "https://repository.apache.org/content/repositories/releases" }
+    }
 
     // Apply a plugin which provides the 'updateOfflineRepository' task that creates an offline
     // repository. This offline repository satisfies all Gradle build dependencies and Java
     // project dependencies. The offline repository is placed within $rootDir/offline-repo
-    // but can be overridden by specifying '-PofflineRepositoryRoot=/path/to/repo'.
+    // but can be overridden by specifying '-Pareas/offline-repo'.
     // Note that parallel build must be disabled when executing 'updateOfflineRepository'
     // by specifying '--no-parallel', see
     // https://github.com/mdietrichstein/gradle-offline-dependencies-plugin/issues/3
@@ -77,13 +74,15 @@ class Repositories {
     project.offlineDependencies {
       repositories {
         mavenLocal()
-        mavenCentral()
-        jcenter()
+        if (!useMirror) {
+          mavenCentral()
+        } else {
+          maven { url mirrorUrl }
+        }
         maven { url "https://plugins.gradle.org/m2/" }
         maven { url "https://repo.spring.io/plugins-release" }
-        maven { url "https://public.nexus.pentaho.org/repository/proxy-public-3rd-party-release" }
         maven { url "https://packages.confluent.io/maven/" }
-        maven { url project.offlineRepositoryRoot }
+        maven { url project.rootProject.file(project.offlineRepositoryRoot) }
       }
       includeSources = false
       includeJavadocs = false
@@ -91,4 +90,3 @@ class Repositories {
     }
   }
 }
-

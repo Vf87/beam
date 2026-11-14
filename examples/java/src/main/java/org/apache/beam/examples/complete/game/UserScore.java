@@ -23,8 +23,8 @@ import java.util.Objects;
 import org.apache.avro.reflect.Nullable;
 import org.apache.beam.examples.complete.game.utils.WriteToText;
 import org.apache.beam.sdk.Pipeline;
-import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.coders.DefaultCoder;
+import org.apache.beam.sdk.extensions.avro.coders.AvroCoder;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Metrics;
@@ -34,6 +34,8 @@ import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.Validation;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.DoFn.Element;
+import org.apache.beam.sdk.transforms.DoFn.OutputReceiver;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -71,7 +73,7 @@ import org.slf4j.LoggerFactory;
  * data.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class UserScore {
 
@@ -121,7 +123,7 @@ public class UserScore {
       if (this == o) {
         return true;
       }
-      if (o == null || o.getClass() != this.getClass()) {
+      if (!(o instanceof GameActionInfo)) {
         return false;
       }
 
@@ -161,18 +163,18 @@ public class UserScore {
     private final Counter numParseErrors = Metrics.counter("main", "ParseErrors");
 
     @ProcessElement
-    public void processElement(ProcessContext c) {
-      String[] components = c.element().split(",", -1);
+    public void processElement(@Element String element, OutputReceiver<GameActionInfo> receiver) {
+      String[] components = element.split(",", -1);
       try {
         String user = components[0].trim();
         String team = components[1].trim();
         Integer score = Integer.parseInt(components[2].trim());
         Long timestamp = Long.parseLong(components[3].trim());
         GameActionInfo gInfo = new GameActionInfo(user, team, score, timestamp);
-        c.output(gInfo);
+        receiver.output(gInfo);
       } catch (ArrayIndexOutOfBoundsException | NumberFormatException e) {
         numParseErrors.inc();
-        LOG.info("Parse error on " + c.element() + ", " + e.getMessage());
+        LOG.info("Parse error on {}", element, e);
       }
     }
   }
@@ -202,6 +204,7 @@ public class UserScore {
           .apply(Sum.integersPerKey());
     }
   }
+
   // [END DocInclude_USExtractXform]
 
   /** Options supported by {@link UserScore}. */
@@ -212,7 +215,7 @@ public class UserScore {
     day's worth (roughly) of data.
 
     Note: You may want to use a small sample dataset to test it locally/quickly : gs://apache-beam-samples/game/small/gaming_data.csv
-    You can also download it via the command line gsutil cp gs://apache-beam-samples/game/small/gaming_data.csv ./destination_folder/gaming_data.csv */
+    You can also download it via the command line gcloud storage cp gs://apache-beam-samples/game/small/gaming_data.csv ./destination_folder/gaming_data.csv */
     @Default.String("gs://apache-beam-samples/game/gaming_data*.csv")
     String getInput();
 
@@ -232,8 +235,8 @@ public class UserScore {
    */
   protected static Map<String, WriteToText.FieldFn<KV<String, Integer>>> configureOutput() {
     Map<String, WriteToText.FieldFn<KV<String, Integer>>> config = new HashMap<>();
-    config.put("user", (c, w) -> c.element().getKey());
-    config.put("total_score", (c, w) -> c.element().getValue());
+    config.put("user", (e, w, t, p) -> e.getKey());
+    config.put("total_score", (e, w, t, p) -> e.getValue());
     return config;
   }
 

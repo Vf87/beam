@@ -28,12 +28,15 @@ import javax.xml.bind.JAXBContext;
 import javax.xml.bind.JAXBException;
 import javax.xml.bind.Marshaller;
 import javax.xml.bind.Unmarshaller;
+import javax.xml.stream.XMLInputFactory;
+import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.XMLStreamReader;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.CustomCoder;
 import org.apache.beam.sdk.util.EmptyOnDeserializationThreadLocal;
 import org.apache.beam.sdk.util.VarInt;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.ByteStreams;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.ByteStreams;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -43,12 +46,13 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * @param <T> type of JAXB annotated objects that will be serialized.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class JAXBCoder<T> extends CustomCoder<T> {
 
   private final Class<T> jaxbClass;
   private transient volatile JAXBContext jaxbContext;
+  private transient volatile XMLInputFactory xmlInputFactory;
   private final EmptyOnDeserializationThreadLocal<Marshaller> jaxbMarshaller;
   private final EmptyOnDeserializationThreadLocal<Unmarshaller> jaxbUnmarshaller;
 
@@ -130,10 +134,15 @@ public class JAXBCoder<T> extends CustomCoder<T> {
         long limit = VarInt.decodeLong(inStream);
         inStream = ByteStreams.limit(inStream, limit);
       }
+
+      XMLInputFactory factory = getXMLInputFactory();
+      XMLStreamReader xmlStreamReader =
+          factory.createXMLStreamReader(new CloseIgnoringInputStream(inStream));
+
       @SuppressWarnings("unchecked")
-      T obj = (T) jaxbUnmarshaller.get().unmarshal(new CloseIgnoringInputStream(inStream));
+      T obj = (T) jaxbUnmarshaller.get().unmarshal(xmlStreamReader);
       return obj;
-    } catch (JAXBException e) {
+    } catch (JAXBException | XMLStreamException e) {
       throw new CoderException(e);
     }
   }
@@ -147,6 +156,21 @@ public class JAXBCoder<T> extends CustomCoder<T> {
       }
     }
     return jaxbContext;
+  }
+
+  private XMLInputFactory getXMLInputFactory() {
+    if (xmlInputFactory == null) {
+      synchronized (this) {
+        if (xmlInputFactory == null) {
+          XMLInputFactory factory = XMLInputFactory.newInstance();
+
+          factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false);
+          factory.setProperty(XMLInputFactory.SUPPORT_DTD, false);
+          xmlInputFactory = factory;
+        }
+      }
+    }
+    return xmlInputFactory;
   }
 
   @Override

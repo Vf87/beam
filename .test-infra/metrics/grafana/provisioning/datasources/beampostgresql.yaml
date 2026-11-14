@@ -25,11 +25,12 @@ datasources:
     type: postgres
     orgId: 1
     url: ${PSQL_DB_HOST}:${PSQL_DB_PORT}
+    uid: beampsql
     secureJsonData:
       password: ${PSQL_DB_DBPWD}
     user: ${PSQL_DB_DBUSERNAME}
-    database: ${PSQL_DB_DBNAME}
     jsonData:
+      database: ${PSQL_DB_DBNAME}
       sslmode: disable
     editable: false
 

@@ -17,9 +17,9 @@
  */
 package org.apache.beam.runners.fnexecution.control;
 
-import static org.apache.beam.runners.core.construction.SyntheticComponents.uniqueId;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.sdk.util.construction.SyntheticComponents.uniqueId;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import com.google.auto.value.AutoValue;
 import java.io.IOException;
@@ -37,14 +37,6 @@ import org.apache.beam.model.pipeline.v1.RunnerApi.Components;
 import org.apache.beam.model.pipeline.v1.RunnerApi.ExecutableStagePayload.WireCoderSetting;
 import org.apache.beam.model.pipeline.v1.RunnerApi.PCollection;
 import org.apache.beam.model.pipeline.v1.RunnerApi.PTransform;
-import org.apache.beam.runners.core.construction.RehydratedComponents;
-import org.apache.beam.runners.core.construction.Timer;
-import org.apache.beam.runners.core.construction.graph.ExecutableStage;
-import org.apache.beam.runners.core.construction.graph.PipelineNode.PCollectionNode;
-import org.apache.beam.runners.core.construction.graph.PipelineNode.PTransformNode;
-import org.apache.beam.runners.core.construction.graph.SideInputReference;
-import org.apache.beam.runners.core.construction.graph.TimerReference;
-import org.apache.beam.runners.core.construction.graph.UserStateReference;
 import org.apache.beam.runners.fnexecution.data.RemoteInputDestination;
 import org.apache.beam.runners.fnexecution.wire.ByteStringCoder;
 import org.apache.beam.runners.fnexecution.wire.LengthPrefixUnknownCoders;
@@ -55,20 +47,28 @@ import org.apache.beam.sdk.fn.data.RemoteGrpcPortWrite;
 import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.state.TimerSpecs;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.sdk.util.WindowedValue.FullWindowedValueCoder;
+import org.apache.beam.sdk.util.construction.RehydratedComponents;
+import org.apache.beam.sdk.util.construction.Timer;
+import org.apache.beam.sdk.util.construction.graph.ExecutableStage;
+import org.apache.beam.sdk.util.construction.graph.PipelineNode.PCollectionNode;
+import org.apache.beam.sdk.util.construction.graph.PipelineNode.PTransformNode;
+import org.apache.beam.sdk.util.construction.graph.SideInputReference;
+import org.apache.beam.sdk.util.construction.graph.TimerReference;
+import org.apache.beam.sdk.util.construction.graph.UserStateReference;
 import org.apache.beam.sdk.values.KV;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.InvalidProtocolBufferException;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableTable;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues.FullWindowedValueCoder;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableTable;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Utility methods for creating {@link ProcessBundleDescriptor} instances. */
 // TODO: Rename to ExecutableStages?
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class ProcessBundleDescriptors {
 
@@ -382,17 +382,13 @@ public class ProcessBundleDescriptors {
           timerCoder instanceof Timer.Coder, "Expected a timer coder but received %s.", timerCoder);
 
       RunnerApi.FunctionSpec.Builder updatedSpec =
-          components
-              .getTransformsOrThrow(timerReference.transform().getId())
-              .toBuilder()
+          components.getTransformsOrThrow(timerReference.transform().getId()).toBuilder()
               .getSpecBuilder();
       RunnerApi.ParDoPayload.Builder updatedPayload =
           RunnerApi.ParDoPayload.parseFrom(updatedSpec.getPayload()).toBuilder();
       updatedPayload.putTimerFamilySpecs(
           timerReference.localName(),
-          updatedPayload
-              .getTimerFamilySpecsOrThrow(timerReference.localName())
-              .toBuilder()
+          updatedPayload.getTimerFamilySpecsOrThrow(timerReference.localName()).toBuilder()
               .setTimerFamilyCoderId(sdkCoderId)
               .build());
       updatedSpec.setPayload(updatedPayload.build().toByteString());
@@ -400,9 +396,7 @@ public class ProcessBundleDescriptors {
           timerReference.transform().getId(),
           // Since a transform can have more then one timer, update the transform inside components
           // and not the original
-          components
-              .getTransformsOrThrow(timerReference.transform().getId())
-              .toBuilder()
+          components.getTransformsOrThrow(timerReference.transform().getId()).toBuilder()
               .setSpec(updatedSpec)
               .build());
 
@@ -511,7 +505,7 @@ public class ProcessBundleDescriptors {
     public abstract Coder<K> coder();
   }
 
-  /** */
+  /** ExecutableProcessBundleDescriptor. */
   @AutoValue
   @AutoValue.CopyAnnotations
   @SuppressWarnings({"rawtypes"})

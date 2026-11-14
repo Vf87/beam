@@ -17,7 +17,6 @@
  */
 package org.apache.beam.runners.dataflow.worker;
 
-import java.io.ByteArrayInputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -37,9 +36,12 @@ import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.util.CoderUtils;
-import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.KV;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Assert;
 import org.junit.Test;
@@ -81,11 +83,12 @@ public class ShuffleSinkTest {
           KV.of(5, KV.of("in 5", 666)));
 
   private static final Instant timestamp = new Instant(123000);
-  private static final IntervalWindow window = new IntervalWindow(timestamp, timestamp.plus(1000));
+  private static final IntervalWindow window =
+      new IntervalWindow(timestamp, timestamp.plus(Duration.millis(1000)));
 
   private void runTestWriteUngroupingShuffleSink(List<Integer> expected) throws Exception {
     Coder<WindowedValue<Integer>> windowedValueCoder =
-        WindowedValue.getFullCoder(BigEndianIntegerCoder.of(), new GlobalWindows().windowCoder());
+        WindowedValues.getFullCoder(BigEndianIntegerCoder.of(), new GlobalWindows().windowCoder());
     BatchModeExecutionContext executionContext =
         BatchModeExecutionContext.forTesting(PipelineOptionsFactory.create(), "STAGE");
     ShuffleSink<Integer> shuffleSink =
@@ -102,7 +105,7 @@ public class ShuffleSinkTest {
     try (Sink.SinkWriter<WindowedValue<Integer>> shuffleSinkWriter =
         shuffleSink.writer(shuffleWriter, "dataset")) {
       for (Integer value : expected) {
-        actualSizes.add(shuffleSinkWriter.add(WindowedValue.valueInGlobalWindow(value)));
+        actualSizes.add(shuffleSinkWriter.add(WindowedValues.valueInGlobalWindow(value)));
       }
     }
 
@@ -111,9 +114,11 @@ public class ShuffleSinkTest {
     List<Integer> actual = new ArrayList<>();
     for (ShuffleEntry record : records) {
       // Ignore the key.
-      byte[] valueBytes = record.getValue();
-      WindowedValue<Integer> value = CoderUtils.decodeFromByteArray(windowedValueCoder, valueBytes);
-      Assert.assertEquals(Lists.newArrayList(GlobalWindow.INSTANCE), value.getWindows());
+      ByteString valueBytes = record.getValue();
+      WindowedValue<Integer> value =
+          CoderUtils.decodeFromByteString(windowedValueCoder, valueBytes);
+      Assert.assertEquals(
+          Lists.newArrayList(GlobalWindow.INSTANCE), Lists.newArrayList(value.getWindows()));
       actual.add(value.getValue());
     }
 
@@ -129,7 +134,7 @@ public class ShuffleSinkTest {
             PipelineOptionsFactory.create(),
             null,
             ShuffleSink.ShuffleKind.GROUP_KEYS,
-            WindowedValue.getFullCoder(
+            WindowedValues.getFullCoder(
                 KvCoder.of(BigEndianIntegerCoder.of(), StringUtf8Coder.of()),
                 IntervalWindow.getCoder()),
             executionContext,
@@ -142,7 +147,7 @@ public class ShuffleSinkTest {
       for (KV<Integer, String> kv : expected) {
         actualSizes.add(
             shuffleSinkWriter.add(
-                WindowedValue.of(
+                WindowedValues.of(
                     KV.of(kv.getKey(), kv.getValue()),
                     timestamp,
                     Lists.newArrayList(window),
@@ -154,13 +159,13 @@ public class ShuffleSinkTest {
 
     List<KV<Integer, String>> actual = new ArrayList<>();
     for (ShuffleEntry record : records) {
-      byte[] keyBytes = record.getKey();
-      byte[] valueBytes = record.getValue();
+      ByteString keyBytes = record.getKey();
+      ByteString valueBytes = record.getValue();
       Assert.assertEquals(
-          timestamp, CoderUtils.decodeFromByteArray(InstantCoder.of(), record.getSecondaryKey()));
+          timestamp, CoderUtils.decodeFromByteString(InstantCoder.of(), record.getSecondaryKey()));
 
-      Integer key = CoderUtils.decodeFromByteArray(BigEndianIntegerCoder.of(), keyBytes);
-      String valueElem = CoderUtils.decodeFromByteArray(StringUtf8Coder.of(), valueBytes);
+      Integer key = CoderUtils.decodeFromByteString(BigEndianIntegerCoder.of(), keyBytes);
+      String valueElem = CoderUtils.decodeFromByteString(StringUtf8Coder.of(), valueBytes);
 
       actual.add(KV.of(key, valueElem));
     }
@@ -178,7 +183,7 @@ public class ShuffleSinkTest {
             PipelineOptionsFactory.create(),
             null,
             ShuffleSink.ShuffleKind.GROUP_KEYS_AND_SORT_VALUES,
-            WindowedValue.getFullCoder(
+            WindowedValues.getFullCoder(
                 KvCoder.of(
                     BigEndianIntegerCoder.of(),
                     KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of())),
@@ -191,7 +196,7 @@ public class ShuffleSinkTest {
     try (Sink.SinkWriter<WindowedValue<KV<Integer, KV<String, Integer>>>> shuffleSinkWriter =
         shuffleSink.writer(shuffleWriter, "dataset")) {
       for (KV<Integer, KV<String, Integer>> kv : expected) {
-        actualSizes.add(shuffleSinkWriter.add(WindowedValue.valueInGlobalWindow(kv)));
+        actualSizes.add(shuffleSinkWriter.add(WindowedValues.valueInGlobalWindow(kv)));
       }
     }
 
@@ -199,14 +204,14 @@ public class ShuffleSinkTest {
 
     List<KV<Integer, KV<String, Integer>>> actual = new ArrayList<>();
     for (ShuffleEntry record : records) {
-      byte[] keyBytes = record.getKey();
-      byte[] valueBytes = record.getValue();
-      byte[] sortKeyBytes = record.getSecondaryKey();
+      ByteString keyBytes = record.getKey();
+      ByteString valueBytes = record.getValue();
+      ByteString sortKeyBytes = record.getSecondaryKey();
 
-      Integer key = CoderUtils.decodeFromByteArray(BigEndianIntegerCoder.of(), keyBytes);
-      ByteArrayInputStream bais = new ByteArrayInputStream(sortKeyBytes);
-      String sortKey = StringUtf8Coder.of().decode(bais);
-      Integer sortValue = CoderUtils.decodeFromByteArray(BigEndianIntegerCoder.of(), valueBytes);
+      Integer key = CoderUtils.decodeFromByteString(BigEndianIntegerCoder.of(), keyBytes);
+      String sortKey =
+          CoderUtils.decodeFromByteString(StringUtf8Coder.of(), sortKeyBytes, Coder.Context.NESTED);
+      Integer sortValue = CoderUtils.decodeFromByteString(BigEndianIntegerCoder.of(), valueBytes);
 
       actual.add(KV.of(key, KV.of(sortKey, sortValue)));
     }

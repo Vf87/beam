@@ -27,7 +27,7 @@ import static org.hamcrest.Matchers.not;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import java.util.Set;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableSet;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableSet;
 import org.hamcrest.FeatureMatcher;
 import org.hamcrest.Matcher;
 import org.hamcrest.Matchers;
@@ -226,15 +226,6 @@ public class PipelineOptionsReflectorTest {
       @Override
       protected Class<?> featureValueOf(PipelineOptionSpec actual) {
         return actual.getDefiningInterface();
-      }
-    };
-  }
-
-  private static Matcher<PipelineOptionSpec> hasGetter(String methodName) {
-    return new FeatureMatcher<PipelineOptionSpec, String>(is(methodName), "getter method", "name") {
-      @Override
-      protected String featureValueOf(PipelineOptionSpec actual) {
-        return actual.getGetterMethod().getName();
       }
     };
   }

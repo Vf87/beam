@@ -22,14 +22,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import javax.annotation.Nullable;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.Struct;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.ListeningExecutorService;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.MoreExecutors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.Struct;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ListeningExecutorService;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.MoreExecutors;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 /** Factory to create {@link JobInvocation} instances. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public abstract class JobInvoker {
 
@@ -49,8 +49,21 @@ public abstract class JobInvoker {
   }
 
   private ListeningExecutorService createExecutorService(String name) {
+    final ClassLoader classLoader = getClass().getClassLoader();
+    ThreadFactory baseFactory = Executors.defaultThreadFactory();
     ThreadFactory threadFactory =
-        new ThreadFactoryBuilder().setNameFormat(name).setDaemon(true).build();
+        new ThreadFactoryBuilder()
+            .setThreadFactory(
+                r -> {
+                  Thread t = baseFactory.newThread(r);
+                  // Prevent job invoker threads from inheriting a transient task classloader
+                  // (e.g. a closed Spark ExecutorClassLoader) from gRPC executor threads.
+                  t.setContextClassLoader(classLoader);
+                  return t;
+                })
+            .setNameFormat(name)
+            .setDaemon(true)
+            .build();
     return MoreExecutors.listeningDecorator(Executors.newCachedThreadPool(threadFactory));
   }
 

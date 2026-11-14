@@ -80,12 +80,10 @@
 
 import json
 from enum import Enum
-from typing import List
 from typing import NamedTuple
 from typing import Optional
 
-from apache_beam.transforms import DoFn
-from apache_beam.transforms import ParDo
+from apache_beam.transforms import Map
 from apache_beam.transforms import PTransform
 from apache_beam.transforms.external import BeamJarExpansionService
 from apache_beam.transforms.external import ExternalTransform
@@ -110,14 +108,9 @@ ReadFromDebeziumSchema = NamedTuple(
     'ReadFromDebeziumSchema',
     [('connector_class', str), ('username', str), ('password', str),
      ('host', str), ('port', str), ('max_number_of_records', Optional[int]),
-     ('connection_properties', List[str])])
-
-
-class _JsonStringToDictionaries(DoFn):
-  """ A DoFn that consumes a JSON string and yields a python dictionary """
-  def process(self, json_string):
-    obj = json.loads(json_string)
-    yield obj
+     ('connection_properties', list[str]),
+     ('start_offset', Optional[list[str]]),
+     ('offset_storage_path', Optional[str]), ('full_metadata', Optional[bool])])
 
 
 class ReadFromDebezium(PTransform):
@@ -128,7 +121,7 @@ class ReadFromDebezium(PTransform):
 
         Experimental; no backwards compatibility guarantees.
     """
-  URN = 'beam:external:java:debezium:read:v1'
+  URN = 'beam:transform:org.apache.beam:debezium_read:v1'
 
   def __init__(
       self,
@@ -139,6 +132,9 @@ class ReadFromDebezium(PTransform):
       port,
       max_number_of_records=None,
       connection_properties=None,
+      start_offset=None,
+      offset_storage_path=None,
+      full_metadata=None,
       expansion_service=None):
     """
         Initializes a read operation from Debezium.
@@ -152,19 +148,61 @@ class ReadFromDebezium(PTransform):
                                       to be fetched before stop.
         :param connection_properties: properties of the debezium
                                       connection passed as string
-                                      with format
-                                      [propertyName=property;]*
+                                      with format [propertyName=property;]*
+                                      Set ``provide.transaction.metadata=true``
+                                      to add a ``transaction`` key to records
+                                      and emit transaction BEGIN/END records.
+        :param start_offset: starting offset to resume the connector from
+                             a previously seen position. Provided as a list
+                             of "key=value" strings, where numeric values are
+                             encoded as their decimal string representation.
+                             Example for PostgreSQL::
+
+                               start_offset=["lsn=28160840"]
+
+                             Example for MySQL::
+
+                               start_offset=["file=binlog.000001", "pos=156"]
+
+                             Obtain the offset from the JSON output of a
+                             previous pipeline run (the "metadata" field
+                             contains connector-specific position info) or
+                             via ``SourceRecord.sourceOffset()`` in a custom
+                             Java SourceRecordMapper.
+        :param offset_storage_path: path to a file where the connector offset
+                                    is automatically saved after each checkpoint
+                                    and loaded on pipeline startup, allowing the
+                                    pipeline to resume from where it left off.
+                                    Supports any filesystem available to the
+                                    Beam runner (local, GCS, S3, etc.).
+                                    Example::
+
+                                      offset_storage_path=(
+                                        "gs://my-bucket/debezium/offset.json"
+                                      )
+
+                                    When set, takes precedence over
+                                    ``start_offset``.
+        :param full_metadata: when True, adds ``op`` and all Debezium source
+                              fields not already present (e.g. MySQL
+                              ``file``, ``pos``, ``row``, ``ts_ms``;
+                              PostgreSQL ``lsn``, ``txId``, ``ts_ms``) to
+                              ``metadata``. Defaults to False.
         :param expansion_service: The address (host:port)
                                   of the ExpansionService.
     """
+
     self.params = ReadFromDebeziumSchema(
         connector_class=connector_class.value,
         username=username,
         password=password,
         host=host,
-        port=port,
+        port=str(port),
         max_number_of_records=max_number_of_records,
-        connection_properties=connection_properties)
+        connection_properties=connection_properties,
+        start_offset=start_offset,
+        offset_storage_path=offset_storage_path,
+        full_metadata=full_metadata)
     self.expansion_service = expansion_service or default_io_expansion_service()
 
   def expand(self, pbegin):
@@ -173,4 +211,5 @@ class ReadFromDebezium(PTransform):
             self.URN,
             NamedTupleBasedPayloadBuilder(self.params),
             self.expansion_service,
-        ) | ParDo(_JsonStringToDictionaries()))
+        ).with_output_types(str)
+        | 'JsonToDict' >> Map(json.loads).with_output_types(dict))

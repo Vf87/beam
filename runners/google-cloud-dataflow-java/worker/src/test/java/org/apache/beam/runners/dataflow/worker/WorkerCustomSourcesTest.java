@@ -26,16 +26,18 @@ import static org.apache.beam.runners.dataflow.worker.SourceTranslationUtils.dic
 import static org.apache.beam.runners.dataflow.worker.SourceTranslationUtils.readerProgressToCloudProgress;
 import static org.apache.beam.runners.dataflow.worker.WorkerCustomSources.BoundedReaderIterator.getReaderProgress;
 import static org.apache.beam.runners.dataflow.worker.WorkerCustomSources.BoundedReaderIterator.longToParallelism;
+import static org.apache.beam.sdk.testing.ExpectedLogs.verifyLogged;
 import static org.apache.beam.sdk.testing.SourceTestUtils.readFromSource;
 import static org.apache.beam.sdk.util.CoderUtils.encodeToByteArray;
 import static org.apache.beam.sdk.util.SerializableUtils.deserializeFromByteArray;
-import static org.apache.beam.sdk.util.WindowedValue.valueInGlobalWindow;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Throwables.getStackTraceAsString;
+import static org.apache.beam.sdk.values.WindowedValues.valueInGlobalWindow;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Throwables.getStackTraceAsString;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
@@ -47,6 +49,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.junit.internal.matchers.ThrowableMessageMatcher.hasMessage;
+import static org.mockito.Mockito.mock;
 
 import com.google.api.services.dataflow.model.ApproximateReportedProgress;
 import com.google.api.services.dataflow.model.DataflowPackage;
@@ -67,12 +70,11 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Random;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.LogManager;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
-import org.apache.beam.runners.core.construction.Environments;
-import org.apache.beam.runners.core.construction.PipelineTranslation;
-import org.apache.beam.runners.core.construction.SdkComponents;
-import org.apache.beam.runners.core.construction.SplittableParDo;
 import org.apache.beam.runners.core.metrics.ExecutionStateSampler;
 import org.apache.beam.runners.dataflow.DataflowPipelineTranslator;
 import org.apache.beam.runners.dataflow.DataflowRunner;
@@ -81,17 +83,35 @@ import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
 import org.apache.beam.runners.dataflow.util.CloudObject;
 import org.apache.beam.runners.dataflow.util.PropertyNames;
 import org.apache.beam.runners.dataflow.worker.DataflowExecutionContext.DataflowExecutionStateTracker;
+import org.apache.beam.runners.dataflow.worker.StreamingModeExecutionContext.KeyTransitionListener;
 import org.apache.beam.runners.dataflow.worker.StreamingModeExecutionContext.StreamingModeExecutionStateRegistry;
 import org.apache.beam.runners.dataflow.worker.WorkerCustomSources.SplittableOnlyBoundedSource;
 import org.apache.beam.runners.dataflow.worker.counters.CounterSet;
 import org.apache.beam.runners.dataflow.worker.counters.NameContext;
 import org.apache.beam.runners.dataflow.worker.profiler.ScopedProfiler.NoopProfileScope;
+import org.apache.beam.runners.dataflow.worker.streaming.BoundedQueueExecutorWorkHandle;
+import org.apache.beam.runners.dataflow.worker.streaming.Watermarks;
+import org.apache.beam.runners.dataflow.worker.streaming.Work;
+import org.apache.beam.runners.dataflow.worker.streaming.config.FixedGlobalConfigHandle;
+import org.apache.beam.runners.dataflow.worker.streaming.config.StreamingGlobalConfig;
+import org.apache.beam.runners.dataflow.worker.streaming.config.StreamingGlobalConfigHandle;
+import org.apache.beam.runners.dataflow.worker.streaming.harness.StreamingCounters;
+import org.apache.beam.runners.dataflow.worker.streaming.sideinput.SideInputStateFetcherFactory;
 import org.apache.beam.runners.dataflow.worker.testing.TestCountingSource;
+import org.apache.beam.runners.dataflow.worker.util.BoundedQueueExecutor;
 import org.apache.beam.runners.dataflow.worker.util.common.worker.NativeReader;
+import org.apache.beam.runners.dataflow.worker.util.common.worker.NativeReader.NativeReaderIterator;
+import org.apache.beam.runners.dataflow.worker.util.common.worker.WorkExecutor;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill;
+import org.apache.beam.runners.dataflow.worker.windmill.client.getdata.FakeGetDataClient;
+import org.apache.beam.runners.dataflow.worker.windmill.state.WindmillStateCache;
+import org.apache.beam.runners.dataflow.worker.windmill.work.processing.ExecuteWorkResult;
+import org.apache.beam.runners.dataflow.worker.windmill.work.processing.failures.FailureTracker;
+import org.apache.beam.runners.dataflow.worker.windmill.work.refresh.HeartbeatSender;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.coders.BigEndianIntegerCoder;
 import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.VarIntCoder;
 import org.apache.beam.sdk.extensions.gcp.auth.TestCredential;
@@ -106,13 +126,18 @@ import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.testing.ExpectedLogs;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.construction.Environments;
+import org.apache.beam.sdk.util.construction.PipelineTranslation;
+import org.apache.beam.sdk.util.construction.SdkComponents;
+import org.apache.beam.sdk.util.construction.SplittableParDo;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.ValueWithRecordId;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.ByteString;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -128,6 +153,8 @@ import org.junit.runners.JUnit4;
 public class WorkerCustomSourcesTest {
   @Rule public ExpectedException expectedException = ExpectedException.none();
   @Rule public ExpectedLogs logged = ExpectedLogs.none(WorkerCustomSources.class);
+
+  private static final String COMPUTATION_ID = "computationId";
 
   private DataflowPipelineOptions options;
 
@@ -147,8 +174,8 @@ public class WorkerCustomSourcesTest {
   public void testSplitAndReadBundlesBack() throws Exception {
     com.google.api.services.dataflow.model.Source source =
         translateIOToCloudSource(CountingSource.upTo(10L), options);
-    List<WindowedValue<Integer>> elems = readElemsFromSource(options, source);
-    assertEquals(10L, elems.size());
+    List<WindowedValue<Long>> elems = readElemsFromSource(options, source);
+    assertEquals(10, elems.size());
     for (long i = 0; i < 10L; i++) {
       assertEquals(valueInGlobalWindow(i), elems.get((int) i));
     }
@@ -168,13 +195,107 @@ public class WorkerCustomSourcesTest {
       com.google.api.services.dataflow.model.Source bundleSource = bundle.getSource();
       assertTrue(bundleSource.getDoesNotNeedSplitting());
       bundleSource.setCodec(source.getCodec());
-      List<WindowedValue<Integer>> xs = readElemsFromSource(options, bundleSource);
+      List<WindowedValue<Long>> xs = readElemsFromSource(options, bundleSource);
       assertThat(
           "Failed on bundle " + i,
           xs,
           contains(valueInGlobalWindow(0L + 2 * i), valueInGlobalWindow(1L + 2 * i)));
       assertTrue(bundle.getSource().getMetadata().getEstimatedSizeBytes() > 0);
     }
+  }
+
+  private static Work createMockWork(Windmill.WorkItem workItem, Watermarks watermarks) {
+    return Work.create(
+        workItem,
+        workItem.getSerializedSize(),
+        watermarks,
+        Work.createProcessingContext(
+            COMPUTATION_ID, new FakeGetDataClient(), ignored -> {}, mock(HeartbeatSender.class)),
+        false,
+        Instant::now,
+        ImmutableList.of());
+  }
+
+  private void startContext(StreamingModeExecutionContext context, Work work) {
+    try {
+      context.start(
+          work,
+          mock(WorkExecutor.class),
+          /* workQueueExecutor= */ mock(BoundedQueueExecutor.class),
+          /* budgetHandle= */ mock(BoundedQueueExecutorWorkHandle.class),
+          /* keyCoder= */ null,
+          /* keyTransitionListener= */ mock(KeyTransitionListener.class),
+          /* onFailedWorkHandler= */ ignored -> {});
+    } catch (CoderException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  private static class SourceProducingSubSourcesInSplit extends MockSource {
+    int numDesiredBundle;
+    int sourceObjectSize;
+
+    private transient @Nullable List<BoundedSource<Integer>> cachedSplitResult = null;
+
+    public SourceProducingSubSourcesInSplit(int numDesiredBundle, int sourceObjectSize) {
+      this.numDesiredBundle = numDesiredBundle;
+      this.sourceObjectSize = sourceObjectSize;
+    }
+
+    @Override
+    public List<? extends BoundedSource<Integer>> split(
+        long desiredBundleSizeBytes, PipelineOptions options) throws Exception {
+      if (cachedSplitResult == null) {
+        ArrayList<SourceWithLargeObject> result = new ArrayList<>(numDesiredBundle);
+        for (int i = 0; i < numDesiredBundle; ++i) {
+          result.add(new SourceWithLargeObject(sourceObjectSize));
+        }
+        cachedSplitResult = ImmutableList.copyOf(result);
+      }
+      return cachedSplitResult;
+    }
+
+    @Override
+    public long getEstimatedSizeBytes(PipelineOptions options) {
+      return numDesiredBundle * 1000L;
+    }
+  }
+
+  private static class SourceWithLargeObject extends MockSource {
+    @SuppressWarnings("unused")
+    byte[] array;
+
+    public SourceWithLargeObject(int sourceObjectSize) {
+      byte[] array = new byte[sourceObjectSize];
+      new Random().nextBytes(array);
+    }
+
+    @Override
+    public long getEstimatedSizeBytes(PipelineOptions options) {
+      return 1000L;
+    }
+  }
+
+  @Test
+  public void testSplittingProducedResponseUnderLimit() throws Exception {
+    SourceProducingSubSourcesInSplit source = new SourceProducingSubSourcesInSplit(200, 10_000);
+    com.google.api.services.dataflow.model.Source cloudSource =
+        translateIOToCloudSource(source, options);
+    SourceSplitRequest splitRequest = new SourceSplitRequest();
+    splitRequest.setSource(cloudSource);
+
+    ExpectedLogs.LogSaver logSaver = new ExpectedLogs.LogSaver();
+    LogManager.getLogManager()
+        .getLogger("org.apache.beam.runners.dataflow.worker.WorkerCustomSources")
+        .addHandler(logSaver);
+
+    WorkerCustomSources.performSplitWithApiLimit(splitRequest, options, 100, 10_000);
+    // verify initial split is not valid
+    verifyLogged(
+        ExpectedLogs.matcher(Level.WARNING, "this is too large for the Google Cloud Dataflow API"),
+        logSaver);
+    // verify that re-bundle is effective
+    verifyLogged(ExpectedLogs.matcher(Level.WARNING, "Re-bundle source"), logSaver);
   }
 
   private static class SourceProducingNegativeEstimatedSizes extends MockSource {
@@ -207,15 +328,15 @@ public class WorkerCustomSourcesTest {
     // Same as previous test, but now using BasicSerializableSourceFormat wrappers.
     // We know that the underlying reader behaves correctly (because of the previous test),
     // now check that we are wrapping it correctly.
-    NativeReader<WindowedValue<Integer>> reader =
-        (NativeReader<WindowedValue<Integer>>)
+    NativeReader<WindowedValue<Long>> reader =
+        (NativeReader<WindowedValue<Long>>)
             ReaderRegistry.defaultRegistry()
                 .create(
                     translateIOToCloudSource(CountingSource.upTo(10), options),
                     options,
                     null, // executionContext
                     TestOperationContext.create());
-    try (NativeReader.NativeReaderIterator<WindowedValue<Integer>> iterator = reader.iterator()) {
+    try (NativeReader.NativeReaderIterator<WindowedValue<Long>> iterator = reader.iterator()) {
       assertTrue(iterator.start());
       assertEquals(valueInGlobalWindow(0L), iterator.getCurrent());
       assertEquals(
@@ -499,15 +620,17 @@ public class WorkerCustomSourcesTest {
   public void testReadUnboundedReader() throws Exception {
     CounterSet counterSet = new CounterSet();
     StreamingModeExecutionStateRegistry executionStateRegistry =
-        new StreamingModeExecutionStateRegistry(null);
+        new StreamingModeExecutionStateRegistry();
     ReaderCache readerCache = new ReaderCache(Duration.standardMinutes(1), Runnable::run);
+    StreamingGlobalConfigHandle globalConfigHandle =
+        new FixedGlobalConfigHandle(StreamingGlobalConfig.builder().build());
     StreamingModeExecutionContext context =
         new StreamingModeExecutionContext(
             counterSet,
-            "computationId",
+            COMPUTATION_ID,
             readerCache,
-            /*stateNameMap=*/ ImmutableMap.of(),
-            /*stateCache=*/ null,
+            /* stateNameMap= */ ImmutableMap.of(),
+            /* stateCache= */ null,
             StreamingStepMetricsContainer.createRegistry(),
             new DataflowExecutionStateTracker(
                 ExecutionStateSampler.newForTest(),
@@ -517,7 +640,18 @@ public class WorkerCustomSourcesTest {
                 PipelineOptionsFactory.create(),
                 "test-work-item-id"),
             executionStateRegistry,
-            Long.MAX_VALUE);
+            globalConfigHandle,
+            Long.MAX_VALUE,
+            /* throwExceptionOnLargeOutput= */ false,
+            new HotKeyLogger(),
+            /* hotKeyLoggingEnabled= */ false,
+            /* stepName= */ "stepName",
+            /* systemName= */ "systemName",
+            StreamingCounters.create(),
+            mock(FailureTracker.class),
+            "sourceBytesProcessCounterName",
+            MultiKeyBundleOptions.fromOptions(options),
+            SideInputStateFetcherFactory.fromOptions(options));
 
     options.setNumWorkers(5);
     int maxElements = 10;
@@ -527,22 +661,19 @@ public class WorkerCustomSourcesTest {
     ByteString state = ByteString.EMPTY;
     for (int i = 0; i < 10 * maxElements;
     /* Incremented in inner loop */ ) {
-      // Initialize streaming context with state from previous iteration.
-      context.start(
-          "key",
+      Windmill.WorkItem workItem =
           Windmill.WorkItem.newBuilder()
               .setKey(ByteString.copyFromUtf8("0000000000000001")) // key is zero-padded index.
               .setWorkToken(i) // Must be increasing across activations for cache to be used.
               .setCacheToken(1)
               .setSourceState(
                   Windmill.SourceState.newBuilder().setState(state).build()) // Source state.
-              .build(),
-          new Instant(0), // input watermark
-          null, // output watermark
-          null, // synchronized processing time
-          null, // StateReader
-          null, // StateFetcher
-          Windmill.WorkItemCommitRequest.newBuilder());
+              .build();
+      // Initialize streaming context with state from previous iteration.
+      startContext(
+          context,
+          createMockWork(
+              workItem, Watermarks.builder().setInputDataWatermark(new Instant(0)).build()));
 
       @SuppressWarnings({"unchecked", "rawtypes"})
       NativeReader<WindowedValue<ValueWithRecordId<KV<Integer, Integer>>>> reader =
@@ -577,21 +708,21 @@ public class WorkerCustomSourcesTest {
           numReadOnThisIteration, lessThanOrEqualTo(debugOptions.getUnboundedReaderMaxElements()));
 
       // Extract and verify state modifications.
-      context.flushState();
-      state = context.getOutputBuilder().getSourceStateUpdates().getState();
+      context.finishKey();
+      WindmillComputationKey computationKey = context.getComputationKey();
+      ExecuteWorkResult result = context.flushStateAndReset();
+      assertEquals(1, result.workItemCommits().size());
+      Windmill.WorkItemCommitRequest commitRequest = result.workItemCommits().get(0);
+      state = commitRequest.getSourceStateUpdates().getState();
       // CountingSource's watermark is the last record + 1.  i is now one past the last record,
       // so the expected watermark is i millis.
-      assertEquals(
-          TimeUnit.MILLISECONDS.toMicros(i), context.getOutputBuilder().getSourceWatermark());
-      assertEquals(
-          1, context.getOutputBuilder().getSourceStateUpdates().getFinalizeIdsList().size());
+      assertEquals(TimeUnit.MILLISECONDS.toMicros(i), commitRequest.getSourceWatermark());
+      assertEquals(1, commitRequest.getSourceStateUpdates().getFinalizeIdsList().size());
 
       assertNotNull(
           readerCache.acquireReader(
-              context.getComputationKey(),
-              context.getWork().getCacheToken(),
-              context.getWorkToken() + 1));
-      assertEquals(7L, context.getBacklogBytes());
+              computationKey, workItem.getCacheToken(), workItem.getWorkToken() + 1));
+      assertEquals(7L, commitRequest.getSourceBacklogBytes());
     }
   }
 
@@ -859,5 +990,103 @@ public class WorkerCustomSourcesTest {
     assertEquals(5.0, progress.getConsumedParallelism().getValue(), 1e-6);
     assertNull(progress.getRemainingParallelism());
     logged.verifyWarn("remaining parallelism");
+  }
+
+  @Test
+  public void testFailedWorkItemsAbort() throws Exception {
+    CounterSet counterSet = new CounterSet();
+    StreamingModeExecutionStateRegistry executionStateRegistry =
+        new StreamingModeExecutionStateRegistry();
+    StreamingGlobalConfigHandle globalConfigHandle =
+        new FixedGlobalConfigHandle(StreamingGlobalConfig.builder().build());
+    StreamingModeExecutionContext context =
+        new StreamingModeExecutionContext(
+            counterSet,
+            COMPUTATION_ID,
+            new ReaderCache(Duration.standardMinutes(1), Runnable::run),
+            /* stateNameMap= */ ImmutableMap.of(),
+            WindmillStateCache.builder()
+                .setSizeMb(options.getWorkerCacheMb())
+                .build()
+                .forComputation(COMPUTATION_ID),
+            StreamingStepMetricsContainer.createRegistry(),
+            new DataflowExecutionStateTracker(
+                ExecutionStateSampler.newForTest(),
+                executionStateRegistry.getState(
+                    NameContext.forStage("stageName"), "other", null, NoopProfileScope.NOOP),
+                counterSet,
+                PipelineOptionsFactory.create(),
+                "test-work-item-id"),
+            executionStateRegistry,
+            globalConfigHandle,
+            Long.MAX_VALUE,
+            /* throwExceptionOnLargeOutput= */ false,
+            new HotKeyLogger(),
+            /* hotKeyLoggingEnabled= */ false,
+            /* stepName= */ "stepName",
+            /* systemName= */ "systemName",
+            StreamingCounters.create(),
+            mock(FailureTracker.class),
+            "sourceBytesProcessCounterName",
+            MultiKeyBundleOptions.fromOptions(options),
+            SideInputStateFetcherFactory.fromOptions(options));
+
+    options.setNumWorkers(5);
+    int maxElements = 100;
+    DataflowPipelineDebugOptions debugOptions = options.as(DataflowPipelineDebugOptions.class);
+    debugOptions.setUnboundedReaderMaxElements(maxElements);
+
+    ByteString state = ByteString.EMPTY;
+    Windmill.WorkItem workItem =
+        Windmill.WorkItem.newBuilder()
+            .setKey(ByteString.copyFromUtf8("0000000000000001")) // key is zero-padded index.
+            .setWorkToken(0)
+            .setCacheToken(1)
+            .setSourceState(
+                Windmill.SourceState.newBuilder().setState(state).build()) // Source state.
+            .build();
+    Work dummyWork =
+        Work.create(
+            workItem,
+            workItem.getSerializedSize(),
+            Watermarks.builder().setInputDataWatermark(new Instant(0)).build(),
+            Work.createProcessingContext(
+                COMPUTATION_ID,
+                new FakeGetDataClient(),
+                ignored -> {},
+                mock(HeartbeatSender.class)),
+            false,
+            Instant::now,
+            ImmutableList.of());
+    startContext(context, dummyWork);
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    NativeReader<WindowedValue<ValueWithRecordId<KV<Integer, Integer>>>> reader =
+        (NativeReader)
+            WorkerCustomSources.create(
+                (CloudObject)
+                    serializeToCloudSource(new TestCountingSource(Integer.MAX_VALUE), options)
+                        .getSpec(),
+                options,
+                context);
+
+    NativeReaderIterator<WindowedValue<ValueWithRecordId<KV<Integer, Integer>>>> readerIterator =
+        reader.iterator();
+    int numReads = 0;
+    try {
+      while ((numReads == 0) ? readerIterator.start() : readerIterator.advance()) {
+        WindowedValue<ValueWithRecordId<KV<Integer, Integer>>> value = readerIterator.getCurrent();
+        assertEquals(KV.of(0, numReads), value.getValue().getValue());
+        numReads++;
+        // Fail the work item after reading two elements.
+        if (numReads == 2) {
+          dummyWork.setFailed();
+        }
+      }
+      fail("Expected WorkItemCancelledException");
+    } catch (WorkItemCancelledException e) {
+      // Expected
+    }
+    assertThat(numReads, equalTo(2));
   }
 }

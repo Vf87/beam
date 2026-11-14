@@ -26,7 +26,6 @@ import java.time.Instant;
 import java.util.Collection;
 import java.util.Objects;
 import java.util.function.Supplier;
-import org.apache.avro.reflect.AvroSchema;
 import org.apache.beam.sdk.coders.Coder.NonDeterministicException;
 import org.apache.beam.sdk.coders.RowCoder;
 import org.apache.beam.sdk.schemas.Schema.Field;
@@ -37,7 +36,7 @@ import org.apache.beam.sdk.schemas.utils.SchemaTestUtils;
 import org.apache.beam.sdk.testing.CoderProperties;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.hamcrest.Matchers;
 import org.joda.time.DateTime;
@@ -50,7 +49,7 @@ import org.junit.runners.Parameterized;
 /** Unit tests for {@link Schema}. */
 @RunWith(Enclosed.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class SchemaCoderTest {
 
@@ -83,13 +82,13 @@ public class SchemaCoderTest {
   public abstract static class SimpleAutoValue {
     public abstract String getString();
 
-    public abstract Integer getInt32();
+    public abstract int getInt32();
 
-    public abstract Long getInt64();
+    public abstract long getInt64();
 
     public abstract DateTime getDatetime();
 
-    public static SimpleAutoValue of(String string, Integer int32, Long int64, DateTime datetime) {
+    public static SimpleAutoValue of(String string, int int32, long int64, DateTime datetime) {
       return new AutoValue_SchemaCoderTest_SimpleAutoValue(string, int32, int64, datetime);
     }
   }
@@ -145,7 +144,7 @@ public class SchemaCoderTest {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof SimpleBean)) {
         return false;
       }
       SimpleBean that = (SimpleBean) o;
@@ -180,47 +179,10 @@ public class SchemaCoderTest {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof SimplePojo)) {
         return false;
       }
       SimplePojo that = (SimplePojo) o;
-      return string.equals(that.string)
-          && int32.equals(that.int32)
-          && int64.equals(that.int64)
-          && datetime.equals(that.datetime);
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(string, int32, int64, datetime);
-    }
-  }
-
-  @DefaultSchema(AvroRecordSchema.class)
-  private static class SimpleAvro {
-    public String string;
-    public Integer int32;
-    public Long int64;
-
-    @AvroSchema("{\"type\": \"long\", \"logicalType\": \"timestamp-millis\"}")
-    public DateTime datetime;
-
-    public SimpleAvro(String string, Integer int32, Long int64, DateTime datetime) {
-      this.string = string;
-      this.int32 = int32;
-      this.int64 = int64;
-      this.datetime = datetime;
-    }
-
-    @Override
-    public boolean equals(@Nullable Object o) {
-      if (this == o) {
-        return true;
-      }
-      if (o == null || getClass() != o.getClass()) {
-        return false;
-      }
-      SimpleAvro that = (SimpleAvro) o;
       return string.equals(that.string)
           && int32.equals(that.int32)
           && int64.equals(that.int64)
@@ -310,23 +272,6 @@ public class SchemaCoderTest {
                         new DateTime().withDate(1979, 3, 14).withTime(10, 30, 0, 0)),
                 () ->
                     new SimplePojo(
-                        "bar",
-                        9002,
-                        1L,
-                        new DateTime().withDate(1989, 3, 14).withTime(10, 30, 0, 0))),
-            true
-          },
-          new Object[] {
-            coderFrom(TypeDescriptor.of(SimpleAvro.class)),
-            ImmutableList.<Supplier<Object>>of(
-                () ->
-                    new SimpleAvro(
-                        "foo",
-                        9001,
-                        0L,
-                        new DateTime().withDate(1979, 3, 14).withTime(10, 30, 0, 0)),
-                () ->
-                    new SimpleAvro(
                         "bar",
                         9002,
                         1L,

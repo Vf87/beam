@@ -17,17 +17,16 @@
  */
 package org.apache.beam.sdk.io;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.IOException;
 import java.io.Serializable;
 import java.nio.ByteBuffer;
 import java.nio.channels.ReadableByteChannel;
 import java.util.NoSuchElementException;
 import javax.annotation.concurrent.GuardedBy;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.io.fs.MatchResult.Metadata;
 import org.apache.beam.sdk.options.PipelineOptions;
@@ -64,10 +63,15 @@ import org.joda.time.Instant;
  *
  * @param <T> The type to read from the compressed file.
  */
-@Experimental(Kind.SOURCE_SINK)
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
+@SuppressFBWarnings(
+    value = "CT_CONSTRUCTOR_THROW",
+    justification =
+        "Pre-existing finding, not triaged yet."
+            + " Making the class final or moving the throwing code"
+            + " into a static factory method may fix it.")
 public class CompressedSource<T> extends FileBasedSource<T> {
   /**
    * Factory interface for creating channels that decompress the content of an underlying channel.
@@ -77,37 +81,39 @@ public class CompressedSource<T> extends FileBasedSource<T> {
     ReadableByteChannel createDecompressingChannel(ReadableByteChannel channel) throws IOException;
   }
 
-  /** @deprecated Use {@link Compression} instead */
+  /**
+   * @deprecated Use {@link Compression} instead
+   */
   @Deprecated
   public enum CompressionMode implements DecompressingChannelFactory {
-    /** @see Compression#UNCOMPRESSED */
+    /** See {@link Compression#UNCOMPRESSED}. */
     UNCOMPRESSED(Compression.UNCOMPRESSED),
 
-    /** @see Compression#AUTO */
+    /** See {@link Compression#AUTO}. */
     AUTO(Compression.AUTO),
 
-    /** @see Compression#GZIP */
+    /** See {@link Compression#GZIP}. */
     GZIP(Compression.GZIP),
 
-    /** @see Compression#BZIP2 */
+    /** See {@link Compression#BZIP2}. */
     BZIP2(Compression.BZIP2),
 
-    /** @see Compression#ZIP */
+    /** See {@link Compression#ZIP}. */
     ZIP(Compression.ZIP),
 
-    /** @see Compression#ZSTD */
+    /** See {@link Compression#ZSTD}. */
     ZSTD(Compression.ZSTD),
 
-    /** @see Compression#LZO */
+    /** See {@link Compression#LZO}. */
     LZO(Compression.LZO),
 
-    /** @see Compression#LZOP */
+    /** See {@link Compression#LZOP}. */
     LZOP(Compression.LZOP),
 
-    /** @see Compression#DEFLATE */
+    /** See {@link Compression#DEFLATE}. */
     DEFLATE(Compression.DEFLATE),
 
-    /** @see Compression#SNAPPY */
+    /** See {@link Compression#SNAPPY}. */
     SNAPPY(Compression.SNAPPY);
 
     private final Compression canonical;
@@ -266,8 +272,8 @@ public class CompressedSource<T> extends FileBasedSource<T> {
 
   /**
    * Determines whether a single file represented by this source is splittable. Returns true if we
-   * are using the default decompression factory and and it determines from the requested file name
-   * that the file is not compressed.
+   * are using the default decompression factory and it determines from the requested file name that
+   * the file is not compressed.
    */
   @Override
   protected final boolean isSplittable() {

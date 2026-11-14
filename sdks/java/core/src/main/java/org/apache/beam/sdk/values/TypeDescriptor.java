@@ -17,6 +17,7 @@
  */
 package org.apache.beam.sdk.values;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.Serializable;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -24,11 +25,11 @@ import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.lang.reflect.TypeVariable;
 import java.util.List;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.reflect.Invokable;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.reflect.Parameter;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.reflect.TypeResolver;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.reflect.TypeToken;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.reflect.Invokable;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.reflect.Parameter;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.reflect.TypeResolver;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.reflect.TypeToken;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -46,9 +47,12 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  *
  * @param <T> the type represented by this {@link TypeDescriptor}
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
+@SuppressFBWarnings(
+    value = "CT_CONSTRUCTOR_THROW",
+    justification =
+        "Pre-existing finding, not triaged yet."
+            + " Making the class final or moving the throwing code"
+            + " into a static factory method may fix it.")
 public abstract class TypeDescriptor<T> implements Serializable {
 
   // This class is just a wrapper for TypeToken
@@ -106,7 +110,7 @@ public abstract class TypeDescriptor<T> implements Serializable {
     token = typedToken;
   }
 
-  private boolean hasUnresolvedParameters(Type type) {
+  private static boolean hasUnresolvedParameters(Type type) {
     if (type instanceof TypeVariable) {
       return true;
     } else if (type instanceof ParameterizedType) {
@@ -124,7 +128,7 @@ public abstract class TypeDescriptor<T> implements Serializable {
    * Returns the enclosing instance if the field is synthetic and it is able to access it, or
    * {@literal null} if not.
    */
-  private @Nullable Object getEnclosingInstance(Field field, Object instance) {
+  private static @Nullable Object getEnclosingInstance(Field field, Object instance) {
     if (!field.isSynthetic()) {
       return null;
     }
@@ -179,13 +183,23 @@ public abstract class TypeDescriptor<T> implements Serializable {
   }
 
   /** Returns the component type if this type is an array type, otherwise returns {@code null}. */
-  public TypeDescriptor<?> getComponentType() {
-    return new SimpleTypeDescriptor<>(token.getComponentType());
+  public @Nullable TypeDescriptor<?> getComponentType() {
+    @Nullable TypeToken<?> componentTypeToken = token.getComponentType();
+    if (componentTypeToken == null) {
+      return null;
+    } else {
+      return new SimpleTypeDescriptor<>(componentTypeToken);
+    }
   }
 
   /** Returns the generic form of a supertype. */
   public final TypeDescriptor<? super T> getSupertype(Class<? super T> superclass) {
     return new SimpleTypeDescriptor<>(token.getSupertype(superclass));
+  }
+
+  /** Returns the generic form of a subtype. */
+  public final TypeDescriptor<? extends T> getSubtype(Class<? extends T> subclass) {
+    return new SimpleTypeDescriptor<>(token.getSubtype(subclass));
   }
 
   /** Returns true if this type is known to be an array type. */

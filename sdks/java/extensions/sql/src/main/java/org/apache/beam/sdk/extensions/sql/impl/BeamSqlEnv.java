@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.extensions.sql.impl;
 
-import static org.apache.beam.vendor.calcite.v1_26_0.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
 
 import java.sql.SQLException;
 import java.util.AbstractMap.SimpleEntry;
@@ -27,7 +27,6 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.ServiceLoader;
 import java.util.Set;
-import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.annotations.Internal;
 import org.apache.beam.sdk.extensions.sql.BeamSqlUdf;
 import org.apache.beam.sdk.extensions.sql.impl.QueryPlanner.QueryParameters;
@@ -35,31 +34,30 @@ import org.apache.beam.sdk.extensions.sql.impl.parser.BeamSqlParser;
 import org.apache.beam.sdk.extensions.sql.impl.planner.BeamRuleSets;
 import org.apache.beam.sdk.extensions.sql.impl.rel.BeamRelNode;
 import org.apache.beam.sdk.extensions.sql.meta.BeamSqlTable;
+import org.apache.beam.sdk.extensions.sql.meta.catalog.CatalogManager;
+import org.apache.beam.sdk.extensions.sql.meta.catalog.InMemoryCatalog;
+import org.apache.beam.sdk.extensions.sql.meta.catalog.InMemoryCatalogManager;
 import org.apache.beam.sdk.extensions.sql.meta.provider.ReadOnlyTableProvider;
 import org.apache.beam.sdk.extensions.sql.meta.provider.TableProvider;
 import org.apache.beam.sdk.extensions.sql.meta.provider.UdfUdafProvider;
-import org.apache.beam.sdk.extensions.sql.meta.store.InMemoryMetaStore;
+import org.apache.beam.sdk.extensions.sql.meta.store.MetaStore;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.transforms.Combine.CombineFn;
 import org.apache.beam.sdk.transforms.SerializableFunction;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.base.Strings;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.jdbc.CalcitePrepare;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelOptUtil;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.Function;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.SqlKind;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.tools.RuleSet;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.jdbc.CalcitePrepare;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptUtil;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.Function;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlKind;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlOperator;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.tools.RuleSet;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
  * Contains the metadata of tables/UDF functions, and exposes APIs to
  * query/validate/optimize/translate SQL statements.
  */
 @Internal
-@Experimental
-@SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class BeamSqlEnv {
   JdbcConnection connection;
   QueryPlanner planner;
@@ -72,6 +70,11 @@ public class BeamSqlEnv {
   /** Creates a builder with the default schema backed by the table provider. */
   public static BeamSqlEnvBuilder builder(TableProvider tableProvider) {
     return new BeamSqlEnvBuilder(tableProvider);
+  }
+
+  /** Creates a builder with the default schema backed by the catalog manager. */
+  public static BeamSqlEnvBuilder builder(CatalogManager catalogManager) {
+    return new BeamSqlEnvBuilder(catalogManager);
   }
 
   /**
@@ -95,12 +98,14 @@ public class BeamSqlEnv {
    * Pipeline Options. It should only be used in tests.
    */
   public static BeamSqlEnv inMemory(TableProvider... tableProviders) {
-    InMemoryMetaStore inMemoryMetaStore = new InMemoryMetaStore();
+    InMemoryCatalogManager catalogManager = new InMemoryCatalogManager();
     for (TableProvider tableProvider : tableProviders) {
-      inMemoryMetaStore.registerProvider(tableProvider);
+      catalogManager.registerTableProvider(tableProvider);
     }
 
-    return withTableProvider(inMemoryMetaStore);
+    return BeamSqlEnv.builder(catalogManager)
+        .setPipelineOptions(PipelineOptionsFactory.create())
+        .build();
   }
 
   public BeamRelNode parseQuery(String query) throws ParseException {
@@ -128,6 +133,18 @@ public class BeamSqlEnv {
     return connection.getPipelineOptionsMap();
   }
 
+  /**
+   * Registers a custom {@link SqlOperator} into the current session's operator table. This allows
+   * registering functions with non-fixed operand types (e.g. VARIADIC), which the schema-function
+   * auto-wrapping mechanism cannot express.
+   *
+   * <p>Only safe to call before the first SQL query is planned in this environment (otherwise the
+   * parser/validator operator table may have already been built without it).
+   */
+  public void registerSqlOperator(SqlOperator operator) {
+    connection.getExtraOperatorTable().add(operator);
+  }
+
   public String explain(String sqlString) throws ParseException {
     try {
       return RelOptUtil.toString(planner.convertToBeamRel(sqlString, QueryParameters.ofNone()));
@@ -141,24 +158,37 @@ public class BeamSqlEnv {
     private static final String CALCITE_PLANNER =
         "org.apache.beam.sdk.extensions.sql.impl.CalciteQueryPlanner";
     private String queryPlannerClassName;
-    private TableProvider defaultTableProvider;
-    private String currentSchemaName;
+    private CatalogManager catalogManager;
+    private @Nullable String currentSchemaName = null;
     private Map<String, TableProvider> schemaMap;
     private Set<Map.Entry<String, Function>> functionSet;
     private boolean autoLoadUdfs;
-    private PipelineOptions pipelineOptions;
+    private @Nullable PipelineOptions pipelineOptions;
     private Collection<RuleSet> ruleSets;
 
     private BeamSqlEnvBuilder(TableProvider tableProvider) {
-      checkNotNull(tableProvider, "Table provider for the default schema must be sets.");
-
-      defaultTableProvider = tableProvider;
+      if (tableProvider instanceof MetaStore) {
+        catalogManager = new InMemoryCatalogManager((MetaStore) tableProvider);
+      } else {
+        catalogManager = new InMemoryCatalogManager();
+        catalogManager.registerTableProvider(tableProvider);
+      }
       queryPlannerClassName = CALCITE_PLANNER;
       schemaMap = new HashMap<>();
       functionSet = new HashSet<>();
       autoLoadUdfs = false;
       pipelineOptions = null;
       ruleSets = BeamRuleSets.getRuleSets();
+    }
+
+    private BeamSqlEnvBuilder(CatalogManager catalogManager) {
+      this.catalogManager = catalogManager;
+      this.queryPlannerClassName = CALCITE_PLANNER;
+      this.schemaMap = new HashMap<>();
+      this.functionSet = new HashSet<>();
+      this.autoLoadUdfs = false;
+      this.pipelineOptions = null;
+      this.ruleSets = BeamRuleSets.getRuleSets();
     }
 
     /** Add a top-level schema backed by the table provider. */
@@ -182,6 +212,7 @@ public class BeamSqlEnv {
       this.ruleSets = ruleSets;
       return this;
     }
+
     /** Register a UDF function which can be used in SQL expression. */
     public BeamSqlEnvBuilder addUdf(String functionName, Class<?> clazz, String method) {
       functionSet.add(new SimpleEntry<>(functionName, UdfImpl.create(clazz, method)));
@@ -225,14 +256,23 @@ public class BeamSqlEnv {
     }
 
     /**
+     * Uses the specified {@link InMemoryCatalog}. Must already exist inside the provided {@link
+     * CatalogManager}.
+     */
+    public BeamSqlEnvBuilder setUseCatalog(String name) {
+      catalogManager.useCatalog(name);
+      return this;
+    }
+
+    /**
      * Build function to create an instance of BeamSqlEnv based on preset fields.
      *
      * @return BeamSqlEnv.
      */
     public BeamSqlEnv build() {
-      checkNotNull(pipelineOptions);
+      checkStateNotNull(pipelineOptions);
 
-      JdbcConnection jdbcConnection = JdbcDriver.connect(defaultTableProvider, pipelineOptions);
+      JdbcConnection jdbcConnection = JdbcDriver.connect(catalogManager, pipelineOptions);
 
       configureSchemas(jdbcConnection);
 
@@ -252,7 +292,9 @@ public class BeamSqlEnv {
       // Does not update the current default schema.
       schemaMap.forEach(jdbcConnection::setSchema);
 
-      if (Strings.isNullOrEmpty(currentSchemaName)) {
+      // Fix it in a local variable so static analysis knows it cannot be mutated.
+      @Nullable String currentSchemaName = this.currentSchemaName;
+      if (currentSchemaName == null || currentSchemaName.isEmpty()) {
         return;
       }
 
@@ -293,9 +335,20 @@ public class BeamSqlEnv {
             "Cannot find requested QueryPlanner class: " + queryPlannerClassName, exc);
       }
 
+      // This try/catch kept deliberately tight to ensure that we _only_ catch exceptions due to
+      // this reflective access.
       QueryPlanner.Factory factory;
       try {
-        factory = (QueryPlanner.Factory) queryPlannerClass.getField("FACTORY").get(null);
+        // Field.get(null) reads a static field; the checker's annotated JDK stub marks the
+        // receiver as @NonNull, so this narrow suppression is required.
+        // See https://github.com/typetools/jdk/pull/235#pullrequestreview-3400922783
+        @SuppressWarnings("nullness")
+        Object queryPlannerFactoryObj =
+            checkStateNotNull(
+                queryPlannerClass.getField("FACTORY").get(null),
+                "Static field %s.FACTORY is null. It must be a QueryPlanner.Factory instance.",
+                queryPlannerClass);
+        factory = (QueryPlanner.Factory) queryPlannerFactoryObj;
       } catch (NoSuchFieldException | IllegalAccessException exc) {
         throw new RuntimeException(
             String.format(

@@ -17,7 +17,7 @@
  */
 package org.apache.beam.runners.core;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.when;
@@ -27,7 +27,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.function.BiFunction;
-import org.apache.beam.runners.core.DoFnRunners.OutputManager;
 import org.apache.beam.runners.core.metrics.MetricsContainerImpl;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
@@ -44,11 +43,13 @@ import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.WindowedValueMultiReceiver;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -62,7 +63,7 @@ import org.mockito.MockitoAnnotations;
 /** Tests for {@link StatefulDoFnRunnerTest}. */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class StatefulDoFnRunnerTest {
 
@@ -148,10 +149,11 @@ public class StatefulDoFnRunnerTest {
 
     runner.startBundle();
 
-    IntervalWindow window = new IntervalWindow(timestamp, timestamp.plus(WINDOW_SIZE));
+    IntervalWindow window =
+        new IntervalWindow(timestamp, timestamp.plus(Duration.millis(WINDOW_SIZE)));
 
     runner.processElement(
-        WindowedValue.of(KV.of("hello", 1), timestamp, window, PaneInfo.NO_FIRING));
+        WindowedValues.of(KV.of("hello", 1), timestamp, window, PaneInfo.NO_FIRING));
 
     long droppedValues =
         container
@@ -161,10 +163,10 @@ public class StatefulDoFnRunnerTest {
             .getCumulative();
     assertEquals(0L, droppedValues);
 
-    timerInternals.advanceInputWatermark(timestamp.plus(ALLOWED_LATENESS + 1));
+    timerInternals.advanceInputWatermark(timestamp.plus(Duration.millis(ALLOWED_LATENESS + 1)));
 
     runner.processElement(
-        WindowedValue.of(KV.of("hello", 1), timestamp, window, PaneInfo.NO_FIRING));
+        WindowedValues.of(KV.of("hello", 1), timestamp, window, PaneInfo.NO_FIRING));
 
     droppedValues =
         container
@@ -181,8 +183,8 @@ public class StatefulDoFnRunnerTest {
     MetricsContainerImpl container = new MetricsContainerImpl("any");
     MetricsEnvironment.setCurrentContainer(container);
 
-    timerInternals.advanceInputWatermark(new Instant(BoundedWindow.TIMESTAMP_MAX_VALUE));
-    timerInternals.advanceOutputWatermark(new Instant(BoundedWindow.TIMESTAMP_MAX_VALUE));
+    timerInternals.advanceInputWatermark(BoundedWindow.TIMESTAMP_MAX_VALUE);
+    timerInternals.advanceOutputWatermark(BoundedWindow.TIMESTAMP_MAX_VALUE);
 
     MyDoFn fn = MyDoFn.create(ordered);
 
@@ -194,7 +196,7 @@ public class StatefulDoFnRunnerTest {
     Instant timestamp = new Instant(0);
 
     runner.processElement(
-        WindowedValue.of(KV.of("hello", 1), timestamp, window, PaneInfo.NO_FIRING));
+        WindowedValues.of(KV.of("hello", 1), timestamp, window, PaneInfo.NO_FIRING));
 
     long droppedValues =
         container
@@ -219,28 +221,37 @@ public class StatefulDoFnRunnerTest {
 
     // first element, key is hello, WINDOW_1
     runner.processElement(
-        WindowedValue.of(KV.of("hello", 1), elementTime, WINDOW_1, PaneInfo.NO_FIRING));
+        WindowedValues.of(KV.of("hello", 1), elementTime, WINDOW_1, PaneInfo.NO_FIRING));
 
     if (ordered) {
       // move forward in time so that the input might get flushed
-      advanceInputWatermark(timerInternals, elementTime.plus(ALLOWED_LATENESS + 1), runner);
+      advanceInputWatermark(
+          timerInternals, elementTime.plus(Duration.millis(ALLOWED_LATENESS + 1)), runner);
     }
 
     assertEquals(1, (int) stateInternals.state(windowNamespace(WINDOW_1), stateTag).read());
 
     // second element, key is hello, WINDOW_2
     runner.processElement(
-        WindowedValue.of(
-            KV.of("hello", 1), elementTime.plus(WINDOW_SIZE), WINDOW_2, PaneInfo.NO_FIRING));
+        WindowedValues.of(
+            KV.of("hello", 1),
+            elementTime.plus(Duration.millis(WINDOW_SIZE)),
+            WINDOW_2,
+            PaneInfo.NO_FIRING));
 
     runner.processElement(
-        WindowedValue.of(
-            KV.of("hello", 1), elementTime.plus(WINDOW_SIZE), WINDOW_2, PaneInfo.NO_FIRING));
+        WindowedValues.of(
+            KV.of("hello", 1),
+            elementTime.plus(Duration.millis(WINDOW_SIZE)),
+            WINDOW_2,
+            PaneInfo.NO_FIRING));
 
     if (ordered) {
       // move forward in time so that the input might get flushed
       advanceInputWatermark(
-          timerInternals, elementTime.plus(ALLOWED_LATENESS + 1 + WINDOW_SIZE), runner);
+          timerInternals,
+          elementTime.plus(Duration.millis(ALLOWED_LATENESS + 1 + WINDOW_SIZE)),
+          runner);
     }
 
     assertEquals(2, (int) stateInternals.state(windowNamespace(WINDOW_2), stateTag).read());
@@ -249,7 +260,9 @@ public class StatefulDoFnRunnerTest {
     // the cleanup timer is set to window.maxTimestamp() + allowed lateness + 1
     // to ensure that state is still available when a user timer for window.maxTimestamp() fires
     advanceInputWatermark(
-        timerInternals, elementTime.plus(ALLOWED_LATENESS + 1 + WINDOW_SIZE), runner);
+        timerInternals,
+        elementTime.plus(Duration.millis(ALLOWED_LATENESS + 1 + WINDOW_SIZE)),
+        runner);
 
     assertTrue(
         stateInternals.isEmptyForTesting(
@@ -262,9 +275,9 @@ public class StatefulDoFnRunnerTest {
         timerInternals,
         WINDOW_2
             .maxTimestamp()
-            .plus(ALLOWED_LATENESS)
-            .plus(StatefulDoFnRunner.TimeInternalsCleanupTimer.GC_DELAY_MS)
-            .plus(1), // so the watermark is past the GC horizon, not on it
+            .plus(Duration.millis(ALLOWED_LATENESS))
+            .plus(Duration.millis(StatefulDoFnRunner.TimeInternalsCleanupTimer.GC_DELAY_MS))
+            .plus(Duration.millis(1)), // so the watermark is past the GC horizon, not on it
         runner);
 
     assertTrue(
@@ -278,7 +291,8 @@ public class StatefulDoFnRunnerTest {
 
   private void testOutput(
       boolean ordered,
-      BiFunction<MyDoFn, OutputManager, DoFnRunner<KV<String, Integer>, Integer>> runnerFactory)
+      BiFunction<MyDoFn, WindowedValueMultiReceiver, DoFnRunner<KV<String, Integer>, Integer>>
+          runnerFactory)
       throws Exception {
 
     timerInternals.advanceInputWatermark(new Instant(1L));
@@ -287,20 +301,25 @@ public class StatefulDoFnRunnerTest {
     StateTag<ValueState<Integer>> stateTag = StateTags.tagForSpec(MyDoFn.STATE_ID, fn.intState());
 
     List<KV<TupleTag<?>, WindowedValue<?>>> outputs = new ArrayList<>();
-    OutputManager output = asOutputManager(outputs);
+    WindowedValueMultiReceiver output = asOutputManager(outputs);
     DoFnRunner<KV<String, Integer>, Integer> runner = runnerFactory.apply(fn, output);
 
     Instant elementTime = new Instant(5);
 
     // write two elements, with descending timestamps
     runner.processElement(
-        WindowedValue.of(KV.of("hello", 1), elementTime, WINDOW_1, PaneInfo.NO_FIRING));
+        WindowedValues.of(KV.of("hello", 1), elementTime, WINDOW_1, PaneInfo.NO_FIRING));
     runner.processElement(
-        WindowedValue.of(KV.of("hello", 2), elementTime.minus(1), WINDOW_1, PaneInfo.NO_FIRING));
+        WindowedValues.of(
+            KV.of("hello", 2),
+            elementTime.minus(Duration.millis(1)),
+            WINDOW_1,
+            PaneInfo.NO_FIRING));
 
     if (ordered) {
       // move forward in time so that the input might get flushed
-      advanceInputWatermark(timerInternals, elementTime.plus(ALLOWED_LATENESS + 1), runner);
+      advanceInputWatermark(
+          timerInternals, elementTime.plus(Duration.millis(ALLOWED_LATENESS + 1)), runner);
     }
 
     assertEquals(3, (int) stateInternals.state(windowNamespace(WINDOW_1), stateTag).read());
@@ -310,34 +329,45 @@ public class StatefulDoFnRunnerTest {
           Arrays.asList(
               KV.of(
                   outputTag,
-                  WindowedValue.of(2, elementTime.minus(1), WINDOW_1, PaneInfo.NO_FIRING)),
-              KV.of(outputTag, WindowedValue.of(3, elementTime, WINDOW_1, PaneInfo.NO_FIRING))),
+                  WindowedValues.of(
+                      2, elementTime.minus(Duration.millis(1)), WINDOW_1, PaneInfo.NO_FIRING)),
+              KV.of(outputTag, WindowedValues.of(3, elementTime, WINDOW_1, PaneInfo.NO_FIRING))),
           outputs);
     } else {
       assertEquals(
           Arrays.asList(
-              KV.of(outputTag, WindowedValue.of(1, elementTime, WINDOW_1, PaneInfo.NO_FIRING)),
+              KV.of(outputTag, WindowedValues.of(1, elementTime, WINDOW_1, PaneInfo.NO_FIRING)),
               KV.of(
                   outputTag,
-                  WindowedValue.of(3, elementTime.minus(1), WINDOW_1, PaneInfo.NO_FIRING))),
+                  WindowedValues.of(
+                      3, elementTime.minus(Duration.millis(1)), WINDOW_1, PaneInfo.NO_FIRING))),
           outputs);
     }
     outputs.clear();
 
     // another window
-    elementTime = elementTime.plus(WINDOW_SIZE);
+    elementTime = elementTime.plus(Duration.millis(WINDOW_SIZE));
     runner.processElement(
-        WindowedValue.of(KV.of("hello", 1), elementTime, WINDOW_2, PaneInfo.NO_FIRING));
+        WindowedValues.of(KV.of("hello", 1), elementTime, WINDOW_2, PaneInfo.NO_FIRING));
 
     runner.processElement(
-        WindowedValue.of(KV.of("hello", 2), elementTime.minus(1), WINDOW_2, PaneInfo.NO_FIRING));
+        WindowedValues.of(
+            KV.of("hello", 2),
+            elementTime.minus(Duration.millis(1)),
+            WINDOW_2,
+            PaneInfo.NO_FIRING));
 
     runner.processElement(
-        WindowedValue.of(KV.of("hello", 3), elementTime.minus(2), WINDOW_2, PaneInfo.NO_FIRING));
+        WindowedValues.of(
+            KV.of("hello", 3),
+            elementTime.minus(Duration.millis(2)),
+            WINDOW_2,
+            PaneInfo.NO_FIRING));
 
     if (ordered) {
       // move forward in time so that the input might get flushed
-      advanceInputWatermark(timerInternals, elementTime.plus(ALLOWED_LATENESS + 1), runner);
+      advanceInputWatermark(
+          timerInternals, elementTime.plus(Duration.millis(ALLOWED_LATENESS + 1)), runner);
     }
 
     assertEquals(6, (int) stateInternals.state(windowNamespace(WINDOW_2), stateTag).read());
@@ -347,22 +377,26 @@ public class StatefulDoFnRunnerTest {
           Arrays.asList(
               KV.of(
                   outputTag,
-                  WindowedValue.of(3, elementTime.minus(2), WINDOW_2, PaneInfo.NO_FIRING)),
+                  WindowedValues.of(
+                      3, elementTime.minus(Duration.millis(2)), WINDOW_2, PaneInfo.NO_FIRING)),
               KV.of(
                   outputTag,
-                  WindowedValue.of(5, elementTime.minus(1), WINDOW_2, PaneInfo.NO_FIRING)),
-              KV.of(outputTag, WindowedValue.of(6, elementTime, WINDOW_2, PaneInfo.NO_FIRING))),
+                  WindowedValues.of(
+                      5, elementTime.minus(Duration.millis(1)), WINDOW_2, PaneInfo.NO_FIRING)),
+              KV.of(outputTag, WindowedValues.of(6, elementTime, WINDOW_2, PaneInfo.NO_FIRING))),
           outputs);
     } else {
       assertEquals(
           Arrays.asList(
-              KV.of(outputTag, WindowedValue.of(1, elementTime, WINDOW_2, PaneInfo.NO_FIRING)),
+              KV.of(outputTag, WindowedValues.of(1, elementTime, WINDOW_2, PaneInfo.NO_FIRING)),
               KV.of(
                   outputTag,
-                  WindowedValue.of(3, elementTime.minus(1), WINDOW_2, PaneInfo.NO_FIRING)),
+                  WindowedValues.of(
+                      3, elementTime.minus(Duration.millis(1)), WINDOW_2, PaneInfo.NO_FIRING)),
               KV.of(
                   outputTag,
-                  WindowedValue.of(6, elementTime.minus(2), WINDOW_2, PaneInfo.NO_FIRING))),
+                  WindowedValues.of(
+                      6, elementTime.minus(Duration.millis(2)), WINDOW_2, PaneInfo.NO_FIRING))),
           outputs);
     }
   }
@@ -372,13 +406,13 @@ public class StatefulDoFnRunnerTest {
   }
 
   private DoFnRunner createStatefulDoFnRunner(
-      DoFn<KV<String, Integer>, Integer> fn, OutputManager outputManager) {
+      DoFn<KV<String, Integer>, Integer> fn, WindowedValueMultiReceiver outputManager) {
     return createStatefulDoFnRunner(fn, outputManager, true);
   }
 
   private DoFnRunner createStatefulDoFnRunner(
       DoFn<KV<String, Integer>, Integer> fn,
-      OutputManager outputManager,
+      WindowedValueMultiReceiver outputManager,
       boolean supportTimeSortedInput) {
     return DoFnRunners.defaultStatefulDoFnRunner(
         fn,
@@ -393,12 +427,7 @@ public class StatefulDoFnRunnerTest {
   }
 
   private DoFnRunner<KV<String, Integer>, Integer> getDoFnRunner(
-      DoFn<KV<String, Integer>, Integer> fn) {
-    return getDoFnRunner(fn, null);
-  }
-
-  private DoFnRunner<KV<String, Integer>, Integer> getDoFnRunner(
-      DoFn<KV<String, Integer>, Integer> fn, @Nullable OutputManager outputManager) {
+      DoFn<KV<String, Integer>, Integer> fn, @Nullable WindowedValueMultiReceiver outputManager) {
     return new SimpleDoFnRunner<>(
         null,
         fn,
@@ -414,10 +443,10 @@ public class StatefulDoFnRunnerTest {
         Collections.emptyMap());
   }
 
-  private OutputManager discardingOutputManager() {
-    return new OutputManager() {
+  private WindowedValueMultiReceiver discardingOutputManager() {
+    return new WindowedValueMultiReceiver() {
       @Override
-      public <T> void output(TupleTag<T> tag, WindowedValue<T> output) {
+      public <OutputT> void output(TupleTag<OutputT> tag, WindowedValue<OutputT> output) {
         // discard
       }
     };
@@ -439,15 +468,18 @@ public class StatefulDoFnRunnerTest {
           window,
           timer.getTimestamp(),
           timer.getOutputTimestamp(),
-          timer.getDomain());
+          timer.getDomain(),
+          timer.causedByDrain());
     }
   }
 
-  private static OutputManager asOutputManager(List<KV<TupleTag<?>, WindowedValue<?>>> outputs) {
-    return new OutputManager() {
+  private static WindowedValueMultiReceiver asOutputManager(
+      List<KV<TupleTag<?>, WindowedValue<?>>> outputs) {
+    return new WindowedValueMultiReceiver() {
       @Override
-      public <T> void output(TupleTag<T> tag, WindowedValue<T> output) {
-        outputs.add(KV.of(tag, output));
+      public <OutputT> void output(TupleTag<OutputT> tag, WindowedValue<OutputT> output) {
+        // silly cast needed to forget the inner type parameter
+        outputs.add((KV<TupleTag<?>, WindowedValue<?>>) (Object) KV.of(tag, output));
       }
     };
   }

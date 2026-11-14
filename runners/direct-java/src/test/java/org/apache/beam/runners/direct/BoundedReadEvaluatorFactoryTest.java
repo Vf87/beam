@@ -36,7 +36,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.concurrent.CountDownLatch;
-import org.apache.beam.runners.core.construction.SplittableParDo;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.beam.runners.direct.BoundedReadEvaluatorFactory.BoundedSourceShard;
 import org.apache.beam.sdk.coders.BigEndianLongCoder;
 import org.apache.beam.sdk.coders.Coder;
@@ -54,10 +54,12 @@ import org.apache.beam.sdk.testing.SourceTestUtils;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.construction.SplittableParDo;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.hamcrest.Matchers;
 import org.joda.time.Instant;
 import org.junit.Before;
@@ -71,7 +73,7 @@ import org.mockito.MockitoAnnotations;
 /** Tests for {@link BoundedReadEvaluatorFactory}. */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class BoundedReadEvaluatorFactoryTest {
   private BoundedSource<Long> source;
@@ -262,7 +264,7 @@ public class BoundedReadEvaluatorFactoryTest {
     UncommittedBundle<BoundedSourceShard<Long>> rootBundle = bundleFactory.createRootBundle();
     for (BoundedSource<Long> split : splits) {
       BoundedSourceShard<Long> shard = BoundedSourceShard.of(split);
-      rootBundle.add(WindowedValue.valueInGlobalWindow(shard));
+      rootBundle.add(WindowedValues.valueInGlobalWindow(shard));
     }
     CommittedBundle<BoundedSourceShard<Long>> shards = rootBundle.commit(Instant.now());
 
@@ -301,11 +303,11 @@ public class BoundedReadEvaluatorFactoryTest {
     TransformEvaluator<BoundedSourceShard<Long>> evaluator =
         factory.forApplication(
             sourceTransform, bundleFactory.createRootBundle().commit(Instant.now()));
-    evaluator.processElement(WindowedValue.valueInGlobalWindow(BoundedSourceShard.of(source)));
+    evaluator.processElement(WindowedValues.valueInGlobalWindow(BoundedSourceShard.of(source)));
     evaluator.finishBundle();
     CommittedBundle<Long> committed = output.commit(Instant.now());
     assertThat(committed.getElements(), containsInAnyOrder(gw(2L), gw(3L), gw(1L)));
-    assertThat(TestSource.readerClosed, is(true));
+    assertThat(TestSource.readerClosed.get(), is(true));
   }
 
   @Test
@@ -321,11 +323,11 @@ public class BoundedReadEvaluatorFactoryTest {
     TransformEvaluator<BoundedSourceShard<Long>> evaluator =
         factory.forApplication(
             sourceTransform, bundleFactory.createRootBundle().commit(Instant.now()));
-    evaluator.processElement(WindowedValue.valueInGlobalWindow(BoundedSourceShard.of(source)));
+    evaluator.processElement(WindowedValues.valueInGlobalWindow(BoundedSourceShard.of(source)));
     evaluator.finishBundle();
     CommittedBundle<Long> committed = output.commit(Instant.now());
     assertThat(committed.getElements(), emptyIterable());
-    assertThat(TestSource.readerClosed, is(true));
+    assertThat(TestSource.readerClosed.get(), is(true));
   }
 
   @Test
@@ -335,7 +337,7 @@ public class BoundedReadEvaluatorFactoryTest {
   }
 
   private static class TestSource<T> extends OffsetBasedSource<T> {
-    private static boolean readerClosed;
+    private static final AtomicBoolean readerClosed = new AtomicBoolean(false);
     private final Coder<T> coder;
     private final T[] elems;
     private final int firstSplitIndex;
@@ -351,7 +353,7 @@ public class BoundedReadEvaluatorFactoryTest {
       this.elems = elems;
       this.coder = coder;
       this.firstSplitIndex = firstSplitIndex;
-      readerClosed = false;
+      readerClosed.set(false);
 
       subrangesCompleted = new CountDownLatch(2);
     }
@@ -448,11 +450,11 @@ public class BoundedReadEvaluatorFactoryTest {
 
     @Override
     public void close() throws IOException {
-      TestSource.readerClosed = true;
+      TestSource.readerClosed.set(true);
     }
   }
 
   private static WindowedValue<Long> gw(Long elem) {
-    return WindowedValue.valueInGlobalWindow(elem);
+    return WindowedValues.valueInGlobalWindow(elem);
   }
 }

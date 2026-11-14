@@ -17,6 +17,8 @@
  */
 package org.apache.beam.runners.direct;
 
+import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
+
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -27,11 +29,13 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import javax.annotation.Nonnull;
+import org.apache.beam.runners.core.LateDataUtils;
 import org.apache.beam.sdk.runners.AppliedPTransform;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ComparisonChain;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Ordering;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ComparisonChain;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Ordering;
+import org.joda.time.Duration;
 import org.joda.time.Instant;
 
 /**
@@ -49,9 +53,6 @@ import org.joda.time.Instant;
  * followed by a call to {@link #fireForWatermark(AppliedPTransform, Instant)} for the same
  * transform with the current value of the watermark.
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 class WatermarkCallbackExecutor {
   /** Create a new {@link WatermarkCallbackExecutor}. */
   public static WatermarkCallbackExecutor create(Executor executor) {
@@ -82,10 +83,9 @@ class WatermarkCallbackExecutor {
 
     PriorityQueue<WatermarkCallback> callbackQueue = callbacks.get(step);
     if (callbackQueue == null) {
-      callbackQueue = new PriorityQueue<>(11, new CallbackOrdering());
-      if (callbacks.putIfAbsent(step, callbackQueue) != null) {
-        callbackQueue = callbacks.get(step);
-      }
+      PriorityQueue<WatermarkCallback> newQueue = new PriorityQueue<>(11, new CallbackOrdering());
+      PriorityQueue<WatermarkCallback> existing = callbacks.putIfAbsent(step, newQueue);
+      callbackQueue = existing != null ? existing : newQueue;
     }
 
     synchronized (callbackQueue) {
@@ -107,10 +107,9 @@ class WatermarkCallbackExecutor {
 
     PriorityQueue<WatermarkCallback> callbackQueue = callbacks.get(step);
     if (callbackQueue == null) {
-      callbackQueue = new PriorityQueue<>(11, new CallbackOrdering());
-      if (callbacks.putIfAbsent(step, callbackQueue) != null) {
-        callbackQueue = callbacks.get(step);
-      }
+      PriorityQueue<WatermarkCallback> newQueue = new PriorityQueue<>(11, new CallbackOrdering());
+      PriorityQueue<WatermarkCallback> existing = callbacks.putIfAbsent(step, newQueue);
+      callbackQueue = existing != null ? existing : newQueue;
     }
 
     synchronized (callbackQueue) {
@@ -130,8 +129,9 @@ class WatermarkCallbackExecutor {
     }
     synchronized (callbackQueue) {
       List<Runnable> toFire = new ArrayList<>();
-      while (!callbackQueue.isEmpty() && callbackQueue.peek().shouldFire(watermark)) {
-        toFire.add(callbackQueue.poll().getCallback());
+      while (!callbackQueue.isEmpty()
+          && checkStateNotNull(callbackQueue.peek()).shouldFire(watermark)) {
+        toFire.add(checkStateNotNull(callbackQueue.poll()).getCallback());
       }
       if (!toFire.isEmpty()) {
         CountDownLatch latch = new CountDownLatch(toFire.size());
@@ -153,8 +153,11 @@ class WatermarkCallbackExecutor {
   private static class WatermarkCallback {
     public static <W extends BoundedWindow> WatermarkCallback onGuaranteedFiring(
         BoundedWindow window, WindowingStrategy<?, W> strategy, Runnable callback) {
-      @SuppressWarnings("unchecked")
-      Instant firingAfter = strategy.getTrigger().getWatermarkThatGuaranteesFiring((W) window);
+      Instant firingAfter =
+          Ordering.natural()
+              .min(
+                  LateDataUtils.garbageCollectionTime(window, strategy),
+                  strategy.getTrigger().getWatermarkThatGuaranteesFiring((W) window));
       return new WatermarkCallback(firingAfter, callback);
     }
 
@@ -162,7 +165,8 @@ class WatermarkCallbackExecutor {
         BoundedWindow window, WindowingStrategy<?, W> strategy, Runnable callback) {
       // Fire one milli past the end of the window. This ensures that all window expiration
       // timers are delivered first
-      Instant firingAfter = window.maxTimestamp().plus(strategy.getAllowedLateness()).plus(1L);
+      Instant firingAfter =
+          window.maxTimestamp().plus(strategy.getAllowedLateness()).plus(Duration.millis(1L));
       return new WatermarkCallback(firingAfter, callback);
     }
 

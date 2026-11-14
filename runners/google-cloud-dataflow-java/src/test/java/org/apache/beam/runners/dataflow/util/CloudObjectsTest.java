@@ -34,8 +34,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import org.apache.beam.runners.core.construction.SdkComponents;
-import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.coders.ByteArrayCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderException;
@@ -53,6 +51,8 @@ import org.apache.beam.sdk.coders.SetCoder;
 import org.apache.beam.sdk.coders.StructuredCoder;
 import org.apache.beam.sdk.coders.TimestampPrefixingWindowCoder;
 import org.apache.beam.sdk.coders.VarLongCoder;
+import org.apache.beam.sdk.extensions.avro.coders.AvroCoder;
+import org.apache.beam.sdk.extensions.avro.io.AvroGeneratedUser;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.schemas.SchemaCoder;
@@ -64,13 +64,14 @@ import org.apache.beam.sdk.transforms.join.UnionCoder;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
 import org.apache.beam.sdk.util.InstanceBuilder;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.construction.SdkComponents;
 import org.apache.beam.sdk.values.Row;
+import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TypeDescriptors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList.Builder;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.junit.Test;
 import org.junit.experimental.runners.Enclosed;
@@ -83,7 +84,7 @@ import org.junit.runners.Parameterized.Parameters;
 /** Tests for {@link CloudObjects}. */
 @RunWith(Enclosed.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class CloudObjectsTest {
   private static final Schema TEST_SCHEMA =
@@ -112,6 +113,9 @@ public class CloudObjectsTest {
         if (tested instanceof ObjectCoder || tested instanceof ArbitraryCoder) {
           testedClasses.add(CustomCoder.class);
           assertThat(defaultCoderTranslators, hasItem(CustomCoder.class));
+        } else if (AvroCoder.class.isAssignableFrom(tested.getClass())) {
+          testedClasses.add(AvroCoder.class);
+          assertThat(defaultCoderTranslators, hasItem(AvroCoder.class));
         } else {
           testedClasses.add(tested.getClass());
           assertThat(defaultCoderTranslators, hasItem(tested.getClass()));
@@ -139,7 +143,7 @@ public class CloudObjectsTest {
   public static class DefaultCoders {
     @Parameters(name = "{index}: {0}")
     public static Iterable<Coder<?>> data() {
-      Builder<Coder<?>> dataBuilder =
+      ImmutableList.Builder<Coder<?>> dataBuilder =
           ImmutableList.<Coder<?>>builder()
               .add(new ArbitraryCoder())
               .add(new ObjectCoder())
@@ -150,18 +154,21 @@ public class CloudObjectsTest {
               .add(IterableCoder.of(VarLongCoder.of()))
               .add(KvCoder.of(VarLongCoder.of(), ByteArrayCoder.of()))
               .add(
-                  WindowedValue.getFullCoder(
+                  WindowedValues.getFullCoder(
                       KvCoder.of(VarLongCoder.of(), ByteArrayCoder.of()),
                       IntervalWindow.getCoder()))
               .add(ByteArrayCoder.of())
               .add(VarLongCoder.of())
-              .add(SerializableCoder.of(Record.class))
-              .add(AvroCoder.of(Record.class))
+              .add(SerializableCoder.of(TestRecord.class))
+              .add(AvroCoder.generic(avroSchema))
+              .add(AvroCoder.specific(AvroGeneratedUser.class))
+              .add(AvroCoder.reflect(TestRecord.class))
               .add(CollectionCoder.of(VarLongCoder.of()))
               .add(ListCoder.of(VarLongCoder.of()))
               .add(SetCoder.of(VarLongCoder.of()))
               .add(MapCoder.of(VarLongCoder.of(), ByteArrayCoder.of()))
               .add(NullableCoder.of(IntervalWindow.getCoder()))
+              .add(TimestampedValue.TimestampedValueCoder.of(VarLongCoder.of()))
               .add(
                   UnionCoder.of(
                       ImmutableList.of(
@@ -195,7 +202,7 @@ public class CloudObjectsTest {
 
     @Test
     public void toAndFromCloudObject() throws Exception {
-      CloudObject cloudObject = CloudObjects.asCloudObject(coder, /*sdkComponents=*/ null);
+      CloudObject cloudObject = CloudObjects.asCloudObject(coder, /* sdkComponents= */ null);
       Coder<?> fromCloudObject = CloudObjects.coderFromCloudObject(cloudObject);
 
       assertEquals(coder.getClass(), fromCloudObject.getClass());
@@ -247,7 +254,16 @@ public class CloudObjectsTest {
     }
   }
 
-  private static class Record implements Serializable {}
+  private static class TestRecord implements Serializable {}
+
+  private static org.apache.avro.Schema avroSchema =
+      new org.apache.avro.Schema.Parser()
+          .parse(
+              "{\"namespace\": \"example.avro\",\n"
+                  + " \"type\": \"record\",\n"
+                  + " \"name\": \"TestAvro\",\n"
+                  + " \"fields\": []\n"
+                  + "}");
 
   private static class ObjectCoder extends CustomCoder<Object> {
     @Override
@@ -260,7 +276,7 @@ public class CloudObjectsTest {
 
     @Override
     public boolean equals(@Nullable Object other) {
-      return other != null && getClass().equals(other.getClass());
+      return other instanceof ObjectCoder;
     }
 
     @Override
@@ -270,13 +286,14 @@ public class CloudObjectsTest {
   }
 
   /** A non-custom coder with no registered translator. */
-  private static class ArbitraryCoder extends StructuredCoder<Record> {
+  private static class ArbitraryCoder extends StructuredCoder<TestRecord> {
     @Override
-    public void encode(Record value, OutputStream outStream) throws CoderException, IOException {}
+    public void encode(TestRecord value, OutputStream outStream)
+        throws CoderException, IOException {}
 
     @Override
-    public Record decode(InputStream inStream) throws CoderException, IOException {
-      return new Record();
+    public TestRecord decode(InputStream inStream) throws CoderException, IOException {
+      return new TestRecord();
     }
 
     @Override
@@ -305,7 +322,7 @@ public class CloudObjectsTest {
       if (this == o) {
         return true;
       }
-      return o != null && getClass() == o.getClass();
+      return o instanceof RowIdentity;
     }
   }
 }

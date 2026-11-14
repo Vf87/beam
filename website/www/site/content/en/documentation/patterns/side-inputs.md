@@ -19,6 +19,8 @@ limitations under the License.
 
 The samples on this page show you common Beam side input patterns. A side input is an additional input that your `DoFn` can access each time it processes an element in the input `PCollection`. For more information, see the [programming guide section on side inputs](/documentation/programming-guide/#side-inputs).
 
+If you are trying to enrich your data by doing a key-value lookup to a remote service, you may first want to consider the [Enrichment transform](https://beam.apache.org/documentation/transforms/python/elementwise/enrichment/) which can abstract away some of the details of side inputs and provide additional benefits like client-side throttling.
+
 {{< language-switcher java py >}}
 
 ## Slowly updating global window side inputs
@@ -37,7 +39,7 @@ To slowly update global window side inputs in pipelines with non-global windows:
 
 1. Create the side input for downstream transforms. The side input should fit into memory.
 
-The global window side input triggers on processing time, so the main pipeline nondeterministically matches the side input to elements in event time.
+The global window side input triggers on processing time, so the main pipeline non-deterministically matches the side input to elements in event time.
 
 For instance, the following code sample uses a `Map` to create a `DoFn`. The `Map` becomes a `View.asSingleton` side input that’s rebuilt on each counter tick. The side input updates every 5 seconds in order to demonstrate the workflow. In a real-world scenario, the side input would typically update every few hours or once per day.
 
@@ -45,8 +47,12 @@ For instance, the following code sample uses a `Map` to create a `DoFn`. The `Ma
 {{< code_sample "examples/java/src/main/java/org/apache/beam/examples/snippets/Snippets.java" SideInputPatternSlowUpdateGlobalWindowSnip1 >}}
 {{< /highlight >}}
 
+{{< paragraph class="language-py" >}}
+The Python sample uses `PeriodicImpulse` to re-read the placeholder external service on a fixed interval, and re-publishes the result into the global window on every firing. Use `Latest.Globally().without_defaults()` rather than `Latest.Globally()`: the variant with defaults adds its own side input, which stops the transform from emitting more than once. For more information, see [Issue 35934](https://github.com/apache/beam/issues/35934).
+{{< /paragraph >}}
+
 {{< highlight py >}}
-No sample present.
+{{< code_sample "sdks/python/apache_beam/examples/snippets/snippets.py" SideInputPatternSlowUpdateGlobalWindowSnip1 >}}
 {{< /highlight >}}
 
 

@@ -26,6 +26,8 @@ import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.Validation;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.DoFn.Element;
+import org.apache.beam.sdk.transforms.DoFn.OutputReceiver;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.join.CoGbkResult;
 import org.apache.beam.sdk.transforms.join.CoGroupByKey;
@@ -58,7 +60,7 @@ import org.apache.beam.sdk.values.TupleTag;
 public class JoinExamples {
 
   // A 1000-row sample of the GDELT data here: gdelt-bq:full.events.
-  private static final String GDELT_EVENTS_TABLE = "clouddataflow-readonly:samples.gdelt_sample";
+  private static final String GDELT_EVENTS_TABLE = "apache-beam-testing.samples.gdelt_sample";
   // A table that maps country codes to country names.
   private static final String COUNTRY_CODES = "gdelt-bq:full.crosswalk_geocountrycodetohuman";
 
@@ -90,14 +92,14 @@ public class JoinExamples {
             ParDo.of(
                 new DoFn<KV<String, CoGbkResult>, KV<String, String>>() {
                   @ProcessElement
-                  public void processElement(ProcessContext c) {
-                    KV<String, CoGbkResult> e = c.element();
-                    String countryCode = e.getKey();
-                    String countryName = "none";
-                    countryName = e.getValue().getOnly(countryInfoTag);
-                    for (String eventInfo : c.element().getValue().getAll(eventInfoTag)) {
+                  public void processElement(
+                      @Element KV<String, CoGbkResult> element,
+                      OutputReceiver<KV<String, String>> receiver) {
+                    String countryCode = element.getKey();
+                    String countryName = element.getValue().getOnly(countryInfoTag);
+                    for (String eventInfo : element.getValue().getAll(eventInfoTag)) {
                       // Generate a string that combines information from both collection values
-                      c.output(
+                      receiver.output(
                           KV.of(
                               countryCode,
                               "Country name: " + countryName + ", Event info: " + eventInfo));
@@ -112,10 +114,11 @@ public class JoinExamples {
             ParDo.of(
                 new DoFn<KV<String, String>, String>() {
                   @ProcessElement
-                  public void processElement(ProcessContext c) {
+                  public void processElement(
+                      @Element KV<String, String> element, OutputReceiver<String> receiver) {
                     String outputstring =
-                        "Country code: " + c.element().getKey() + ", " + c.element().getValue();
-                    c.output(outputstring);
+                        "Country code: " + element.getKey() + ", " + element.getValue();
+                    receiver.output(outputstring);
                   }
                 }));
     return formattedResults;
@@ -127,14 +130,13 @@ public class JoinExamples {
    */
   static class ExtractEventDataFn extends DoFn<TableRow, KV<String, String>> {
     @ProcessElement
-    public void processElement(ProcessContext c) {
-      TableRow row = c.element();
+    public void processElement(@Element TableRow row, OutputReceiver<KV<String, String>> receiver) {
       String countryCode = (String) row.get("ActionGeo_CountryCode");
       String sqlDate = (String) row.get("SQLDATE");
       String actor1Name = (String) row.get("Actor1Name");
       String sourceUrl = (String) row.get("SOURCEURL");
       String eventInfo = "Date: " + sqlDate + ", Actor1: " + actor1Name + ", url: " + sourceUrl;
-      c.output(KV.of(countryCode, eventInfo));
+      receiver.output(KV.of(countryCode, eventInfo));
     }
   }
 
@@ -144,11 +146,10 @@ public class JoinExamples {
    */
   static class ExtractCountryInfoFn extends DoFn<TableRow, KV<String, String>> {
     @ProcessElement
-    public void processElement(ProcessContext c) {
-      TableRow row = c.element();
+    public void processElement(@Element TableRow row, OutputReceiver<KV<String, String>> receiver) {
       String countryCode = (String) row.get("FIPSCC");
       String countryName = (String) row.get("HumanName");
-      c.output(KV.of(countryCode, countryName));
+      receiver.output(KV.of(countryCode, countryName));
     }
   }
 
@@ -167,12 +168,17 @@ public class JoinExamples {
 
   public static void main(String[] args) throws Exception {
     Options options = PipelineOptionsFactory.fromArgs(args).withValidation().as(Options.class);
+    runJoinExamples(options);
+  }
+
+  static void runJoinExamples(Options options) throws Exception {
     Pipeline p = Pipeline.create(options);
     // the following two 'applys' create multiple inputs to our pipeline, one for each
     // of our two input sources.
     PCollection<TableRow> eventsTable =
-        p.apply(BigQueryIO.readTableRows().from(GDELT_EVENTS_TABLE));
-    PCollection<TableRow> countryCodes = p.apply(BigQueryIO.readTableRows().from(COUNTRY_CODES));
+        p.apply("Read BQ Events", BigQueryIO.readTableRows().from(GDELT_EVENTS_TABLE));
+    PCollection<TableRow> countryCodes =
+        p.apply("Read BQ Country Codes", BigQueryIO.readTableRows().from(COUNTRY_CODES));
     PCollection<String> formattedResults = joinEvents(eventsTable, countryCodes);
     formattedResults.apply(TextIO.write().to(options.getOutput()));
     p.run().waitUntilFinish();

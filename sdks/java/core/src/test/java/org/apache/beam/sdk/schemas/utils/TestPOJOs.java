@@ -19,20 +19,29 @@ package org.apache.beam.sdk.schemas.utils;
 
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import org.apache.beam.sdk.schemas.JavaFieldSchema;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.schemas.annotations.DefaultSchema;
 import org.apache.beam.sdk.schemas.annotations.SchemaCaseFormat;
 import org.apache.beam.sdk.schemas.annotations.SchemaCreate;
+import org.apache.beam.sdk.schemas.annotations.SchemaFieldDescription;
 import org.apache.beam.sdk.schemas.annotations.SchemaFieldName;
+import org.apache.beam.sdk.schemas.annotations.SchemaFieldNumber;
 import org.apache.beam.sdk.schemas.annotations.SchemaIgnore;
 import org.apache.beam.sdk.schemas.logicaltypes.EnumerationType;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.CaseFormat;
+import org.apache.beam.sdk.schemas.logicaltypes.NanosInstant;
+import org.apache.beam.sdk.schemas.logicaltypes.SqlTypes;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.CaseFormat;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.DateTime;
 import org.joda.time.Instant;
@@ -57,7 +66,7 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof POJOWithNullables)) {
         return false;
       }
       POJOWithNullables that = (POJOWithNullables) o;
@@ -90,7 +99,7 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof POJOWithNestedNullable)) {
         return false;
       }
       POJOWithNestedNullable that = (POJOWithNestedNullable) o;
@@ -225,23 +234,44 @@ public class TestPOJOs {
   /** A POJO for testing annotations. */
   @DefaultSchema(JavaFieldSchema.class)
   public static class AnnotatedSimplePojo {
+    @SchemaFieldNumber("0")
     public final String str;
 
     @SchemaFieldName("aByte")
+    @SchemaFieldNumber("2")
     public final byte theByte;
 
     @SchemaFieldName("aShort")
+    @SchemaFieldNumber("1")
     public final short theShort;
 
+    @SchemaFieldNumber("3")
     public final int anInt;
+
+    @SchemaFieldNumber("4")
     public final long aLong;
+
+    @SchemaFieldNumber("5")
     public final boolean aBoolean;
+
+    @SchemaFieldNumber("6")
     public final DateTime dateTime;
+
+    @SchemaFieldNumber("7")
     public final Instant instant;
+
+    @SchemaFieldNumber("8")
     public final byte[] bytes;
+
+    @SchemaFieldNumber("9")
     public final ByteBuffer byteBuffer;
+
+    @SchemaFieldNumber("10")
     public final BigDecimal bigDecimal;
+
+    @SchemaFieldNumber("11")
     public final StringBuilder stringBuilder;
+
     @SchemaIgnore public final Integer pleaseIgnore;
 
     // Marked with SchemaCreate, so this will be called to construct instances.
@@ -279,7 +309,7 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof AnnotatedSimplePojo)) {
         return false;
       }
       AnnotatedSimplePojo that = (AnnotatedSimplePojo) o;
@@ -350,6 +380,23 @@ public class TestPOJOs {
     }
   }
 
+  /** The schema for {@link SimplePOJO}. * */
+  public static final Schema ANNOTATED_SIMPLE_POJO_SCHEMA =
+      Schema.builder()
+          .addStringField("str")
+          .addInt16Field("aShort")
+          .addByteField("aByte")
+          .addInt32Field("anInt")
+          .addInt64Field("aLong")
+          .addBooleanField("aBoolean")
+          .addDateTimeField("dateTime")
+          .addDateTimeField("instant")
+          .addByteArrayField("bytes")
+          .addByteArrayField("byteBuffer")
+          .addDecimalField("bigDecimal")
+          .addStringField("stringBuilder")
+          .build();
+
   /** A simple POJO containing basic types. * */
   @DefaultSchema(JavaFieldSchema.class)
   public static class SimplePOJO {
@@ -400,7 +447,7 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof SimplePOJO)) {
         return false;
       }
       SimplePOJO that = (SimplePOJO) o;
@@ -471,7 +518,7 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof NestedPOJO)) {
         return false;
       }
       NestedPOJO that = (NestedPOJO) o;
@@ -509,7 +556,7 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof PrimitiveArrayPOJO)) {
         return false;
       }
       PrimitiveArrayPOJO that = (PrimitiveArrayPOJO) o;
@@ -551,7 +598,7 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof NestedArrayPOJO)) {
         return false;
       }
       NestedArrayPOJO that = (NestedArrayPOJO) o;
@@ -584,7 +631,7 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof NestedArraysPOJO)) {
         return false;
       }
       NestedArraysPOJO that = (NestedArraysPOJO) o;
@@ -619,12 +666,15 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof NestedCollectionPOJO)) {
         return false;
       }
       NestedCollectionPOJO that = (NestedCollectionPOJO) o;
       return Objects.equals(simples, that.simples)
-          && Objects.equals(iterableSimples, that.iterableSimples);
+          && (iterableSimples == that.iterableSimples
+              || (iterableSimples != null
+                  && that.iterableSimples != null
+                  && Iterables.elementsEqual(iterableSimples, that.iterableSimples)));
     }
 
     @Override
@@ -656,7 +706,7 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof PrimitiveMapPOJO)) {
         return false;
       }
       PrimitiveMapPOJO that = (PrimitiveMapPOJO) o;
@@ -690,7 +740,7 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof NestedMapPOJO)) {
         return false;
       }
       NestedMapPOJO that = (NestedMapPOJO) o;
@@ -734,7 +784,7 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof POJOWithBoxedFields)) {
         return false;
       }
       POJOWithBoxedFields that = (POJOWithBoxedFields) o;
@@ -779,7 +829,7 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof POJOWithByteArray)) {
         return false;
       }
       POJOWithByteArray that = (POJOWithByteArray) o;
@@ -847,11 +897,14 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (!(o instanceof PojoWithNestedArray)) {
+      if (!(o instanceof PojoWithIterable)) {
         return false;
       }
       PojoWithIterable that = (PojoWithIterable) o;
-      return Objects.equals(strings, that.strings);
+      return strings == that.strings
+          || (strings != null
+              && that.strings != null
+              && Iterables.elementsEqual(strings, that.strings));
     }
 
     @Override
@@ -887,7 +940,7 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof PojoWithEnum)) {
         return false;
       }
       PojoWithEnum that = (PojoWithEnum) o;
@@ -959,7 +1012,7 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof NullablePOJO)) {
         return false;
       }
       NullablePOJO that = (NullablePOJO) o;
@@ -1035,7 +1088,7 @@ public class TestPOJOs {
       if (this == o) {
         return true;
       }
-      if (o == null || getClass() != o.getClass()) {
+      if (!(o instanceof PojoWithCaseFormat)) {
         return false;
       }
       PojoWithCaseFormat that = (PojoWithCaseFormat) o;
@@ -1066,5 +1119,309 @@ public class TestPOJOs {
     public PojoNoCreateOption(String user) {
       this.user = user;
     }
+  }
+
+  /** A POJO containing itself as a nested class. * */
+  @DefaultSchema(JavaFieldSchema.class)
+  public static class SelfNestedPOJO {
+    public SelfNestedPOJO nested;
+
+    public SelfNestedPOJO(SelfNestedPOJO nested) {
+      this.nested = nested;
+    }
+
+    public SelfNestedPOJO() {}
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof SelfNestedPOJO)) {
+        return false;
+      }
+      SelfNestedPOJO that = (SelfNestedPOJO) o;
+      return Objects.equals(nested, that.nested);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(nested);
+    }
+  }
+
+  /**
+   * A POJO containing a circular reference back to itself through the accompanying POJO below. *
+   */
+  @DefaultSchema(JavaFieldSchema.class)
+  public static class FirstCircularNestedPOJO {
+    public SecondCircularNestedPOJO nested;
+
+    public FirstCircularNestedPOJO(SecondCircularNestedPOJO nested) {
+      this.nested = nested;
+    }
+
+    public FirstCircularNestedPOJO() {}
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof FirstCircularNestedPOJO)) {
+        return false;
+      }
+      FirstCircularNestedPOJO that = (FirstCircularNestedPOJO) o;
+      return Objects.equals(nested, that.nested);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(nested);
+    }
+  }
+
+  /**
+   * A POJO containing a circular reference back to itself through the accompanying POJO below. *
+   */
+  @DefaultSchema(JavaFieldSchema.class)
+  public static class SecondCircularNestedPOJO {
+    public FirstCircularNestedPOJO nested;
+
+    public SecondCircularNestedPOJO(FirstCircularNestedPOJO nested) {
+      this.nested = nested;
+    }
+
+    public SecondCircularNestedPOJO() {}
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof SecondCircularNestedPOJO)) {
+        return false;
+      }
+      SecondCircularNestedPOJO that = (SecondCircularNestedPOJO) o;
+      return Objects.equals(nested, that.nested);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(nested);
+    }
+  }
+
+  /** A POJO containing a nested class, along with a SimplePOJO. * */
+  @DefaultSchema(JavaFieldSchema.class)
+  public static class NestedPOJOWithSimplePOJO {
+    public NestedPOJO nested;
+    public SimplePOJO simplePojo;
+
+    public NestedPOJOWithSimplePOJO(NestedPOJO nested, SimplePOJO simplePojo) {
+      this.nested = nested;
+      this.simplePojo = simplePojo;
+    }
+
+    public NestedPOJOWithSimplePOJO() {}
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof NestedPOJOWithSimplePOJO)) {
+        return false;
+      }
+      NestedPOJOWithSimplePOJO that = (NestedPOJOWithSimplePOJO) o;
+      return Objects.equals(nested, that.nested);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(nested);
+    }
+  }
+
+  /** The schema for {@link NestedPOJOWithSimplePOJO}. * */
+  public static final Schema NESTED_POJO_WITH_SIMPLE_POJO_SCHEMA =
+      Schema.builder()
+          .addRowField("nested", NESTED_POJO_SCHEMA)
+          .addRowField("simplePojo", SIMPLE_POJO_SCHEMA)
+          .build();
+
+  /** A simple POJO containing nullable basic types. * */
+  @DefaultSchema(JavaFieldSchema.class)
+  public static class SimplePOJOWithDescription {
+    @SchemaFieldDescription("a simple string that is part of this field")
+    public @Nullable String str;
+
+    public SimplePOJOWithDescription() {}
+
+    public SimplePOJOWithDescription(String str) {
+      this.str = str;
+    }
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof SimplePOJOWithDescription)) {
+        return false;
+      }
+      SimplePOJOWithDescription that = (SimplePOJOWithDescription) o;
+      return Objects.equals(str, that.str);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(str);
+    }
+  }
+
+  /** The schema for {@link NullablePOJO}. * */
+  public static final Schema SIMPLE_POJO_WITH_DESCRIPTION_SCHEMA =
+      Schema.builder()
+          .addField(
+              Schema.Field.nullable("str", FieldType.STRING)
+                  .withDescription("a simple string that is part of this field"))
+          .build();
+
+  /** A POJO containing JSR-310 date/time types and a UUID, all inferred as Beam logical types. */
+  @DefaultSchema(JavaFieldSchema.class)
+  public static class JavaTimePOJO {
+    public LocalDate localDate;
+    public LocalTime localTime;
+    public LocalDateTime localDateTime;
+    public java.time.Instant instant;
+    public UUID uuid;
+
+    public JavaTimePOJO() {}
+
+    public JavaTimePOJO(
+        LocalDate localDate,
+        LocalTime localTime,
+        LocalDateTime localDateTime,
+        java.time.Instant instant,
+        UUID uuid) {
+      this.localDate = localDate;
+      this.localTime = localTime;
+      this.localDateTime = localDateTime;
+      this.instant = instant;
+      this.uuid = uuid;
+    }
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof JavaTimePOJO)) {
+        return false;
+      }
+      JavaTimePOJO that = (JavaTimePOJO) o;
+      return Objects.equals(localDate, that.localDate)
+          && Objects.equals(localTime, that.localTime)
+          && Objects.equals(localDateTime, that.localDateTime)
+          && Objects.equals(instant, that.instant)
+          && Objects.equals(uuid, that.uuid);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(localDate, localTime, localDateTime, instant, uuid);
+    }
+  }
+
+  /** The schema for {@link JavaTimePOJO}. */
+  public static final Schema JAVA_TIME_POJO_SCHEMA =
+      Schema.builder()
+          .addLogicalTypeField("localDate", SqlTypes.DATE)
+          .addLogicalTypeField("localTime", SqlTypes.TIME)
+          .addLogicalTypeField("localDateTime", SqlTypes.DATETIME)
+          .addLogicalTypeField("instant", new NanosInstant())
+          .addLogicalTypeField("uuid", SqlTypes.UUID)
+          .build();
+
+  /** A POJO with nullable JSR-310 and UUID fields. */
+  @DefaultSchema(JavaFieldSchema.class)
+  public static class NullableJavaTimePOJO {
+    public @Nullable LocalDate localDate;
+    public @Nullable LocalTime localTime;
+    public @Nullable LocalDateTime localDateTime;
+    public java.time.@Nullable Instant instant;
+    public @Nullable UUID uuid;
+
+    public NullableJavaTimePOJO() {}
+
+    public NullableJavaTimePOJO(
+        LocalDate localDate,
+        LocalTime localTime,
+        LocalDateTime localDateTime,
+        java.time.Instant instant,
+        UUID uuid) {
+      this.localDate = localDate;
+      this.localTime = localTime;
+      this.localDateTime = localDateTime;
+      this.instant = instant;
+      this.uuid = uuid;
+    }
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof NullableJavaTimePOJO)) {
+        return false;
+      }
+      NullableJavaTimePOJO that = (NullableJavaTimePOJO) o;
+      return Objects.equals(localDate, that.localDate)
+          && Objects.equals(localTime, that.localTime)
+          && Objects.equals(localDateTime, that.localDateTime)
+          && Objects.equals(instant, that.instant)
+          && Objects.equals(uuid, that.uuid);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(localDate, localTime, localDateTime, instant, uuid);
+    }
+  }
+
+  /** The schema for {@link NullableJavaTimePOJO}. */
+  public static final Schema NULLABLE_JAVA_TIME_POJO_SCHEMA =
+      Schema.builder()
+          .addNullableLogicalTypeField("localDate", SqlTypes.DATE)
+          .addNullableLogicalTypeField("localTime", SqlTypes.TIME)
+          .addNullableLogicalTypeField("localDateTime", SqlTypes.DATETIME)
+          .addNullableLogicalTypeField("instant", new NanosInstant())
+          .addNullableLogicalTypeField("uuid", SqlTypes.UUID)
+          .build();
+
+  @DefaultSchema(JavaFieldSchema.class)
+  public static class GenericPOJOWithCreator<T> {
+    public @Nullable T t;
+
+    @SchemaCreate
+    public GenericPOJOWithCreator(@Nullable T t) {
+      this.t = t;
+    }
+  }
+
+  @DefaultSchema(JavaFieldSchema.class)
+  public static class GenericPOJO<T> {
+    public @Nullable T t;
+
+    public static <T> GenericPOJO<T> create(T t) {
+      GenericPOJO<T> genericPOJO = new GenericPOJO<>();
+      genericPOJO.t = t;
+      return genericPOJO;
+    }
+  }
+
+  public static Schema genericPOJOSchema(FieldType tFieldType) {
+    return Schema.builder().addNullableField("t", tFieldType).build();
   }
 }

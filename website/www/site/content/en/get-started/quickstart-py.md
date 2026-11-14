@@ -1,5 +1,5 @@
 ---
-title: "Beam Quickstart for Python"
+title: "WordCount Quickstart for Python"
 ---
 <!--
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,7 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Apache Beam Python SDK Quickstart
+# WordCount quickstart for Python
 
 This guide shows you how to set up your Python development environment, get the Apache Beam SDK for Python, and run an example pipeline.
 
@@ -23,77 +23,25 @@ If you're interested in contributing to the Apache Beam Python codebase, see the
 
 {{< toc >}}
 
-The Python SDK supports Python 3.6, 3.7, and 3.8. Beam 2.24.0 was the last release with support for Python 2.7 and 3.5.
+The Python SDK supports Python 3.11, 3.12, 3.13 and 3.14. Beam 2.77.0 was the last release with support for Python 3.10. Beam 2.69.0 was the last release with support for Python 3.9. Beam 2.60.0 was the last release with support for Python 3.8.
 
 ## Set up your environment
 
-### Check your Python version
-
-The Beam SDK requires Python users to use Python version 3.6 or higher. Check your version by running:
-
-{{< highlight >}}
-python --version
-{{< /highlight >}}
-
-### Install pip
-
-Install [pip](https://pip.pypa.io/en/stable/installing/), Python's package manager. Check that you have version 7.0.0 or newer by running:
-
-{{< highlight >}}
-pip --version
-{{< /highlight >}}
-
-If you do not have `pip` version 7.0.0 or newer, run the following command to
-install it. This command might require administrative privileges.
-
-{{< shell unix >}}
-pip install --upgrade pip
-{{< /shell >}}
-
-{{< shell powerShell >}}
-PS> python -m pip install --upgrade pip
-{{< /shell >}}
-
-
-### Install Python virtual environment
-
-It is recommended that you install a [Python virtual environment](https://docs.python-guide.org/en/latest/dev/virtualenvs/)
-for initial experiments. If you do not have `virtualenv` version 13.1.0 or
-newer, run the following command to install it. This command might require
-administrative privileges.
-
-{{< shell unix >}}
-pip install --upgrade virtualenv
-{{< /shell >}}
-
-{{< shell powerShell >}}
-PS> python -m pip install --upgrade virtualenv
-{{< /shell >}}
-
-If you do not want to use a Python virtual environment (not recommended), ensure
-`setuptools` is installed on your machine. If you do not have `setuptools`
-version 17.1 or newer, run the following command to install it.
-
-{{< shell unix >}}
-pip install --upgrade setuptools
-{{< /shell >}}
-
-{{< shell powerShell >}}
-PS> python -m pip install --upgrade setuptools
-{{< /shell >}}
+For details, see
+[Set up your development environment](/get-started/quickstart/python#set-up-your-development-environment).
 
 ## Get Apache Beam
 
 ### Create and activate a virtual environment
 
-A virtual environment is a directory tree containing its own Python distribution. To create a virtual environment, create a directory and run:
+A virtual environment is a directory tree containing its own Python distribution. To create a virtual environment, run:
 
 {{< shell unix >}}
-virtualenv /path/to/directory
+python -m venv /path/to/directory
 {{< /shell >}}
 
 {{< shell powerShell >}}
-PS> virtualenv C:\path\to\directory
+PS> python -m venv C:\path\to\directory
 {{< /shell >}}
 
 A virtual environment needs to be activated for each shell that is to use it.
@@ -112,7 +60,7 @@ PS> C:\path\to\directory\Scripts\activate.ps1
 
 That is, execute the `activate` script under the virtual environment directory you created.
 
-For instructions using other shells, see the [virtualenv documentation](https://virtualenv.pypa.io/en/stable/userguide/#activate-script).
+For instructions using other shells, see the [venv documentation](https://docs.python.org/3/library/venv.html).
 
 ### Download and install
 
@@ -128,24 +76,50 @@ PS> python -m pip install apache-beam
 
 #### Extra requirements
 
-The above installation will not install all the extra dependencies for using features like the Google Cloud Dataflow runner. Information on what extra packages are required for different features are highlighted below. It is possible to install multiple extra requirements using something like `pip install apache-beam[feature1,feature2]`.
+The above installation will not install all the extra dependencies for using features like the Google Cloud Dataflow runner. Information on what extra packages are required for different features are highlighted below. It is possible to install multiple extra requirements using something like `pip install 'apache-beam[feature1,feature2]'`.
 
 - **Google Cloud Platform**
-  - Installation Command: `pip install apache-beam[gcp]`
+  - Installation Command: `pip install 'apache-beam[gcp]'`
   - Required for:
     - Google Cloud Dataflow Runner
     - GCS IO
     - Datastore IO
     - BigQuery IO
 - **Amazon Web Services**
-  - Installation Command: `pip install apache-beam[aws]`
+  - Installation Command: `pip install 'apache-beam[aws]'`
   - Required for I/O connectors interfacing with AWS
+- **Microsoft Azure**
+  - Installation Command: `pip install 'apache-beam[azure]'`
+  - Required for I/O connectors interfacing with Microsoft Azure
+- **Beam YAML API**
+  - Installation Command: `pip install 'apache-beam[yaml]'`
+  - Required for using [Beam YAML API](/documentation/sdks/yaml/)
+- **Beam YAML Dataframe API**
+  - Installation Command: `pip install 'apache-beam[dataframe]'`
+  - Required for using [Beam Dataframe API](/documentation/dsls/dataframes/overview/)
+- **[Machine Learning (Beam ML)](/documentation/ml/about-ml)**
+  - Installation Command: `pip install 'apache-beam[<extra>]'`
+  - Required for machine learning frameworks and utilities:
+    - `ml_cpu` ([pydoc](https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.html))
+    - `milvus` ([pydoc](https://beam.apache.org/releases/pydoc/current/apache_beam.ml.rag.enrichment.milvus_search.html))
+    - `onnx` ([pydoc](https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.onnx_inference.html))
+    - [**tensorflow**](/documentation/ml/about-ml#tensorflow) ([pydoc](https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.tensorflow_inference.html))
+    - `tensorflow-hub` ([pydoc](https://beam.apache.org/releases/pydoc/current/apache_beam.ml.transforms.embeddings.tensorflow_hub.html))
+    - [**tft**](/documentation/ml/preprocess-data#data-processing-transforms-that-use-tft) ([pydoc](https://beam.apache.org/releases/pydoc/current/apache_beam.ml.transforms.tft.html))
+    - [**torch**](/documentation/ml/about-ml#pytorch) ([pydoc](https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.pytorch_inference.html))
+    - `transformers` ([pydoc](https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.huggingface_inference.html))
+    - [**vllm**](/documentation/ml/large-language-modeling) ([pydoc](https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.vllm_inference.html))
+    - `xgboost` ([pydoc](https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.xgboost_inference.html))
+- **Interactive Beam**
+  - Installation Command: `pip install 'apache-beam[interactive]'`
+  - Required for using [Beam Interactive Runner](https://github.com/apache/beam/blob/master/sdks/python/apache_beam/runners/interactive/README.md) in Jupyter notebooks
+  - To also install testing interactive notebook features, use `apache-beam[interactive,interactive_test]`.
 - **Tests**
-  - Installation Command: `pip install apache-beam[test]`
-  - Required for developing on beam and running unittests
+  - Installation Command: `pip install 'apache-beam[test]'`
+  - Required for developing Beam and running unit tests
 - **Docs**
-  - Installation Command: `pip install apache-beam[docs]`
-  - Generating API documentation using Sphinx
+  - Installation Command: `pip install 'apache-beam[docs]'`
+  - Required for generating API documentation using Sphinx
 
 ## Execute a pipeline
 
@@ -194,9 +168,10 @@ sequentially in the format `counts-0000-of-0001`.
 
 * Learn more about the [Beam SDK for Python](/documentation/sdks/python/)
   and look through the [Python SDK API reference](https://beam.apache.org/releases/pydoc).
+* Get [An Interactive Overview of Beam](/get-started/an-interactive-overview-of-beam)
 * Walk through these WordCount examples in the [WordCount Example Walkthrough](/get-started/wordcount-example).
 * Take a self-paced tour through our [Learning Resources](/documentation/resources/learning-resources).
-* Dive in to some of our favorite [Videos and Podcasts](/documentation/resources/videos-and-podcasts).
+* Dive in to some of our favorite [Videos and Podcasts](/get-started/resources/videos-and-podcasts).
 * Join the Beam [users@](/community/contact-us) mailing list.
 
 Please don't hesitate to [reach out](/community/contact-us) if you encounter any issues!

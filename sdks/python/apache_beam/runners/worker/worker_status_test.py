@@ -28,6 +28,7 @@ from apache_beam.portability.api import beam_fn_api_pb2_grpc
 from apache_beam.runners.worker import statesampler
 from apache_beam.runners.worker.worker_status import FnApiWorkerStatusHandler
 from apache_beam.runners.worker.worker_status import heap_dump
+from apache_beam.runners.worker.worker_status import memory_stats
 from apache_beam.utils import thread_pool_executor
 from apache_beam.utils.counters import CounterName
 
@@ -45,7 +46,7 @@ class BeamFnStatusServicer(beam_fn_api_pb2_grpc.BeamFnWorkerStatusServicer):
       self.finished.acquire()
       self.response_received.append(response)
       if len(self.response_received) == self.num_request:
-        self.finished.notifyAll()
+        self.finished.notify_all()
       self.finished.release()
 
 
@@ -59,9 +60,11 @@ class FnApiWorkerStatusHandlerTest(unittest.TestCase):
     self.test_port = self.server.add_insecure_port('[::]:0')
     self.server.start()
     self.url = 'localhost:%s' % self.test_port
-    self.fn_status_handler = FnApiWorkerStatusHandler(self.url)
+    self.fn_status_handler = FnApiWorkerStatusHandler(
+        self.url, element_processing_timeout_minutes=10)
 
   def tearDown(self):
+    self.fn_status_handler.close()
     self.server.stop(5)
 
   def test_send_status_response(self):
@@ -71,7 +74,6 @@ class FnApiWorkerStatusHandlerTest(unittest.TestCase):
     self.test_status_service.finished.release()
     for response in self.test_status_service.response_received:
       self.assertIsNotNone(response.status_info)
-    self.fn_status_handler.close()
 
   @mock.patch(
       'apache_beam.runners.worker.worker_status'
@@ -84,45 +86,143 @@ class FnApiWorkerStatusHandlerTest(unittest.TestCase):
     self.test_status_service.finished.release()
     for response in self.test_status_service.response_received:
       self.assertIsNotNone(response.error)
-    self.fn_status_handler.close()
 
   def test_log_lull_in_bundle_processor(self):
     def get_state_sampler_info_for_lull(lull_duration_s):
-      return statesampler.StateSamplerInfo(
-          CounterName('progress-msecs', 'stage_name', 'step_name'),
-          1,
-          lull_duration_s * 1e9,
-          threading.current_thread())
+      return "bundle-id", statesampler.StateSamplerInfo(
+        CounterName('progress-msecs', 'stage_name', 'step_name'),
+        1,
+        lull_duration_s * 1e9,
+        threading.current_thread())
 
     now = time.time()
     with mock.patch('logging.Logger.warning') as warn_mock:
-      with mock.patch('time.time') as time_mock:
-        time_mock.return_value = now
-        sampler_info = get_state_sampler_info_for_lull(21 * 60)
-        self.fn_status_handler._log_lull_sampler_info(sampler_info)
+      with mock.patch(
+          'apache_beam.runners.worker.sdk_worker_main.terminate_sdk_harness'
+      ) as flush_mock:
+        with mock.patch('time.time') as time_mock:
+          time_mock.return_value = now
+          bundle_id, sampler_info = get_state_sampler_info_for_lull(21 * 60)
+          self.fn_status_handler._log_lull_sampler_info(sampler_info, bundle_id)
+          bundle_id_template = warn_mock.call_args[0][1]
+          step_name_template = warn_mock.call_args[0][2]
+          processing_template = warn_mock.call_args[0][3]
+          traceback = warn_mock.call_args = warn_mock.call_args[0][4]
 
-        processing_template = warn_mock.call_args[0][1]
-        step_name_template = warn_mock.call_args[0][2]
-        traceback = warn_mock.call_args = warn_mock.call_args[0][3]
+          self.assertIn('bundle-id', bundle_id_template)
+          self.assertIn('step_name', step_name_template)
+          self.assertEqual(21 * 60, processing_template)
+          self.assertIn('test_log_lull_in_bundle_processor', traceback)
+          flush_mock.assert_called_once()
 
-        self.assertIn('progress-msecs', processing_template)
-        self.assertIn('step_name', step_name_template)
-        self.assertIn('test_log_lull_in_bundle_processor', traceback)
+        with mock.patch('time.time') as time_mock:
+          time_mock.return_value = now + 6 * 60  # 6 minutes
+          bundle_id, sampler_info = get_state_sampler_info_for_lull(21 * 60)
+          self.fn_status_handler._log_lull_sampler_info(sampler_info, bundle_id)
+          self.assertEqual(flush_mock.call_count, 2)
 
-      with mock.patch('time.time') as time_mock:
-        time_mock.return_value = now + 6 * 60  # 6 minutes
-        sampler_info = get_state_sampler_info_for_lull(21 * 60)
-        self.fn_status_handler._log_lull_sampler_info(sampler_info)
+        with mock.patch('time.time') as time_mock:
+          time_mock.return_value = now + 21 * 60  # 21 minutes
+          bundle_id, sampler_info = get_state_sampler_info_for_lull(10 * 60)
+          self.fn_status_handler._log_lull_sampler_info(sampler_info, bundle_id)
+          self.assertEqual(flush_mock.call_count, 2)
 
-      with mock.patch('time.time') as time_mock:
-        time_mock.return_value = now + 21 * 60  # 21 minutes
-        sampler_info = get_state_sampler_info_for_lull(10 * 60)
-        self.fn_status_handler._log_lull_sampler_info(sampler_info)
+        with mock.patch('time.time') as time_mock:
+          time_mock.return_value = now + 42 * 60  # 42 minutes
+          bundle_id, sampler_info = get_state_sampler_info_for_lull(11 * 60)
+          self.fn_status_handler._log_lull_sampler_info(sampler_info, bundle_id)
+          self.assertEqual(flush_mock.call_count, 3)
 
-      with mock.patch('time.time') as time_mock:
-        time_mock.return_value = now + 42 * 60  # 21 minutes after previous one
-        sampler_info = get_state_sampler_info_for_lull(21 * 60)
-        self.fn_status_handler._log_lull_sampler_info(sampler_info)
+  def test_lull_logs_emitted_when_creating_bundle_processor_takes_time(self):
+    instruction_id = "instruction-1"
+    bundle_id = "bundle-1"
+    thread = threading.current_thread()
+    now = time.time()
+    creation_time = now
+
+    with (
+        mock.patch('logging.Logger.warning') as warn_mock,
+        mock.patch('logging.Logger.error') as error_mock,
+        mock.patch('time.time') as time_mock,
+        mock.patch(
+            'apache_beam.runners.worker.sdk_worker_main.terminate_sdk_harness',
+        ) as terminate_mock):
+      # Set time to be past the lull timeout
+      time_mock.return_value = (
+          now + self.fn_status_handler.log_lull_timeout_ns / 1e9 + 1)
+      self.fn_status_handler._log_lull_in_creating_bundle_descriptor(
+          instruction_id, bundle_id, thread, creation_time)
+      warn_mock.assert_called_once()
+      args, _ = warn_mock.call_args
+      self.assertIn(
+          'Bundle processor for instruction %s (bundle %s) has been '
+          'creating for at least %.2f seconds',
+          args[0])
+
+      # Set time to be past the element processing timeout
+      time_mock.return_value = (
+          now + self.fn_status_handler._element_processing_timeout_ns / 1e9 + 1)
+
+      self.fn_status_handler._log_lull_in_creating_bundle_descriptor(
+          instruction_id, bundle_id, thread, creation_time)
+
+      error_mock.assert_called_once()
+      args, _ = error_mock.call_args
+      self.assertIn(
+          'Creation of bundle processor for instruction %s (bundle %s) '
+          'has exceeded the specified timeout',
+          args[0])
+
+      terminate_mock.assert_called_once()
+
+  def test_lull_logs_emitted_when_processing_a_bundle_takes_time(self):
+    instruction_id = "instruction-1"
+    now = time.time()
+    thread = threading.current_thread()
+
+    with (
+        mock.patch('logging.Logger.warning') as warn_mock,
+        mock.patch('logging.Logger.error') as error_mock,
+        mock.patch('time.time') as time_mock,
+        mock.patch(
+            'apache_beam.runners.worker.sdk_worker_main.terminate_sdk_harness',
+        ) as terminate_mock):
+      time_mock.return_value = now + 1
+      # Set time to be past the lull timeout
+      sampler_info = statesampler.StateSamplerInfo(
+          state_name=CounterName('test_counter', 'test_stage', 'test_step'),
+          transition_count=1,
+          # Set time to be past the lull timeout
+          time_since_transition=(
+              self.fn_status_handler.log_lull_timeout_ns + 1),
+          tracked_thread=thread)
+      self.fn_status_handler._log_lull_sampler_info(
+          sampler_info, instruction_id)
+      warn_mock.assert_called_once()
+      args, _ = warn_mock.call_args
+      self.assertIn(
+          'Operation ongoing in bundle %s%s for at least %.2f seconds', args[0])
+
+      time_mock.return_value = now + 2
+
+      sampler_info = statesampler.StateSamplerInfo(
+          state_name=CounterName('test_counter', 'test_stage', 'test_step'),
+          transition_count=1,
+          # Set time to be past the element processing timeout
+          time_since_transition=(
+              self.fn_status_handler._element_processing_timeout_ns + 1),
+          tracked_thread=thread)
+      self.fn_status_handler._log_lull_sampler_info(
+          sampler_info, instruction_id)
+
+      error_mock.assert_called_once()
+      args, _ = error_mock.call_args
+      self.assertIn(
+          'Processing of an element in bundle %s%s has exceeded the '
+          'specified timeout of %.2f minutes',
+          args[0])
+
+      terminate_mock.assert_called_once()
 
 
 class HeapDumpTest(unittest.TestCase):
@@ -131,6 +231,30 @@ class HeapDumpTest(unittest.TestCase):
     result = '%s' % heap_dump()
     self.assertTrue(
         'Unable to import guppy, the heap dump will be skipped' in result)
+
+  @mock.patch('apache_beam.runners.worker.worker_status.hpy', None)
+  def test_heap_dump_includes_memory_stats_without_guppy(self):
+    # Memory stats must be emitted even when guppy is unavailable.
+    result = '%s' % heap_dump()
+    self.assertIn('MEMORY STATS', result)
+
+
+class MemoryStatsTest(unittest.TestCase):
+  def test_memory_stats_sections_present(self):
+    result = memory_stats()
+    self.assertIn('MEMORY STATS', result)
+    self.assertIn('Process memory', result)
+    self.assertIn('Python allocations', result)
+    self.assertIn('glibc malloc', result)
+    # Python allocator introspection is available on every platform.
+    self.assertIn('sys.getallocatedblocks', result)
+
+  @mock.patch('sys.platform', 'darwin')
+  def test_glibc_stats_graceful_on_non_glibc(self):
+    # On non-glibc platforms the native-heap section must degrade gracefully
+    # rather than raise.
+    result = memory_stats()
+    self.assertIn('unavailable', result)
 
 
 if __name__ == '__main__':

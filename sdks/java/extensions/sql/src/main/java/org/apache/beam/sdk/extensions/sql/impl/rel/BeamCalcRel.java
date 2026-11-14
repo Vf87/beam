@@ -19,7 +19,7 @@ package org.apache.beam.sdk.extensions.sql.impl.rel;
 
 import static org.apache.beam.sdk.schemas.Schema.Field;
 import static org.apache.beam.sdk.schemas.Schema.FieldType;
-import static org.apache.beam.vendor.calcite.v1_26_0.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
@@ -43,75 +43,112 @@ import java.util.Set;
 import java.util.TimeZone;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
+import org.apache.beam.sdk.coders.RowCoder;
 import org.apache.beam.sdk.extensions.sql.impl.BeamSqlPipelineOptions;
 import org.apache.beam.sdk.extensions.sql.impl.JavaUdfLoader;
 import org.apache.beam.sdk.extensions.sql.impl.ScalarFunctionImpl;
 import org.apache.beam.sdk.extensions.sql.impl.planner.BeamJavaTypeFactory;
 import org.apache.beam.sdk.extensions.sql.impl.utils.CalciteUtils;
-import org.apache.beam.sdk.extensions.sql.impl.utils.CalciteUtils.CharType;
 import org.apache.beam.sdk.extensions.sql.impl.utils.CalciteUtils.TimeWithLocalTzType;
 import org.apache.beam.sdk.schemas.FieldAccessDescriptor;
 import org.apache.beam.sdk.schemas.Schema;
+import org.apache.beam.sdk.schemas.Schema.LogicalType;
+import org.apache.beam.sdk.schemas.logicaltypes.FixedBytes;
+import org.apache.beam.sdk.schemas.logicaltypes.FixedPrecisionNumeric;
+import org.apache.beam.sdk.schemas.logicaltypes.FixedString;
+import org.apache.beam.sdk.schemas.logicaltypes.PassThroughLogicalType;
 import org.apache.beam.sdk.schemas.logicaltypes.SqlTypes;
+import org.apache.beam.sdk.schemas.logicaltypes.VariableBytes;
+import org.apache.beam.sdk.schemas.logicaltypes.VariableString;
+import org.apache.beam.sdk.schemas.utils.SelectHelpers;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
+import org.apache.beam.sdk.values.PCollectionTuple;
+import org.apache.beam.sdk.values.POutput;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.DataContext;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.adapter.enumerable.JavaRowFormat;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.adapter.enumerable.PhysType;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.adapter.enumerable.PhysTypeImpl;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.adapter.enumerable.RexToLixTranslator;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.adapter.java.JavaTypeFactory;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.avatica.util.ByteString;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.linq4j.QueryProvider;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.linq4j.tree.BlockBuilder;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.linq4j.tree.Expression;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.linq4j.tree.Expressions;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.linq4j.tree.MemberDeclaration;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.linq4j.tree.ParameterExpression;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.linq4j.tree.Types;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelOptCluster;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelOptPredicateList;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelTraitSet;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.RelNode;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.core.Calc;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.metadata.RelMetadataQuery;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexBuilder;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexCall;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexNode;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexProgram;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexSimplify;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexUtil;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.runtime.SqlFunctions;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.Function;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.SchemaPlus;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.SqlOperator;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.validate.SqlConformance;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.validate.SqlConformanceEnum;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.validate.SqlUserDefinedFunction;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Maps;
+import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.TupleTagList;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.DataContext;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.adapter.enumerable.JavaRowFormat;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.adapter.enumerable.PhysType;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.adapter.enumerable.PhysTypeImpl;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.adapter.enumerable.RexToLixTranslator;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.adapter.java.JavaTypeFactory;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.avatica.util.ByteString;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.QueryProvider;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.tree.BlockBuilder;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.tree.Expression;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.tree.Expressions;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.tree.MemberDeclaration;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.tree.ParameterExpression;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.tree.Types;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptCluster;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptPredicateList;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelTraitSet;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.core.Calc;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.metadata.RelMetadataQuery;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexBuilder;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexCall;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexProgram;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexSimplify;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexUtil;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.runtime.SqlFunctions;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.Function;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.SchemaPlus;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlOperator;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.validate.SqlConformance;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.validate.SqlConformanceEnum;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.validate.SqlUserDefinedFunction;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Maps;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.codehaus.commons.compiler.CompileException;
 import org.codehaus.janino.ScriptEvaluator;
 import org.joda.time.DateTime;
 import org.joda.time.Instant;
+import org.joda.time.base.AbstractInstant;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** BeamRelNode to replace {@code Project} and {@code Filter} node. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
   "keyfor",
-  "nullness"
-}) // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness",
+  // TODO(https://github.com/apache/beam/issues/21230): Remove when new version of
+  // errorprone is released (2.11.0)
+  "unused"
+}) // TODO(https://github.com/apache/beam/issues/20497)
 public class BeamCalcRel extends AbstractBeamCalcRel {
 
   private static final long NANOS_PER_MILLISECOND = 1000000L;
   private static final long MILLIS_PER_DAY = 86400000L;
 
   private static final ParameterExpression rowParam = Expressions.parameter(Row.class, "row");
+  private static final TupleTag<Row> rows = new TupleTag<Row>() {};
+  private static final TupleTag<Row> errors = new TupleTag<Row>() {};
+
+  /**
+   * Converts a {@link java.time.Instant} from a Timestamp logical type to Calcite TIMESTAMP millis.
+   * Calcite's TIMESTAMP is millisecond-based, so sub-millisecond values are rejected rather than
+   * silently truncated.
+   */
+  public static long timestampToCalciteMillis(java.time.Instant instant) {
+    long millis = instant.toEpochMilli();
+    // toEpochMilli truncates; reject rather than silently drop sub-millisecond precision.
+    if (!instant.equals(java.time.Instant.ofEpochMilli(millis))) {
+      throw new UnsupportedOperationException(
+          "Beam SQL cannot convert Timestamp values with sub-millisecond precision through"
+              + " Calcite (millis-based TIMESTAMP). Got: "
+              + instant);
+    }
+    return millis;
+  }
 
   public BeamCalcRel(RelOptCluster cluster, RelTraitSet traits, RelNode input, RexProgram program) {
     super(cluster, traits, input, program);
@@ -123,11 +160,26 @@ public class BeamCalcRel extends AbstractBeamCalcRel {
   }
 
   @Override
+  public PTransform<PCollectionList<Row>, PCollection<Row>> buildPTransform(
+      @Nullable PTransform<PCollection<Row>, ? extends POutput> errorsTransformer) {
+    return new Transform(errorsTransformer);
+  }
+
+  @Override
   public PTransform<PCollectionList<Row>, PCollection<Row>> buildPTransform() {
-    return new Transform();
+    return new Transform(null);
   }
 
   private class Transform extends PTransform<PCollectionList<Row>, PCollection<Row>> {
+
+    private PTransform<PCollection<Row>, ? extends POutput> errorsTransformer;
+
+    Transform() {}
+
+    Transform(@Nullable PTransform<PCollection<Row>, ? extends POutput> errorsTransformer) {
+
+      this.errorsTransformer = errorsTransformer;
+    }
 
     /**
      * expand is based on calcite's EnumerableCalc.implement(). This function generates java code
@@ -186,16 +238,31 @@ public class BeamCalcRel extends AbstractBeamCalcRel {
       BeamSqlPipelineOptions options =
           pinput.getPipeline().getOptions().as(BeamSqlPipelineOptions.class);
 
+      String builderString = builder.toBlock().toString();
       CalcFn calcFn =
           new CalcFn(
-              builder.toBlock().toString(),
+              builderString,
               outputSchema,
               options.getVerifyRowValues(),
               getJarPaths(program),
-              inputGetter.getFieldAccess());
+              inputGetter.getFieldAccess(),
+              this.errorsTransformer != null);
 
-      return upstream.apply(ParDo.of(calcFn)).setRowSchema(outputSchema);
+      PCollectionTuple tuple =
+          upstream.apply(ParDo.of(calcFn).withOutputTags(rows, TupleTagList.of(errors)));
+      PCollection<Row> errorPCollection =
+          tuple.get(errors).setCoder(getErrorRowCoder(upstream, inputGetter));
+      if (errorsTransformer != null) {
+        errorPCollection.apply(errorsTransformer);
+      }
+      return tuple.get(rows).setRowSchema(outputSchema);
     }
+  }
+
+  private RowCoder getErrorRowCoder(PCollection<Row> upstream, InputGetterImpl inputGetter) {
+    return RowCoder.of(
+        BeamSqlRelUtils.getErrorRowSchema(
+            SelectHelpers.getOutputSchema(upstream.getSchema(), inputGetter.getFieldAccess())));
   }
 
   /** {@code CalcFn} is the executor for a {@link BeamCalcRel} step. */
@@ -208,19 +275,23 @@ public class BeamCalcRel extends AbstractBeamCalcRel {
     @FieldAccess("row")
     private final FieldAccessDescriptor fieldAccess;
 
+    private boolean collectErrors;
     private transient @Nullable ScriptEvaluator se = null;
+    private static final Logger LOG = LoggerFactory.getLogger(CalcFn.class);
 
     public CalcFn(
         String processElementBlock,
         Schema outputSchema,
         boolean verifyRowValues,
         List<String> jarPaths,
-        FieldAccessDescriptor fieldAccess) {
+        FieldAccessDescriptor fieldAccess,
+        boolean collectErrors) {
       this.processElementBlock = processElementBlock;
       this.outputSchema = outputSchema;
       this.verifyRowValues = verifyRowValues;
       this.jarPaths = jarPaths;
       this.fieldAccess = fieldAccess;
+      this.collectErrors = collectErrors;
 
       // validate generated code
       compile(processElementBlock, jarPaths);
@@ -256,18 +327,29 @@ public class BeamCalcRel extends AbstractBeamCalcRel {
     }
 
     @ProcessElement
-    public void processElement(@FieldAccess("row") Row row, OutputReceiver<Row> r) {
+    public void processElement(
+        @FieldAccess("row") Row row,
+        OutputReceiver<Row> outputReceiver,
+        MultiOutputReceiver multiOutputReceiver) {
       assert se != null;
-      final Object[] v;
       try {
-        v = (Object[]) se.evaluate(new Object[] {row, CONTEXT_INSTANCE});
+        Object[] v = (Object[]) se.evaluate(new Object[] {row, CONTEXT_INSTANCE});
+        if (v != null) {
+          final Row output = toBeamRow(Arrays.asList(v), outputSchema, verifyRowValues);
+          outputReceiver.output(output);
+        }
+
       } catch (InvocationTargetException e) {
-        throw new RuntimeException(
-            "CalcFn failed to evaluate: " + processElementBlock, e.getCause());
-      }
-      if (v != null) {
-        final Row output = toBeamRow(Arrays.asList(v), outputSchema, verifyRowValues);
-        r.output(output);
+        if (collectErrors) {
+          Schema schema = BeamSqlRelUtils.getErrorRowSchema(row.getSchema());
+          Row errorRow =
+              toBeamRow(Arrays.asList(row.getValues(), e.getCause().getMessage()), schema, true);
+          LOG.error("CalcFn failed to evaluate: {}", processElementBlock, e.getCause());
+          multiOutputReceiver.get(errors).output(errorRow);
+        } else {
+          throw new RuntimeException(
+              "CalcFn failed to evaluate: " + processElementBlock, e.getCause());
+        }
       }
     }
   }
@@ -296,7 +378,7 @@ public class BeamCalcRel extends AbstractBeamCalcRel {
       return null;
     }
     switch (fieldType.getTypeName()) {
-        // BEAM-12176: Numbers aren't always the type we expect.
+        // https://github.com/apache/beam/issues/20864: Numbers aren't always the type we expect.
       case BYTE:
         return ((Number) value).byteValue();
       case INT16:
@@ -333,6 +415,7 @@ public class BeamCalcRel extends AbstractBeamCalcRel {
         }
         return ((ByteString) value).getBytes();
       case ARRAY:
+      case ITERABLE:
         return toBeamList((List<Object>) value, fieldType.getCollectionElementType(), verifyValues);
       case MAP:
         return toBeamMap(
@@ -346,22 +429,24 @@ public class BeamCalcRel extends AbstractBeamCalcRel {
         }
         return toBeamRow((List<Object>) value, fieldType.getRowSchema(), verifyValues);
       case LOGICAL_TYPE:
-        String identifier = fieldType.getLogicalType().getIdentifier();
-        if (CharType.IDENTIFIER.equals(identifier)) {
-          return (String) value;
-        } else if (TimeWithLocalTzType.IDENTIFIER.equals(identifier)) {
+        LogicalType<?, ?> logicalType = fieldType.getLogicalType();
+        assert logicalType != null;
+        String identifier = logicalType.getIdentifier();
+        if (TimeWithLocalTzType.IDENTIFIER.equals(identifier)) {
           return Instant.ofEpochMilli(((Number) value).longValue());
         } else if (SqlTypes.DATE.getIdentifier().equals(identifier)) {
           if (value instanceof Date) {
             value = SqlFunctions.toInt((Date) value);
           }
-          // BEAM-12175: value should always be Integer here, but it isn't.
+          // https://github.com/apache/beam/issues/20865: value should always be Integer here, but
+          // it isn't.
           return LocalDate.ofEpochDay(((Number) value).longValue());
         } else if (SqlTypes.TIME.getIdentifier().equals(identifier)) {
           if (value instanceof Time) {
             value = SqlFunctions.toInt((Time) value);
           }
-          // BEAM-12175: value should always be Integer here, but it isn't.
+          // https://github.com/apache/beam/issues/20865: value should always be Integer here, but
+          // it isn't.
           return LocalTime.ofNanoOfDay(((Number) value).longValue() * NANOS_PER_MILLISECOND);
         } else if (SqlTypes.DATETIME.getIdentifier().equals(identifier)) {
           if (value instanceof Timestamp) {
@@ -371,7 +456,16 @@ public class BeamCalcRel extends AbstractBeamCalcRel {
               LocalDate.ofEpochDay(((Number) value).longValue() / MILLIS_PER_DAY),
               LocalTime.ofNanoOfDay(
                   (((Number) value).longValue() % MILLIS_PER_DAY) * NANOS_PER_MILLISECOND));
+        } else if (org.apache.beam.sdk.schemas.logicaltypes.Timestamp.IDENTIFIER.equals(
+            identifier)) {
+          if (value instanceof Timestamp) {
+            value = SqlFunctions.toLong((Timestamp) value);
+          }
+          return java.time.Instant.ofEpochMilli(((Number) value).longValue());
         } else {
+          if (logicalType instanceof PassThroughLogicalType) {
+            return toBeamObject(value, logicalType.getBaseType(), verifyValues);
+          }
           throw new UnsupportedOperationException("Unable to convert logical type " + identifier);
         }
       default:
@@ -432,111 +526,118 @@ public class BeamCalcRel extends AbstractBeamCalcRel {
     @Override
     public Expression field(BlockBuilder list, int index, Type storageType) {
       this.referencedColumns.add(index);
-      return getBeamField(list, index, input, inputSchema);
+      return getBeamField(list, index, input, inputSchema, true);
     }
 
     // Read field from Beam Row
     private static Expression getBeamField(
-        BlockBuilder list, int index, Expression input, Schema schema) {
+        BlockBuilder list, int index, Expression input, Schema schema, boolean useByteString) {
       if (index >= schema.getFieldCount() || index < 0) {
         throw new IllegalArgumentException("Unable to find value #" + index);
       }
 
       final Expression expression = list.append(list.newName("current"), input);
-
       final Field field = schema.getField(index);
       final FieldType fieldType = field.getType();
       final Expression fieldName = Expressions.constant(field.getName());
+      Expression value = getBeamField(list, expression, fieldName, fieldType);
+
+      return toCalciteValue(value, fieldType, useByteString);
+    }
+
+    private static Expression getBeamField(
+        BlockBuilder list, Expression expression, Expression fieldName, FieldType fieldType) {
       final Expression value;
       switch (fieldType.getTypeName()) {
         case BYTE:
-          value = Expressions.call(expression, "getByte", fieldName);
-          break;
+          return Expressions.call(expression, "getByte", fieldName);
         case INT16:
-          value = Expressions.call(expression, "getInt16", fieldName);
-          break;
+          return Expressions.call(expression, "getInt16", fieldName);
         case INT32:
-          value = Expressions.call(expression, "getInt32", fieldName);
-          break;
+          return Expressions.call(expression, "getInt32", fieldName);
         case INT64:
-          value = Expressions.call(expression, "getInt64", fieldName);
-          break;
+          return Expressions.call(expression, "getInt64", fieldName);
         case DECIMAL:
-          value = Expressions.call(expression, "getDecimal", fieldName);
-          break;
+          return Expressions.call(expression, "getDecimal", fieldName);
         case FLOAT:
-          value = Expressions.call(expression, "getFloat", fieldName);
-          break;
+          return Expressions.call(expression, "getFloat", fieldName);
         case DOUBLE:
-          value = Expressions.call(expression, "getDouble", fieldName);
-          break;
+          return Expressions.call(expression, "getDouble", fieldName);
         case STRING:
-          value = Expressions.call(expression, "getString", fieldName);
-          break;
+          return Expressions.call(expression, "getString", fieldName);
         case DATETIME:
-          value = Expressions.call(expression, "getDateTime", fieldName);
-          break;
+          return Expressions.call(expression, "getDateTime", fieldName);
         case BOOLEAN:
-          value = Expressions.call(expression, "getBoolean", fieldName);
-          break;
+          return Expressions.call(expression, "getBoolean", fieldName);
         case BYTES:
-          value = Expressions.call(expression, "getBytes", fieldName);
-          break;
+          return Expressions.call(expression, "getBytes", fieldName);
         case ARRAY:
-          value = Expressions.call(expression, "getArray", fieldName);
-          break;
+          return Expressions.call(expression, "getArray", fieldName);
         case MAP:
-          value = Expressions.call(expression, "getMap", fieldName);
-          break;
+          return Expressions.call(expression, "getMap", fieldName);
         case ROW:
-          value = Expressions.call(expression, "getRow", fieldName);
-          break;
+          return Expressions.call(expression, "getRow", fieldName);
+        case ITERABLE:
+          return Expressions.call(expression, "getIterable", fieldName);
         case LOGICAL_TYPE:
-          String identifier = fieldType.getLogicalType().getIdentifier();
-          if (CharType.IDENTIFIER.equals(identifier)) {
-            value = Expressions.call(expression, "getString", fieldName);
+          LogicalType logicalType = fieldType.getLogicalType();
+          String identifier = logicalType.getIdentifier();
+          if (FixedString.IDENTIFIER.equals(identifier)
+              || VariableString.IDENTIFIER.equals(identifier)) {
+            return Expressions.call(expression, "getString", fieldName);
+          } else if (FixedBytes.IDENTIFIER.equals(identifier)
+              || VariableBytes.IDENTIFIER.equals(identifier)) {
+            return Expressions.call(expression, "getBytes", fieldName);
           } else if (TimeWithLocalTzType.IDENTIFIER.equals(identifier)) {
-            value = Expressions.call(expression, "getDateTime", fieldName);
+            return Expressions.call(expression, "getDateTime", fieldName);
           } else if (SqlTypes.DATE.getIdentifier().equals(identifier)) {
-            value =
-                Expressions.convert_(
-                    Expressions.call(
-                        expression,
-                        "getLogicalTypeValue",
-                        fieldName,
-                        Expressions.constant(LocalDate.class)),
-                    LocalDate.class);
+            return Expressions.convert_(
+                Expressions.call(
+                    expression,
+                    "getLogicalTypeValue",
+                    fieldName,
+                    Expressions.constant(LocalDate.class)),
+                LocalDate.class);
           } else if (SqlTypes.TIME.getIdentifier().equals(identifier)) {
-            value =
-                Expressions.convert_(
-                    Expressions.call(
-                        expression,
-                        "getLogicalTypeValue",
-                        fieldName,
-                        Expressions.constant(LocalTime.class)),
-                    LocalTime.class);
+            return Expressions.convert_(
+                Expressions.call(
+                    expression,
+                    "getLogicalTypeValue",
+                    fieldName,
+                    Expressions.constant(LocalTime.class)),
+                LocalTime.class);
           } else if (SqlTypes.DATETIME.getIdentifier().equals(identifier)) {
-            value =
-                Expressions.convert_(
-                    Expressions.call(
-                        expression,
-                        "getLogicalTypeValue",
-                        fieldName,
-                        Expressions.constant(LocalDateTime.class)),
-                    LocalDateTime.class);
+            return Expressions.convert_(
+                Expressions.call(
+                    expression,
+                    "getLogicalTypeValue",
+                    fieldName,
+                    Expressions.constant(LocalDateTime.class)),
+                LocalDateTime.class);
+          } else if (org.apache.beam.sdk.schemas.logicaltypes.Timestamp.IDENTIFIER.equals(
+              identifier)) {
+            return Expressions.convert_(
+                Expressions.call(
+                    expression,
+                    "getLogicalTypeValue",
+                    fieldName,
+                    Expressions.constant(java.time.Instant.class)),
+                java.time.Instant.class);
+          } else if (FixedPrecisionNumeric.IDENTIFIER.equals(identifier)) {
+            return Expressions.call(expression, "getDecimal", fieldName);
+          } else if (logicalType instanceof PassThroughLogicalType) {
+            return getBeamField(list, expression, fieldName, logicalType.getBaseType());
           } else {
             throw new UnsupportedOperationException("Unable to get logical type " + identifier);
           }
-          break;
         default:
           throw new UnsupportedOperationException("Unable to get " + fieldType.getTypeName());
       }
-
-      return toCalciteValue(value, fieldType);
     }
 
     // Value conversion: Beam => Calcite
-    private static Expression toCalciteValue(Expression value, FieldType fieldType) {
+    private static Expression toCalciteValue(
+        Expression value, FieldType fieldType, boolean useByteString) {
       switch (fieldType.getTypeName()) {
         case BYTE:
           return Expressions.convert_(value, Byte.class);
@@ -557,21 +658,32 @@ public class BeamCalcRel extends AbstractBeamCalcRel {
         case BOOLEAN:
           return Expressions.convert_(value, Boolean.class);
         case DATETIME:
+          // AbstractInstant handles both joda Instant and DateTime
           return nullOr(
-              value, Expressions.call(Expressions.convert_(value, DateTime.class), "getMillis"));
+              value,
+              Expressions.call(Expressions.convert_(value, AbstractInstant.class), "getMillis"));
         case BYTES:
           return nullOr(
-              value, Expressions.new_(ByteString.class, Expressions.convert_(value, byte[].class)));
+              value,
+              useByteString
+                  ? Expressions.new_(ByteString.class, Expressions.convert_(value, byte[].class))
+                  : Expressions.convert_(value, byte[].class));
         case ARRAY:
+        case ITERABLE:
           return nullOr(value, toCalciteList(value, fieldType.getCollectionElementType()));
         case MAP:
           return nullOr(value, toCalciteMap(value, fieldType.getMapValueType()));
         case ROW:
           return nullOr(value, toCalciteRow(value, fieldType.getRowSchema()));
         case LOGICAL_TYPE:
-          String identifier = fieldType.getLogicalType().getIdentifier();
-          if (CharType.IDENTIFIER.equals(identifier)) {
+          LogicalType logicalType = fieldType.getLogicalType();
+          String identifier = logicalType.getIdentifier();
+          if (FixedString.IDENTIFIER.equals(identifier)
+              || VariableString.IDENTIFIER.equals(identifier)) {
             return Expressions.convert_(value, String.class);
+          } else if (FixedBytes.IDENTIFIER.equals(identifier)
+              || VariableBytes.IDENTIFIER.equals(identifier)) {
+            return Expressions.convert_(value, byte[].class);
           } else if (TimeWithLocalTzType.IDENTIFIER.equals(identifier)) {
             return nullOr(
                 value, Expressions.call(Expressions.convert_(value, DateTime.class), "getMillis"));
@@ -604,6 +716,18 @@ public class BeamCalcRel extends AbstractBeamCalcRel {
                     Expressions.multiply(dateValue, Expressions.constant(MILLIS_PER_DAY)),
                     Expressions.divide(timeValue, Expressions.constant(NANOS_PER_MILLISECOND)));
             return nullOr(value, returnValue);
+          } else if (org.apache.beam.sdk.schemas.logicaltypes.Timestamp.IDENTIFIER.equals(
+              identifier)) {
+            return nullOr(
+                value,
+                Expressions.call(
+                    BeamCalcRel.class,
+                    "timestampToCalciteMillis",
+                    Expressions.convert_(value, java.time.Instant.class)));
+          } else if (FixedPrecisionNumeric.IDENTIFIER.equals(identifier)) {
+            return Expressions.convert_(value, BigDecimal.class);
+          } else if (logicalType instanceof PassThroughLogicalType) {
+            return toCalciteValue(value, logicalType.getBaseType(), useByteString);
           } else {
             throw new UnsupportedOperationException("Unable to convert logical type " + identifier);
           }
@@ -616,7 +740,7 @@ public class BeamCalcRel extends AbstractBeamCalcRel {
       ParameterExpression value = Expressions.parameter(Object.class);
 
       BlockBuilder block = new BlockBuilder();
-      block.add(toCalciteValue(value, elementType));
+      block.add(toCalciteValue(value, elementType, false));
 
       return Expressions.new_(
           WrappedList.class,
@@ -634,7 +758,7 @@ public class BeamCalcRel extends AbstractBeamCalcRel {
       ParameterExpression value = Expressions.parameter(Object.class);
 
       BlockBuilder block = new BlockBuilder();
-      block.add(toCalciteValue(value, mapValueType));
+      block.add(toCalciteValue(value, mapValueType, false));
 
       return Expressions.new_(
           WrappedMap.class,
@@ -649,21 +773,22 @@ public class BeamCalcRel extends AbstractBeamCalcRel {
     }
 
     private static Expression toCalciteRow(Expression input, Schema schema) {
+      // This function generates an instance of WrappedRow. The bulk of the function is generating
+      // an implementation for WrappedRow.field
       ParameterExpression row = Expressions.parameter(Row.class);
       ParameterExpression index = Expressions.parameter(int.class);
       BlockBuilder body = new BlockBuilder(/* optimizing= */ false);
 
       for (int i = 0; i < schema.getFieldCount(); i++) {
         BlockBuilder list = new BlockBuilder(/* optimizing= */ false, body);
-        Expression returnValue = getBeamField(list, i, row, schema);
+        // instruct conversion of BYTES to byte[], required by BeamJavaTypeFactory
+        Expression returnValue = getBeamField(list, i, row, schema, false);
 
         list.append(returnValue);
 
-        body.append(
-            "if i=" + i,
-            Expressions.block(
-                Expressions.ifThen(
-                    Expressions.equal(index, Expressions.constant(i, int.class)), list.toBlock())));
+        body.add(
+            Expressions.ifThen(
+                Expressions.equal(index, Expressions.constant(i, int.class)), list.toBlock()));
       }
 
       body.add(Expressions.throw_(Expressions.new_(IndexOutOfBoundsException.class)));

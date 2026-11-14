@@ -28,7 +28,7 @@ import static org.junit.Assert.fail;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.List;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -271,8 +271,8 @@ public class ByteKeyRangeTest {
   @Test
   public void testInterpolateKeyIsNotEmpty() {
     String fmt = "Interpolating %s at fraction 0.0 should not return the empty key";
-    for (ByteKeyRange range : TEST_RANGES) {
-      range = ByteKeyRange.ALL_KEYS;
+    for (ByteKeyRange ignored : TEST_RANGES) {
+      ByteKeyRange range = ByteKeyRange.ALL_KEYS;
       assertFalse(String.format(fmt, range), range.interpolateKey(0.0).isEmpty());
     }
   }

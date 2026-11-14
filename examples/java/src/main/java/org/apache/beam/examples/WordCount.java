@@ -17,6 +17,23 @@
  */
 package org.apache.beam.examples;
 
+// beam-playground:
+//   name: WordCount
+//   description: An example that counts words in Shakespeare's works.
+//   multifile: false
+//   pipeline_options: --output output.txt
+//   context_line: 204
+//   categories:
+//     - Combiners
+//     - Options
+//     - Quickstart
+//   complexity: MEDIUM
+//   tags:
+//     - count
+//     - strings
+
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import org.apache.beam.examples.common.ExampleUtils;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.io.TextIO;
@@ -78,7 +95,7 @@ import org.apache.beam.sdk.values.PCollection;
  * --output=[YOUR_LOCAL_FILE | YOUR_OUTPUT_PREFIX]
  * }</pre>
  *
- * <p>The input file defaults to a public data set containing the text of of King Lear, by William
+ * <p>The input file defaults to a public data set containing the text of King Lear, by William
  * Shakespeare. You can override it and choose your own input with {@code --inputFile}.
  */
 public class WordCount {
@@ -88,10 +105,12 @@ public class WordCount {
    * statically out-of-line. This DoFn tokenizes lines of text into individual words; we pass it to
    * a ParDo in the pipeline.
    */
+  // [START extract_words_fn]
   static class ExtractWordsFn extends DoFn<String, String> {
     private final Counter emptyLines = Metrics.counter(ExtractWordsFn.class, "emptyLines");
     private final Distribution lineLenDist =
         Metrics.distribution(ExtractWordsFn.class, "lineLenDistro");
+    private final Pattern splitPattern = Pattern.compile(ExampleUtils.TOKENIZER_PATTERN);
 
     @ProcessElement
     public void processElement(@Element String element, OutputReceiver<String> receiver) {
@@ -101,16 +120,18 @@ public class WordCount {
       }
 
       // Split the line into words.
-      String[] words = element.split(ExampleUtils.TOKENIZER_PATTERN, -1);
-
-      // Output each word encountered into the output PCollection.
-      for (String word : words) {
-        if (!word.isEmpty()) {
-          receiver.output(word);
-        }
-      }
+      Stream<String> stream = splitPattern.splitAsStream(element);
+      stream.forEach(
+          word -> {
+            if (!word.isEmpty()) {
+              // Output each word encountered into the output PCollection.
+              receiver.output(word);
+            }
+          });
     }
   }
+
+  // [END extract_words_fn]
 
   /** A SimpleFunction that converts a Word and Count into a printable string. */
   public static class FormatAsTextFn extends SimpleFunction<KV<String, Long>, String> {
@@ -128,6 +149,7 @@ public class WordCount {
    * Count) as a reusable PTransform subclass. Using composite transforms allows for easy reuse,
    * modular testing, and an improved monitoring experience.
    */
+  // [START count_words]
   public static class CountWords
       extends PTransform<PCollection<String>, PCollection<KV<String, Long>>> {
     @Override
@@ -143,6 +165,8 @@ public class WordCount {
     }
   }
 
+  // [END count_words]
+
   /**
    * Options supported by {@link WordCount}.
    *
@@ -152,6 +176,7 @@ public class WordCount {
    *
    * <p>Inherits standard configuration options.
    */
+  // [START wordcount_options]
   public interface WordCountOptions extends PipelineOptions {
 
     /**
@@ -171,6 +196,8 @@ public class WordCount {
 
     void setOutput(String value);
   }
+
+  // [END wordcount_options]
 
   static void runWordCount(WordCountOptions options) {
     Pipeline p = Pipeline.create(options);

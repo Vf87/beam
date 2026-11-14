@@ -17,7 +17,7 @@
  */
 package org.apache.beam.runners.dataflow.worker;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import java.time.Duration;
 import java.util.ArrayDeque;
@@ -36,10 +36,10 @@ import org.apache.beam.runners.dataflow.worker.counters.CounterFactory;
 import org.apache.beam.runners.dataflow.worker.counters.NameContext;
 import org.apache.beam.runners.dataflow.worker.util.common.worker.ElementExecutionTracker;
 import org.apache.beam.sdk.options.PipelineOptions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterators;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.PeekingIterator;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterators;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.PeekingIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -63,7 +63,7 @@ import org.slf4j.LoggerFactory;
  * Flume.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class DataflowElementExecutionTracker extends ElementExecutionTracker {
   @VisibleForTesting
@@ -100,14 +100,14 @@ public class DataflowElementExecutionTracker extends ElementExecutionTracker {
     /** Marker execution to represent when there is no element currently being processed. */
     static final ElementExecution IDLE = new ElementExecution();
 
-    /** Only empty for {@see IDLE}. */
+    /** Only empty for {@link #IDLE}. */
     final Optional<NameContext> step;
 
     ElementExecution(NameContext step) {
       this.step = Optional.of(step);
     }
 
-    /** Only used for {@see IDLE}. */
+    /** Only used for {@link #IDLE}. */
     private ElementExecution() {
       step = Optional.empty();
     }
@@ -155,8 +155,8 @@ public class DataflowElementExecutionTracker extends ElementExecutionTracker {
      * Journal of fragments of execution per element to count for attributing processing time. Each
      * time we transition up or down the stage fusion graph we add an execution fragment for the
      * currently processing element with an incremented snapshot version. Each snapshot version must
-     * have a representative value in the {@code executionJournal}, or {@see IDLE_EXECUTION} to
-     * represent completion of processing.
+     * have a representative value in the {@code executionJournal}, or {@link ElementExecution#IDLE}
+     * to represent completion of processing.
      */
     private final Journal<ElementExecution> executionJournal;
 

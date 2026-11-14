@@ -53,6 +53,7 @@ class SparkUberJarJobServer(abstract_job_service.AbstractJobServiceServicer):
     spark_options = options.view_as(pipeline_options.SparkRunnerOptions)
     self._executable_jar = spark_options.spark_job_server_jar
     self._spark_version = spark_options.spark_version
+    self._user_agent = options.view_as(pipeline_options.SetupOptions).user_agent
 
   def start(self):
     return self
@@ -69,18 +70,17 @@ class SparkUberJarJobServer(abstract_job_service.AbstractJobServiceServicer):
               'Unable to parse jar URL "%s". If using a full URL, make sure '
               'the scheme is specified. If using a local file path, make sure '
               'the file exists; you may have to first build the job server '
-              'using `./gradlew runners:spark:2:job-server:shadowJar`.' %
+              'using `./gradlew runners:spark:3:job-server:shadowJar`.' %
               self._executable_jar)
       url = self._executable_jar
     else:
-      if self._spark_version == '3':
-        url = job_server.JavaJarJobServer.path_to_beam_jar(
-            ':runners:spark:3:job-server:shadowJar')
+      if self._spark_version == '2':
+        raise ValueError('Support for Spark 2 was dropped.')
       else:
         url = job_server.JavaJarJobServer.path_to_beam_jar(
-            ':runners:spark:2:job-server:shadowJar',
-            artifact_id='beam-runners-spark-job-server')
-    return job_server.JavaJarJobServer.local_jar(url)
+            ':runners:spark:3:job-server:shadowJar')
+    return job_server.JavaJarJobServer.local_jar(
+        url, user_agent=self._user_agent)
 
   def create_beam_job(self, job_id, job_name, pipeline, options):
     return SparkBeamJob(
@@ -248,8 +248,8 @@ class SparkBeamJob(abstract_job_service.UberJarBeamJob):
             message_text=response['message'])
         yield message
         message_ix += 1
-        # TODO(BEAM-8983) In the event of a failure, query
-        #  additional info from Spark master and/or workers.
+        # TODO(https://github.com/apache/beam/issues/20019) In the event of a
+        #  failure, query additional info from Spark master and/or workers.
       check_timestamp = self.set_state(state)
       if check_timestamp is not None:
         if message:

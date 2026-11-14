@@ -29,6 +29,7 @@ import org.apache.beam.sdk.coders.CannotProvideCoderException;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.coders.KvCoder;
+import org.apache.beam.sdk.coders.NullableCoder;
 import org.apache.beam.sdk.extensions.sql.impl.transform.agg.CountIf;
 import org.apache.beam.sdk.extensions.sql.impl.transform.agg.CovarianceFn;
 import org.apache.beam.sdk.extensions.sql.impl.transform.agg.VarianceFn;
@@ -44,13 +45,15 @@ import org.apache.beam.sdk.transforms.Min;
 import org.apache.beam.sdk.transforms.Sample;
 import org.apache.beam.sdk.transforms.Sum;
 import org.apache.beam.sdk.values.KV;
-import org.apache.beam.vendor.calcite.v1_26_0.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Predicates;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Built-in aggregations functions for COUNT/MAX/MIN/SUM/AVG/VAR_POP/VAR_SAMP. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class BeamBuiltinAggregations {
 
@@ -59,12 +62,14 @@ public class BeamBuiltinAggregations {
           ImmutableMap.<String, Function<Schema.FieldType, CombineFn<?, ?, ?>>>builder()
               .put("ANY_VALUE", typeName -> Sample.anyValueCombineFn())
               // Drop null elements for these aggregations.
-              .put("COUNT", typeName -> new DropNullFn(Count.combineFn()))
+              .put("COUNT", typeName -> new DropNullFnWithDefault(Count.combineFn()))
               .put("MAX", typeName -> new DropNullFn(BeamBuiltinAggregations.createMax(typeName)))
               .put("MIN", typeName -> new DropNullFn(BeamBuiltinAggregations.createMin(typeName)))
               .put("SUM", typeName -> new DropNullFn(BeamBuiltinAggregations.createSum(typeName)))
               .put(
-                  "$SUM0", typeName -> new DropNullFn(BeamBuiltinAggregations.createSum0(typeName)))
+                  "$SUM0",
+                  typeName ->
+                      new DropNullFnWithDefault(BeamBuiltinAggregations.createSum0(typeName)))
               .put("AVG", typeName -> new DropNullFn(BeamBuiltinAggregations.createAvg(typeName)))
               .put(
                   "BIT_OR",
@@ -78,6 +83,8 @@ public class BeamBuiltinAggregations {
                   typeName -> new DropNullFn(BeamBuiltinAggregations.createBitAnd(typeName)))
               .put("VAR_POP", t -> VarianceFn.newPopulation(t.getTypeName()))
               .put("VAR_SAMP", t -> VarianceFn.newSample(t.getTypeName()))
+              .put("STDDEV_POP", t -> VarianceFn.newPopulationStddev(t.getTypeName()))
+              .put("STDDEV_SAMP", t -> VarianceFn.newSampleStddev(t.getTypeName()))
               .put("COVAR_POP", t -> CovarianceFn.newPopulation(t.getTypeName()))
               .put("COVAR_SAMP", t -> CovarianceFn.newSample(t.getTypeName()))
               .put("COUNTIF", typeName -> CountIf.combineFn())
@@ -360,7 +367,7 @@ public class BeamBuiltinAggregations {
 
   private static class DropNullFn<InputT, AccumT, OutputT>
       extends CombineFn<InputT, AccumT, OutputT> {
-    private final CombineFn<InputT, AccumT, OutputT> combineFn;
+    protected final CombineFn<InputT, AccumT, OutputT> combineFn;
 
     DropNullFn(CombineFn<InputT, AccumT, OutputT> combineFn) {
       this.combineFn = combineFn;
@@ -368,28 +375,63 @@ public class BeamBuiltinAggregations {
 
     @Override
     public AccumT createAccumulator() {
-      return combineFn.createAccumulator();
+      return null;
     }
 
     @Override
     public AccumT addInput(AccumT accumulator, InputT input) {
-      return (input == null) ? accumulator : combineFn.addInput(accumulator, input);
+      if (input == null) {
+        return accumulator;
+      }
+
+      if (accumulator == null) {
+        accumulator = combineFn.createAccumulator();
+      }
+      return combineFn.addInput(accumulator, input);
     }
 
     @Override
     public AccumT mergeAccumulators(Iterable<AccumT> accumulators) {
+      // filter out nulls
+      accumulators = Iterables.filter(accumulators, Predicates.notNull());
+
+      // handle only nulls
+      if (!accumulators.iterator().hasNext()) {
+        return null;
+      }
+
       return combineFn.mergeAccumulators(accumulators);
     }
 
     @Override
     public OutputT extractOutput(AccumT accumulator) {
+      if (accumulator == null) {
+        return null;
+      }
       return combineFn.extractOutput(accumulator);
     }
 
     @Override
     public Coder<AccumT> getAccumulatorCoder(CoderRegistry registry, Coder<InputT> inputCoder)
         throws CannotProvideCoderException {
-      return combineFn.getAccumulatorCoder(registry, inputCoder);
+      Coder<AccumT> coder = combineFn.getAccumulatorCoder(registry, inputCoder);
+      if (coder instanceof NullableCoder) {
+        return coder;
+      }
+      return NullableCoder.of(coder);
+    }
+  }
+
+  private static class DropNullFnWithDefault<InputT, AccumT, OutputT>
+      extends DropNullFn<InputT, AccumT, OutputT> {
+
+    DropNullFnWithDefault(CombineFn<InputT, AccumT, OutputT> combineFn) {
+      super(combineFn);
+    }
+
+    @Override
+    public AccumT createAccumulator() {
+      return combineFn.createAccumulator();
     }
   }
 
@@ -484,7 +526,10 @@ public class BeamBuiltinAggregations {
   static class FloatAvg extends Avg<Float> {
     @Override
     public @Nullable Float extractOutput(KV<Integer, BigDecimal> accumulator) {
-      return accumulator.getKey() == 0 ? null : prepareOutput(accumulator).floatValue();
+      if (accumulator.getKey() == 0) {
+        return null;
+      }
+      return (float) (accumulator.getValue().doubleValue() / accumulator.getKey());
     }
 
     @Override
@@ -496,7 +541,10 @@ public class BeamBuiltinAggregations {
   static class DoubleAvg extends Avg<Double> {
     @Override
     public @Nullable Double extractOutput(KV<Integer, BigDecimal> accumulator) {
-      return accumulator.getKey() == 0 ? null : prepareOutput(accumulator).doubleValue();
+      if (accumulator.getKey() == 0) {
+        return null;
+      }
+      return accumulator.getValue().doubleValue() / accumulator.getKey();
     }
 
     @Override
@@ -521,26 +569,27 @@ public class BeamBuiltinAggregations {
     static class Accum implements Serializable {
       /** True if no inputs have been seen yet. */
       boolean isEmpty = true;
+
       /** The bitwise-or of the inputs seen so far. */
       long bitOr = 0L;
     }
 
     @Override
-    public Accum createAccumulator() {
-      return new Accum();
+    public BitOr.Accum createAccumulator() {
+      return new BitOr.Accum();
     }
 
     @Override
-    public Accum addInput(Accum accum, T input) {
+    public BitOr.Accum addInput(BitOr.Accum accum, T input) {
       accum.isEmpty = false;
       accum.bitOr |= input.longValue();
       return accum;
     }
 
     @Override
-    public Accum mergeAccumulators(Iterable<Accum> accums) {
-      Accum merged = createAccumulator();
-      for (Accum accum : accums) {
+    public BitOr.Accum mergeAccumulators(Iterable<BitOr.Accum> accums) {
+      BitOr.Accum merged = createAccumulator();
+      for (BitOr.Accum accum : accums) {
         if (accum.isEmpty) {
           continue;
         }
@@ -551,7 +600,7 @@ public class BeamBuiltinAggregations {
     }
 
     @Override
-    public Long extractOutput(Accum accum) {
+    public Long extractOutput(BitOr.Accum accum) {
       if (accum.isEmpty) {
         return null;
       }
@@ -569,26 +618,27 @@ public class BeamBuiltinAggregations {
     static class Accum implements Serializable {
       /** True if no inputs have been seen yet. */
       boolean isEmpty = true;
+
       /** The bitwise-and of the inputs seen so far. */
       long bitAnd = -1L;
     }
 
     @Override
-    public Accum createAccumulator() {
-      return new Accum();
+    public BitAnd.Accum createAccumulator() {
+      return new BitAnd.Accum();
     }
 
     @Override
-    public Accum addInput(Accum accum, T input) {
+    public BitAnd.Accum addInput(BitAnd.Accum accum, T input) {
       accum.isEmpty = false;
       accum.bitAnd &= input.longValue();
       return accum;
     }
 
     @Override
-    public Accum mergeAccumulators(Iterable<Accum> accums) {
-      Accum merged = createAccumulator();
-      for (Accum accum : accums) {
+    public BitAnd.Accum mergeAccumulators(Iterable<BitAnd.Accum> accums) {
+      BitAnd.Accum merged = createAccumulator();
+      for (BitAnd.Accum accum : accums) {
         if (accum.isEmpty) {
           continue;
         }
@@ -599,7 +649,7 @@ public class BeamBuiltinAggregations {
     }
 
     @Override
-    public Long extractOutput(Accum accum) {
+    public Long extractOutput(BitAnd.Accum accum) {
       if (accum.isEmpty) {
         return null;
       }
@@ -612,17 +662,18 @@ public class BeamBuiltinAggregations {
     static class Accum implements Serializable {
       /** True if no inputs have been seen yet. */
       boolean isEmpty = true;
+
       /** The bitwise-and of the inputs seen so far. */
       long bitXOr = 0L;
     }
 
     @Override
-    public Accum createAccumulator() {
-      return new Accum();
+    public BitXOr.Accum createAccumulator() {
+      return new BitXOr.Accum();
     }
 
     @Override
-    public Accum addInput(Accum mutableAccumulator, T input) {
+    public BitXOr.Accum addInput(Accum mutableAccumulator, T input) {
       if (input != null) {
         mutableAccumulator.isEmpty = false;
         mutableAccumulator.bitXOr ^= input.longValue();
@@ -631,9 +682,9 @@ public class BeamBuiltinAggregations {
     }
 
     @Override
-    public Accum mergeAccumulators(Iterable<Accum> accumulators) {
-      Accum merged = createAccumulator();
-      for (Accum accum : accumulators) {
+    public BitXOr.Accum mergeAccumulators(Iterable<BitXOr.Accum> accumulators) {
+      BitXOr.Accum merged = createAccumulator();
+      for (BitXOr.Accum accum : accumulators) {
         if (accum.isEmpty) {
           continue;
         }
@@ -644,7 +695,7 @@ public class BeamBuiltinAggregations {
     }
 
     @Override
-    public Long extractOutput(Accum accumulator) {
+    public Long extractOutput(BitXOr.Accum accumulator) {
       if (accumulator.isEmpty) {
         return null;
       }

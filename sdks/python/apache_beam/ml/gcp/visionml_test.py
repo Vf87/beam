@@ -31,8 +31,9 @@ from apache_beam.typehints.decorators import TypeCheckError
 
 # Protect against environments where vision lib is not available.
 try:
-  from google.cloud.vision import ImageAnnotatorClient
   from google.cloud import vision
+  from google.cloud.vision import ImageAnnotatorClient
+
   from apache_beam.ml.gcp import visionml
 except ImportError:
   ImageAnnotatorClient = None
@@ -45,12 +46,13 @@ class VisionTest(unittest.TestCase):
     self._mock_client = mock.Mock()
     self._mock_client.batch_annotate_images.return_value = None
 
-    feature_type = vision.enums.Feature.Type.TEXT_DETECTION
+    feature_type = vision.Feature.Type.TEXT_DETECTION
     self.features = [
-        vision.types.Feature(
-            type=feature_type, max_results=3, model="builtin/stable")
+        vision.Feature({
+            'type': feature_type, 'max_results': 3, 'model': "builtin/stable"
+        })
     ]
-    self.img_ctx = vision.types.ImageContext()
+    self.img_ctx = vision.ImageContext()
     self.min_batch_size = 1
     self.max_batch_size = 1
 

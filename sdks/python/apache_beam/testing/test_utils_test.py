@@ -19,8 +19,10 @@
 
 # pytype: skip-file
 
+import importlib
 import logging
 import os
+import sys
 import tempfile
 import unittest
 
@@ -85,15 +87,118 @@ class TestUtilsTest(unittest.TestCase):
     sub = mock.Mock()
     sub.name = 'test_sub'
     utils.cleanup_subscriptions(sub_client, [sub])
-    sub_client.delete_subscription.assert_called_with(sub.name)
+    sub_client.delete_subscription.assert_called_with(subscription=sub.name)
 
   def test_cleanup_topics(self):
     pub_client = mock.Mock()
     topic = mock.Mock()
     topic.name = 'test_topic'
     utils.cleanup_topics(pub_client, [topic])
-    pub_client.delete_topic.assert_called_with(topic.name)
+    pub_client.delete_topic.assert_called_with(topic=topic.name)
 
+
+class BlockImportsTest(unittest.TestCase):
+  def test_block_imports_blocks_and_records_imports(self):
+    with utils.block_imports('colorsys') as attempted_imports:
+      with self.assertRaises(ImportError):
+        importlib.import_module('colorsys')
+    self.assertEqual(attempted_imports, ['colorsys'])
+    # The module can be imported again after exiting the context.
+    importlib.import_module('colorsys')
+
+  def test_block_imports_hides_and_restores_imported_modules(self):
+    wsgiref_util = importlib.import_module('wsgiref.util')
+    wsgiref = sys.modules['wsgiref']
+    with utils.block_imports('wsgiref') as attempted_imports:
+      self.assertNotIn('wsgiref', sys.modules)
+      self.assertNotIn('wsgiref.util', sys.modules)
+      with self.assertRaises(ImportError):
+        importlib.import_module('wsgiref.util')
+    # Importing a submodule first imports its parent package.
+    self.assertEqual(attempted_imports, ['wsgiref'])
+    self.assertIs(sys.modules['wsgiref'], wsgiref)
+    self.assertIs(sys.modules['wsgiref.util'], wsgiref_util)
+
+  def test_block_imports_only_blocks_given_packages(self):
+    with utils.block_imports('wsgi', 'colorsys.foo') as attempted_imports:
+      importlib.import_module('wsgiref')
+      importlib.import_module('colorsys')
+    self.assertEqual(attempted_imports, [])
+
+
+class RequireLinuxDockerTest(unittest.TestCase):
+  def _fake_docker(self, os_type=None, error=None):
+    fake_docker = mock.MagicMock()
+    client = fake_docker.from_env.return_value
+    if error:
+      client.info.side_effect = error
+    else:
+      client.info.return_value = {'OSType': os_type}
+    return fake_docker, client
+
+  def test_linux_docker_does_not_skip(self):
+    fake_docker, client = self._fake_docker(os_type='linux')
+    with mock.patch.dict(sys.modules, {'docker': fake_docker}):
+      utils.require_linux_docker()
+    client.close.assert_called_once()
+
+  def test_windows_docker_skips(self):
+    fake_docker, client = self._fake_docker(os_type='windows')
+    with mock.patch.dict(sys.modules, {'docker': fake_docker}):
+      with self.assertRaisesRegex(unittest.SkipTest, 'windows containers'):
+        utils.require_linux_docker()
+    client.close.assert_called_once()
+
+  def test_unreachable_docker_skips(self):
+    fake_docker, client = self._fake_docker(
+        error=ConnectionError('no such file'))
+    with mock.patch.dict(sys.modules, {'docker': fake_docker}):
+      with self.assertRaisesRegex(unittest.SkipTest, 'Docker is not available'):
+        utils.require_linux_docker()
+    client.close.assert_called_once()
+
+  def test_missing_docker_sdk_skips(self):
+    with utils.block_imports('docker'):
+      with self.assertRaisesRegex(unittest.SkipTest, 'Docker is not available'):
+        utils.require_linux_docker()
+
+
+class LCGeneratorTest(unittest.TestCase):
+  Generator = utils.LCGenerator
+
+  def test_generator_seed_results(self):
+    generator = self.Generator()
+    generator.seed(0)
+    self.assertEqual(generator.next_int(), 4232237)
+
+    generator.seed(1)
+    self.assertEqual(generator.next_int(), -1151252339)
+    self.assertEqual(generator.next_uint(), 3745583449)
+    self.assertAlmostEqual(generator.random_sample(), 0.375548, delta=1e-6)
+    self.assertEqual(generator.randbytes(10), b'\xa6\x8fW\xcb\xb1\xa88]dP')
+
+  def test_generator_seed_jdk_results(self):
+    generator = self.Generator()
+    generator.seed_jdk(0)
+    self.assertEqual(generator.next_int(), -1155484576)
+
+    generator.seed_jdk(1)
+    # the first next_int after seed_jdk(1) is close to seed_jdk(0)
+    self.assertEqual(generator.next_int(), -1155869325)
+    self.assertEqual(generator.next_uint(), 431529176)
+    self.assertAlmostEqual(generator.random_sample(), 0.410081, delta=1e-6)
+    self.assertEqual(generator.randbytes(10), b'\x92\xf9Mh\xfc\xcc,5\xf0\xb8')
+
+
+try:
+  # pylint: disable=wrong-import-position
+  from .fast_test_utils import LCGenerator as FastLCGenerator
+
+  class FastLCGeneratorTest(LCGeneratorTest):
+    Generator = FastLCGenerator
+
+except ImportError:
+  pass
 
 if __name__ == '__main__':
   logging.getLogger().setLevel(logging.INFO)

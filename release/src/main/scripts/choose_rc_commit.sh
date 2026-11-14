@@ -106,9 +106,11 @@ SCRIPT_DIR=$(dirname $0)
 
 RC_TAG="v${RELEASE}-RC${RC}"
 
+RELEASE_BRANCH="release-$(cut -d '.' -f 1,2 <<< $RELEASE)"
+
 if [[ "$CLONE" == yes ]] ; then
   CLONE_DIR=`mktemp -d`
-  git clone "$GIT_REPO" "$CLONE_DIR" --single-branch --branch "release-$RELEASE" --shallow-exclude master
+  git clone "$GIT_REPO" "$CLONE_DIR" --single-branch --branch "$RELEASE_BRANCH" --shallow-exclude master
 else
   echo "Not cloning repo; assuming working dir is the desired repo. To run with a fresh clone, run with --clone."
   CLONE_DIR=$PWD
@@ -129,9 +131,17 @@ fi
     fi
   fi
 
+  # Tag for Go SDK.
+  # Go Modules defined in sub directories need to have a prefixed tag
+  # in order to get the matching version.
+  # See BEAM-13119 for context.
+  git tag -a "sdks/$RC_TAG" -m "Go SDK $RC_TAG" HEAD
+
+  # Primary tag for the repo.
   git tag -a -m "$RC_TAG" "$RC_TAG" HEAD
 
   if [[ "$PUSH_TAG" == yes ]] ; then
+    git push --follow-tags origin "sdks/$RC_TAG"
     git push --follow-tags origin "$RC_TAG"
   else 
     echo "Not pushing tag $RC_TAG. You can push it manually or run with --push-tag."

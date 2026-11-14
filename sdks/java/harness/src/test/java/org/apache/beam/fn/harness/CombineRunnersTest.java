@@ -17,7 +17,7 @@
  */
 package org.apache.beam.fn.harness;
 
-import static org.apache.beam.sdk.util.WindowedValue.valueInGlobalWindow;
+import static org.apache.beam.sdk.values.WindowedValues.valueInGlobalWindow;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
@@ -30,9 +30,6 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.Map;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
-import org.apache.beam.runners.core.construction.ModelCoders;
-import org.apache.beam.runners.core.construction.PipelineTranslation;
-import org.apache.beam.runners.core.construction.SdkComponents;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.coders.BigEndianIntegerCoder;
 import org.apache.beam.sdk.coders.KvCoder;
@@ -41,10 +38,13 @@ import org.apache.beam.sdk.fn.data.FnDataReceiver;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.Combine.CombineFn;
 import org.apache.beam.sdk.transforms.Create;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.construction.ModelCoders;
+import org.apache.beam.sdk.util.construction.PipelineTranslation;
+import org.apache.beam.sdk.util.construction.SdkComponents;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -120,19 +120,22 @@ public class CombineRunnersTest {
   public void testPrecombine() throws Exception {
     PTransformRunnerFactoryTestContext context =
         PTransformRunnerFactoryTestContext.builder(TEST_COMBINE_ID, pTransform)
-            .pCollections(pProto.getComponents().getPcollectionsMap())
-            .coders(pProto.getComponents().getCodersMap())
-            .windowingStrategies(pProto.getComponents().getWindowingStrategiesMap())
+            .components(
+                RunnerApi.Components.newBuilder()
+                    .putAllPcollections(pProto.getComponents().getPcollectionsMap())
+                    .putAllCoders(pProto.getComponents().getCodersMap())
+                    .putAllWindowingStrategies(pProto.getComponents().getWindowingStrategiesMap())
+                    .build())
             .build();
     // Add a consumer and output target to check output values.
     Deque<WindowedValue<KV<String, Integer>>> mainOutputValues = new ArrayDeque<>();
     context.addPCollectionConsumer(
         Iterables.getOnlyElement(pTransform.getOutputsMap().values()),
-        (FnDataReceiver) (FnDataReceiver<WindowedValue<KV<String, Integer>>>) mainOutputValues::add,
-        KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of()));
+        (FnDataReceiver)
+            (FnDataReceiver<WindowedValue<KV<String, Integer>>>) mainOutputValues::add);
 
     // Create runner.
-    new CombineRunners.PrecombineFactory<>().createRunnerForPTransform(context);
+    new CombineRunners.PrecombineFactory().addRunnerForPTransform(context);
 
     Iterables.getOnlyElement(context.getStartBundleFunctions()).run();
 
@@ -201,19 +204,22 @@ public class CombineRunnersTest {
 
     PTransformRunnerFactoryTestContext context =
         PTransformRunnerFactoryTestContext.builder(TEST_COMBINE_ID, pTransform)
-            .pCollections(pCollectionMap)
-            .coders(coderMap)
+            .components(
+                RunnerApi.Components.newBuilder()
+                    .putAllPcollections(pCollectionMap)
+                    .putAllCoders(coderMap)
+                    .build())
             .build();
     // Add a consumer and output target to check output values.
     Deque<WindowedValue<KV<String, Integer>>> mainOutputValues = new ArrayDeque<>();
     context.addPCollectionConsumer(
         Iterables.getOnlyElement(pTransform.getOutputsMap().values()),
-        (FnDataReceiver) (FnDataReceiver<WindowedValue<KV<String, Integer>>>) mainOutputValues::add,
-        KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of()));
+        (FnDataReceiver)
+            (FnDataReceiver<WindowedValue<KV<String, Integer>>>) mainOutputValues::add);
 
     // Create runner.
     MapFnRunners.forValueMapFnFactory(CombineRunners::createMergeAccumulatorsMapFunction)
-        .createRunnerForPTransform(context);
+        .addRunnerForPTransform(context);
 
     assertThat(context.getStartBundleFunctions(), empty());
     assertThat(context.getFinishBundleFunctions(), empty());
@@ -262,19 +268,22 @@ public class CombineRunnersTest {
             .build());
     PTransformRunnerFactoryTestContext context =
         PTransformRunnerFactoryTestContext.builder(TEST_COMBINE_ID, pTransform)
-            .pCollections(pCollectionMap)
-            .coders(coderMap)
+            .components(
+                RunnerApi.Components.newBuilder()
+                    .putAllPcollections(pCollectionMap)
+                    .putAllCoders(coderMap)
+                    .build())
             .build();
     // Add a consumer and output target to check output values.
     Deque<WindowedValue<KV<String, Integer>>> mainOutputValues = new ArrayDeque<>();
     context.addPCollectionConsumer(
         Iterables.getOnlyElement(pTransform.getOutputsMap().values()),
-        (FnDataReceiver) (FnDataReceiver<WindowedValue<KV<String, Integer>>>) mainOutputValues::add,
-        KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of()));
+        (FnDataReceiver)
+            (FnDataReceiver<WindowedValue<KV<String, Integer>>>) mainOutputValues::add);
 
     // Create runner.
     MapFnRunners.forValueMapFnFactory(CombineRunners::createExtractOutputsMapFunction)
-        .createRunnerForPTransform(context);
+        .addRunnerForPTransform(context);
 
     assertThat(context.getStartBundleFunctions(), empty());
     assertThat(context.getFinishBundleFunctions(), empty());
@@ -306,19 +315,22 @@ public class CombineRunnersTest {
   public void testConvertToAccumulators() throws Exception {
     PTransformRunnerFactoryTestContext context =
         PTransformRunnerFactoryTestContext.builder(TEST_COMBINE_ID, pTransform)
-            .pCollections(pProto.getComponents().getPcollectionsMap())
-            .coders(pProto.getComponents().getCodersMap())
+            .components(
+                RunnerApi.Components.newBuilder()
+                    .putAllPcollections(pProto.getComponents().getPcollectionsMap())
+                    .putAllCoders(pProto.getComponents().getCodersMap())
+                    .build())
             .build();
     // Add a consumer and output target to check output values.
     Deque<WindowedValue<KV<String, Integer>>> mainOutputValues = new ArrayDeque<>();
     context.addPCollectionConsumer(
         Iterables.getOnlyElement(pTransform.getOutputsMap().values()),
-        (FnDataReceiver) (FnDataReceiver<WindowedValue<KV<String, Integer>>>) mainOutputValues::add,
-        KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of()));
+        (FnDataReceiver)
+            (FnDataReceiver<WindowedValue<KV<String, Integer>>>) mainOutputValues::add);
 
     // Create runner.
     MapFnRunners.forValueMapFnFactory(CombineRunners::createConvertToAccumulatorsMapFunction)
-        .createRunnerForPTransform(context);
+        .addRunnerForPTransform(context);
 
     assertThat(context.getStartBundleFunctions(), empty());
     assertThat(context.getFinishBundleFunctions(), empty());
@@ -341,6 +353,7 @@ public class CombineRunnersTest {
             valueInGlobalWindow(KV.of("B", 5)),
             valueInGlobalWindow(KV.of("C", 7))));
   }
+
   /**
    * Create a Combine Grouped Values function that is given lists of values that are grouped by key
    * and validates that the lists are properly combined.
@@ -373,19 +386,22 @@ public class CombineRunnersTest {
             .build());
     PTransformRunnerFactoryTestContext context =
         PTransformRunnerFactoryTestContext.builder(TEST_COMBINE_ID, pTransform)
-            .pCollections(pCollectionMap)
-            .coders(coderMap)
+            .components(
+                RunnerApi.Components.newBuilder()
+                    .putAllPcollections(pCollectionMap)
+                    .putAllCoders(coderMap)
+                    .build())
             .build();
     // Add a consumer and output target to check output values.
     Deque<WindowedValue<KV<String, Integer>>> mainOutputValues = new ArrayDeque<>();
     context.addPCollectionConsumer(
         Iterables.getOnlyElement(pTransform.getOutputsMap().values()),
-        (FnDataReceiver) (FnDataReceiver<WindowedValue<KV<String, Integer>>>) mainOutputValues::add,
-        KvCoder.of(StringUtf8Coder.of(), BigEndianIntegerCoder.of()));
+        (FnDataReceiver)
+            (FnDataReceiver<WindowedValue<KV<String, Integer>>>) mainOutputValues::add);
 
     // Create runner.
     MapFnRunners.forValueMapFnFactory(CombineRunners::createCombineGroupedValuesMapFunction)
-        .createRunnerForPTransform(context);
+        .addRunnerForPTransform(context);
 
     assertThat(context.getStartBundleFunctions(), empty());
     assertThat(context.getFinishBundleFunctions(), empty());

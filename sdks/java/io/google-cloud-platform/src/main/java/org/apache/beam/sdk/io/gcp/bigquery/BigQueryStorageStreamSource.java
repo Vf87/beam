@@ -19,7 +19,7 @@ package org.apache.beam.sdk.io.gcp.bigquery;
 
 import static org.apache.beam.sdk.io.gcp.bigquery.BigQueryHelpers.fromJsonString;
 import static org.apache.beam.sdk.io.gcp.bigquery.BigQueryHelpers.toJsonString;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.api.gax.rpc.ApiException;
 import com.google.api.gax.rpc.FailedPreconditionException;
@@ -35,24 +35,31 @@ import java.io.IOException;
 import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.apache.beam.runners.core.metrics.ServiceCallMetric;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryServices.BigQueryServerStream;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryServices.StorageClient;
+import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.display.DisplayData;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.sdk.util.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Objects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.checkerframework.checker.nullness.qual.Nullable;
+import org.checkerframework.checker.nullness.qual.RequiresNonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** A {@link org.apache.beam.sdk.io.Source} representing a single stream in a read session. */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 class BigQueryStorageStreamSource<T> extends BoundedSource<T> {
 
   private static final Logger LOG = LoggerFactory.getLogger(BigQueryStorageStreamSource.class);
@@ -67,10 +74,36 @@ class BigQueryStorageStreamSource<T> extends BoundedSource<T> {
     return new BigQueryStorageStreamSource<>(
         readSession,
         readStream,
-        toJsonString(checkNotNull(tableSchema, "tableSchema")),
+        toJsonString(Preconditions.checkArgumentNotNull(tableSchema, "tableSchema")),
         parseFn,
         outputCoder,
-        bqServices);
+        bqServices,
+        false);
+  }
+
+  public BigQueryStorageStreamSource<T> withFromQuery() {
+    return new BigQueryStorageStreamSource<>(
+        readSession, readStream, jsonTableSchema, parseFn, outputCoder, bqServices, true);
+  }
+
+  @Override
+  public boolean equals(@Nullable Object obj) {
+    if (this == obj) {
+      return true;
+    }
+    if (!(obj instanceof BigQueryStorageStreamSource)) {
+      return false;
+    }
+    BigQueryStorageStreamSource<?> other = (BigQueryStorageStreamSource<?>) obj;
+    return readSession.equals(other.readSession)
+        && readStream.equals(other.readStream)
+        && jsonTableSchema.equals(other.jsonTableSchema)
+        && outputCoder.equals(other.outputCoder);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hashCode(readSession, readStream, jsonTableSchema, outputCoder);
   }
 
   /**
@@ -79,7 +112,13 @@ class BigQueryStorageStreamSource<T> extends BoundedSource<T> {
    */
   public BigQueryStorageStreamSource<T> fromExisting(ReadStream newReadStream) {
     return new BigQueryStorageStreamSource<>(
-        readSession, newReadStream, jsonTableSchema, parseFn, outputCoder, bqServices);
+        readSession, newReadStream, jsonTableSchema, parseFn, outputCoder, bqServices, fromQuery);
+  }
+
+  public BigQueryStorageStreamSource<T> fromExisting(
+      SerializableFunction<SchemaAndRecord, T> parseFn) {
+    return new BigQueryStorageStreamSource<>(
+        readSession, readStream, jsonTableSchema, parseFn, outputCoder, bqServices, fromQuery);
   }
 
   private final ReadSession readSession;
@@ -88,6 +127,7 @@ class BigQueryStorageStreamSource<T> extends BoundedSource<T> {
   private final SerializableFunction<SchemaAndRecord, T> parseFn;
   private final Coder<T> outputCoder;
   private final BigQueryServices bqServices;
+  private final boolean fromQuery;
 
   private BigQueryStorageStreamSource(
       ReadSession readSession,
@@ -95,13 +135,19 @@ class BigQueryStorageStreamSource<T> extends BoundedSource<T> {
       String jsonTableSchema,
       SerializableFunction<SchemaAndRecord, T> parseFn,
       Coder<T> outputCoder,
-      BigQueryServices bqServices) {
-    this.readSession = checkNotNull(readSession, "readSession");
-    this.readStream = checkNotNull(readStream, "stream");
-    this.jsonTableSchema = checkNotNull(jsonTableSchema, "jsonTableSchema");
-    this.parseFn = checkNotNull(parseFn, "parseFn");
-    this.outputCoder = checkNotNull(outputCoder, "outputCoder");
-    this.bqServices = checkNotNull(bqServices, "bqServices");
+      BigQueryServices bqServices,
+      boolean fromQuery) {
+    this.readSession = Preconditions.checkArgumentNotNull(readSession, "readSession");
+    this.readStream = Preconditions.checkArgumentNotNull(readStream, "stream");
+    this.jsonTableSchema = Preconditions.checkArgumentNotNull(jsonTableSchema, "jsonTableSchema");
+    this.parseFn = Preconditions.checkArgumentNotNull(parseFn, "parseFn");
+    this.outputCoder = Preconditions.checkArgumentNotNull(outputCoder, "outputCoder");
+    this.bqServices = Preconditions.checkArgumentNotNull(bqServices, "bqServices");
+    this.fromQuery = fromQuery;
+  }
+
+  public boolean getFromQuery() {
+    return fromQuery;
   }
 
   @Override
@@ -152,21 +198,41 @@ class BigQueryStorageStreamSource<T> extends BoundedSource<T> {
     private final TableSchema tableSchema;
 
     private BigQueryStorageStreamSource<T> source;
-    private BigQueryServerStream<ReadRowsResponse> responseStream;
-    private Iterator<ReadRowsResponse> responseIterator;
-    private T current;
+    private @Nullable BigQueryServerStream<ReadRowsResponse> responseStream = null;
+    private @Nullable Iterator<ReadRowsResponse> responseIterator = null;
+    private @Nullable T current = null;
     private long currentOffset;
 
     // Values used for progress reporting.
     private boolean splitPossible = true;
+    private boolean splitAllowed = true;
     private double fractionConsumed;
     private double progressAtResponseStart;
     private double progressAtResponseEnd;
     private long rowsConsumedFromCurrentResponse;
     private long totalRowsInCurrentResponse;
 
-    private TableReference tableReference;
-    private ServiceCallMetric serviceCallMetric;
+    private @Nullable TableReference tableReference;
+    private @Nullable ServiceCallMetric serviceCallMetric;
+
+    // Initialize metrics.
+    private final Counter totalSplitCalls =
+        Metrics.counter(BigQueryStorageStreamReader.class, "split-at-fraction-calls");
+    private final Counter impossibleSplitPointCalls =
+        Metrics.counter(
+            BigQueryStorageStreamReader.class,
+            "split-at-fraction-calls-failed-due-to-impossible-split-point");
+    private final Counter badSplitPointCalls =
+        Metrics.counter(
+            BigQueryStorageStreamReader.class,
+            "split-at-fraction-calls-failed-due-to-bad-split-point");
+    private final Counter otherFailedSplitCalls =
+        Metrics.counter(
+            BigQueryStorageStreamReader.class,
+            "split-at-fraction-calls-failed-due-to-other-reasons");
+    private final Counter successfulSplitCalls =
+        Metrics.counter(BigQueryStorageStreamReader.class, "split-at-fraction-calls-successful");
+    private static final ExecutorService executor = Executors.newCachedThreadPool();
 
     private BigQueryStorageStreamReader(
         BigQueryStorageStreamSource<T> source, BigQueryOptions options) throws IOException {
@@ -175,6 +241,8 @@ class BigQueryStorageStreamSource<T> extends BoundedSource<T> {
       this.parseFn = source.parseFn;
       this.storageClient = source.bqServices.getStorageClient(options);
       this.tableSchema = fromJsonString(source.jsonTableSchema, TableSchema.class);
+      // number of stream determined from server side for storage read api v2
+      this.splitAllowed = !options.getEnableStorageReadApiV2();
       this.fractionConsumed = 0d;
       this.progressAtResponseStart = 0d;
       this.progressAtResponseEnd = 0d;
@@ -194,21 +262,32 @@ class BigQueryStorageStreamSource<T> extends BoundedSource<T> {
 
       tableReference = BigQueryUtils.toTableReference(source.readSession.getTable());
       serviceCallMetric = BigQueryUtils.readCallMetric(tableReference);
+      LOG.info("Started BigQuery Storage API read from stream {}.", source.readStream.getName());
       responseStream = storageClient.readRows(request, source.readSession.getTable());
       responseIterator = responseStream.iterator();
-      LOG.info("Started BigQuery Storage API read from stream {}.", source.readStream.getName());
       return readNextRecord();
     }
 
     @Override
     public synchronized boolean advance() throws IOException {
+      Preconditions.checkStateNotNull(responseIterator);
       currentOffset++;
       return readNextRecord();
     }
 
+    @RequiresNonNull("responseIterator")
     private synchronized boolean readNextRecord() throws IOException {
+      Iterator<ReadRowsResponse> responseIterator = this.responseIterator;
       while (reader.readyForNextReadResponse()) {
-        if (!responseIterator.hasNext()) {
+        boolean previous = splitAllowed;
+        // disallow splitAtFraction (where it also calls hasNext) when iterator busy
+        splitAllowed = false;
+        boolean hasNext = responseIterator.hasNext();
+        splitAllowed = previous;
+        // hasNext call has internal retry. Record throttling metrics after called
+        storageClient.reportPendingMetrics();
+
+        if (!hasNext) {
           fractionConsumed = 1d;
           return false;
         }
@@ -235,27 +314,23 @@ class BigQueryStorageStreamSource<T> extends BoundedSource<T> {
         totalRowsInCurrentResponse = response.getRowCount();
         rowsConsumedFromCurrentResponse = 0L;
 
-        Preconditions.checkArgument(
+        checkArgument(
             totalRowsInCurrentResponse >= 0,
             "Row count from current response (%s) must be non-negative.",
             totalRowsInCurrentResponse);
 
-        Preconditions.checkArgument(
+        checkArgument(
             0f <= progressAtResponseStart && progressAtResponseStart <= 1f,
             "Progress at response start (%s) is not in the range [0.0, 1.0].",
             progressAtResponseStart);
 
-        Preconditions.checkArgument(
+        checkArgument(
             0f <= progressAtResponseEnd && progressAtResponseEnd <= 1f,
             "Progress at response end (%s) is not in the range [0.0, 1.0].",
             progressAtResponseEnd);
 
         reader.processReadRowsResponse(response);
       }
-
-      SchemaAndRecord schemaAndRecord = new SchemaAndRecord(reader.readSingleRecord(), tableSchema);
-
-      current = parseFn.apply(schemaAndRecord);
 
       // Updates the fraction consumed value. This value is calculated by interpolating between
       // the fraction consumed value from the previous server response (or zero if we're consuming
@@ -270,16 +345,27 @@ class BigQueryStorageStreamSource<T> extends BoundedSource<T> {
                   * 1.0
                   / totalRowsInCurrentResponse;
 
+      SchemaAndRecord schemaAndRecord = new SchemaAndRecord(reader.readSingleRecord(), tableSchema);
+
+      current = parseFn.apply(schemaAndRecord);
+
       return true;
     }
 
     @Override
     public T getCurrent() throws NoSuchElementException {
+      if (current == null) {
+        throw new NoSuchElementException();
+      }
       return current;
     }
 
     @Override
     public synchronized void close() {
+      // Because superclass cannot have preconditions around these variables, cannot use
+      // @RequiresNonNull
+      Preconditions.checkStateNotNull(storageClient);
+      Preconditions.checkStateNotNull(reader);
       storageClient.close();
       reader.close();
     }
@@ -290,8 +376,13 @@ class BigQueryStorageStreamSource<T> extends BoundedSource<T> {
     }
 
     @Override
-    public BoundedSource<T> splitAtFraction(double fraction) {
-      Metrics.counter(BigQueryStorageStreamReader.class, "split-at-fraction-calls").inc();
+    @SuppressWarnings("ReturnValueIgnored")
+    public @Nullable BoundedSource<T> splitAtFraction(double fraction) {
+      // Because superclass cannot have preconditions around these variables, cannot use
+      // @RequiresNonNull
+      Preconditions.checkStateNotNull(responseStream);
+      final BigQueryServerStream<ReadRowsResponse> responseStream = this.responseStream;
+      totalSplitCalls.inc();
       LOG.debug(
           "Received BigQuery Storage API split request for stream {} at fraction {}.",
           source.readStream.getName(),
@@ -302,7 +393,7 @@ class BigQueryStorageStreamSource<T> extends BoundedSource<T> {
         return null;
       }
 
-      if (!splitPossible) {
+      if (!splitPossible || !splitAllowed) {
         return null;
       }
 
@@ -311,14 +402,16 @@ class BigQueryStorageStreamSource<T> extends BoundedSource<T> {
               .setName(source.readStream.getName())
               .setFraction((float) fraction)
               .build();
-
-      SplitReadStreamResponse splitResponse = storageClient.splitReadStream(splitRequest);
+      SplitReadStreamResponse splitResponse;
+      try {
+        splitResponse = storageClient.splitReadStream(splitRequest);
+      } catch (Exception e) {
+        LOG.warn("Skip split read stream due to failed request: ", e);
+        return null;
+      }
       if (!splitResponse.hasPrimaryStream() || !splitResponse.hasRemainderStream()) {
         // No more splits are possible!
-        Metrics.counter(
-                BigQueryStorageStreamReader.class,
-                "split-at-fraction-calls-failed-due-to-impossible-split-point")
-            .inc();
+        impossibleSplitPointCalls.inc();
         LOG.info(
             "BigQuery Storage API stream {} cannot be split at {}.",
             source.readStream.getName(),
@@ -342,14 +435,29 @@ class BigQueryStorageStreamSource<T> extends BoundedSource<T> {
                       .build(),
                   source.readSession.getTable());
           newResponseIterator = newResponseStream.iterator();
-          newResponseIterator.hasNext();
+          // The following line is required to trigger the `FailedPreconditionException` on which
+          // the SplitReadStream validation logic depends. Removing it will cause incorrect
+          // split operations to succeed.
+          Future<Boolean> future = executor.submit(newResponseIterator::hasNext);
+          try {
+            // The intended wait time is in sync with splitReadStreamSettings.setRetrySettings in
+            // StorageClientImpl.
+            future.get(30, TimeUnit.SECONDS);
+          } catch (TimeoutException | InterruptedException | ExecutionException e) {
+            badSplitPointCalls.inc();
+            LOG.info(
+                "Split of stream {} abandoned because current position check failed with {}.",
+                source.readStream.getName(),
+                e.getClass().getName());
+
+            return null;
+          } finally {
+            future.cancel(true);
+          }
         } catch (FailedPreconditionException e) {
           // The current source has already moved past the split point, so this split attempt
           // is unsuccessful.
-          Metrics.counter(
-                  BigQueryStorageStreamReader.class,
-                  "split-at-fraction-calls-failed-due-to-bad-split-point")
-              .inc();
+          badSplitPointCalls.inc();
           LOG.info(
               "BigQuery Storage API split of stream {} abandoned because the primary stream is to "
                   + "the left of the split fraction {}.",
@@ -357,24 +465,20 @@ class BigQueryStorageStreamSource<T> extends BoundedSource<T> {
               fraction);
           return null;
         } catch (Exception e) {
-          Metrics.counter(
-                  BigQueryStorageStreamReader.class,
-                  "split-at-fraction-calls-failed-due-to-other-reasons")
-              .inc();
+          otherFailedSplitCalls.inc();
           LOG.error("BigQuery Storage API stream split failed.", e);
           return null;
         }
 
         // Cancels the parent stream before replacing it with the primary stream.
         responseStream.cancel();
-        source = source.fromExisting(splitResponse.getPrimaryStream());
-        responseStream = newResponseStream;
-        responseIterator = newResponseIterator;
+        this.source = source.fromExisting(splitResponse.getPrimaryStream());
+        this.responseStream = newResponseStream;
+        this.responseIterator = newResponseIterator;
         reader.resetBuffer();
       }
 
-      Metrics.counter(BigQueryStorageStreamReader.class, "split-at-fraction-calls-successful")
-          .inc();
+      successfulSplitCalls.inc();
       LOG.info(
           "Successfully split BigQuery Storage API stream at {}. Split response: {}",
           fraction,

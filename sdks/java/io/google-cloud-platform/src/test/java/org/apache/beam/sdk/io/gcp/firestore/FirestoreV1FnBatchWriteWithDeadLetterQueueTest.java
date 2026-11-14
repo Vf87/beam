@@ -50,13 +50,13 @@ import org.apache.beam.sdk.io.gcp.firestore.FirestoreV1.WriteFailure;
 import org.apache.beam.sdk.io.gcp.firestore.FirestoreV1WriteFn.BatchWriteFnWithDeadLetterQueue;
 import org.apache.beam.sdk.io.gcp.firestore.FirestoreV1WriteFn.WriteElement;
 import org.apache.beam.sdk.io.gcp.firestore.RpcQos.RpcWriteAttempt.Element;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 
 @SuppressWarnings({
   "initialization.fields.uninitialized", // mockito fields are initialized via the Mockito Runner
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public final class FirestoreV1FnBatchWriteWithDeadLetterQueueTest
     extends BaseFirestoreV1WriteFnTest<WriteFailure, BatchWriteFnWithDeadLetterQueue> {
@@ -67,7 +67,7 @@ public final class FirestoreV1FnBatchWriteWithDeadLetterQueueTest
     int maxBytes = 50;
     RpcQosOptions options = rpcQosOptions.toBuilder().withBatchMaxBytes(maxBytes).build();
 
-    when(ff.getFirestoreStub(any())).thenReturn(stub);
+    when(ff.getFirestoreStub(any(), any(), any())).thenReturn(stub);
     when(ff.getRpcQos(any()))
         .thenReturn(FirestoreStatefulComponentFactory.INSTANCE.getRpcQos(options));
 
@@ -145,8 +145,7 @@ public final class FirestoreV1FnBatchWriteWithDeadLetterQueueTest
   public void nonRetryableWriteIsOutput() throws Exception {
     Write write0 = FirestoreProtoHelpers.newWrite(0);
     Write write1 =
-        FirestoreProtoHelpers.newWrite(1)
-            .toBuilder()
+        FirestoreProtoHelpers.newWrite(1).toBuilder()
             .setCurrentDocument(Precondition.newBuilder().setExists(false).build())
             .build();
 
@@ -177,7 +176,7 @@ public final class FirestoreV1FnBatchWriteWithDeadLetterQueueTest
 
     when(rpcQos.newWriteAttempt(any())).thenReturn(attempt);
     when(attempt.awaitSafeToProceed(any())).thenReturn(true);
-    when(attempt.<Write, Element<Write>>newFlushBuffer(any()))
+    when(attempt.<Element<Write>>newFlushBuffer(any()))
         .thenReturn(newFlushBuffer(options))
         .thenReturn(newFlushBuffer(options))
         .thenThrow(new IllegalStateException("too many attempt#newFlushBuffer calls"));
@@ -223,6 +222,7 @@ public final class FirestoreV1FnBatchWriteWithDeadLetterQueueTest
       RpcQosOptions rpcQosOptions,
       CounterFactory counterFactory,
       DistributionFactory distributionFactory) {
-    return new BatchWriteFnWithDeadLetterQueue(clock, ff, rpcQosOptions, counterFactory);
+    return new BatchWriteFnWithDeadLetterQueue(
+        clock, ff, rpcQosOptions, counterFactory, null, null);
   }
 }

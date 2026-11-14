@@ -32,11 +32,13 @@ import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.Validation;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.DoFn.Element;
+import org.apache.beam.sdk.transforms.DoFn.OutputReceiver;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -63,15 +65,15 @@ import org.slf4j.LoggerFactory;
  *
  * See examples/java/README.md for instructions about how to configure different runners.
  *
- * <p>The BigQuery input table defaults to {@code clouddataflow-readonly:samples.weather_stations}
- * and can be overridden with {@code --input}.
+ * <p>The BigQuery input table defaults to {@code apache-beam-testing.samples.weather_stations} and
+ * can be overridden with {@code --input}.
  */
 public class BigQueryTornadoes {
   private static final Logger LOG = LoggerFactory.getLogger(BigQueryTornadoes.class);
 
   // Default to using a 1000 row subset of the public weather station table publicdata:samples.gsod.
   private static final String WEATHER_SAMPLES_TABLE =
-      "clouddataflow-readonly:samples.weather_stations";
+      "apache-beam-testing.samples.weather_stations";
 
   /**
    * Examines each row in the input table. If a tornado was recorded in that sample, the month in
@@ -79,10 +81,9 @@ public class BigQueryTornadoes {
    */
   static class ExtractTornadoesFn extends DoFn<TableRow, Integer> {
     @ProcessElement
-    public void processElement(ProcessContext c) {
-      TableRow row = c.element();
+    public void processElement(@Element TableRow row, OutputReceiver<Integer> receiver) {
       if ((Boolean) row.get("tornado")) {
-        c.output(Integer.parseInt((String) row.get("month")));
+        receiver.output(Integer.parseInt((String) row.get("month")));
       }
     }
   }
@@ -93,12 +94,11 @@ public class BigQueryTornadoes {
    */
   static class FormatCountsFn extends DoFn<KV<Integer, Long>, TableRow> {
     @ProcessElement
-    public void processElement(ProcessContext c) {
+    public void processElement(
+        @Element KV<Integer, Long> element, OutputReceiver<TableRow> receiver) {
       TableRow row =
-          new TableRow()
-              .set("month", c.element().getKey())
-              .set("tornado_count", c.element().getValue());
-      c.output(row);
+          new TableRow().set("month", element.getKey()).set("tornado_count", element.getValue());
+      receiver.output(row);
     }
   }
 
@@ -220,7 +220,7 @@ public class BigQueryTornadoes {
   }
 
   public static void runBigQueryTornadoes(Options options) {
-    LOG.info("Running BigQuery Tornadoes with options " + options.toString());
+    LOG.info("Running BigQuery Tornadoes with options {}", options.toString());
     Pipeline p = Pipeline.create(options);
     applyBigQueryTornadoes(p, options);
     p.run().waitUntilFinish();

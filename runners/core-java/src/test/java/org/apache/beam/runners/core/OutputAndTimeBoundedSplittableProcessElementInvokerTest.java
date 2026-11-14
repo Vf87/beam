@@ -27,7 +27,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import java.util.Collection;
+import java.util.Collections;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.apache.beam.sdk.io.range.OffsetRange;
@@ -37,12 +37,13 @@ import org.apache.beam.sdk.transforms.reflect.DoFnInvokers;
 import org.apache.beam.sdk.transforms.splittabledofn.OffsetRangeTracker;
 import org.apache.beam.sdk.transforms.splittabledofn.RestrictionTracker;
 import org.apache.beam.sdk.transforms.splittabledofn.WatermarkEstimator;
-import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.WindowedValueMultiReceiver;
 import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.Uninterruptibles;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.Uninterruptibles;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Rule;
@@ -51,7 +52,7 @@ import org.junit.rules.ExpectedException;
 
 /** Tests for {@link OutputAndTimeBoundedSplittableProcessElementInvoker}. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class OutputAndTimeBoundedSplittableProcessElementInvokerTest {
   @Rule public transient ExpectedException e = ExpectedException.none();
@@ -89,8 +90,32 @@ public class OutputAndTimeBoundedSplittableProcessElementInvokerTest {
     }
 
     @GetInitialRestriction
-    public OffsetRange getInitialRestriction(@Element Void element) {
+    public OffsetRange getInitialRestriction(@SuppressWarnings("unused") @Element Void element) {
       throw new UnsupportedOperationException("Should not be called in this test");
+    }
+  }
+
+  private static class GetSizeFn extends DoFn<Void, String> {
+    @ProcessElement
+    public ProcessContinuation process(
+        ProcessContext c, RestrictionTracker<OffsetRange, Long> tracker) {
+      for (long i = tracker.currentRestriction().getFrom(); tracker.tryClaim(i); ++i) {
+        c.output(String.valueOf(i));
+        if (i == 2) {
+          return resume();
+        }
+      }
+      return stop();
+    }
+
+    @GetInitialRestriction
+    public OffsetRange getInitialRestriction() {
+      return new OffsetRange(0, 10);
+    }
+
+    @GetSize
+    public double getSize(@Restriction OffsetRange range) {
+      return range.getTo() - range.getFrom();
     }
   }
 
@@ -102,35 +127,27 @@ public class OutputAndTimeBoundedSplittableProcessElementInvokerTest {
       throws Exception {
     SomeFn fn = new SomeFn(sleepBeforeFirstClaim, numOutputsPerProcessCall, sleepBeforeEachOutput);
     OffsetRange initialRestriction = new OffsetRange(0, totalNumOutputs);
-    return runTest(fn, initialRestriction);
+    return runTest(fn, initialRestriction, Duration.standardSeconds(3));
   }
 
   private SplittableProcessElementInvoker<Void, String, OffsetRange, Long, Void>.Result runTest(
-      DoFn<Void, String> fn, OffsetRange initialRestriction) throws Exception {
+      DoFn<Void, String> fn, OffsetRange initialRestriction, Duration checkpointDuration)
+      throws Exception {
     SplittableProcessElementInvoker<Void, String, OffsetRange, Long, Void> invoker =
         new OutputAndTimeBoundedSplittableProcessElementInvoker<>(
             fn,
             PipelineOptionsFactory.create(),
-            new OutputWindowedValue<String>() {
+            new WindowedValueMultiReceiver() {
               @Override
-              public void outputWindowedValue(
-                  String output,
-                  Instant timestamp,
-                  Collection<? extends BoundedWindow> windows,
-                  PaneInfo pane) {}
-
-              @Override
-              public <AdditionalOutputT> void outputWindowedValue(
-                  TupleTag<AdditionalOutputT> tag,
-                  AdditionalOutputT output,
-                  Instant timestamp,
-                  Collection<? extends BoundedWindow> windows,
-                  PaneInfo pane) {}
+              public <OutputT> void output(TupleTag<OutputT> tag, WindowedValue<OutputT> output) {
+                // discard
+              }
             },
+            null,
             NullSideInputReader.empty(),
             Executors.newSingleThreadScheduledExecutor(),
             1000,
-            Duration.standardSeconds(3),
+            checkpointDuration,
             () -> {
               throw new UnsupportedOperationException("BundleFinalizer not configured for test.");
             });
@@ -138,7 +155,7 @@ public class OutputAndTimeBoundedSplittableProcessElementInvokerTest {
     SplittableProcessElementInvoker.Result rval =
         invoker.invokeProcessElement(
             DoFnInvokers.invokerFor(fn),
-            WindowedValue.of(null, Instant.now(), GlobalWindow.INSTANCE, PaneInfo.NO_FIRING),
+            WindowedValues.of(null, Instant.now(), GlobalWindow.INSTANCE, PaneInfo.NO_FIRING),
             new OffsetRangeTracker(initialRestriction),
             new WatermarkEstimator<Void>() {
               @Override
@@ -150,7 +167,8 @@ public class OutputAndTimeBoundedSplittableProcessElementInvokerTest {
               public Void getState() {
                 return null;
               }
-            });
+            },
+            Collections.emptyMap());
     return rval;
   }
 
@@ -196,6 +214,7 @@ public class OutputAndTimeBoundedSplittableProcessElementInvokerTest {
         runTest(5, Duration.ZERO, Integer.MAX_VALUE, Duration.millis(100));
     assertFalse(res.getContinuation().shouldResume());
     assertNull(res.getResidualRestriction());
+    assertEquals(0.0, res.getBacklogBytes(), 0.001);
   }
 
   @Test
@@ -216,12 +235,13 @@ public class OutputAndTimeBoundedSplittableProcessElementInvokerTest {
           }
 
           @GetInitialRestriction
-          public OffsetRange getInitialRestriction(@Element Void element) {
+          public OffsetRange getInitialRestriction(
+              @SuppressWarnings("unused") @Element Void element) {
             throw new UnsupportedOperationException("Should not be called in this test");
           }
         };
     e.expectMessage("Output is not allowed before tryClaim()");
-    runTest(brokenFn, new OffsetRange(0, 5));
+    runTest(brokenFn, new OffsetRange(0, 5), Duration.standardSeconds(3));
   }
 
   @Test
@@ -235,11 +255,36 @@ public class OutputAndTimeBoundedSplittableProcessElementInvokerTest {
           }
 
           @GetInitialRestriction
-          public OffsetRange getInitialRestriction(@Element Void element) {
+          public OffsetRange getInitialRestriction(
+              @SuppressWarnings("unused") @Element Void element) {
             throw new UnsupportedOperationException("Should not be called in this test");
           }
         };
     e.expectMessage("Output is not allowed after a failed tryClaim()");
-    runTest(brokenFn, new OffsetRange(0, 5));
+    runTest(brokenFn, new OffsetRange(0, 5), Duration.standardSeconds(3));
+  }
+
+  @Test
+  public void testBacklogBytes() throws Exception {
+    GetSizeFn fn = new GetSizeFn();
+    OffsetRange initialRestriction = new OffsetRange(0, 10);
+    // Set a high checkpoint duration to prevent flakiness caused by early checkpointing.
+    SplittableProcessElementInvoker<Void, String, OffsetRange, Long, Void>.Result res =
+        runTest(fn, initialRestriction, Duration.standardMinutes(3));
+    // GetSizeFn claims 3 elements and then takes a checkpoint.
+    assertEquals(7.0, res.getBacklogBytes(), 0.001);
+    assertEquals(new OffsetRange(3, 10), res.getResidualRestriction());
+  }
+
+  @Test
+  public void testBacklogBytesWhenDone() throws Exception {
+    GetSizeFn fn = new GetSizeFn();
+    OffsetRange initialRestriction = new OffsetRange(0, 2);
+    // Set a high checkpoint duration to prevent flakiness caused by early checkpointing.
+    SplittableProcessElementInvoker<Void, String, OffsetRange, Long, Void>.Result res =
+        runTest(fn, initialRestriction, Duration.standardMinutes(3));
+    // GetSizeFn claims 2 elements and finishes.
+    assertEquals(0.0, res.getBacklogBytes(), 0.001);
+    assertNull(res.getResidualRestriction());
   }
 }

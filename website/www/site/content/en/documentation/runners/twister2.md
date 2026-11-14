@@ -20,6 +20,8 @@ limitations under the License.
 
 ## Overview
 
+**Note** Twister2 runner support has been removed in Beam 2.78.0 ([Issue](https://github.com/apache/beam/issues/35905)).
+
 Twister2 Runner can be used to execute Apache Beam pipelines on top of a Twister2
 cluster. Twister2 Runner runs Beam pipelines as Twister2 jobs, which can be executed on
 a Twister2 cluster either as a local deployment or distributed deployment using, Nomad,
@@ -32,9 +34,6 @@ require high performance, and provide.
 * Distributed massively parallel data processing engine with high performance using
  Bulk Synchronous Parallel (BSP) style execution.
 * Native support for Beam side-inputs.
-
-The [Beam Capability Matrix](/documentation/runners/capability-matrix/) documents the
-supported capabilities of the Twister2 Runner.
 
 ## Running WordCount with the Twister2 Runner
 
@@ -88,7 +87,7 @@ deployments and how to get them setup visit [Twister2 Docs](https://twister2.org
 <nav class="version-switcher">
   <strong>Adapt for:</strong>
   <ul>
-    <li data-type="version-twister2-0.6.0">Twister2 0.6.0</li>
+    <li data-value="twister2-0.6.0">Twister2 0.6.0</li>
   </ul>
 </nav>
 
@@ -113,6 +112,7 @@ Note: Currently file paths need to be absolute paths.
 
 ## Pipeline Options for the Twister2 Runner
 
+<div class="table-container-wrapper">
 <table class="table table-bordered">
 <tr>
   <th>Field</th>
@@ -150,3 +150,4 @@ Note: Currently file paths need to be absolute paths.
   <td>2048</td>
 </tr>
 </table>
+</div>

@@ -23,10 +23,8 @@ import java.util.Arrays;
 import java.util.List;
 import org.apache.beam.sdk.extensions.sql.BeamSqlSeekableTable;
 import org.apache.beam.sdk.extensions.sql.TestUtils;
-import org.apache.beam.sdk.extensions.sql.impl.BeamTableStatistics;
 import org.apache.beam.sdk.extensions.sql.meta.SchemaBaseBeamTable;
 import org.apache.beam.sdk.extensions.sql.meta.provider.test.TestTableUtils;
-import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
@@ -36,6 +34,7 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.POutput;
 import org.apache.beam.sdk.values.Row;
 import org.hamcrest.core.StringContains;
+import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
@@ -49,9 +48,16 @@ public class BeamSideInputLookupJoinRelTest extends BaseRelTest {
 
   /** Test table for JOIN-AS-LOOKUP. */
   public static class SiteLookupTable extends SchemaBaseBeamTable implements BeamSqlSeekableTable {
+    private Schema joinSubsetType;
 
     public SiteLookupTable(Schema schema) {
       super(schema);
+    }
+
+    @Override
+    public void setUp(Schema joinSubsetType) {
+      this.joinSubsetType = joinSubsetType;
+      Assert.assertNotNull(joinSubsetType);
     }
 
     @Override
@@ -71,15 +77,11 @@ public class BeamSideInputLookupJoinRelTest extends BaseRelTest {
 
     @Override
     public List<Row> seekRow(Row lookupSubRow) {
+      Assert.assertEquals(joinSubsetType, lookupSubRow.getSchema());
       if (lookupSubRow.getInt32("site_id") == 2) {
         return Arrays.asList(Row.withSchema(getSchema()).addValues(2, "SITE1").build());
       }
       return Arrays.asList(Row.nullRow(getSchema()));
-    }
-
-    @Override
-    public BeamTableStatistics getTableStatistics(PipelineOptions options) {
-      return BeamTableStatistics.BOUNDED_UNKNOWN;
     }
   }
 
@@ -253,7 +255,7 @@ public class BeamSideInputLookupJoinRelTest extends BaseRelTest {
             + " o1.site_id=o2.site_id ";
     thrown.expect(UnsupportedOperationException.class);
     thrown.expectMessage(StringContains.containsString("OUTER JOIN must be a non Seekable table"));
-    PCollection<Row> rows = compilePipeline(sql, pipeline);
+    compilePipeline(sql, pipeline);
     pipeline.run();
   }
 
@@ -271,7 +273,7 @@ public class BeamSideInputLookupJoinRelTest extends BaseRelTest {
             + " o1.site_id=o2.site_id";
     thrown.expect(UnsupportedOperationException.class);
     thrown.expectMessage(StringContains.containsString("not supported"));
-    PCollection<Row> rows = compilePipeline(sql, pipeline);
+    compilePipeline(sql, pipeline);
     pipeline.run();
   }
 
@@ -289,7 +291,7 @@ public class BeamSideInputLookupJoinRelTest extends BaseRelTest {
             + " o1.site_id=o2.site_id";
     thrown.expect(UnsupportedOperationException.class);
     thrown.expectMessage(StringContains.containsString("OUTER JOIN must be a non Seekable table"));
-    PCollection<Row> rows = compilePipeline(sql, pipeline);
+    compilePipeline(sql, pipeline);
     pipeline.run();
   }
 }

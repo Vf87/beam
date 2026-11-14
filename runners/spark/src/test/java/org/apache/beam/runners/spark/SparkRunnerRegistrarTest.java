@@ -23,8 +23,8 @@ import static org.junit.Assert.fail;
 import java.util.ServiceLoader;
 import org.apache.beam.sdk.options.PipelineOptionsRegistrar;
 import org.apache.beam.sdk.runners.PipelineRunnerRegistrar;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -36,14 +36,14 @@ public class SparkRunnerRegistrarTest {
   public void testOptions() {
     assertEquals(
         ImmutableList.of(SparkPipelineOptions.class, SparkPortableStreamingPipelineOptions.class),
-        new SparkRunnerRegistrar.Options().getPipelineOptions());
+        Lists.newArrayList(new SparkRunnerRegistrar.Options().getPipelineOptions()));
   }
 
   @Test
   public void testRunners() {
     assertEquals(
         ImmutableList.of(SparkRunner.class, TestSparkRunner.class),
-        new SparkRunnerRegistrar.Runner().getPipelineRunners());
+        Lists.newArrayList(new SparkRunnerRegistrar.Runner().getPipelineRunners()));
   }
 
   @Test

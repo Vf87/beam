@@ -17,8 +17,8 @@
  */
 package org.apache.beam.sdk.extensions.sql.impl.rel;
 
-import static org.apache.beam.vendor.calcite.v1_26_0.com.google.common.base.MoreObjects.firstNonNull;
-import static org.apache.beam.vendor.calcite.v1_26_0.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects.firstNonNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.io.Serializable;
 import java.math.BigDecimal;
@@ -31,6 +31,7 @@ import org.apache.beam.sdk.coders.ListCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VarIntCoder;
 import org.apache.beam.sdk.extensions.sql.impl.planner.BeamCostModel;
+import org.apache.beam.sdk.extensions.sql.impl.planner.BeamRelMetadataQuery;
 import org.apache.beam.sdk.extensions.sql.impl.planner.NodeStats;
 import org.apache.beam.sdk.extensions.sql.impl.utils.CalciteUtils;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
@@ -39,6 +40,7 @@ import org.apache.beam.sdk.state.StateSpecs;
 import org.apache.beam.sdk.state.ValueState;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Flatten;
+import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.Top;
@@ -50,19 +52,19 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelOptCluster;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelOptPlanner;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.plan.RelTraitSet;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.RelCollation;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.RelCollationImpl;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.RelFieldCollation;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.RelNode;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.core.Sort;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.metadata.RelMetadataQuery;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexInputRef;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexLiteral;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rex.RexNode;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptCluster;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptPlanner;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelTraitSet;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelCollation;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelCollationImpl;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelFieldCollation;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.core.Sort;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexInputRef;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexLiteral;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.type.SqlTypeName;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
  * {@code BeamRelNode} to replace a {@code Sort} node.
@@ -73,14 +75,11 @@ import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.type.SqlTyp
  * <pre>{@code
  * SELECT * FROM t ORDER BY id DESC LIMIT 10;
  * SELECT * FROM t ORDER BY id DESC LIMIT 10 OFFSET 5;
- * }</pre>
- *
- * <p>but an ORDER BY without a LIMIT is NOT supported. For example, the following will throw an
- * exception:
- *
- * <pre>{@code
  * SELECT * FROM t ORDER BY id DESC;
  * }</pre>
+ *
+ * <p>Note: ORDER BY without a LIMIT is supported by keying all rows to a single key and sorting
+ * them in memory. This can be memory-intensive and may fail for large datasets.
  *
  * <h3>Constraints</h3>
  *
@@ -92,8 +91,11 @@ import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.sql.type.SqlTyp
  * </ul>
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness", // TODO(https://github.com/apache/beam/issues/20497)
+  // TODO(https://github.com/apache/beam/issues/21230): Remove when new version of
+  // errorprone is released (2.11.0)
+  "unused"
 })
 public class BeamSortRel extends Sort implements BeamRelNode {
   private List<Integer> fieldIndices = new ArrayList<>();
@@ -108,8 +110,8 @@ public class BeamSortRel extends Sort implements BeamRelNode {
       RelTraitSet traits,
       RelNode child,
       RelCollation collation,
-      RexNode offset,
-      RexNode fetch) {
+      @Nullable RexNode offset,
+      @Nullable RexNode fetch) {
     super(cluster, traits, child, collation, offset, fetch);
 
     // https://issues.apache.org/jira/browse/CALCITE-4079?focusedCommentId=17165904&page=com.atlassian.jira.plugin.system.issuetabpanels%3Acomment-tabpanel#comment-17165904
@@ -130,11 +132,11 @@ public class BeamSortRel extends Sort implements BeamRelNode {
     }
 
     if (fetch == null) {
-      throw new UnsupportedOperationException("ORDER BY without a LIMIT is not supported!");
+      count = -1;
+    } else {
+      RexLiteral fetchLiteral = (RexLiteral) fetch;
+      count = ((BigDecimal) fetchLiteral.getValue()).intValue();
     }
-
-    RexLiteral fetchLiteral = (RexLiteral) fetch;
-    count = ((BigDecimal) fetchLiteral.getValue()).intValue();
 
     if (offset != null) {
       RexLiteral offsetLiteral = (RexLiteral) offset;
@@ -143,13 +145,13 @@ public class BeamSortRel extends Sort implements BeamRelNode {
   }
 
   @Override
-  public NodeStats estimateNodeStats(RelMetadataQuery mq) {
+  public NodeStats estimateNodeStats(BeamRelMetadataQuery mq) {
     // Sorting does not change rate or row count of the input.
     return BeamSqlRelUtils.getNodeStats(this.input, mq);
   }
 
   @Override
-  public BeamCostModel beamComputeSelfCost(RelOptPlanner planner, RelMetadataQuery mq) {
+  public BeamCostModel beamComputeSelfCost(RelOptPlanner planner, BeamRelMetadataQuery mq) {
     NodeStats inputEstimates = BeamSqlRelUtils.getNodeStats(this.input, mq);
 
     final double rowSize = getRowType().getFieldCount();
@@ -188,7 +190,7 @@ public class BeamSortRel extends Sort implements BeamRelNode {
       //    works only on bounded data.
       //  - Just LIMIT operates on unbounded data, but across windows.
       if (fieldIndices.isEmpty()) {
-        // TODO(https://issues.apache.org/jira/projects/BEAM/issues/BEAM-4702)
+        // TODO(https://github.com/apache/beam/issues/19075)
         // Figure out which operations are per-window and which are not.
 
         return upstream
@@ -203,6 +205,21 @@ public class BeamSortRel extends Sort implements BeamRelNode {
               String.format(
                   "`ORDER BY` is only supported for %s, actual windowing strategy: %s",
                   GlobalWindows.class.getSimpleName(), windowingStrategy));
+        }
+
+        // When no limit is specified (count == -1), we must sort the entire dataset.
+        // To achieve this globally, we key all rows by a single dummy key, group them together
+        // using GroupByKey to ensure they are processed together, and then sort them in-memory
+        // via SortInMemoryFn. Note: This can be memory-intensive for large datasets. It should
+        // only be done as a final step when the remaining data is small
+        if (count == -1) {
+          BeamSqlRowComparator comparator =
+              new BeamSqlRowComparator(fieldIndices, orientation, nullsFirst);
+          return upstream
+              .apply("WithDummyKey", WithKeys.of("DummyKey"))
+              .apply("GroupByKey", GroupByKey.create())
+              .apply("SortInMemory", ParDo.of(new SortInMemoryFn(comparator)))
+              .setRowSchema(CalciteUtils.toSchema(getRowType()));
         }
 
         ReversedBeamSqlRowComparator comparator =
@@ -299,6 +316,31 @@ public class BeamSortRel extends Sort implements BeamRelNode {
     }
   }
 
+  /**
+   * A {@link DoFn} that sorts all elements in-memory. Expects input grouped by a dummy key, sorts
+   * the iterable values, and outputs them.
+   */
+  private static class SortInMemoryFn extends DoFn<KV<String, Iterable<Row>>, Row> {
+    private final BeamSqlRowComparator comparator;
+
+    public SortInMemoryFn(BeamSqlRowComparator comparator) {
+      this.comparator = comparator;
+    }
+
+    @ProcessElement
+    public void processElement(ProcessContext ctx) {
+      Iterable<Row> input = ctx.element().getValue();
+      List<Row> list = new ArrayList<>();
+      for (Row r : input) {
+        list.add(r);
+      }
+      list.sort(comparator);
+      for (Row r : list) {
+        ctx.output(r);
+      }
+    }
+  }
+
   @Override
   public Sort copy(
       RelTraitSet traitSet,
@@ -336,9 +378,12 @@ public class BeamSortRel extends Sort implements BeamRelNode {
         if (isValue1Null && isValue2Null) {
           continue;
         } else if (isValue1Null && !isValue2Null) {
-          fieldRet = -1 * (nullsFirst.get(i) ? -1 : 1);
+          // Return early as NULLS FIRST/LAST is independent of ASC/DESC orientation.
+          fieldRet = nullsFirst.get(i) ? -1 : 1;
+          return fieldRet;
         } else if (!isValue1Null && isValue2Null) {
-          fieldRet = 1 * (nullsFirst.get(i) ? -1 : 1);
+          fieldRet = nullsFirst.get(i) ? 1 : -1;
+          return fieldRet;
         } else {
           switch (sqlTypeName) {
             case TINYINT:
@@ -347,8 +392,12 @@ public class BeamSortRel extends Sort implements BeamRelNode {
             case BIGINT:
             case FLOAT:
             case DOUBLE:
+            case DECIMAL:
+            case BOOLEAN:
             case VARCHAR:
+            case CHAR:
             case DATE:
+            case TIME:
             case TIMESTAMP:
               Comparable v1 = row1.getBaseValue(fieldIndex, Comparable.class);
               Comparable v2 = row2.getBaseValue(fieldIndex, Comparable.class);

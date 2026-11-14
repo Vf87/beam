@@ -20,23 +20,32 @@ package org.apache.beam.sdk.io.clickhouse;
 import com.google.auto.value.AutoValue;
 import java.io.Serializable;
 import java.io.StringReader;
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
+import java.util.stream.Collectors;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.logicaltypes.FixedBytes;
+import org.apache.beam.sdk.schemas.logicaltypes.FixedPrecisionNumeric;
+import org.apache.beam.sdk.schemas.logicaltypes.NanosInstant;
+import org.apache.beam.sdk.schemas.logicaltypes.SqlTypes;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
-/** A descriptor for ClickHouse table schema. */
-@Experimental(Kind.SOURCE_SINK)
+/**
+ * A descriptor for ClickHouse table schema. To be updated with ClickHouse table schema API -
+ * https://github.com/apache/beam/issues/37613
+ */
 @AutoValue
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public abstract class TableSchema implements Serializable {
+
+  private static final Schema.FieldType NANOS_INSTANT_TYPE =
+      Schema.FieldType.logicalType(new NanosInstant());
 
   public abstract List<Column> columns();
 
@@ -75,6 +84,30 @@ public abstract class TableSchema implements Serializable {
       case DATETIME:
         return Schema.FieldType.DATETIME;
 
+      case DATETIME64:
+        // Pick the narrowest Beam logical type that still round-trips the requested precision:
+        //   ≤ 3 (milliseconds)         → Joda DATETIME, keeping existing pipelines unchanged.
+        //   4–6 (down to microseconds) → SqlTypes.TIMESTAMP (MicrosInstant) — interoperable
+        //                                with BigQueryIO, Avro and Beam SQL.
+        //   ≥ 7 (sub-microsecond)      → NanosInstant, the only built-in type that preserves
+        //                                full nanosecond precision through Row construction.
+        int p = columnType.precision();
+        if (p <= 3) {
+          return Schema.FieldType.DATETIME;
+        } else if (p <= 6) {
+          return Schema.FieldType.logicalType(SqlTypes.TIMESTAMP);
+        } else {
+          return NANOS_INSTANT_TYPE;
+        }
+
+      case DECIMAL:
+        int decimalPrecision =
+            Preconditions.checkNotNull(columnType.precision(), "Decimal column missing precision");
+        int decimalScale =
+            Preconditions.checkNotNull(columnType.scale(), "Decimal column missing scale");
+        return Schema.FieldType.logicalType(
+            FixedPrecisionNumeric.of(decimalPrecision, decimalScale));
+
       case STRING:
         return Schema.FieldType.STRING;
 
@@ -112,6 +145,16 @@ public abstract class TableSchema implements Serializable {
       case ENUM8:
       case ENUM16:
         return Schema.FieldType.STRING;
+      case BOOL:
+        return Schema.FieldType.BOOLEAN;
+      case TUPLE:
+        List<Schema.Field> fields =
+            columnType.tupleTypes().entrySet().stream()
+                .map(x -> Schema.Field.of(x.getKey(), Schema.FieldType.DATETIME))
+                .collect(Collectors.toList());
+        Schema.Field[] array = fields.toArray(new Schema.Field[fields.size()]);
+        Schema schema = Schema.of(array);
+        return Schema.FieldType.row(schema);
     }
 
     // not possible, errorprone checks for exhaustive switch
@@ -152,6 +195,8 @@ public abstract class TableSchema implements Serializable {
     // Primitive types
     DATE,
     DATETIME,
+    DATETIME64,
+    DECIMAL,
     ENUM8,
     ENUM16,
     FIXEDSTRING,
@@ -166,14 +211,19 @@ public abstract class TableSchema implements Serializable {
     UINT16,
     UINT32,
     UINT64,
-    // Composite types
-    ARRAY
+    // Composite type
+    ARRAY,
+    // Primitive type
+    BOOL,
+    // Composite type
+    TUPLE
   }
 
   /**
    * An enumeration of possible kinds of default values in ClickHouse.
    *
-   * @see <a href="https://clickhouse.yandex/docs/en/single/#default-values">ClickHouse
+   * @see <a
+   *     href="https://clickhouse.com/docs/sql-reference/statements/create/table#default_values">ClickHouse
    *     documentation</a>
    */
   public enum DefaultType {
@@ -206,6 +256,8 @@ public abstract class TableSchema implements Serializable {
     public static final ColumnType UINT16 = ColumnType.of(TypeName.UINT16);
     public static final ColumnType UINT32 = ColumnType.of(TypeName.UINT32);
     public static final ColumnType UINT64 = ColumnType.of(TypeName.UINT64);
+    public static final ColumnType BOOL = ColumnType.of(TypeName.BOOL);
+    public static final ColumnType TUPLE = ColumnType.of(TypeName.TUPLE);
 
     // ClickHouse doesn't allow nested nullables, so boolean flag is enough
     public abstract boolean nullable();
@@ -217,6 +269,20 @@ public abstract class TableSchema implements Serializable {
     public abstract @Nullable Integer fixedStringSize();
 
     public abstract @Nullable ColumnType arrayElementType();
+
+    public abstract @Nullable Map<String, ColumnType> tupleTypes();
+
+    /**
+     * Sub-second precision (0–9) of {@code DateTime64}, or total number of decimal digits (1–76) of
+     * {@code Decimal}. {@code null} for other types.
+     */
+    public abstract @Nullable Integer precision();
+
+    /**
+     * Number of fractional decimal digits (0–precision) of {@code Decimal}. {@code null} for other
+     * types.
+     */
+    public abstract @Nullable Integer scale();
 
     public ColumnType withNullable(boolean nullable) {
       return toBuilder().nullable(nullable).build();
@@ -235,6 +301,60 @@ public abstract class TableSchema implements Serializable {
           .typeName(TypeName.FIXEDSTRING)
           .nullable(false)
           .fixedStringSize(size)
+          .build();
+    }
+
+    /** Default {@code DateTime64} precision in ClickHouse. */
+    public static final int DEFAULT_DATETIME64_PRECISION = 3;
+
+    /** Returns a {@code DateTime64} type with ClickHouse's default precision of 3. */
+    public static ColumnType dateTime64() {
+      return dateTime64(DEFAULT_DATETIME64_PRECISION);
+    }
+
+    public static ColumnType dateTime64(int precision) {
+      if (precision < 0 || precision > 9) {
+        throw new IllegalArgumentException(
+            "DateTime64 precision must be in [0, 9], got " + precision);
+      }
+      return ColumnType.builder()
+          .typeName(TypeName.DATETIME64)
+          .nullable(false)
+          .precision(precision)
+          .build();
+    }
+
+    /** Default {@code Decimal} precision in ClickHouse when none is specified. */
+    public static final int DEFAULT_DECIMAL_PRECISION = 10;
+
+    /** Default {@code Decimal} scale in ClickHouse when none is specified. */
+    public static final int DEFAULT_DECIMAL_SCALE = 0;
+
+    /**
+     * Returns a {@code Decimal(precision, scale)} type.
+     *
+     * <p>ClickHouse stores {@code Decimal} values as integers of a width chosen from the declared
+     * precision: 32 bits for precision 1–9, 64 for 10–18, 128 for 19–38 and 256 for 39–76. The
+     * width aliases {@code Decimal32(S)}, {@code Decimal64(S)}, {@code Decimal128(S)} and {@code
+     * Decimal256(S)} correspond to precisions 9, 18, 38 and 76.
+     *
+     * @param precision total number of decimal digits, in {@code [1, 76]}
+     * @param scale number of fractional decimal digits, in {@code [0, precision]}
+     */
+    public static ColumnType decimal(int precision, int scale) {
+      if (precision < 1 || precision > 76) {
+        throw new IllegalArgumentException(
+            "Decimal precision must be in [1, 76], got " + precision);
+      }
+      if (scale < 0 || scale > precision) {
+        throw new IllegalArgumentException(
+            "Decimal scale must be in [0, " + precision + "], got " + scale);
+      }
+      return ColumnType.builder()
+          .typeName(TypeName.DECIMAL)
+          .nullable(false)
+          .precision(precision)
+          .scale(scale)
           .build();
     }
 
@@ -263,18 +383,30 @@ public abstract class TableSchema implements Serializable {
           .build();
     }
 
+    public static ColumnType tuple(Map<String, ColumnType> elements) {
+      return ColumnType.builder()
+          .typeName(TypeName.TUPLE)
+          .nullable(false)
+          .tupleTypes(elements)
+          .build();
+    }
+
     /**
      * Parse string with ClickHouse type to {@link ColumnType}.
      *
      * @param str string representation of ClickHouse type
      * @return type of ClickHouse column
+     * @throws IllegalArgumentException if {@code str} is not a valid ClickHouse column type
      */
     public static ColumnType parse(String str) {
       try {
         return new org.apache.beam.sdk.io.clickhouse.impl.parser.ColumnTypeParser(
                 new StringReader(str))
             .parse();
-      } catch (org.apache.beam.sdk.io.clickhouse.impl.parser.ParseException e) {
+      } catch (org.apache.beam.sdk.io.clickhouse.impl.parser.ParseException
+          | org.apache.beam.sdk.io.clickhouse.impl.parser.TokenMgrError
+          | IllegalArgumentException e) {
+        // Funnel lexical, syntactic and validation failures into one error surface.
         throw new IllegalArgumentException("failed to parse", e);
       }
     }
@@ -285,43 +417,38 @@ public abstract class TableSchema implements Serializable {
      * <p>E.g., "CREATE TABLE hits(id Int32, count Int32 DEFAULT &lt;str&gt;)"
      *
      * @param columnType type of ClickHouse expression
-     * @param str ClickHouse expression
+     * @param value ClickHouse expression
      * @return value of ClickHouse expression
      */
-    public static Object parseDefaultExpression(ColumnType columnType, String str) {
-      try {
-        String value =
-            new org.apache.beam.sdk.io.clickhouse.impl.parser.ColumnTypeParser(
-                    new StringReader(str))
-                .parseDefaultExpression();
-
-        switch (columnType.typeName()) {
-          case INT8:
-            return Byte.valueOf(value);
-          case INT16:
-            return Short.valueOf(value);
-          case INT32:
-            return Integer.valueOf(value);
-          case INT64:
-            return Long.valueOf(value);
-          case ENUM16:
-          case ENUM8:
-          case FIXEDSTRING:
-          case STRING:
-            return value;
-          case UINT8:
-            return Short.valueOf(value);
-          case UINT16:
-            return Integer.valueOf(value);
-          case UINT32:
-            return Long.valueOf(value);
-          case UINT64:
-            return Long.valueOf(value);
-          default:
-            throw new UnsupportedOperationException("Unsupported type: " + columnType);
-        }
-      } catch (org.apache.beam.sdk.io.clickhouse.impl.parser.ParseException e) {
-        throw new IllegalArgumentException("failed to parse", e);
+    public static Object parseDefaultExpression(ColumnType columnType, String value) {
+      switch (columnType.typeName()) {
+        case INT8:
+          return Byte.valueOf(value);
+        case INT16:
+          return Short.valueOf(value);
+        case INT32:
+          return Integer.valueOf(value);
+        case INT64:
+          return Long.valueOf(value);
+        case ENUM16:
+        case ENUM8:
+        case FIXEDSTRING:
+        case STRING:
+          return value;
+        case UINT8:
+          return Short.valueOf(value);
+        case UINT16:
+          return Integer.valueOf(value);
+        case UINT32:
+          return Long.valueOf(value);
+        case UINT64:
+          return Long.valueOf(value);
+        case BOOL:
+          return Boolean.valueOf(value);
+        case DECIMAL:
+          return new BigDecimal(value);
+        default:
+          throw new UnsupportedOperationException("Unsupported type: " + columnType);
       }
     }
 
@@ -343,6 +470,12 @@ public abstract class TableSchema implements Serializable {
       public abstract Builder enumValues(Map<String, Integer> enumValues);
 
       public abstract Builder fixedStringSize(Integer size);
+
+      public abstract Builder tupleTypes(Map<String, ColumnType> tupleElements);
+
+      public abstract Builder precision(@Nullable Integer precision);
+
+      public abstract Builder scale(@Nullable Integer scale);
 
       public abstract ColumnType build();
     }

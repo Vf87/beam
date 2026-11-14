@@ -17,19 +17,21 @@
  */
 package org.apache.beam.examples.complete.datatokenization.utils;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.api.services.bigquery.model.TableRow;
 import com.google.auto.value.AutoValue;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import javax.annotation.Nullable;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.Write.CreateDisposition;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.Write.WriteDisposition;
 import org.apache.beam.sdk.io.gcp.bigquery.WriteResult;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.DoFn.Element;
+import org.apache.beam.sdk.transforms.DoFn.OutputReceiver;
+import org.apache.beam.sdk.transforms.DoFn.Timestamp;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -40,8 +42,11 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollection.IsBounded;
 import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.TypeDescriptors;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.DateTimeZone;
 import org.joda.time.Duration;
+import org.joda.time.Instant;
 import org.joda.time.format.DateTimeFormat;
 import org.joda.time.format.DateTimeFormatter;
 
@@ -61,10 +66,9 @@ public class ErrorConverters {
 
     public abstract String csvDelimiter();
 
-    @Nullable
-    public abstract Duration windowDuration();
+    public abstract @Nullable Duration windowDuration();
 
-    @SuppressWarnings("argument.type.incompatible")
+    @SuppressWarnings("argument")
     @Override
     public PDone expand(PCollection<FailsafeElement<String, String>> pCollection) {
 
@@ -123,24 +127,25 @@ public class ErrorConverters {
     }
 
     @ProcessElement
-    public void processElement(ProcessContext context) {
-      FailsafeElement<String, String> failsafeElement = context.element();
+    public void processElement(
+        @Element FailsafeElement<String, String> failsafeElement,
+        @Timestamp Instant timestamp,
+        OutputReceiver<String> receiver) {
       ArrayList<String> outputRow = new ArrayList<>();
       final String message = failsafeElement.getOriginalPayload();
 
       // Format the timestamp for insertion
-      String timestamp =
-          TIMESTAMP_FORMATTER.print(context.timestamp().toDateTime(DateTimeZone.UTC));
+      String timestampStr = TIMESTAMP_FORMATTER.print(timestamp.toDateTime(DateTimeZone.UTC));
 
-      outputRow.add(timestamp);
-      outputRow.add(failsafeElement.getErrorMessage());
+      outputRow.add(timestampStr);
+      outputRow.add(MoreObjects.firstNonNull(failsafeElement.getErrorMessage(), ""));
 
       // Only set the payload if it's populated on the message.
       if (message != null) {
         outputRow.add(message);
       }
 
-      context.output(String.join(csvDelimiter, outputRow));
+      receiver.output(String.join(csvDelimiter, outputRow));
     }
   }
 
@@ -198,18 +203,20 @@ public class ErrorConverters {
         DateTimeFormat.forPattern("yyyy-MM-dd HH:mm:ss.SSSSSS");
 
     @ProcessElement
-    public void processElement(ProcessContext context) {
-      FailsafeElement<String, String> failsafeElement = context.element();
+    public void processElement(
+        @Timestamp Instant timestamp,
+        @Element FailsafeElement<String, String> failsafeElement,
+        OutputReceiver<TableRow> receiver) {
       final String message = failsafeElement.getOriginalPayload();
 
       // Format the timestamp for insertion
-      String timestamp =
-          TIMESTAMP_FORMATTER.print(context.timestamp().toDateTime(DateTimeZone.UTC));
+      String timestampStr = TIMESTAMP_FORMATTER.print(timestamp.toDateTime(DateTimeZone.UTC));
 
       // Build the table row
+      @SuppressWarnings("nullness") // TableRow.set not annotated but does accept nulls
       final TableRow failedRow =
           new TableRow()
-              .set("timestamp", timestamp)
+              .set("timestamp", timestampStr)
               .set("errorMessage", failsafeElement.getErrorMessage())
               .set("stacktrace", failsafeElement.getStacktrace());
 
@@ -220,7 +227,7 @@ public class ErrorConverters {
             .set("payloadBytes", message.getBytes(StandardCharsets.UTF_8));
       }
 
-      context.output(failedRow);
+      receiver.output(failedRow);
     }
   }
 
@@ -262,11 +269,10 @@ public class ErrorConverters {
 
     public abstract SerializableFunction<FailsafeElement<T, V>, String> translateFunction();
 
-    @Nullable
-    public abstract Duration windowDuration();
+    public abstract @Nullable Duration windowDuration();
 
     @Override
-    @SuppressWarnings("argument.type.incompatible")
+    @SuppressWarnings("argument")
     public PDone expand(PCollection<FailsafeElement<T, V>> pCollection) {
 
       PCollection<String> formattedErrorRows =

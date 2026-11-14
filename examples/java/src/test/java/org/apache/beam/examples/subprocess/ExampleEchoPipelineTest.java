@@ -41,10 +41,12 @@ import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.DoFn.Element;
+import org.apache.beam.sdk.transforms.DoFn.OutputReceiver;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -62,8 +64,6 @@ import org.slf4j.LoggerFactory;
  */
 @RunWith(JUnit4.class)
 public class ExampleEchoPipelineTest {
-
-  private static final Logger LOG = LoggerFactory.getLogger(ExampleEchoPipelineTest.class);
 
   @Rule public TestPipeline p = TestPipeline.create().enableAbandonedNodeEnforcement(false);
 
@@ -146,11 +146,13 @@ public class ExampleEchoPipelineTest {
     }
 
     @ProcessElement
-    public void processElement(ProcessContext c) throws Exception {
+    public void processElement(
+        @Element KV<String, String> element, OutputReceiver<KV<String, String>> receiver)
+        throws Exception {
       try {
         // Our Library takes a single command in position 0 which it will echo back in the result
         SubProcessCommandLineArgs commands = new SubProcessCommandLineArgs();
-        Command command = new Command(0, String.valueOf(c.element().getValue()));
+        Command command = new Command(0, String.valueOf(element.getValue()));
         commands.putCommand(command);
 
         // The ProcessingKernel deals with the execution of the process
@@ -159,7 +161,7 @@ public class ExampleEchoPipelineTest {
         // Run the command and work through the results
         List<String> results = kernel.exec(commands);
         for (String s : results) {
-          c.output(KV.of(c.element().getKey(), s));
+          receiver.output(KV.of(element.getKey(), s));
         }
       } catch (Exception ex) {
         LOG.error("Error processing element ", ex);

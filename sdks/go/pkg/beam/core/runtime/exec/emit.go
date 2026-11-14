@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/funcx"
+	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/sdf"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/typex"
 )
 
@@ -29,9 +30,17 @@ import (
 // emit event time.
 type ReusableEmitter interface {
 	// Init resets the value. Can be called multiple times.
-	Init(ctx context.Context, ws []typex.Window, t typex.EventTime) error
+	Init(ctx context.Context, pn typex.PaneInfo, ws []typex.Window, t typex.EventTime) error
 	// Value returns the side input value. Constant value.
-	Value() interface{}
+	Value() any
+}
+
+// ReusableTimestampObservingWatermarkEmitter is a resettable value needed to hold
+// the implicit context and emit event time. It also has the ability to have a
+// watermark estimator attached.
+type ReusableTimestampObservingWatermarkEmitter interface {
+	ReusableEmitter
+	AttachEstimator(est *sdf.WatermarkEstimator)
 }
 
 var (
@@ -82,27 +91,34 @@ func makeEmit(t reflect.Type, n ElementProcessor) ReusableEmitter {
 // emitValue is the reflection-based default emitter implementation.
 type emitValue struct {
 	n     ElementProcessor
-	fn    interface{}
+	fn    any
 	types []reflect.Type
+	est   *sdf.WatermarkEstimator
 
 	ctx context.Context
+	pn  typex.PaneInfo
 	ws  []typex.Window
 	et  typex.EventTime
 }
 
-func (e *emitValue) Init(ctx context.Context, ws []typex.Window, et typex.EventTime) error {
+func (e *emitValue) Init(ctx context.Context, pn typex.PaneInfo, ws []typex.Window, et typex.EventTime) error {
 	e.ctx = ctx
+	e.pn = pn
 	e.ws = ws
 	e.et = et
 	return nil
 }
 
-func (e *emitValue) Value() interface{} {
+func (e *emitValue) Value() any {
 	return e.fn
 }
 
+func (e *emitValue) AttachEstimator(est *sdf.WatermarkEstimator) {
+	e.est = est
+}
+
 func (e *emitValue) invoke(args []reflect.Value) []reflect.Value {
-	value := &FullValue{Windows: e.ws, Timestamp: e.et}
+	value := &FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et}
 	isKey := true
 	for i, t := range e.types {
 		switch {
@@ -114,6 +130,10 @@ func (e *emitValue) invoke(args []reflect.Value) []reflect.Value {
 		default:
 			value.Elm2 = args[i].Interface()
 		}
+	}
+
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(value.Timestamp.ToTime())
 	}
 
 	if err := e.n.ProcessElement(e.ctx, value); err != nil {

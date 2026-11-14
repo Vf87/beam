@@ -31,7 +31,7 @@ import java.util.Set;
 import java.util.WeakHashMap;
 import org.apache.beam.sdk.PipelineRunner;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -119,7 +119,7 @@ public class SerializableCoder<T extends Serializable> extends CustomCoder<T> {
     if (warn && MISSING_EQUALS_METHOD.add(clazz)) {
       LOG.warn(
           "Can't verify serialized elements of type {} have well defined equals method. "
-              + "This may produce incorrect results on some {}",
+              + "This may produce incorrect results on some {} implementations",
           clazz.getSimpleName(),
           PipelineRunner.class.getSimpleName());
     }
@@ -169,8 +169,11 @@ public class SerializableCoder<T extends Serializable> extends CustomCoder<T> {
 
   private final Class<T> type;
 
-  /** Access via {@link #getEncodedTypeDescriptor()}. */
-  // the field is restored lazily if it is not present due to serialization
+  /**
+   * Access via {@link #getEncodedTypeDescriptor()}.
+   *
+   * <p>The field is restored lazily if it is not present due to serialization.
+   */
   @SuppressFBWarnings("SE_TRANSIENT_FIELD_NOT_RESTORED")
   private transient @Nullable TypeDescriptor<T> typeDescriptor;
 
@@ -212,6 +215,7 @@ public class SerializableCoder<T extends Serializable> extends CustomCoder<T> {
   }
 
   @Override
+  @SuppressWarnings("EqualsGetClass")
   public boolean equals(@Nullable Object other) {
     return !(other == null || getClass() != other.getClass())
         && type == ((SerializableCoder<?>) other).type;

@@ -31,8 +31,8 @@ import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.sdk.util.WindowedValue.FullWindowedValueCoder;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.sdk.values.WindowedValues.FullWindowedValueCoder;
 import org.hamcrest.core.IsInstanceOf;
 import org.junit.Assert;
 import org.junit.Test;
@@ -42,7 +42,7 @@ import org.junit.runners.JUnit4;
 /** Tests for ShuffleSinkFactory. */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class ShuffleSinkFactoryTest {
 
@@ -91,7 +91,7 @@ public class ShuffleSinkFactoryTest {
   void runTestCreatePartitioningShuffleSink(
       byte[] shuffleWriterConfig, Coder<?> keyCoder, Coder<?> valueCoder) throws Exception {
     FullWindowedValueCoder<?> coder =
-        WindowedValue.getFullCoder(KvCoder.of(keyCoder, valueCoder), IntervalWindow.getCoder());
+        WindowedValues.getFullCoder(KvCoder.of(keyCoder, valueCoder), IntervalWindow.getCoder());
     ShuffleSink shuffleSink =
         runTestCreateShuffleSinkHelper(shuffleWriterConfig, "partition_keys", coder, coder);
     Assert.assertEquals(ShuffleSink.ShuffleKind.PARTITION_KEYS, shuffleSink.shuffleKind);
@@ -110,7 +110,7 @@ public class ShuffleSinkFactoryTest {
   void runTestCreateGroupingShuffleSink(
       byte[] shuffleWriterConfig, Coder<?> keyCoder, Coder<?> valueCoder) throws Exception {
     FullWindowedValueCoder<?> coder =
-        WindowedValue.getFullCoder(KvCoder.of(keyCoder, valueCoder), IntervalWindow.getCoder());
+        WindowedValues.getFullCoder(KvCoder.of(keyCoder, valueCoder), IntervalWindow.getCoder());
     ShuffleSink shuffleSink =
         runTestCreateShuffleSinkHelper(shuffleWriterConfig, "group_keys", coder, coder);
     Assert.assertEquals(ShuffleSink.ShuffleKind.GROUP_KEYS, shuffleSink.shuffleKind);
@@ -128,7 +128,7 @@ public class ShuffleSinkFactoryTest {
       byte[] shuffleWriterConfig, Coder<?> keyCoder, Coder<?> sortKeyCoder, Coder<?> sortValueCoder)
       throws Exception {
     FullWindowedValueCoder<?> coder =
-        WindowedValue.getFullCoder(
+        WindowedValues.getFullCoder(
             KvCoder.of(keyCoder, KvCoder.of(sortKeyCoder, sortValueCoder)),
             IntervalWindow.getCoder());
     ShuffleSink shuffleSink =
@@ -149,7 +149,7 @@ public class ShuffleSinkFactoryTest {
   @Test
   public void testCreateUngroupingShuffleSink() throws Exception {
     FullWindowedValueCoder<?> coder =
-        WindowedValue.getFullCoder(StringUtf8Coder.of(), IntervalWindow.getCoder());
+        WindowedValues.getFullCoder(StringUtf8Coder.of(), IntervalWindow.getCoder());
     runTestCreateUngroupingShuffleSink(new byte[] {(byte) 0xE1}, coder, coder);
   }
 
@@ -164,7 +164,7 @@ public class ShuffleSinkFactoryTest {
     runTestCreateGroupingShuffleSink(
         new byte[] {(byte) 0xE2},
         BigEndianIntegerCoder.of(),
-        WindowedValue.getFullCoder(StringUtf8Coder.of(), IntervalWindow.getCoder()));
+        WindowedValues.getFullCoder(StringUtf8Coder.of(), IntervalWindow.getCoder()));
   }
 
   @Test

@@ -18,10 +18,12 @@
 package org.apache.beam.sdk.io.gcp.testing;
 
 import com.google.protobuf.ByteString;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.primitives.Ints;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.primitives.Longs;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.primitives.Ints;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.primitives.Longs;
 
 public class BigtableUtils {
+
+  public static final String TEMP_DATASET_PREFIX = "beam_temp_dataset_";
 
   public static ByteString byteString(byte[] bytes) {
     return ByteString.copyFrom(bytes);

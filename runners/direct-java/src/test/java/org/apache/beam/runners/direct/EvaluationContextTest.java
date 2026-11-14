@@ -61,14 +61,16 @@ import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo.Timing;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.CausedByDrain;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollection.IsBounded;
 import org.apache.beam.sdk.values.PCollectionView;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.joda.time.Instant;
 import org.junit.Before;
 import org.junit.Rule;
@@ -79,7 +81,7 @@ import org.junit.runners.JUnit4;
 /** Tests for {@link EvaluationContext}. */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class EvaluationContextTest implements Serializable {
   private transient EvaluationContext context;
@@ -153,13 +155,13 @@ public class EvaluationContextTest implements Serializable {
     for (Object materializedValue :
         materializeValuesFor(view.getPipeline().getOptions(), View.asIterable(), 1)) {
       valuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue, new Instant(1222), window, PaneInfo.ON_TIME_AND_ONLY_FIRING));
     }
     for (Object materializedValue :
         materializeValuesFor(view.getPipeline().getOptions(), View.asIterable(), 2)) {
       valuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue,
               new Instant(8766L),
               second,
@@ -175,7 +177,7 @@ public class EvaluationContextTest implements Serializable {
     for (Object materializedValue :
         materializeValuesFor(view.getPipeline().getOptions(), View.asIterable(), 4444)) {
       overwrittenValuesBuilder.add(
-          WindowedValue.of(
+          WindowedValues.of(
               materializedValue,
               new Instant(8677L),
               second,
@@ -333,7 +335,11 @@ public class EvaluationContextTest implements Serializable {
     StructuralKey<?> key = StructuralKey.of("foo".length(), VarIntCoder.of());
     TimerData toFire =
         TimerData.of(
-            StateNamespaces.global(), new Instant(100L), new Instant(100L), TimeDomain.EVENT_TIME);
+            StateNamespaces.global(),
+            new Instant(100L),
+            new Instant(100L),
+            TimeDomain.EVENT_TIME,
+            CausedByDrain.NORMAL);
     TransformResult<?> timerResult =
         StepTransformResult.withoutHold(downstreamProducer)
             .withState(CopyOnAccessInMemoryStateInternals.withUnderlying(key, null))
@@ -389,7 +395,7 @@ public class EvaluationContextTest implements Serializable {
 
     // Impulse produces one element
     UncommittedBundle<byte[]> rootBundle = context.createBundle(impulse);
-    rootBundle.add(WindowedValue.valueInGlobalWindow(new byte[0]));
+    rootBundle.add(WindowedValues.valueInGlobalWindow(new byte[0]));
     CommittedResult handleResult =
         context.handleResult(
             null,

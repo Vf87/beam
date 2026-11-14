@@ -18,7 +18,7 @@
 package org.apache.beam.runners.dataflow.worker;
 
 import static org.apache.beam.runners.dataflow.util.Structs.getBytes;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import com.google.api.services.dataflow.model.SideInputInfo;
 import java.util.Collection;
@@ -31,10 +31,12 @@ import org.apache.beam.runners.dataflow.worker.util.common.worker.Receiver;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.WindowFn;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.DoFnInfo;
 import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
@@ -63,19 +65,15 @@ class AssignWindowsParDoFnFactory implements ParDoFnFactory {
     WindowingStrategy<Object, BoundedWindow> windowingStrategy =
         (WindowingStrategy<Object, BoundedWindow>) deserializedWindowingStrategy;
 
-    return new AssignWindowsParDoFn<>(
-        windowingStrategy.getWindowFn(), executionContext.getStepContext(operationContext));
+    return new AssignWindowsParDoFn<>(windowingStrategy.getWindowFn());
   }
 
   private static class AssignWindowsParDoFn<T, W extends BoundedWindow> implements ParDoFn {
-    private final DataflowExecutionContext.DataflowStepContext stepContext;
     private final WindowFn<T, W> windowFn;
 
     private @Nullable Receiver receiver;
 
-    AssignWindowsParDoFn(
-        WindowFn<T, W> windowFn, DataflowExecutionContext.DataflowStepContext stepContext) {
-      this.stepContext = stepContext;
+    AssignWindowsParDoFn(WindowFn<T, W> windowFn) {
       this.windowFn = windowFn;
     }
 
@@ -114,15 +112,16 @@ class AssignWindowsParDoFnFactory implements ParDoFnFactory {
                 }
               });
 
-      WindowedValue<T> res =
-          WindowedValue.of(elem.getValue(), elem.getTimestamp(), windows, elem.getPane());
-      receiver.process(res);
+      WindowedValues.builder(elem).setWindows(windows).setReceiver(receiver::process).output();
     }
 
     @Override
     public void processTimers() throws Exception {
       // Nothing.
     }
+
+    @Override
+    public void finishKey(Object key) throws Exception {}
 
     @Override
     public void finishBundle() throws Exception {
@@ -132,6 +131,11 @@ class AssignWindowsParDoFnFactory implements ParDoFnFactory {
     @Override
     public void abort() throws Exception {
       receiver = null;
+    }
+
+    @Override
+    public @Nullable DoFnInfo<?, ?> getDoFnInfo() {
+      return null;
     }
   }
 }

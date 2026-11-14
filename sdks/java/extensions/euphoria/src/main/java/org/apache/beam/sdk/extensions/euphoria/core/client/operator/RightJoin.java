@@ -24,7 +24,6 @@ import org.apache.beam.sdk.extensions.euphoria.core.annotation.audience.Audience
 import org.apache.beam.sdk.extensions.euphoria.core.client.functional.BinaryFunctor;
 import org.apache.beam.sdk.extensions.euphoria.core.client.functional.UnaryFunction;
 import org.apache.beam.sdk.extensions.euphoria.core.client.io.Collector;
-import org.apache.beam.sdk.extensions.euphoria.core.client.operator.Join.Type;
 import org.apache.beam.sdk.transforms.windowing.WindowFn;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TypeDescriptor;
@@ -52,11 +51,14 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  *   <li>{@code [accumulationMode] .......} windowing accumulation mode, follows [triggeredBy]
  *   <li>{@code (output | outputValues) ..} build output dataset
  * </ol>
+ *
+ * @deprecated Use Java SDK directly, Euphoria is scheduled for removal in a future release.
  */
 @Audience(Audience.Type.CLIENT)
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
+@Deprecated
 public class RightJoin {
 
   /**
@@ -158,7 +160,7 @@ public class RightJoin {
     public <OutputT> Join.WindowByBuilder<KeyT, OutputT> using(
         BinaryFunctor<Optional<LeftT>, RightT, OutputT> joinFunc,
         @Nullable TypeDescriptor<OutputT> outputType) {
-      return new Join.Builder<>(name, Type.RIGHT)
+      return new Join.Builder<>(name, Join.Type.RIGHT)
           .of(left, right)
           .by(leftKeyExtractor, rightKeyExtractor, keyType)
           .using(

@@ -17,8 +17,8 @@
  */
 package org.apache.beam.sdk.io.elasticsearch;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -31,6 +31,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.Serializable;
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
@@ -42,7 +43,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.Map;
@@ -50,13 +50,19 @@ import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 import javax.annotation.Nonnull;
 import javax.net.ssl.SSLContext;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
+import org.apache.beam.sdk.coders.AtomicCoder;
+import org.apache.beam.sdk.coders.BooleanCoder;
 import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.coders.DefaultCoder;
+import org.apache.beam.sdk.coders.InstantCoder;
+import org.apache.beam.sdk.coders.NullableCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.BoundedSource;
+import org.apache.beam.sdk.metrics.Counter;
+import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -66,6 +72,10 @@ import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.Reshuffle;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.display.DisplayData;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
+import org.apache.beam.sdk.transforms.windowing.Window;
+import org.apache.beam.sdk.transforms.windowing.WindowFn;
 import org.apache.beam.sdk.util.BackOff;
 import org.apache.beam.sdk.util.BackOffUtils;
 import org.apache.beam.sdk.util.FluentBackoff;
@@ -73,9 +83,12 @@ import org.apache.beam.sdk.util.Sleeper;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.sdk.values.PDone;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
+import org.apache.beam.sdk.values.PCollectionTuple;
+import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.TupleTagList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Strings;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Streams;
 import org.apache.http.ConnectionClosedException;
 import org.apache.http.Header;
 import org.apache.http.HttpEntity;
@@ -97,9 +110,11 @@ import org.apache.http.ssl.SSLContexts;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
+import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.client.RestClientBuilder;
 import org.joda.time.Duration;
+import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -123,7 +138,8 @@ import org.slf4j.LoggerFactory;
  * }</pre>
  *
  * <p>The connection configuration also accepts optional configuration: {@code withUsername()},
- * {@code withPassword()}, {@code withApiKey()} and {@code withBearerToken()}.
+ * {@code withPassword()}, {@code withApiKey()}, {@code withBearerToken()} and {@code
+ * withDefaultHeaders()}.
  *
  * <p>You can also specify a query on the {@code read()} using {@code withQuery()}.
  *
@@ -167,7 +183,7 @@ import org.slf4j.LoggerFactory;
  * </ul>
  *
  * <p>Note that configurations options for {@link ElasticsearchIO.Write} are a union of
- * configutation options for {@link ElasticsearchIO.DocToBulk} and {@link ElasticsearchIO.BulkIO}.
+ * configuration options for {@link ElasticsearchIO.DocToBulk} and {@link ElasticsearchIO.BulkIO}.
  *
  * <p>To configure {@link ElasticsearchIO#write ElasticsearchIO.write()}, similar to the read, you
  * have to provide a connection configuration. For instance:
@@ -184,13 +200,14 @@ import org.slf4j.LoggerFactory;
  * <p>There are many more configuration options which can be found by looking at the with* methods
  * of {@link ElasticsearchIO.Write}
  */
-@Experimental(Kind.SOURCE_SINK)
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class ElasticsearchIO {
 
-  private static final List<Integer> VALID_CLUSTER_VERSIONS = Arrays.asList(2, 5, 6, 7);
+  private static final List<Integer> VALID_CLUSTER_VERSIONS = Arrays.asList(5, 6, 7, 8, 9);
+  private static final Set<Integer> DEPRECATED_CLUSTER_VERSIONS =
+      new HashSet<>(Arrays.asList(5, 6));
   private static final List<String> VERSION_TYPES =
       Arrays.asList("internal", "external", "external_gt", "external_gte");
   private static final String VERSION_CONFLICT_ERROR = "version_conflict_engine_exception";
@@ -206,6 +223,7 @@ public class ElasticsearchIO {
         .setWithMetadata(false)
         .setScrollKeepalive("5m")
         .setBatchSize(100L)
+        .setUsePITSearch(false)
         .build();
   }
 
@@ -220,7 +238,8 @@ public class ElasticsearchIO {
         // advised default starting batch size in ES docs
         .setMaxBatchSizeBytes(5L * 1024L * 1024L)
         .setUseStatefulBatches(false)
-        .setMaxParallelRequestsPerWindow(1)
+        .setMaxParallelRequests(1)
+        .setThrowWriteErrors(true)
         .build();
   }
 
@@ -237,49 +256,62 @@ public class ElasticsearchIO {
     return mapper.readValue(responseEntity.getContent(), JsonNode.class);
   }
 
-  static void checkForErrors(HttpEntity responseEntity, @Nullable Set<String> allowedErrorTypes)
+  static List<Document> createWriteReport(
+      HttpEntity responseEntity, @Nullable Set<String> allowedErrorTypes, boolean throwWriteErrors)
       throws IOException {
 
+    List<Document> responses = new ArrayList<>();
+    int numErrors = 0;
     JsonNode searchResult = parseResponse(responseEntity);
-    boolean errors = searchResult.path("errors").asBoolean();
-    if (errors) {
-      int numErrors = 0;
+    StringBuilder errorMessages =
+        new StringBuilder("Error writing to Elasticsearch, some elements could not be inserted:");
+    JsonNode items = searchResult.path("items");
 
-      StringBuilder errorMessages =
-          new StringBuilder("Error writing to Elasticsearch, some elements could not be inserted:");
-      JsonNode items = searchResult.path("items");
-      if (items.isMissingNode() || items.size() == 0) {
-        errorMessages.append(searchResult.toString());
-      }
-      // some items present in bulk might have errors, concatenate error messages
-      for (JsonNode item : items) {
-        JsonNode error = item.findValue("error");
-        if (error != null) {
-          // N.B. An empty-string within the allowedErrorTypes Set implies all errors are allowed.
-          String type = error.path("type").asText();
-          String reason = error.path("reason").asText();
-          String docId = item.findValue("_id").asText();
-          JsonNode causedBy = error.path("caused_by"); // May not be present
-          String cbReason = causedBy.path("reason").asText();
-          String cbType = causedBy.path("type").asText();
+    if (items.isMissingNode() || items.size() == 0) {
+      // This would only be expected in cases like connectivity issues or similar
+      errorMessages.append(searchResult);
+      LOG.warn("'items' missing from Elasticsearch response: {}", errorMessages);
+    }
 
-          if (allowedErrorTypes == null
-              || (!allowedErrorTypes.contains(type) && !allowedErrorTypes.contains(cbType))) {
-            // 'error' and 'causedBy` fields are not null, and the error is not being ignored.
-            numErrors++;
+    // some items present in bulk might have errors, concatenate error messages and record
+    // which items had errors
+    for (JsonNode item : items) {
+      Document result = Document.create().withResponseItemJson(item.toString());
 
-            errorMessages.append(String.format("%nDocument id %s: %s (%s)", docId, reason, type));
+      JsonNode error = item.findValue("error");
+      if (error != null) {
+        // N.B. An empty-string within the allowedErrorTypes Set implies all errors are allowed.
+        String type = error.path("type").asText();
+        String reason = error.path("reason").asText();
+        String docId = item.findValue("_id").asText();
+        JsonNode causedBy = error.path("caused_by"); // May not be present
+        String cbReason = causedBy.path("reason").asText();
+        String cbType = causedBy.path("type").asText();
 
-            if (!causedBy.isMissingNode()) {
-              errorMessages.append(String.format("%nCaused by: %s (%s)", cbReason, cbType));
-            }
+        if (allowedErrorTypes == null
+            || (!allowedErrorTypes.contains(type) && !allowedErrorTypes.contains(cbType))) {
+          // 'error' and 'causedBy` fields are not null, and the error is not being ignored.
+          result = result.withHasError(true);
+          numErrors++;
+
+          errorMessages.append(String.format("%nDocument id %s: %s (%s)", docId, reason, type));
+
+          if (!causedBy.isMissingNode()) {
+            errorMessages.append(String.format("%nCaused by: %s (%s)", cbReason, cbType));
           }
         }
       }
-      if (numErrors > 0) {
+      responses.add(result);
+    }
+
+    if (numErrors > 0) {
+      LOG.error("{}", errorMessages.toString());
+      if (throwWriteErrors) {
         throw new IOException(errorMessages.toString());
       }
     }
+
+    return responses;
   }
 
   /** A POJO describing a connection configuration to Elasticsearch. */
@@ -296,19 +328,25 @@ public class ElasticsearchIO {
 
     public abstract @Nullable String getBearerToken();
 
+    public abstract @Nullable List<Header> getDefaultHeaders();
+
     public abstract @Nullable String getKeystorePath();
 
     public abstract @Nullable String getKeystorePassword();
 
+    public abstract @Nullable String getPathPrefix();
+
     public abstract String getIndex();
 
-    public abstract String getType();
+    public abstract @Nullable String getType();
 
     public abstract @Nullable Integer getSocketTimeout();
 
     public abstract @Nullable Integer getConnectTimeout();
 
     public abstract boolean isTrustSelfSignedCerts();
+
+    public abstract boolean isCompressionEnabled();
 
     abstract Builder builder();
 
@@ -324,9 +362,13 @@ public class ElasticsearchIO {
 
       abstract Builder setBearerToken(String bearerToken);
 
+      abstract Builder setDefaultHeaders(List<Header> defaultHeaders);
+
       abstract Builder setKeystorePath(String keystorePath);
 
       abstract Builder setKeystorePassword(String password);
+
+      abstract Builder setPathPrefix(String pathPrefix);
 
       abstract Builder setIndex(String index);
 
@@ -337,6 +379,8 @@ public class ElasticsearchIO {
       abstract Builder setConnectTimeout(Integer connectTimeout);
 
       abstract Builder setTrustSelfSignedCerts(boolean trustSelfSignedCerts);
+
+      abstract Builder setCompressionEnabled(boolean compressionEnabled);
 
       abstract ConnectionConfiguration build();
     }
@@ -359,6 +403,7 @@ public class ElasticsearchIO {
           .setIndex(index)
           .setType(type)
           .setTrustSelfSignedCerts(false)
+          .setCompressionEnabled(true)
           .build();
     }
 
@@ -378,6 +423,7 @@ public class ElasticsearchIO {
           .setIndex(index)
           .setType("")
           .setTrustSelfSignedCerts(false)
+          .setCompressionEnabled(true)
           .build();
     }
 
@@ -395,11 +441,12 @@ public class ElasticsearchIO {
           .setIndex("")
           .setType("")
           .setTrustSelfSignedCerts(false)
+          .setCompressionEnabled(true)
           .build();
     }
 
     /**
-     * Generates the bulk API endpoint based on the set values.
+     * Generates the API endpoint prefix based on the set values.
      *
      * <p>Based on ConnectionConfiguration constructors, we know that one of the following is true:
      *
@@ -409,7 +456,7 @@ public class ElasticsearchIO {
      *   <li>index and type are empty string
      * </ul>
      *
-     * <p>Valid endpoints therefore include:
+     * <p>Example valid endpoints therefore include:
      *
      * <ul>
      *   <li>/_bulk
@@ -417,7 +464,7 @@ public class ElasticsearchIO {
      *   <li>/index_name/type_name/_bulk
      * </ul>
      */
-    public String getBulkEndPoint() {
+    public String getApiPrefix() {
       StringBuilder sb = new StringBuilder();
       if (!Strings.isNullOrEmpty(getIndex())) {
         sb.append("/").append(getIndex());
@@ -425,8 +472,23 @@ public class ElasticsearchIO {
       if (!Strings.isNullOrEmpty(getType())) {
         sb.append("/").append(getType());
       }
-      sb.append("/").append("_bulk");
       return sb.toString();
+    }
+
+    public String getPrefixedEndpoint(String endpoint) {
+      return getApiPrefix() + "/" + endpoint;
+    }
+
+    public String getBulkEndPoint() {
+      return getPrefixedEndpoint("_bulk");
+    }
+
+    public String getSearchEndPoint() {
+      return getPrefixedEndpoint("_search");
+    }
+
+    public String getCountEndPoint() {
+      return getPrefixedEndpoint("_count");
     }
 
     /**
@@ -456,7 +518,23 @@ public class ElasticsearchIO {
     }
 
     /**
-     * If Elasticsearch authentication is enabled, provide an API key.
+     * If Elasticsearch is not running at the root path, e.g. 'host:9200/path/to/index', specify
+     * path prefix 'path/to'.
+     *
+     * @param pathPrefix the path prefix used in Elasticsearch instance.
+     * @return a {@link ConnectionConfiguration} describes a connection configuration to
+     *     Elasticsearch.
+     */
+    public ConnectionConfiguration withPathPrefix(String pathPrefix) {
+      checkArgument(pathPrefix != null, "pathPrefix can not be null");
+      checkArgument(!pathPrefix.isEmpty(), "pathPrefix can not be empty");
+      return builder().setPathPrefix(pathPrefix).build();
+    }
+
+    /**
+     * If Elasticsearch authentication is enabled, provide an API key. Be aware that you can only
+     * use one of {@code withApiToken()}, {@code withBearerToken()} and {@code withDefaultHeaders}
+     * at the same time, as they (potentially) use the same header.
      *
      * @param apiKey the API key used to authenticate to Elasticsearch
      * @return a {@link ConnectionConfiguration} describes a connection configuration to
@@ -464,11 +542,15 @@ public class ElasticsearchIO {
      */
     public ConnectionConfiguration withApiKey(String apiKey) {
       checkArgument(!Strings.isNullOrEmpty(apiKey), "apiKey can not be null or empty");
+      checkArgument(getBearerToken() == null, "apiKey can not be combined with bearerToken");
+      checkArgument(getDefaultHeaders() == null, "apiKey can not be combined with defaultHeaders");
       return builder().setApiKey(apiKey).build();
     }
 
     /**
-     * If Elasticsearch authentication is enabled, provide a bearer token.
+     * If Elasticsearch authentication is enabled, provide a bearer token. Be aware that you can
+     * only use one of {@code withApiToken()}, {@code withBearerToken()} and {@code
+     * withDefaultHeaders} at the same time, as they (potentially) use the same header.
      *
      * @param bearerToken the bearer token used to authenticate to Elasticsearch
      * @return a {@link ConnectionConfiguration} describes a connection configuration to
@@ -476,7 +558,48 @@ public class ElasticsearchIO {
      */
     public ConnectionConfiguration withBearerToken(String bearerToken) {
       checkArgument(!Strings.isNullOrEmpty(bearerToken), "bearerToken can not be null or empty");
+      checkArgument(getApiKey() == null, "bearerToken can not be combined with apiKey");
+      checkArgument(
+          getDefaultHeaders() == null, "bearerToken can not be combined with defaultHeaders");
       return builder().setBearerToken(bearerToken).build();
+    }
+
+    /**
+     * For authentication or custom requirements, provide a set if default headers for the client.
+     * Be aware that you can only use one of {@code withApiToken()}, {@code withBearerToken()} and
+     * {@code withDefaultHeaders} at the same time, as they (potentially) use the same header.
+     *
+     * <p>An example of where this could be useful is if the client needs to use short-lived
+     * credentials that need to be renewed on a certain interval. To implement that, a user could
+     * implement a custom header that tracks the renewal period, for example:
+     *
+     * <pre>
+     * {@code class OAuthTokenHeader extends BasicHeader {
+     *     OAuthToken accessToken;
+     *
+     *     ...
+     *
+     *     @Override
+     *     public String getValue() {
+     *         if (accessToken.isExpired()) {
+     *             accessToken.renew();
+     *         }
+     *         return String.format("Bearer %s", accessToken.getToken());
+     *     }
+     * }}
+     * </pre>
+     *
+     * @param defaultHeaders the headers to add to outgoing requests
+     * @return a {@link ConnectionConfiguration} describes a connection configuration to
+     *     Elasticsearch.
+     */
+    public ConnectionConfiguration withDefaultHeaders(Header[] defaultHeaders) {
+      checkArgument(defaultHeaders != null, "defaultHeaders can not be null");
+      checkArgument(defaultHeaders.length > 0, "defaultHeaders can not be empty");
+      checkArgument(getApiKey() == null, "defaultHeaders can not be combined with apiKey");
+      checkArgument(
+          getBearerToken() == null, "defaultHeaders can not be combined with bearerToken");
+      return builder().setDefaultHeaders(Arrays.asList(defaultHeaders)).build();
     }
 
     /**
@@ -519,6 +642,19 @@ public class ElasticsearchIO {
     }
 
     /**
+     * Configure whether the REST client should compress requests using gzip content encoding and
+     * add the "Accept-Encoding: gzip". The default is true.
+     *
+     * @param compressionEnabled Whether to compress requests using gzip content encoding and add
+     *     the "Accept-Encoding: gzip"
+     * @return a {@link ConnectionConfiguration} describes a connection configuration to
+     *     Elasticsearch.
+     */
+    public ConnectionConfiguration withCompressionEnabled(boolean compressionEnabled) {
+      return builder().setCompressionEnabled(compressionEnabled).build();
+    }
+
+    /**
      * If set, overwrites the default max retry timeout (30000ms) in the Elastic {@link RestClient}
      * and the default socket timeout (30000ms) in the {@link RequestConfig} of the Elastic {@link
      * RestClient}.
@@ -548,12 +684,31 @@ public class ElasticsearchIO {
     private void populateDisplayData(DisplayData.Builder builder) {
       builder.add(DisplayData.item("address", getAddresses().toString()));
       builder.add(DisplayData.item("index", getIndex()));
-      builder.add(DisplayData.item("type", getType()));
+      builder.addIfNotNull(DisplayData.item("type", getType()));
       builder.addIfNotNull(DisplayData.item("username", getUsername()));
       builder.addIfNotNull(DisplayData.item("keystore.path", getKeystorePath()));
       builder.addIfNotNull(DisplayData.item("socketTimeout", getSocketTimeout()));
       builder.addIfNotNull(DisplayData.item("connectTimeout", getConnectTimeout()));
       builder.addIfNotNull(DisplayData.item("trustSelfSignedCerts", isTrustSelfSignedCerts()));
+      builder.addIfNotNull(DisplayData.item("compressionEnabled", isCompressionEnabled()));
+    }
+
+    private SSLContext getSSLContext() throws IOException {
+      if (getKeystorePath() != null && !getKeystorePath().isEmpty()) {
+        try {
+          KeyStore keyStore = KeyStore.getInstance("jks");
+          try (InputStream is = new FileInputStream(new File(getKeystorePath()))) {
+            String keystorePassword = getKeystorePassword();
+            keyStore.load(is, (keystorePassword == null) ? null : keystorePassword.toCharArray());
+          }
+          final TrustStrategy trustStrategy =
+              isTrustSelfSignedCerts() ? new TrustSelfSignedStrategy() : null;
+          return SSLContexts.custom().loadTrustMaterial(keyStore, trustStrategy).build();
+        } catch (Exception e) {
+          throw new IOException("Can't load the client certificate from the keystore", e);
+        }
+      }
+      return null;
     }
 
     @VisibleForTesting
@@ -566,14 +721,11 @@ public class ElasticsearchIO {
         i++;
       }
       RestClientBuilder restClientBuilder = RestClient.builder(hosts);
-      if (getUsername() != null) {
-        final CredentialsProvider credentialsProvider = new BasicCredentialsProvider();
-        credentialsProvider.setCredentials(
-            AuthScope.ANY, new UsernamePasswordCredentials(getUsername(), getPassword()));
-        restClientBuilder.setHttpClientConfigCallback(
-            httpAsyncClientBuilder ->
-                httpAsyncClientBuilder.setDefaultCredentialsProvider(credentialsProvider));
+      if (getPathPrefix() != null) {
+        restClientBuilder.setPathPrefix(getPathPrefix());
       }
+      final SSLContext sslContext = getSSLContext();
+
       if (getApiKey() != null) {
         restClientBuilder.setDefaultHeaders(
             new Header[] {new BasicHeader("Authorization", "ApiKey " + getApiKey())});
@@ -582,25 +734,29 @@ public class ElasticsearchIO {
         restClientBuilder.setDefaultHeaders(
             new Header[] {new BasicHeader("Authorization", "Bearer " + getBearerToken())});
       }
-      if (getKeystorePath() != null && !getKeystorePath().isEmpty()) {
-        try {
-          KeyStore keyStore = KeyStore.getInstance("jks");
-          try (InputStream is = new FileInputStream(new File(getKeystorePath()))) {
-            String keystorePassword = getKeystorePassword();
-            keyStore.load(is, (keystorePassword == null) ? null : keystorePassword.toCharArray());
-          }
-          final TrustStrategy trustStrategy =
-              isTrustSelfSignedCerts() ? new TrustSelfSignedStrategy() : null;
-          final SSLContext sslContext =
-              SSLContexts.custom().loadTrustMaterial(keyStore, trustStrategy).build();
-          final SSLIOSessionStrategy sessionStrategy = new SSLIOSessionStrategy(sslContext);
-          restClientBuilder.setHttpClientConfigCallback(
-              httpClientBuilder ->
-                  httpClientBuilder.setSSLContext(sslContext).setSSLStrategy(sessionStrategy));
-        } catch (Exception e) {
-          throw new IOException("Can't load the client certificate from the keystore", e);
-        }
+      if (getDefaultHeaders() != null) {
+        Header[] headerList = new Header[getDefaultHeaders().size()];
+        restClientBuilder.setDefaultHeaders(getDefaultHeaders().toArray(headerList));
       }
+      if (isCompressionEnabled()) {
+        restClientBuilder.setCompressionEnabled(true);
+      }
+
+      restClientBuilder.setHttpClientConfigCallback(
+          httpClientBuilder -> {
+            if (getUsername() != null) {
+              final CredentialsProvider credentialsProvider = new BasicCredentialsProvider();
+              credentialsProvider.setCredentials(
+                  AuthScope.ANY, new UsernamePasswordCredentials(getUsername(), getPassword()));
+              httpClientBuilder.setDefaultCredentialsProvider(credentialsProvider);
+            }
+            if (sslContext != null) {
+              final SSLIOSessionStrategy sessionStrategy = new SSLIOSessionStrategy(sslContext);
+              httpClientBuilder.setSSLContext(sslContext).setSSLStrategy(sessionStrategy);
+            }
+            return httpClientBuilder;
+          });
+
       restClientBuilder.setRequestConfigCallback(
           new RestClientBuilder.RequestConfigCallback() {
             @Override
@@ -624,6 +780,16 @@ public class ElasticsearchIO {
   public abstract static class Read extends PTransform<PBegin, PCollection<String>> {
 
     private static final long MAX_BATCH_SIZE = 10000L;
+    private static final String SEARCH_AFTER_DEFAULT_SORT_PROPERTY = "@timestamp";
+    private static final String SEARCH_AFTER_SORT_TEMPLATE =
+        "\"sort\" : {"
+            + " \"%s\" : {"
+            + "  \"order\" : \"asc\", "
+            + "  \"format\" : \"strict_date_optional_time_nanos\""
+            + " }"
+            + "}";
+    private static final String SEARCH_AFTER_DEFAULT_SORT =
+        String.format(SEARCH_AFTER_SORT_TEMPLATE, SEARCH_AFTER_DEFAULT_SORT_PROPERTY);
 
     abstract @Nullable ConnectionConfiguration getConnectionConfiguration();
 
@@ -634,6 +800,12 @@ public class ElasticsearchIO {
     abstract String getScrollKeepalive();
 
     abstract long getBatchSize();
+
+    abstract boolean getUsePITSearch();
+
+    abstract @Nullable String getPITSortConfig();
+
+    abstract @Nullable String getPITSortTimestampProperty();
 
     abstract Builder builder();
 
@@ -648,6 +820,12 @@ public class ElasticsearchIO {
       abstract Builder setScrollKeepalive(String scrollKeepalive);
 
       abstract Builder setBatchSize(long batchSize);
+
+      abstract Builder setUsePITSearch(boolean usePIT);
+
+      abstract Builder setPITSortConfig(String pitConfig);
+
+      abstract Builder setPITSortTimestampProperty(String pitTimestampProperty);
 
       abstract Read build();
     }
@@ -668,7 +846,7 @@ public class ElasticsearchIO {
      * Provide a query used while reading from Elasticsearch.
      *
      * @param query the query. See <a
-     *     href="https://www.elastic.co/guide/en/elasticsearch/reference/2.4/query-dsl.html">Query
+     *     href="https://www.elastic.co/guide/en/elasticsearch/reference/7.17/query-dsl.html">Query
      *     DSL</a>
      * @return a {@link PTransform} reading data from Elasticsearch.
      */
@@ -683,7 +861,7 @@ public class ElasticsearchIO {
      * Elasticsearch. This is useful for cases when the query must be dynamic.
      *
      * @param query the query. See <a
-     *     href="https://www.elastic.co/guide/en/elasticsearch/reference/2.4/query-dsl.html">Query
+     *     href="https://www.elastic.co/guide/en/elasticsearch/reference/7.17/query-dsl.html">Query
      *     DSL</a>
      * @return a {@link PTransform} reading data from Elasticsearch.
      */
@@ -703,8 +881,10 @@ public class ElasticsearchIO {
 
     /**
      * Provide a scroll keepalive. See <a
-     * href="https://www.elastic.co/guide/en/elasticsearch/reference/2.4/search-request-scroll.html">scroll
-     * API</a> Default is "5m". Change this only if you get "No search context found" errors.
+     * href="https://www.elastic.co/guide/en/elasticsearch/reference/7.17/search-request-scroll.html">scroll
+     * API</a> Default is "5m". Change this only if you get "No search context found" errors. When
+     * configuring the read to use Point In Time (PIT) search this configuration is used to set the
+     * PIT keep alive.
      *
      * @param scrollKeepalive keepalive duration of the scroll
      * @return a {@link PTransform} reading data from Elasticsearch.
@@ -717,7 +897,7 @@ public class ElasticsearchIO {
 
     /**
      * Provide a size for the scroll read. See <a
-     * href="https://www.elastic.co/guide/en/elasticsearch/reference/2.4/search-request-scroll.html">
+     * href="https://www.elastic.co/guide/en/elasticsearch/reference/7.17/search-request-scroll.html">
      * scroll API</a> Default is 100. Maximum is 10 000. If documents are small, increasing batch
      * size might improve read performance. If documents are big, you might need to decrease
      * batchSize
@@ -734,12 +914,64 @@ public class ElasticsearchIO {
       return builder().setBatchSize(batchSize).build();
     }
 
+    /**
+     * Configures the source to user Point In Time search iteration while reading data from
+     * Elasticsearch. See <a
+     * href="https://www.elastic.co/guide/en/elasticsearch/reference/current/point-in-time-api.html">
+     * Point in time search</a>, using default settings. This iteration mode for searches does not
+     * have the same size constrains the Scroll API have (slice counts, batch size or how deep the
+     * iteration is). By default this iteration mode will use a {@code @timestamp} named property on
+     * the indexed documents to consistently retrieve the data when failures occur on an specific
+     * read work.
+     *
+     * @return a {@link PTransform} reading data from Elasticsearch.
+     */
+    public Read withPointInTimeSearch() {
+      return builder()
+          .setUsePITSearch(true)
+          .setBatchSize(1000)
+          .setPITSortConfig(SEARCH_AFTER_DEFAULT_SORT)
+          .build();
+    }
+
+    /**
+     * Similar to {@link #withPointInTimeSearch() the default PIT search} but setting an existing
+     * timestamp based property name which Elasticsearch will use to sort for the results.
+     *
+     * @param timestampSortProperty a property name found in the read documents containing a
+     *     timestamp-like value.
+     * @return a {@link PTransform} reading data from Elasticsearch.
+     */
+    public Read withPointInTimeSearchAndTimestampSortProperty(String timestampSortProperty) {
+      return builder()
+          .setUsePITSearch(true)
+          .setBatchSize(1000)
+          .setPITSortConfig(String.format(SEARCH_AFTER_SORT_TEMPLATE, timestampSortProperty))
+          .build();
+    }
+
+    /**
+     * Similar to {@link #withPointInTimeSearch() the default PIT search} but setting a specific
+     * sorting configuration which Elasticsearch will use to sort for the results.
+     *
+     * @param sortConfiguration the full sorting configuration to be sent to Elasticsearch while
+     *     iterating on the results.
+     * @return a {@link PTransform} reading data from Elasticsearch.
+     */
+    public Read withPointInTimeSearchAndSortConfiguration(String sortConfiguration) {
+      return builder()
+          .setUsePITSearch(true)
+          .setBatchSize(1000)
+          .setPITSortConfig(sortConfiguration)
+          .build();
+    }
+
     @Override
     public PCollection<String> expand(PBegin input) {
       ConnectionConfiguration connectionConfiguration = getConnectionConfiguration();
       checkState(connectionConfiguration != null, "withConnectionConfiguration() is required");
       return input.apply(
-          org.apache.beam.sdk.io.Read.from(new BoundedElasticsearchSource(this, null, null, null)));
+          org.apache.beam.sdk.io.Read.from(new BoundedElasticsearchSource(this, null, null)));
     }
 
     @Override
@@ -749,7 +981,14 @@ public class ElasticsearchIO {
       builder.addIfNotNull(DisplayData.item("withMetadata", isWithMetadata()));
       builder.addIfNotNull(DisplayData.item("batchSize", getBatchSize()));
       builder.addIfNotNull(DisplayData.item("scrollKeepalive", getScrollKeepalive()));
+      builder.addIfNotNull(DisplayData.item("usePointInTimeSearch", getUsePITSearch()));
       getConnectionConfiguration().populateDisplayData(builder);
+    }
+
+    void validatePITConfiguration(int backendVersion) {
+      checkArgument(
+          getUsePITSearch() && backendVersion >= 8,
+          "Point in time searches are supported for clusters with version 8 and higher.");
     }
   }
 
@@ -760,8 +999,6 @@ public class ElasticsearchIO {
     private int backendVersion;
 
     private final Read spec;
-    // shardPreference is the shard id where the source will read the documents
-    private final @Nullable String shardPreference;
     private final @Nullable Integer numSlices;
     private final @Nullable Integer sliceId;
     private @Nullable Long estimatedByteSize;
@@ -769,27 +1006,20 @@ public class ElasticsearchIO {
     // constructor used in split() when we know the backend version
     private BoundedElasticsearchSource(
         Read spec,
-        @Nullable String shardPreference,
         @Nullable Integer numSlices,
         @Nullable Integer sliceId,
         @Nullable Long estimatedByteSize,
         int backendVersion) {
       this.backendVersion = backendVersion;
       this.spec = spec;
-      this.shardPreference = shardPreference;
       this.numSlices = numSlices;
       this.estimatedByteSize = estimatedByteSize;
       this.sliceId = sliceId;
     }
 
     @VisibleForTesting
-    BoundedElasticsearchSource(
-        Read spec,
-        @Nullable String shardPreference,
-        @Nullable Integer numSlices,
-        @Nullable Integer sliceId) {
+    BoundedElasticsearchSource(Read spec, @Nullable Integer numSlices, @Nullable Integer sliceId) {
       this.spec = spec;
-      this.shardPreference = shardPreference;
       this.numSlices = numSlices;
       this.sliceId = sliceId;
     }
@@ -800,46 +1030,23 @@ public class ElasticsearchIO {
       ConnectionConfiguration connectionConfiguration = spec.getConnectionConfiguration();
       this.backendVersion = getBackendVersion(connectionConfiguration);
       List<BoundedElasticsearchSource> sources = new ArrayList<>();
-      if (backendVersion == 2) {
-        // 1. We split per shard :
-        // unfortunately, Elasticsearch 2.x doesn't provide a way to do parallel reads on a single
-        // shard.So we do not use desiredBundleSize because we cannot split shards.
-        // With the slice API in ES 5.x+ we will be able to use desiredBundleSize.
-        // Basically we will just ask the slice API to return data
-        // in nbBundles = estimatedSize / desiredBundleSize chuncks.
-        // So each beam source will read around desiredBundleSize volume of data.
-
-        JsonNode statsJson = BoundedElasticsearchSource.getStats(connectionConfiguration, true);
-        JsonNode shardsJson =
-            statsJson.path("indices").path(connectionConfiguration.getIndex()).path("shards");
-
-        Iterator<Map.Entry<String, JsonNode>> shards = shardsJson.fields();
-        while (shards.hasNext()) {
-          Map.Entry<String, JsonNode> shardJson = shards.next();
-          String shardId = shardJson.getKey();
-          sources.add(
-              new BoundedElasticsearchSource(spec, shardId, null, null, null, backendVersion));
-        }
-        checkArgument(!sources.isEmpty(), "No shard found");
-      } else if (backendVersion >= 5) {
-        long indexSize = getEstimatedSizeBytes(options);
-        float nbBundlesFloat = (float) indexSize / desiredBundleSizeBytes;
-        int nbBundles = (int) Math.ceil(nbBundlesFloat);
-        // ES slice api imposes that the number of slices is <= 1024 even if it can be overloaded
-        if (nbBundles > 1024) {
-          nbBundles = 1024;
-        }
-        // split the index into nbBundles chunks of desiredBundleSizeBytes by creating
-        // nbBundles sources each reading a slice of the index
-        // (see https://goo.gl/MhtSWz)
-        // the slice API allows to split the ES shards
-        // to have bundles closer to desiredBundleSizeBytes
-        for (int i = 0; i < nbBundles; i++) {
-          long estimatedByteSizeForBundle = getEstimatedSizeBytes(options) / nbBundles;
-          sources.add(
-              new BoundedElasticsearchSource(
-                  spec, null, nbBundles, i, estimatedByteSizeForBundle, backendVersion));
-        }
+      long indexSize = getEstimatedSizeBytes(options);
+      float nbBundlesFloat = (float) indexSize / desiredBundleSizeBytes;
+      int nbBundles = (int) Math.ceil(nbBundlesFloat);
+      // ES slice api imposes that the number of slices is <= 1024 even if it can be overloaded
+      if (nbBundles > 1024) {
+        nbBundles = 1024;
+      }
+      // split the index into nbBundles chunks of desiredBundleSizeBytes by creating
+      // nbBundles sources each reading a slice of the index
+      // (see https://goo.gl/MhtSWz)
+      // the slice API allows to split the ES shards
+      // to have bundles closer to desiredBundleSizeBytes
+      for (int i = 0; i < nbBundles; i++) {
+        long estimatedByteSizeForBundle = getEstimatedSizeBytes(options) / nbBundles;
+        sources.add(
+            new BoundedElasticsearchSource(
+                spec, nbBundles, i, estimatedByteSizeForBundle, backendVersion));
       }
       return sources;
     }
@@ -850,11 +1057,10 @@ public class ElasticsearchIO {
         return estimatedByteSize;
       }
       final ConnectionConfiguration connectionConfiguration = spec.getConnectionConfiguration();
-      JsonNode statsJson = getStats(connectionConfiguration, false);
-      JsonNode indexStats =
-          statsJson.path("indices").path(connectionConfiguration.getIndex()).path("primaries");
+      JsonNode statsJson = getStats(connectionConfiguration);
+      JsonNode indexStats = statsJson.path("_all").path("primaries");
       long indexSize = indexStats.path("store").path("size_in_bytes").asLong();
-      LOG.debug("estimate source byte size: total index size " + indexSize);
+      LOG.debug("estimate source byte size: total index size {}", indexSize);
 
       String query = spec.getQuery() != null ? spec.getQuery().get() : null;
       if (query == null || query.isEmpty()) { // return index size if no query
@@ -863,19 +1069,16 @@ public class ElasticsearchIO {
       }
 
       long totalCount = indexStats.path("docs").path("count").asLong();
-      LOG.debug("estimate source byte size: total document count " + totalCount);
+      LOG.debug("estimate source byte size: total document count {}", totalCount);
       if (totalCount == 0) { // The min size is 1, because DirectRunner does not like 0
         estimatedByteSize = 1L;
         return estimatedByteSize;
       }
 
-      String endPoint =
-          String.format(
-              "/%s/%s/_count",
-              connectionConfiguration.getIndex(), connectionConfiguration.getType());
+      String endPoint = connectionConfiguration.getCountEndPoint();
       try (RestClient restClient = connectionConfiguration.createClient()) {
         long count = queryCount(restClient, endPoint, query);
-        LOG.debug("estimate source byte size: query document count " + count);
+        LOG.debug("estimate source byte size: query document count {}", count);
         if (count == 0) {
           estimatedByteSize = 1L;
         } else {
@@ -900,16 +1103,15 @@ public class ElasticsearchIO {
     static long estimateIndexSize(ConnectionConfiguration connectionConfiguration)
         throws IOException {
       // we use indices stats API to estimate size and list the shards
-      // (https://www.elastic.co/guide/en/elasticsearch/reference/2.4/indices-stats.html)
+      // (https://www.elastic.co/guide/en/elasticsearch/reference/7.17/indices-stats.html)
       // as Elasticsearch 2.x doesn't not support any way to do parallel read inside a shard
       // the estimated size bytes is not really used in the split into bundles.
       // However, we implement this method anyway as the runners can use it.
       // NB: Elasticsearch 5.x+ now provides the slice API.
       // (https://www.elastic.co/guide/en/elasticsearch/reference/5.0/search-request-scroll.html
       // #sliced-scroll)
-      JsonNode statsJson = getStats(connectionConfiguration, false);
-      JsonNode indexStats =
-          statsJson.path("indices").path(connectionConfiguration.getIndex()).path("primaries");
+      JsonNode statsJson = getStats(connectionConfiguration);
+      JsonNode indexStats = statsJson.path("_all").path("primaries");
       JsonNode store = indexStats.path("store");
       return store.path("size_in_bytes").asLong();
     }
@@ -917,14 +1119,18 @@ public class ElasticsearchIO {
     @Override
     public void populateDisplayData(DisplayData.Builder builder) {
       spec.populateDisplayData(builder);
-      builder.addIfNotNull(DisplayData.item("shard", shardPreference));
       builder.addIfNotNull(DisplayData.item("numSlices", numSlices));
       builder.addIfNotNull(DisplayData.item("sliceId", sliceId));
     }
 
     @Override
     public BoundedReader<String> createReader(PipelineOptions options) {
-      return new BoundedElasticsearchReader(this);
+      if (!spec.getUsePITSearch()) {
+        return new BoundedElasticsearchScrollReader(this);
+      } else {
+        spec.validatePITConfiguration(backendVersion);
+        return new BoundedElasticsearchPITReader(this);
+      }
     }
 
     @Override
@@ -937,12 +1143,9 @@ public class ElasticsearchIO {
       return StringUtf8Coder.of();
     }
 
-    private static JsonNode getStats(
-        ConnectionConfiguration connectionConfiguration, boolean shardLevel) throws IOException {
+    private static JsonNode getStats(ConnectionConfiguration connectionConfiguration)
+        throws IOException {
       HashMap<String, String> params = new HashMap<>();
-      if (shardLevel) {
-        params.put("level", "shards");
-      }
       String endpoint = String.format("/%s/_stats", connectionConfiguration.getIndex());
       try (RestClient restClient = connectionConfiguration.createClient()) {
         Request request = new Request("GET", endpoint);
@@ -952,58 +1155,47 @@ public class ElasticsearchIO {
     }
   }
 
-  private static class BoundedElasticsearchReader extends BoundedSource.BoundedReader<String> {
+  abstract static class BoundedElasticsearchReader extends BoundedSource.BoundedReader<String> {
+    private static final Counter READ =
+        Metrics.counter(BoundedElasticsearchScrollReader.class, "es-read-document-count");
+    private static final String MATCH_ALL_QUERY = "{\"query\": { \"match_all\": {} }}";
 
-    private final BoundedElasticsearchSource source;
+    protected final BoundedElasticsearchSource source;
 
-    private RestClient restClient;
-    private String current;
-    private String scrollId;
-    private ListIterator<String> batchIterator;
+    protected RestClient restClient;
+    protected JsonNode current;
+    protected ListIterator<JsonNode> batchIterator;
+    protected String iteratorId;
 
-    private BoundedElasticsearchReader(BoundedElasticsearchSource source) {
+    protected BoundedElasticsearchReader(BoundedElasticsearchSource source) {
       this.source = source;
+    }
+
+    protected abstract Request createStartRequest();
+
+    protected abstract Request createAdvanceRequest();
+
+    protected abstract Request createCloseRequest();
+
+    protected abstract boolean processResult(JsonNode searchResult) throws IOException;
+
+    protected abstract void updateIteratorId(JsonNode searchResult);
+
+    protected String createBaseQuery() {
+      String query = source.spec.getQuery() != null ? source.spec.getQuery().get() : null;
+      if (query == null) {
+        query = BoundedElasticsearchReader.MATCH_ALL_QUERY;
+      }
+      return query;
     }
 
     @Override
     public boolean start() throws IOException {
       restClient = source.spec.getConnectionConfiguration().createClient();
-
-      String query = source.spec.getQuery() != null ? source.spec.getQuery().get() : null;
-      if (query == null) {
-        query = "{\"query\": { \"match_all\": {} }}";
-      }
-      if ((source.backendVersion >= 5) && source.numSlices != null && source.numSlices > 1) {
-        // if there is more than one slice, add the slice to the user query
-        String sliceQuery =
-            String.format("\"slice\": {\"id\": %s,\"max\": %s}", source.sliceId, source.numSlices);
-        query = query.replaceFirst("\\{", "{" + sliceQuery + ",");
-      }
-      String endPoint =
-          String.format(
-              "/%s/%s/_search",
-              source.spec.getConnectionConfiguration().getIndex(),
-              source.spec.getConnectionConfiguration().getType());
-      Map<String, String> params = new HashMap<>();
-      params.put("scroll", source.spec.getScrollKeepalive());
-      if (source.backendVersion == 2) {
-        params.put("size", String.valueOf(source.spec.getBatchSize()));
-        if (source.shardPreference != null) {
-          params.put("preference", "_shards:" + source.shardPreference);
-        }
-      }
-      HttpEntity queryEntity = new NStringEntity(query, ContentType.APPLICATION_JSON);
-      Request request = new Request("GET", endPoint);
-      request.addParameters(params);
-      request.setEntity(queryEntity);
-      Response response = restClient.performRequest(request);
+      Response response = restClient.performRequest(createStartRequest());
       JsonNode searchResult = parseResponse(response.getEntity());
-      updateScrollId(searchResult);
-      return readNextBatchAndReturnFirstDocument(searchResult);
-    }
-
-    private void updateScrollId(JsonNode searchResult) {
-      scrollId = searchResult.path("_scroll_id").asText();
+      updateIteratorId(searchResult);
+      return processResult(searchResult);
     }
 
     @Override
@@ -1012,22 +1204,18 @@ public class ElasticsearchIO {
         current = batchIterator.next();
         return true;
       } else {
-        String requestBody =
-            String.format(
-                "{\"scroll\" : \"%s\",\"scroll_id\" : \"%s\"}",
-                source.spec.getScrollKeepalive(), scrollId);
-        HttpEntity scrollEntity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
-        Request request = new Request("GET", "/_search/scroll");
-        request.addParameters(Collections.emptyMap());
-        request.setEntity(scrollEntity);
-        Response response = restClient.performRequest(request);
-        JsonNode searchResult = parseResponse(response.getEntity());
-        updateScrollId(searchResult);
-        return readNextBatchAndReturnFirstDocument(searchResult);
+        return performAdvance();
       }
     }
 
-    private boolean readNextBatchAndReturnFirstDocument(JsonNode searchResult) {
+    protected boolean performAdvance() throws IOException {
+      Response response = restClient.performRequest(createAdvanceRequest());
+      JsonNode searchResult = parseResponse(response.getEntity());
+      updateIteratorId(searchResult);
+      return processResult(searchResult);
+    }
+
+    protected boolean readNextBatchAndReturnFirstDocument(JsonNode searchResult) {
       // stop if no more data
       JsonNode hits = searchResult.path("hits").path("hits");
       if (hits.size() == 0) {
@@ -1036,15 +1224,9 @@ public class ElasticsearchIO {
         return false;
       }
       // list behind iterator is empty
-      List<String> batch = new ArrayList<>();
-      boolean withMetadata = source.spec.isWithMetadata();
+      List<JsonNode> batch = new ArrayList<>();
       for (JsonNode hit : hits) {
-        if (withMetadata) {
-          batch.add(hit.toString());
-        } else {
-          String document = hit.path("_source").toString();
-          batch.add(document);
-        }
+        batch.add(hit);
       }
       batchIterator = batch.listIterator();
       current = batchIterator.next();
@@ -1056,19 +1238,17 @@ public class ElasticsearchIO {
       if (current == null) {
         throw new NoSuchElementException();
       }
-      return current;
+      READ.inc();
+      boolean withMetadata = source.spec.isWithMetadata();
+      return withMetadata ? current.toString() : current.path("_source").toString();
     }
 
     @Override
     public void close() throws IOException {
-      // remove the scroll
-      String requestBody = String.format("{\"scroll_id\" : [\"%s\"]}", scrollId);
-      HttpEntity entity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
+      Request closeRequest = createCloseRequest();
+      // clear the selected iterator
       try {
-        Request request = new Request("DELETE", "/_search/scroll");
-        request.addParameters(Collections.emptyMap());
-        request.setEntity(entity);
-        restClient.performRequest(request);
+        restClient.performRequest(closeRequest);
       } finally {
         if (restClient != null) {
           restClient.close();
@@ -1081,6 +1261,195 @@ public class ElasticsearchIO {
       return source;
     }
   }
+
+  static class BoundedElasticsearchScrollReader extends BoundedElasticsearchReader {
+
+    public BoundedElasticsearchScrollReader(BoundedElasticsearchSource source) {
+      super(source);
+    }
+
+    @Override
+    protected Request createStartRequest() {
+      String query = createBaseQuery();
+      if ((source.backendVersion >= 5) && source.numSlices != null && source.numSlices > 1) {
+        // if there is more than one slice, add the slice to the user query
+        String sliceQuery =
+            String.format("\"slice\": {\"id\": %s,\"max\": %s}", source.sliceId, source.numSlices);
+        query = query.replaceFirst("\\{", "{" + sliceQuery + ",");
+      }
+      String endPoint = source.spec.getConnectionConfiguration().getSearchEndPoint();
+      Map<String, String> params = new HashMap<>();
+      params.put("scroll", source.spec.getScrollKeepalive());
+      HttpEntity queryEntity = new NStringEntity(query, ContentType.APPLICATION_JSON);
+      Request request = new Request("GET", endPoint);
+      request.addParameters(params);
+      request.setEntity(queryEntity);
+      return request;
+    }
+
+    @Override
+    protected Request createAdvanceRequest() {
+      String requestBody =
+          String.format(
+              "{\"scroll\" : \"%s\",\"scroll_id\" : \"%s\"}",
+              source.spec.getScrollKeepalive(), iteratorId);
+      HttpEntity scrollEntity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
+      Request request = new Request("GET", "/_search/scroll");
+      request.addParameters(Collections.emptyMap());
+      request.setEntity(scrollEntity);
+      return request;
+    }
+
+    @Override
+    protected Request createCloseRequest() {
+      String requestBody = String.format("{\"scroll_id\" : [\"%s\"]}", iteratorId);
+      HttpEntity entity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
+      Request request = new Request("DELETE", "/_search/scroll");
+      request.addParameters(Collections.emptyMap());
+      request.setEntity(entity);
+      return request;
+    }
+
+    @Override
+    protected boolean processResult(JsonNode searchResult) throws IOException {
+      return readNextBatchAndReturnFirstDocument(searchResult);
+    }
+
+    @Override
+    protected void updateIteratorId(JsonNode searchResult) {
+      iteratorId = searchResult.path("_scroll_id").asText();
+    }
+  }
+
+  static class BoundedElasticsearchPITReader extends BoundedElasticsearchReader {
+
+    private String searchAfterProperty = "";
+
+    public BoundedElasticsearchPITReader(BoundedElasticsearchSource source) {
+      super(source);
+    }
+
+    private String modifyQueryForPIT(String originalQuery) {
+      String trimmed = originalQuery.trim();
+      if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+        return trimmed.substring(1, trimmed.length() - 1);
+      }
+      return originalQuery;
+    }
+
+    @Override
+    protected String createBaseQuery() {
+      return modifyQueryForPIT(super.createBaseQuery()) + ", " + source.spec.getPITSortConfig();
+    }
+
+    @Override
+    protected Request createStartRequest() {
+      String endPoint =
+          String.format("/%s/_pit", source.spec.getConnectionConfiguration().getIndex());
+      Map<String, String> params = new HashMap<>();
+      params.put("keep_alive", source.spec.getScrollKeepalive());
+      Request request = new Request("POST", endPoint);
+      request.addParameters(params);
+      return request;
+    }
+
+    String searchAfter() {
+      if (searchAfterProperty.isEmpty()) {
+        return "";
+      }
+      return String.format("\"search_after\" : %s,", searchAfterProperty);
+    }
+
+    @Override
+    protected Request createAdvanceRequest() {
+      // if there is more than one slice, add the slice to the user query
+      String sliceQuery =
+          source.numSlices > 1
+              ? String.format(
+                  "\"slice\" : {\"id\" : %s, \"max\" : %s},", source.sliceId, source.numSlices)
+              : "";
+
+      String requestBody =
+          String.format(
+              "{"
+                  + " %s"
+                  + " \"size\" : %d,"
+                  + " %s"
+                  + " %s,"
+                  + " \"pit\": {"
+                  + "  \"id\": \"%s\""
+                  + " }"
+                  + "}",
+              searchAfter(), source.spec.getBatchSize(), sliceQuery, createBaseQuery(), iteratorId);
+      HttpEntity pitSearchEntity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
+      Request request = new Request("POST", "/_search");
+      request.addParameters(Collections.emptyMap());
+      request.setEntity(pitSearchEntity);
+      return request;
+    }
+
+    @Override
+    protected Request createCloseRequest() {
+      String requestBody = String.format("{\"id\" : \"%s\"}", iteratorId);
+      HttpEntity entity = new NStringEntity(requestBody, ContentType.APPLICATION_JSON);
+      Request request = new Request("DELETE", "/_pit");
+      request.addParameters(Collections.emptyMap());
+      request.setEntity(entity);
+      return request;
+    }
+
+    String extractSearchAfterFromDocument(JsonNode document) {
+      return document.path("sort").toString();
+    }
+
+    @Override
+    public boolean advance() throws IOException {
+      if (batchIterator.hasNext()) {
+        current = batchIterator.next();
+        searchAfterProperty = extractSearchAfterFromDocument(current);
+        return true;
+      } else {
+        return performAdvance();
+      }
+    }
+
+    @Override
+    protected boolean processResult(JsonNode searchResult) throws IOException {
+      JsonNode hits = searchResult.path("hits");
+      if (hits == null || hits.isMissingNode()) {
+        // after creating the PIT we need to make the first request to comply with Reader API and
+        // try to get a first result or declare the source empty
+        return performAdvance();
+      }
+      JsonNode resultArray = hits.path("hits");
+      // check if results are empty
+      if (resultArray == null || resultArray.isEmpty()) {
+        return false;
+      }
+      // we already opened the PIT search and are processing the search results
+      boolean wasDocumentRead = readNextBatchAndReturnFirstDocument(searchResult);
+      if (wasDocumentRead && current != null) {
+        searchAfterProperty = extractSearchAfterFromDocument(current);
+      }
+      return wasDocumentRead;
+    }
+
+    @Override
+    protected void updateIteratorId(JsonNode searchResult) {
+      iteratorId = extractPITId(searchResult);
+    }
+
+    String extractPITId(JsonNode searchResult) {
+      String maybeId = searchResult.path("id").asText();
+      // check if this is the first request
+      if (maybeId != null && !maybeId.isEmpty()) {
+        return maybeId;
+      } else {
+        return searchResult.path("pit_id").asText();
+      }
+    }
+  }
+
   /**
    * A POJO encapsulating a configuration for retry behavior when issuing requests to ES. A retry
    * will be attempted until the maxAttempts or maxDuration is exceeded, whichever comes first, for
@@ -1191,7 +1560,7 @@ public class ElasticsearchIO {
   /** A {@link PTransform} converting docs to their Bulk API counterparts. */
   @AutoValue
   public abstract static class DocToBulk
-      extends PTransform<PCollection<String>, PCollection<String>> {
+      extends PTransform<PCollection<String>, PCollection<Document>> {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final int DEFAULT_RETRY_ON_CONFLICT = 5; // race conditions on updates
@@ -1346,8 +1715,8 @@ public class ElasticsearchIO {
      * href="https://www.elastic.co/guide/en/elasticsearch/reference/current/data-streams.html">data
      * stream</a>. Data streams only support the {@code create} operation. For more information see
      * the <a
-     * href="https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-bulk.html#docs-bulk-api-desc>
-     * Elasticsearch documentation</a>
+     * href="https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-bulk.html#docs-bulk-api-desc">Elasticsearch
+     * documentation</a>
      *
      * <p>Updates and deletions are not allowed, so related options will be ignored.
      *
@@ -1408,7 +1777,7 @@ public class ElasticsearchIO {
      * the batch will fail and the exception propagated. Incompatible with update operations and
      * should only be used with withUsePartialUpdate(false)
      *
-     * @param docVersionType the version type to use, one of {@value VERSION_TYPES}
+     * @param docVersionType the version type to use, one of {@link VERSION_TYPES}
      * @return the {@link DocToBulk} with the doc version type set
      */
     public DocToBulk withDocVersionType(String docVersionType) {
@@ -1424,7 +1793,7 @@ public class ElasticsearchIO {
      * Providing this hint means there is no need for setting {@link
      * DocToBulk#withConnectionConfiguration}. This can also be very useful for testing purposes.
      *
-     * <p>Note: if the value of @param backendVersion differs from the version the destination
+     * <p>Note: if the value of {@code backendVersion} differs from the version the destination
      * cluster is running, behavior is undefined and likely to yield errors.
      *
      * @param backendVersion the major version number of the version of Elasticsearch being run in
@@ -1436,11 +1805,12 @@ public class ElasticsearchIO {
           VALID_CLUSTER_VERSIONS.contains(backendVersion),
           "Backend version may only be one of " + "%s",
           String.join(", ", VERSION_TYPES));
+      maybeLogVersionDeprecationWarning(backendVersion);
       return builder().setBackendVersion(backendVersion).build();
     }
 
     @Override
-    public PCollection<String> expand(PCollection<String> docs) {
+    public PCollection<Document> expand(PCollection<String> docs) {
       ConnectionConfiguration connectionConfiguration = getConnectionConfiguration();
       Integer backendVersion = getBackendVersion();
       Write.FieldValueExtractFn idFn = getIdFn();
@@ -1604,7 +1974,7 @@ public class ElasticsearchIO {
 
     /** {@link DoFn} to for the {@link DocToBulk} transform. */
     @VisibleForTesting
-    static class DocToBulkFn extends DoFn<String, String> {
+    static class DocToBulkFn extends DoFn<String, Document> {
       private final DocToBulk spec;
       private int backendVersion;
 
@@ -1623,8 +1993,151 @@ public class ElasticsearchIO {
 
       @ProcessElement
       public void processElement(ProcessContext c) throws IOException {
-        c.output(createBulkApiEntity(spec, c.element(), backendVersion));
+        String inputDoc = c.element();
+        String bulkDirective = createBulkApiEntity(spec, inputDoc, backendVersion);
+        c.output(
+            Document.create()
+                .withInputDoc(inputDoc)
+                .withBulkDirective(bulkDirective)
+                // N.B. Saving the element timestamp for later use allows for exactly emulating
+                // c.output(...) because c.output is equivalent to
+                // c.outputWithTimestamp(..., c.timestamp())
+                .withTimestamp(c.timestamp()));
       }
+    }
+  }
+
+  public static class DocumentCoder extends AtomicCoder<Document> implements Serializable {
+    private static final DocumentCoder INSTANCE = new DocumentCoder();
+
+    private DocumentCoder() {}
+
+    public static DocumentCoder of() {
+      return INSTANCE;
+    }
+
+    @Override
+    public void encode(Document value, OutputStream outStream) throws IOException {
+      NullableCoder.of(StringUtf8Coder.of()).encode(value.getInputDoc(), outStream);
+      NullableCoder.of(StringUtf8Coder.of()).encode(value.getBulkDirective(), outStream);
+      BooleanCoder.of().encode(value.getHasError(), outStream);
+      NullableCoder.of(StringUtf8Coder.of()).encode(value.getResponseItemJson(), outStream);
+      NullableCoder.of(InstantCoder.of()).encode(value.getTimestamp(), outStream);
+    }
+
+    @Override
+    public Document decode(InputStream inStream) throws IOException {
+      String inputDoc = NullableCoder.of(StringUtf8Coder.of()).decode(inStream);
+      String bulkDirective = NullableCoder.of(StringUtf8Coder.of()).decode(inStream);
+      boolean hasError = BooleanCoder.of().decode(inStream);
+      String responseItemJson = NullableCoder.of(StringUtf8Coder.of()).decode(inStream);
+      Instant timestamp = NullableCoder.of(InstantCoder.of()).decode(inStream);
+
+      return Document.create()
+          .withInputDoc(inputDoc)
+          .withBulkDirective(bulkDirective)
+          .withHasError(hasError)
+          .withResponseItemJson(responseItemJson)
+          .withTimestamp(timestamp);
+    }
+  }
+
+  // Immutable POJO for maintaining various states of documents and their bulk representation, plus
+  // response from ES for the given document and the timestamp of the data
+  @DefaultCoder(DocumentCoder.class)
+  @AutoValue
+  public abstract static class Document implements Serializable {
+    public abstract @Nullable String getInputDoc();
+
+    public abstract @Nullable String getBulkDirective();
+
+    public abstract boolean getHasError();
+
+    public abstract @Nullable String getResponseItemJson();
+
+    public abstract @Nullable Instant getTimestamp();
+
+    abstract Builder toBuilder();
+
+    @AutoValue.Builder
+    abstract static class Builder {
+      abstract Builder setInputDoc(String inputDoc);
+
+      abstract Builder setBulkDirective(String bulkDirective);
+
+      abstract Builder setHasError(boolean hasError);
+
+      abstract Builder setResponseItemJson(String responseItemJson);
+
+      abstract Builder setTimestamp(Instant timestamp);
+
+      abstract Document build();
+    }
+
+    public static Document create() {
+      return new AutoValue_ElasticsearchIO_Document.Builder().setHasError(false).build();
+    }
+
+    /**
+     * Sets the input document i.e. desired document that will end up in Elasticsearch for this
+     * WriteSummary object. The inputDoc will be a document that was part of the input PCollection
+     * to either {@link Write} or {@link DocToBulk}
+     *
+     * @param inputDoc Serialized json input document destined to end up in Elasticsearch.
+     * @return WriteSummary with inputDocument set.
+     */
+    public Document withInputDoc(String inputDoc) {
+      return toBuilder().setInputDoc(inputDoc).build();
+    }
+
+    /**
+     * Sets the bulk directive representation of an input document. This will be new-line separated
+     * JSON where each line is valid JSON. Typically the first line includes meta-data and
+     * instructions to Elasticsearch such as whether to overwrite a document, delete it, etc. and
+     * the second line (if present) will be the document itself. For more info please see
+     * https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-bulk.html
+     *
+     * @param bulkDirective Serialized new-line delimited json bulk API information.
+     * @return WriteSummary with bulkDirective set.
+     */
+    public Document withBulkDirective(String bulkDirective) {
+      return toBuilder().setBulkDirective(bulkDirective).build();
+    }
+
+    /**
+     * Sets the element from Elasticsearch Bulk API response "items" pertaining to this
+     * WriteSummary.
+     *
+     * @param responseItemJson The Elasticsearch Bulk API response.
+     * @return WriteSummary with Elasticsearch Bulk API response set.
+     */
+    public Document withResponseItemJson(String responseItemJson) {
+      return toBuilder().setResponseItemJson(responseItemJson).build();
+    }
+
+    /**
+     * Used to set whether or not there was an error for a given document as indicated by the
+     * response from Elasticsearch. Note that if using {@link Write#withAllowableResponseErrors}
+     * errors which are allowed will have a false value for hasError for their respective
+     * WriteSummary.
+     *
+     * @param hasError Whether or not Elasticsearch returned an error when persisting a bulk
+     *     directive.
+     * @return WriteSummary with hasError set.
+     */
+    public Document withHasError(boolean hasError) {
+      return toBuilder().setHasError(hasError).build();
+    }
+
+    /**
+     * Sets the timestamp of the element in the PCollection, to be used in order to output
+     * WriteSummary to the same window from which the inputDoc originated.
+     *
+     * @param timestamp The timestamp with which the WriteSummary will be output.
+     * @return WriteSummary with timestamp set.
+     */
+    public Document withTimestamp(Instant timestamp) {
+      return toBuilder().setTimestamp(timestamp).build();
     }
   }
 
@@ -1636,10 +2149,14 @@ public class ElasticsearchIO {
    * cluster. This class is effectively a thin proxy for DocToBulk->BulkIO all-in-one for
    * convenience and backward compatibility.
    */
-  public static class Write extends PTransform<PCollection<String>, PDone> {
+  public static class Write extends PTransform<PCollection<String>, PCollectionTuple> {
     public interface FieldValueExtractFn extends SerializableFunction<JsonNode, String> {}
 
     public interface BooleanFieldValueExtractFn extends SerializableFunction<JsonNode, Boolean> {}
+
+    // N.B. Be sure to create tuple tags as new anonymous subclasses to avoid type erasure issues
+    public static final TupleTag<Document> SUCCESSFUL_WRITES = new TupleTag<Document>() {};
+    public static final TupleTag<Document> FAILED_WRITES = new TupleTag<Document>() {};
 
     private DocToBulk docToBulk = new AutoValue_ElasticsearchIO_DocToBulk.Builder().build();
 
@@ -1650,7 +2167,8 @@ public class ElasticsearchIO {
             // advised default starting batch size in ES docs
             .setMaxBatchSizeBytes(5L * 1024L * 1024L)
             .setUseStatefulBatches(false)
-            .setMaxParallelRequestsPerWindow(1)
+            .setMaxParallelRequests(1)
+            .setThrowWriteErrors(true)
             .build();
 
     public DocToBulk getDocToBulk() {
@@ -1727,6 +2245,7 @@ public class ElasticsearchIO {
       docToBulk = docToBulk.withIsDeleteFn(isDeleteFn);
       return this;
     }
+
     // End building Doc2Bulk
 
     /** Refer to {@link BulkIO#withConnectionConfiguration}. */
@@ -1773,9 +2292,20 @@ public class ElasticsearchIO {
       return this;
     }
 
-    /** Refer to {@link BulkIO#withMaxParallelRequestsPerWindow}. */
+    /**
+     * Refer to {@link BulkIO#withMaxParallelRequestsPerWindow}.
+     *
+     * @deprecated use {@link Write#withMaxParallelRequests} instead
+     */
+    @Deprecated
     public Write withMaxParallelRequestsPerWindow(int maxParallelRequestsPerWindow) {
       bulkIO = bulkIO.withMaxParallelRequestsPerWindow(maxParallelRequestsPerWindow);
+      return this;
+    }
+
+    /** Refer to {@link BulkIO#withMaxParallelRequests}. */
+    public Write withMaxParallelRequests(int maxParallelRequests) {
+      bulkIO = bulkIO.withMaxParallelRequests(maxParallelRequests);
       return this;
     }
 
@@ -1789,8 +2319,14 @@ public class ElasticsearchIO {
       return this;
     }
 
+    /** Refer to {@link BulkIO#withThrowWriteErrors}. */
+    public Write withThrowWriteErrors(boolean throwWriteErrors) {
+      bulkIO = bulkIO.withThrowWriteErrors(throwWriteErrors);
+      return this;
+    }
+
     @Override
-    public PDone expand(PCollection<String> input) {
+    public PCollectionTuple expand(PCollection<String> input) {
       return input.apply(docToBulk).apply(bulkIO);
     }
   }
@@ -1802,9 +2338,9 @@ public class ElasticsearchIO {
    * mirroring data to multiple clusters or data lakes without recomputation.
    */
   @AutoValue
-  public abstract static class BulkIO extends PTransform<PCollection<String>, PDone> {
+  public abstract static class BulkIO extends PTransform<PCollection<Document>, PCollectionTuple> {
     @VisibleForTesting
-    static final String RETRY_ATTEMPT_LOG = "Error writing to Elasticsearch. Retry attempt[%d]";
+    static final String RETRY_ATTEMPT_LOG = "Error writing to Elasticsearch. Retry attempt[{}]";
 
     @VisibleForTesting
     static final String RETRY_FAILED_LOG =
@@ -1820,11 +2356,15 @@ public class ElasticsearchIO {
 
     abstract boolean getUseStatefulBatches();
 
-    abstract int getMaxParallelRequestsPerWindow();
+    abstract @Nullable Integer getMaxParallelRequestsPerWindow();
+
+    abstract int getMaxParallelRequests();
 
     abstract @Nullable RetryConfiguration getRetryConfiguration();
 
     abstract @Nullable Set<String> getAllowedResponseErrors();
+
+    abstract boolean getThrowWriteErrors();
 
     abstract Builder builder();
 
@@ -1844,7 +2384,15 @@ public class ElasticsearchIO {
 
       abstract Builder setUseStatefulBatches(boolean useStatefulBatches);
 
+      /**
+       * @deprecated Use {@link #setMaxParallelRequests} instead.
+       */
+      @Deprecated
       abstract Builder setMaxParallelRequestsPerWindow(int maxParallelRequestsPerWindow);
+
+      abstract Builder setMaxParallelRequests(int maxParallelRequests);
+
+      abstract Builder setThrowWriteErrors(boolean throwWriteErrors);
 
       abstract BulkIO build();
     }
@@ -1863,8 +2411,8 @@ public class ElasticsearchIO {
 
     /**
      * Provide a maximum size in number of documents for the batch see bulk API
-     * (https://www.elastic.co/guide/en/elasticsearch/reference/2.4/docs-bulk.html). Default is 1000
-     * docs (like Elasticsearch bulk size advice). See
+     * (https://www.elastic.co/guide/en/elasticsearch/reference/7.17/docs-bulk.html). Default is
+     * 1000 docs (like Elasticsearch bulk size advice). See
      * https://www.elastic.co/guide/en/elasticsearch/guide/current/bulk.html Depending on the
      * execution engine, size of bundles may vary, this sets the maximum size. Change this if you
      * need to have smaller ElasticSearch bulks.
@@ -1879,7 +2427,7 @@ public class ElasticsearchIO {
 
     /**
      * Provide a maximum size in bytes for the batch see bulk API
-     * (https://www.elastic.co/guide/en/elasticsearch/reference/2.4/docs-bulk.html). Default is 5MB
+     * (https://www.elastic.co/guide/en/elasticsearch/reference/7.17/docs-bulk.html). Default is 5MB
      * (like Elasticsearch bulk size advice). See
      * https://www.elastic.co/guide/en/elasticsearch/guide/current/bulk.html Depending on the
      * execution engine, size of bundles may vary, this sets the maximum size. Change this if you
@@ -1942,7 +2490,7 @@ public class ElasticsearchIO {
 
     /**
      * Provide a set of textual error types which can be contained in Bulk API response
-     * items[].error.type field. Any element in @param allowableResponseErrorTypes will suppress
+     * items[].error.type field. Any element in {@code allowableResponseErrorTypes} will suppress
      * errors of the same type in Bulk responses.
      *
      * <p>See also
@@ -1997,22 +2545,63 @@ public class ElasticsearchIO {
     /**
      * When using {@link BulkIO#withUseStatefulBatches} Stateful Processing, states and therefore
      * batches are maintained per-key-per-window. BE AWARE that low values for @param
-     * maxParallelRequestsPerWindow, in particular if the input data has a finite number of windows,
-     * can reduce parallelism greatly. If data is globally windowed and @param
-     * maxParallelRequestsPerWindow is set to 1,there will only ever be 1 request in flight. Having
-     * only a single request in flight can be beneficial for ensuring an Elasticsearch cluster is
-     * not overwhelmed by parallel requests,but may not work for all use cases. If this number is
-     * less than the number of maximum workers in your pipeline, the IO work will result in a
-     * sub-distribution of the last write step with most of the runners.
+     * maxParallelRequests, in particular if the input data has a finite number of windows, can
+     * reduce parallelism greatly. Because data will be temporarily globally windowed as part of
+     * writing data to Elasticsearch, if {@code maxParallelRequests} is set to 1, there will only
+     * ever be 1 request in flight. Having only a single request in flight can be beneficial for
+     * ensuring an Elasticsearch cluster is not overwhelmed by parallel requests, but may not work
+     * for all use cases. If this number is less than the number of maximum workers in your
+     * pipeline, the IO work will result in a sub-optimal distribution of the write step with most
+     * runners.
      *
-     * @param maxParallelRequestsPerWindow the maximum number of parallel bulk requests for a window
-     *     of data
+     * @param maxParallelRequests the maximum number of parallel bulk requests for a window of data
      * @return the {@link BulkIO} with maximum parallel bulk requests per window set
+     * @deprecated use {@link BulkIO#withMaxParallelRequests} instead.
      */
-    public BulkIO withMaxParallelRequestsPerWindow(int maxParallelRequestsPerWindow) {
+    @Deprecated
+    public BulkIO withMaxParallelRequestsPerWindow(int maxParallelRequests) {
       checkArgument(
-          maxParallelRequestsPerWindow > 0, "parameter value must be positive " + "a integer");
-      return builder().setMaxParallelRequestsPerWindow(maxParallelRequestsPerWindow).build();
+          maxParallelRequests > 0, "maxParallelRequestsPerWindow value must be a positive integer");
+      return builder().setMaxParallelRequests(maxParallelRequests).build();
+    }
+
+    /**
+     * When using {@link BulkIO#withUseStatefulBatches} Stateful Processing, states and therefore
+     * batches are maintained per-key-per-window. BE AWARE that low values for @param
+     * maxParallelRequests, in particular if the input data has a finite number of windows, can
+     * reduce parallelism greatly. Because data will be temporarily globally windowed as part of
+     * writing data to Elasticsearch, if {@code maxParallelRequests} is set to 1, there will only
+     * ever be 1 request in flight. Having only a single request in flight can be beneficial for
+     * ensuring an Elasticsearch cluster is not overwhelmed by parallel requests, but may not work
+     * for all use cases. If this number is less than the number of maximum workers in your
+     * pipeline, the IO work will result in a sub-optimal distribution of the write step with most
+     * runners.
+     *
+     * @param maxParallelRequests the maximum number of parallel bulk requests
+     * @return the {@link BulkIO} with maximum parallel bulk requests
+     */
+    public BulkIO withMaxParallelRequests(int maxParallelRequests) {
+      checkArgument(
+          maxParallelRequests > 0, "maxParallelRequests value must be a positive integer");
+      return builder().setMaxParallelRequests(maxParallelRequests).build();
+    }
+
+    /**
+     * Whether to throw runtime exceptions when write (IO) errors occur. Especially useful in
+     * streaming pipelines where non-transient IO failures will cause infinite retries. If true, a
+     * runtime error will be thrown for any error found by {@link ElasticsearchIO#createWriteReport}
+     * and/or java.io.IOException (which is what org.elasticsearch.client.ResponseException based
+     * on) found by in batch flush. If false, a {@link PCollectionTuple} will be returned with tags
+     * {@link Write#SUCCESSFUL_WRITES} and {@link Write#FAILED_WRITES}, each being a {@link
+     * PCollection} of {@link Document} representing documents which were written to Elasticsearch
+     * without errors and those which failed to write due to errors, respectively.
+     *
+     * @param throwWriteErrors whether to surface write errors as runtime exceptions or return them
+     *     in a {@link PCollection}
+     * @return the {@link BulkIO} with write error treatment configured
+     */
+    public BulkIO withThrowWriteErrors(boolean throwWriteErrors) {
+      return builder().setThrowWriteErrors(throwWriteErrors).build();
     }
 
     /**
@@ -2023,7 +2612,7 @@ public class ElasticsearchIO {
      */
     @VisibleForTesting
     static class StatefulBatching
-        extends PTransform<PCollection<String>, PCollection<KV<Integer, Iterable<String>>>> {
+        extends PTransform<PCollection<Document>, PCollection<KV<Integer, Iterable<Document>>>> {
       final BulkIO spec;
 
       private StatefulBatching(BulkIO bulkSpec) {
@@ -2035,8 +2624,8 @@ public class ElasticsearchIO {
       }
 
       @Override
-      public PCollection<KV<Integer, Iterable<String>>> expand(PCollection<String> input) {
-        GroupIntoBatches<Integer, String> groupIntoBatches =
+      public PCollection<KV<Integer, Iterable<Document>>> expand(PCollection<Document> input) {
+        GroupIntoBatches<Integer, Document> groupIntoBatches =
             GroupIntoBatches.ofSize(spec.getMaxBatchSize());
 
         if (spec.getMaxBufferingDuration() != null) {
@@ -2045,26 +2634,53 @@ public class ElasticsearchIO {
         }
 
         return input
-            .apply(ParDo.of(new Reshuffle.AssignShardFn<>(spec.getMaxParallelRequestsPerWindow())))
+            .apply(ParDo.of(new Reshuffle.AssignShardFn<>(spec.getMaxParallelRequests())))
             .apply(groupIntoBatches);
       }
     }
 
     @Override
-    public PDone expand(PCollection<String> input) {
+    public PCollectionTuple expand(PCollection<Document> input) {
       ConnectionConfiguration connectionConfiguration = getConnectionConfiguration();
-
       checkState(connectionConfiguration != null, "withConnectionConfiguration() is required");
 
+      @SuppressWarnings("unchecked")
+      WindowFn<Document, ?> originalWindowFn =
+          (WindowFn<Document, ?>) input.getWindowingStrategy().getWindowFn();
+
+      PCollection<Document> docResults;
+      PCollection<Document> globalDocs =
+          input.apply("Window inputs globally", Window.into(new GlobalWindows()));
+
       if (getUseStatefulBatches()) {
-        input.apply(StatefulBatching.fromSpec(this)).apply(ParDo.of(new BulkIOStatefulFn(this)));
+        docResults =
+            globalDocs
+                .apply(StatefulBatching.fromSpec(this))
+                .apply(ParDo.of(new BulkIOStatefulFn(this)));
       } else {
-        input.apply(ParDo.of(new BulkIOBundleFn(this)));
+        docResults = globalDocs.apply(ParDo.of(new BulkIOBundleFn(this)));
       }
-      return PDone.in(input.getPipeline());
+
+      return docResults
+          // Restore windowing of input
+          .apply("Restore original windows", Window.into(originalWindowFn))
+          .apply(
+              ParDo.of(new ResultFilteringFn())
+                  .withOutputTags(Write.SUCCESSFUL_WRITES, TupleTagList.of(Write.FAILED_WRITES)));
     }
 
-    static class BulkIOBundleFn extends BulkIOBaseFn<String> {
+    private static class ResultFilteringFn extends DoFn<Document, Document> {
+      @ProcessElement
+      public void processElement(@Element Document doc, MultiOutputReceiver out) {
+        if (doc.getHasError()) {
+          out.get(Write.FAILED_WRITES).output(doc);
+        } else {
+          out.get(Write.SUCCESSFUL_WRITES).output(doc);
+        }
+      }
+    }
+
+    static class BulkIOBundleFn extends BulkIOBaseFn<Document> {
       @VisibleForTesting
       BulkIOBundleFn(BulkIO bulkSpec) {
         super(bulkSpec);
@@ -2072,15 +2688,16 @@ public class ElasticsearchIO {
 
       @ProcessElement
       public void processElement(ProcessContext context) throws Exception {
-        String bulkApiEntity = context.element();
-        addAndMaybeFlush(bulkApiEntity);
+        // the element KV pair is a pair of raw_doc + resulting Bulk API formatted newline-json
+        // based on DocToBulk settings
+        addAndMaybeFlush(context.element(), context);
       }
     }
 
     /*
     Intended for use in conjunction with {@link GroupIntoBatches}
      */
-    static class BulkIOStatefulFn extends BulkIOBaseFn<KV<Integer, Iterable<String>>> {
+    static class BulkIOStatefulFn extends BulkIOBaseFn<KV<Integer, Iterable<Document>>> {
       @VisibleForTesting
       BulkIOStatefulFn(BulkIO bulkSpec) {
         super(bulkSpec);
@@ -2088,27 +2705,30 @@ public class ElasticsearchIO {
 
       @ProcessElement
       public void processElement(ProcessContext context) throws Exception {
-        Iterable<String> bulkApiEntities = context.element().getValue();
-        for (String bulkApiEntity : bulkApiEntities) {
-          addAndMaybeFlush(bulkApiEntity);
+        for (Document timedDoc : context.element().getValue()) {
+          addAndMaybeFlush(timedDoc, context);
         }
       }
     }
 
     /** {@link DoFn} to for the {@link BulkIO} transform. */
     @VisibleForTesting
-    private abstract static class BulkIOBaseFn<T> extends DoFn<T, Void> {
+    private abstract static class BulkIOBaseFn<T> extends DoFn<T, Document> {
       private static final Duration RETRY_INITIAL_BACKOFF = Duration.standardSeconds(5);
-
       private transient FluentBackoff retryBackoff;
 
       private BulkIO spec;
       private transient RestClient restClient;
-      private ArrayList<String> batch;
+      private transient List<Document> batch;
       long currentBatchSizeBytes;
 
       protected BulkIOBaseFn(BulkIO bulkSpec) {
         this.spec = bulkSpec;
+      }
+
+      @Override
+      public Duration getAllowedTimestampSkew() {
+        return Duration.millis(Long.MAX_VALUE);
       }
 
       @Setup
@@ -2130,7 +2750,7 @@ public class ElasticsearchIO {
       }
 
       @StartBundle
-      public void startBundle(StartBundleContext context) {
+      public void startBundle(@SuppressWarnings("unused") StartBundleContext context) {
         batch = new ArrayList<>();
         currentBatchSizeBytes = 0;
       }
@@ -2138,47 +2758,112 @@ public class ElasticsearchIO {
       @FinishBundle
       public void finishBundle(FinishBundleContext context)
           throws IOException, InterruptedException {
-        flushBatch();
+        flushAndOutputResults(new FinishBundleContextAdapter<>(context));
       }
 
-      protected void addAndMaybeFlush(String bulkApiEntity)
+      /**
+       * Adapter interface which provides a common parent for {@link ProcessContext} and {@link
+       * FinishBundleContext} so that we are able to use a single common invocation to output from.
+       */
+      interface ContextAdapter {
+        void output(Document timedDoc);
+      }
+
+      private static final class ProcessContextAdapter<T> implements ContextAdapter {
+        private final DoFn<T, Document>.ProcessContext context;
+
+        private ProcessContextAdapter(DoFn<T, Document>.ProcessContext context) {
+          this.context = context;
+        }
+
+        @Override
+        public void output(Document timedDoc) {
+          context.outputWithTimestamp(timedDoc, timedDoc.getTimestamp());
+        }
+      }
+
+      private static final class FinishBundleContextAdapter<T> implements ContextAdapter {
+        private final DoFn<T, Document>.FinishBundleContext context;
+
+        private FinishBundleContextAdapter(DoFn<T, Document>.FinishBundleContext context) {
+          this.context = context;
+        }
+
+        @Override
+        public void output(Document timedDoc) {
+          context.output(timedDoc, timedDoc.getTimestamp(), GlobalWindow.INSTANCE);
+        }
+      }
+
+      private void flushAndOutputResults(ContextAdapter context)
           throws IOException, InterruptedException {
-        batch.add(bulkApiEntity);
-        currentBatchSizeBytes += bulkApiEntity.getBytes(StandardCharsets.UTF_8).length;
+        for (Document timedDoc : flushBatch()) {
+          context.output(timedDoc);
+        }
+      }
+
+      protected void addAndMaybeFlush(Document doc, ProcessContext context)
+          throws IOException, InterruptedException {
+
+        batch.add(doc);
+        currentBatchSizeBytes += doc.getBulkDirective().getBytes(StandardCharsets.UTF_8).length;
 
         if (batch.size() >= spec.getMaxBatchSize()
             || currentBatchSizeBytes >= spec.getMaxBatchSizeBytes()) {
-          flushBatch();
+          flushAndOutputResults(new ProcessContextAdapter<>(context));
         }
       }
 
       private boolean isRetryableClientException(Throwable t) {
-        // RestClient#performRequest only throws wrapped IOException so we must inspect the
+        // RestClient#performRequest mainly throws wrapped IOException so we must inspect the
         // exception cause to determine if the exception is likely transient i.e. retryable or
-        // not.
+        // not. One exception is the ResponseException that is thrown when attempting to parse the
+        // response. This exception is not wrapped.
+
+        // ResponseException should not be wrapped, but check the cause to be safe for future
+        // changes
+        ResponseException re = null;
+        if (t instanceof ResponseException) {
+          re = (ResponseException) t;
+        } else if (t.getCause() instanceof ResponseException) {
+          re = (ResponseException) t.getCause();
+        }
+
+        // Retry for 500-range response code except for 501.
+        if (re != null) {
+          int statusCode = re.getResponse().getStatusLine().getStatusCode();
+          return statusCode >= 500 && statusCode != 501;
+        }
         return t.getCause() instanceof ConnectTimeoutException
             || t.getCause() instanceof SocketTimeoutException
             || t.getCause() instanceof ConnectionClosedException
             || t.getCause() instanceof ConnectException;
       }
 
-      private void flushBatch() throws IOException, InterruptedException {
+      private List<Document> flushBatch() throws IOException, InterruptedException {
+
         if (batch.isEmpty()) {
-          return;
+          return new ArrayList<>();
         }
 
-        LOG.info(
+        LOG.debug(
             "ElasticsearchIO batch size: {}, batch size bytes: {}",
             batch.size(),
             currentBatchSizeBytes);
 
         StringBuilder bulkRequest = new StringBuilder();
-        for (String json : batch) {
-          bulkRequest.append(json);
-        }
+        // Create a stable list of input entries, because order is important to keep constant
+        List<Document> inputEntries = new ArrayList<>(batch);
 
         batch.clear();
         currentBatchSizeBytes = 0L;
+
+        for (Document doc : inputEntries) {
+          // N.B. we need to ensure that we can iterate in the same order later to match up
+          // responses to these bulk directives. ES Bulk response `items` is in the same order
+          // as the bulk directives in the request, so order is imperative.
+          bulkRequest.append(doc.getBulkDirective());
+        }
 
         Response response = null;
         HttpEntity responseEntity = null;
@@ -2191,6 +2876,9 @@ public class ElasticsearchIO {
 
         HttpEntity requestBody =
             new NStringEntity(bulkRequest.toString(), ContentType.APPLICATION_JSON);
+
+        String elasticResponseExceptionMessage = null;
+
         try {
           Request request = new Request("POST", endPoint);
           request.addParameters(Collections.emptyMap());
@@ -2199,12 +2887,18 @@ public class ElasticsearchIO {
           responseEntity = new BufferedHttpEntity(response.getEntity());
         } catch (java.io.IOException ex) {
           if (spec.getRetryConfiguration() == null || !isRetryableClientException(ex)) {
-            throw ex;
+            if (spec.getThrowWriteErrors()) {
+              throw ex;
+            } else {
+              elasticResponseExceptionMessage = ex.getMessage();
+            }
+          } else {
+            LOG.error("Caught ES timeout, retrying", ex);
           }
-          LOG.error("Caught ES timeout, retrying", ex);
         }
 
         if (spec.getRetryConfiguration() != null
+            && elasticResponseExceptionMessage == null
             && (response == null
                 || responseEntity == null
                 || spec.getRetryConfiguration().getRetryPredicate().test(responseEntity))) {
@@ -2212,9 +2906,46 @@ public class ElasticsearchIO {
               && spec.getRetryConfiguration().getRetryPredicate().test(responseEntity)) {
             LOG.warn("ES Cluster is responding with HTP 429 - TOO_MANY_REQUESTS.");
           }
-          responseEntity = handleRetry("POST", endPoint, Collections.emptyMap(), requestBody);
+          try {
+            responseEntity = handleRetry("POST", endPoint, Collections.emptyMap(), requestBody);
+          } catch (java.io.IOException ex) {
+            // No more retry attempts, determine what to do using throwWriteErrors
+            if (spec.getThrowWriteErrors()) {
+              throw ex;
+            } else {
+              elasticResponseExceptionMessage = ex.getMessage();
+            }
+          }
         }
-        checkForErrors(responseEntity, spec.getAllowedResponseErrors());
+
+        List<Document> responses;
+        // If java.io.IOException was thrown, return all input Documents with
+        // withHasError(true)
+        // so that they could be caught by FAILED_WRITES tag.
+        if (elasticResponseExceptionMessage != null) {
+          String errorJsonMessage =
+              String.format(
+                  "{\"message\":\"java.io.IOException was thrown in batch flush: %s\"}",
+                  elasticResponseExceptionMessage);
+
+          responses =
+              inputEntries.stream()
+                  .map(doc -> doc.withHasError(true).withResponseItemJson(errorJsonMessage))
+                  .collect(Collectors.toList());
+        } else {
+          responses =
+              createWriteReport(
+                  responseEntity, spec.getAllowedResponseErrors(), spec.getThrowWriteErrors());
+        }
+
+        return Streams.zip(
+                inputEntries.stream(),
+                responses.stream(),
+                (inputTimedDoc, responseDoc) ->
+                    inputTimedDoc
+                        .withHasError(responseDoc.getHasError())
+                        .withResponseItemJson(responseDoc.getResponseItemJson()))
+            .collect(Collectors.toList());
       }
 
       /** retry request based on retry configuration policy. */
@@ -2228,7 +2959,7 @@ public class ElasticsearchIO {
         int attempt = 0;
         // while retry policy exists
         while (BackOffUtils.next(sleeper, backoff)) {
-          LOG.warn(String.format(RETRY_ATTEMPT_LOG, ++attempt));
+          LOG.warn(RETRY_ATTEMPT_LOG, ++attempt);
           try {
             Request request = new Request(method, endpoint);
             request.addParameters(params);
@@ -2262,21 +2993,40 @@ public class ElasticsearchIO {
     }
   }
 
-  static int getBackendVersion(ConnectionConfiguration connectionConfiguration) {
-    try (RestClient restClient = connectionConfiguration.createClient()) {
+  private static void maybeLogVersionDeprecationWarning(int clusterVersion) {
+    if (DEPRECATED_CLUSTER_VERSIONS.contains(clusterVersion)) {
+      LOG.warn(
+          "Support for Elasticsearch cluster version {} will be dropped in a future release of "
+              + "the Apache Beam SDK",
+          clusterVersion);
+    }
+  }
+
+  static int getBackendVersion(RestClient restClient) {
+    try {
       Request request = new Request("GET", "");
       Response response = restClient.performRequest(request);
       JsonNode jsonNode = parseResponse(response.getEntity());
       int backendVersion =
           Integer.parseInt(jsonNode.path("version").path("number").asText().substring(0, 1));
       checkArgument(
-          (VALID_CLUSTER_VERSIONS.contains(backendVersion)),
+          VALID_CLUSTER_VERSIONS.contains(backendVersion),
           "The Elasticsearch version to connect to is %s.x. "
               + "This version of the ElasticsearchIO is only compatible with "
-              + "Elasticsearch v7.x, v6.x, v5.x and v2.x",
+              + "Elasticsearch "
+              + VALID_CLUSTER_VERSIONS,
           backendVersion);
+      maybeLogVersionDeprecationWarning(backendVersion);
       return backendVersion;
 
+    } catch (IOException e) {
+      throw new IllegalArgumentException("Cannot get Elasticsearch version", e);
+    }
+  }
+
+  static int getBackendVersion(ConnectionConfiguration connectionConfiguration) {
+    try (RestClient restClient = connectionConfiguration.createClient()) {
+      return getBackendVersion(restClient);
     } catch (IOException e) {
       throw new IllegalArgumentException("Cannot get Elasticsearch version", e);
     }

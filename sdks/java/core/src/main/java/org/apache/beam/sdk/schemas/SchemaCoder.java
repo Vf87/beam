@@ -17,7 +17,7 @@
  */
 package org.apache.beam.sdk.schemas;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -25,8 +25,6 @@ import java.io.OutputStream;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CustomCoder;
 import org.apache.beam.sdk.coders.RowCoder;
@@ -37,13 +35,12 @@ import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.util.SerializableUtils;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** {@link SchemaCoder} is used as the coder for types that have schemas registered. */
-@Experimental(Kind.SCHEMAS)
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class SchemaCoder<T> extends CustomCoder<T> {
   protected final Schema schema;
@@ -167,7 +164,10 @@ public class SchemaCoder<T> extends CustomCoder<T> {
   }
 
   // Sets the schema id, and then recursively ensures that all schemas have ids set.
-  private static void setSchemaIds(Schema schema) {
+  private static void setSchemaIds(@Nullable Schema schema) {
+    if (schema == null) {
+      return;
+    }
     if (schema.getUUID() == null) {
       schema.setUUID(UUID.randomUUID());
     }
@@ -190,7 +190,7 @@ public class SchemaCoder<T> extends CustomCoder<T> {
         return;
 
       case ARRAY:
-      case ITERABLE:;
+      case ITERABLE:
         setSchemaIds(fieldType.getCollectionElementType());
         return;
 
@@ -204,7 +204,7 @@ public class SchemaCoder<T> extends CustomCoder<T> {
     if (this == o) {
       return true;
     }
-    if (o == null || getClass() != o.getClass()) {
+    if (!(o instanceof SchemaCoder)) {
       return false;
     }
     SchemaCoder<?> that = (SchemaCoder<?>) o;
@@ -217,30 +217,6 @@ public class SchemaCoder<T> extends CustomCoder<T> {
   @Override
   public int hashCode() {
     return Objects.hash(schema, typeDescriptor, toRowFunction, fromRowFunction);
-  }
-
-  private static RowIdentity identity() {
-    return new RowIdentity();
-  }
-
-  private static class RowIdentity implements SerializableFunction<Row, Row> {
-    @Override
-    public Row apply(Row input) {
-      return input;
-    }
-
-    @Override
-    public int hashCode() {
-      return Objects.hash(getClass());
-    }
-
-    @Override
-    public boolean equals(@Nullable Object o) {
-      if (this == o) {
-        return true;
-      }
-      return o != null && getClass() == o.getClass();
-    }
   }
 
   @Override

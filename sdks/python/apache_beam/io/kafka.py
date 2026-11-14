@@ -45,12 +45,32 @@
   pipeline.
 
   * Install Java runtime in the computer from where the pipeline is constructed
-    and make sure that 'java' command is available.
+    and make sure that 'java' command is available or set JAVA_HOME environment
+    variable.
 
   In this option, Python SDK will either download (for released Beam version) or
-  build (when running from a Beam Git clone) a expansion service jar and use
+  build (when running from a Beam Git clone) an expansion service jar and use
   that to expand transforms. Currently Kafka transforms use the
   'beam-sdks-java-io-expansion-service' jar for this purpose.
+
+  Note that the KafkaIO read transform can be compiled in two modes
+
+  * `ReadFromKafkaViaUnbounded` (legacy)
+  * `ReadFromKafkaViaSDF` (default)
+
+  To use the legacy mode, the `use_deprecated_read` flag should be specified
+  within the IO expansion service. For example,
+
+    kafka.default_io_expansion_service(
+        append_args=["--experiments=use_deprecated_read"]
+    )
+
+  To use the legacy mode using Dataflow runner, the `use_unbounded_sdf_wrapper`
+  flag should be specified within the IO expansion service. For example,
+
+    kafka.default_io_expansion_service(
+        append_args=["--experiments=use_unbounded_sdf_wrapper"]
+    )
 
   *Option 2: specify a custom expansion service*
 
@@ -80,7 +100,10 @@
 
 # pytype: skip-file
 
+import collections
 import typing
+
+import numpy as np
 
 from apache_beam.transforms.external import BeamJarExpansionService
 from apache_beam.transforms.external import ExternalTransform
@@ -88,16 +111,26 @@ from apache_beam.transforms.external import NamedTupleBasedPayloadBuilder
 
 ReadFromKafkaSchema = typing.NamedTuple(
     'ReadFromKafkaSchema',
-    [('consumer_config', typing.Mapping[str, str]),
-     ('topics', typing.List[str]), ('key_deserializer', str),
-     ('value_deserializer', str), ('start_read_time', typing.Optional[int]),
+    [('consumer_config', typing.Mapping[str, str]), ('topics', list[str]),
+     ('key_deserializer', str), ('value_deserializer', str),
+     ('start_read_time', typing.Optional[int]),
      ('max_num_records', typing.Optional[int]),
      ('max_read_time', typing.Optional[int]),
-     ('commit_offset_in_finalize', bool), ('timestamp_policy', str)])
+     ('commit_offset_in_finalize', bool), ('timestamp_policy', str),
+     ('consumer_polling_timeout', typing.Optional[int]),
+     ('redistribute', typing.Optional[bool]),
+     ('redistribute_num_keys', typing.Optional[np.int32]),
+     ('allow_duplicates', typing.Optional[bool]),
+     ('dynamic_read_poll_interval_seconds', typing.Optional[int]),
+     ('consumer_factory_fn_class', typing.Optional[str]),
+     (
+         'consumer_factory_fn_params',
+         typing.Optional[collections.abc.Mapping[str, str]])])
 
 
-def default_io_expansion_service():
-  return BeamJarExpansionService('sdks:java:io:expansion-service:shadowJar')
+def default_io_expansion_service(append_args=None):
+  return BeamJarExpansionService(
+      'sdks:java:io:expansion-service:shadowJar', append_args=append_args)
 
 
 class ReadFromKafka(ExternalTransform):
@@ -117,8 +150,10 @@ class ReadFromKafka(ExternalTransform):
   create_time_policy = 'CreateTime'
   log_append_time = 'LogAppendTime'
 
-  URN_WITH_METADATA = 'beam:external:java:kafkaio:externalwithmetadata:v1'
-  URN_WITHOUT_METADATA = 'beam:external:java:kafkaio:typedwithoutmetadata:v1'
+  URN_WITH_METADATA = (
+      'beam:transform:org.apache.beam:kafka_read_with_metadata:v1')
+  URN_WITHOUT_METADATA = (
+      'beam:transform:org.apache.beam:kafka_read_without_metadata:v1')
 
   def __init__(
       self,
@@ -131,9 +166,16 @@ class ReadFromKafka(ExternalTransform):
       max_read_time=None,
       commit_offset_in_finalize=False,
       timestamp_policy=processing_time_policy,
+      consumer_polling_timeout=2,
       with_metadata=False,
       expansion_service=None,
-  ):
+      redistribute=False,
+      redistribute_num_keys=np.int32(0),
+      allow_duplicates=False,
+      dynamic_read_poll_interval_seconds: typing.Optional[int] = None,
+      consumer_factory_fn_class: typing.Optional[str] = None,
+      consumer_factory_fn_params: typing.Optional[
+          collections.abc.Mapping] = None):
     """
     Initializes a read operation from Kafka.
 
@@ -156,6 +198,10 @@ class ReadFromKafka(ExternalTransform):
     :param commit_offset_in_finalize: Whether to commit offsets when finalizing.
     :param timestamp_policy: The built-in timestamp policy which is used for
         extracting timestamp from KafkaRecord.
+    :param consumer_polling_timeout: Kafka client polling request
+        timeout time in seconds. A lower timeout optimizes for latency. Increase
+        the timeout if the consumer is not fetching any records. Default is 2
+        seconds.
     :param with_metadata: whether the returned PCollection should contain
         Kafka related metadata or not. If False (default), elements of the
         returned PCollection will be of type 'bytes' if True, elements of the
@@ -163,6 +209,22 @@ class ReadFromKafka(ExternalTransform):
         this only works when using default key and value deserializers where
         Java Kafka Reader reads keys and values as 'byte[]'.
     :param expansion_service: The address (host:port) of the ExpansionService.
+    :param redistribute: whether a Redistribute transform should be applied
+        immediately after the read.
+    :param redistribute_num_keys: Configures how many keys the Redistribute
+        spreads the data across. If 0, the KafkaIO default of 32768 is used.
+    :param allow_duplicates: whether the Redistribute transform allows for
+        duplicates (this serves solely as a hint to the underlying runner).
+    :param dynamic_read_poll_interval_seconds: The interval in seconds at which
+        to check for new partitions. If not None, dynamic partition discovery
+        is enabled.
+    :param consumer_factory_fn_class: A fully qualified classpath to an
+        existing provided consumerFactoryFn. If not None, this will construct
+        Kafka consumers with a custom configuration.
+    :param consumer_factory_fn_params: A map which specifies the parameters for
+        the provided consumer_factory_fn_class. If not None, the values in this
+        map will be used when constructing the consumer_factory_fn_class object.
+        This cannot be null if the consumer_factory_fn_class is not null.
     """
     if timestamp_policy not in [ReadFromKafka.processing_time_policy,
                                 ReadFromKafka.create_time_policy,
@@ -183,7 +245,15 @@ class ReadFromKafka(ExternalTransform):
                 max_read_time=max_read_time,
                 start_read_time=start_read_time,
                 commit_offset_in_finalize=commit_offset_in_finalize,
-                timestamp_policy=timestamp_policy)),
+                timestamp_policy=timestamp_policy,
+                consumer_polling_timeout=consumer_polling_timeout,
+                redistribute=redistribute,
+                redistribute_num_keys=redistribute_num_keys,
+                allow_duplicates=allow_duplicates,
+                dynamic_read_poll_interval_seconds=
+                dynamic_read_poll_interval_seconds,
+                consumer_factory_fn_class=consumer_factory_fn_class,
+                consumer_factory_fn_params=consumer_factory_fn_params)),
         expansion_service or default_io_expansion_service())
 
 
@@ -204,13 +274,25 @@ class WriteToKafka(ExternalTransform):
     assumed to be byte arrays.
 
     Experimental; no backwards compatibility guarantees.
+
+    When with_headers=True, the input PCollection elements must be beam.Row
+    objects with the following schema:
+
+      - key: bytes (required) - The key of the record.
+      - value: bytes (required) - The value of the record.
+      - headers: List[Row(key=str, value=bytes)] (optional) - Record headers.
+      - topic: str (optional) - Per-record topic override.
+      - partition: int (optional) - Per-record partition.
+      - timestamp: int (optional) - Per-record timestamp in milliseconds.
   """
 
   # Default serializer which passes raw bytes to Kafka
   byte_array_serializer = (
       'org.apache.kafka.common.serialization.ByteArraySerializer')
 
-  URN = 'beam:external:java:kafka:write:v1'
+  URN = 'beam:transform:org.apache.beam:kafka_write:v1'
+  URN_WITH_HEADERS = (
+      'beam:transform:org.apache.beam:kafka_write_with_headers:v1')
 
   def __init__(
       self,
@@ -218,24 +300,35 @@ class WriteToKafka(ExternalTransform):
       topic,
       key_serializer=byte_array_serializer,
       value_serializer=byte_array_serializer,
+      with_headers=False,
       expansion_service=None):
     """
     Initializes a write operation to Kafka.
 
     :param producer_config: A dictionary containing the producer configuration.
     :param topic: A Kafka topic name.
-    :param key_deserializer: A fully-qualified Java class name of a Kafka
+    :param key_serializer: A fully-qualified Java class name of a Kafka
         Serializer for the topic's key, e.g.
         'org.apache.kafka.common.serialization.LongSerializer'.
         Default: 'org.apache.kafka.common.serialization.ByteArraySerializer'.
-    :param value_deserializer: A fully-qualified Java class name of a Kafka
+    :param value_serializer: A fully-qualified Java class name of a Kafka
         Serializer for the topic's value, e.g.
         'org.apache.kafka.common.serialization.LongSerializer'.
         Default: 'org.apache.kafka.common.serialization.ByteArraySerializer'.
+    :param with_headers: If True, input elements must be beam.Row objects
+        containing 'key', 'value', and optional 'headers' fields.
+        Only ByteArraySerializer is supported when with_headers=True.
     :param expansion_service: The address (host:port) of the ExpansionService.
     """
+    if with_headers and (key_serializer != self.byte_array_serializer or
+                         value_serializer != self.byte_array_serializer):
+      raise ValueError(
+          'WriteToKafka(with_headers=True) only supports '
+          'ByteArraySerializer for key and value.')
+
+    urn = self.URN_WITH_HEADERS if with_headers else self.URN
     super().__init__(
-        self.URN,
+        urn,
         NamedTupleBasedPayloadBuilder(
             WriteToKafkaSchema(
                 producer_config=producer_config,

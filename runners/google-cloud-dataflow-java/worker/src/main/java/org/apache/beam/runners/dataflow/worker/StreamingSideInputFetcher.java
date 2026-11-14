@@ -20,12 +20,14 @@ package org.apache.beam.runners.dataflow.worker;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.apache.beam.runners.core.DoFnRunner;
+import org.apache.beam.runners.core.LateDataUtils;
 import org.apache.beam.runners.core.StateNamespaces;
 import org.apache.beam.runners.core.StateNamespaces.WindowNamespace;
 import org.apache.beam.runners.core.StateTag;
@@ -33,6 +35,7 @@ import org.apache.beam.runners.core.StateTags;
 import org.apache.beam.runners.core.TimerInternals.TimerData;
 import org.apache.beam.runners.core.TimerInternals.TimerDataCoder;
 import org.apache.beam.runners.core.TimerInternals.TimerDataCoderV2;
+import org.apache.beam.runners.dataflow.worker.streaming.sideinput.SideInputState;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill;
 import org.apache.beam.runners.dataflow.worker.windmill.Windmill.GlobalDataRequest;
 import org.apache.beam.sdk.coders.AtomicCoder;
@@ -45,17 +48,20 @@ import org.apache.beam.sdk.state.ValueState;
 import org.apache.beam.sdk.state.WatermarkHoldState;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.WindowFn;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.util.ByteStringOutputStream;
 import org.apache.beam.sdk.values.PCollectionView;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.ByteString;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.Parser;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.Parser;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Ordering;
+import org.joda.time.Instant;
 
 /** A class that handles streaming side inputs in a {@link DoFnRunner}. */
-@SuppressWarnings({"keyfor", "nullness"}) // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+@SuppressWarnings({"keyfor", "nullness"}) // TODO(https://github.com/apache/beam/issues/20497)
 public class StreamingSideInputFetcher<InputT, W extends BoundedWindow> {
   private StreamingModeExecutionContext.StreamingModeStepContext stepContext;
   private Map<String, PCollectionView<?>> sideInputViews;
@@ -78,7 +84,6 @@ public class StreamingSideInputFetcher<InputT, W extends BoundedWindow> {
     this.stepContext = stepContext;
 
     this.mainWindowCoder = windowingStrategy.getWindowFn().windowCoder();
-
     this.sideInputViews = new HashMap<>();
     for (PCollectionView<?> view : views) {
       sideInputViews.put(view.getTagInternal().getId(), view);
@@ -87,7 +92,7 @@ public class StreamingSideInputFetcher<InputT, W extends BoundedWindow> {
     this.blockedMapAddr = blockedMapAddr(mainWindowCoder);
     this.elementsAddr =
         StateTags.makeSystemTagInternal(
-            StateTags.bag("elem", WindowedValue.getFullCoder(inputCoder, mainWindowCoder)));
+            StateTags.bag("elem", WindowedValues.getFullCoder(inputCoder, mainWindowCoder)));
     this.oldTimersAddr =
         StateTags.makeSystemTagInternal(StateTags.bag("timer", TimerDataCoder.of(mainWindowCoder)));
     this.timersAddr =
@@ -135,8 +140,7 @@ public class StreamingSideInputFetcher<InputT, W extends BoundedWindow> {
           W window = entry.getKey();
           boolean allSideInputsCached = true;
           for (PCollectionView<?> view : sideInputViews.values()) {
-            if (!stepContext.issueSideInputFetch(
-                view, window, StateFetcher.SideInputState.KNOWN_READY)) {
+            if (!stepContext.issueSideInputFetch(view, window, SideInputState.KNOWN_READY)) {
               Windmill.GlobalDataRequest request = buildGlobalDataRequest(view, window);
               stepContext.addBlockingSideInput(request);
               windowBlockedSet.add(request);
@@ -184,15 +188,11 @@ public class StreamingSideInputFetcher<InputT, W extends BoundedWindow> {
     return timers;
   }
 
-  /** Compute the set of side inputs that are not yet ready for the given main input window. */
-  public boolean storeIfBlocked(WindowedValue<InputT> elem) {
-    @SuppressWarnings("unchecked")
-    W window = (W) Iterables.getOnlyElement(elem.getWindows());
-
+  private Set<Windmill.GlobalDataRequest> checkIfBlocked(W window) {
     Set<Windmill.GlobalDataRequest> blocked = blockedMap().get(window);
     if (blocked == null) {
       for (PCollectionView<?> view : sideInputViews.values()) {
-        if (!stepContext.issueSideInputFetch(view, window, StateFetcher.SideInputState.UNKNOWN)) {
+        if (!stepContext.issueSideInputFetch(view, window, SideInputState.UNKNOWN)) {
           if (blocked == null) {
             blocked = new HashSet<>();
             blockedMap().put(window, blocked);
@@ -201,7 +201,16 @@ public class StreamingSideInputFetcher<InputT, W extends BoundedWindow> {
         }
       }
     }
-    if (blocked != null) {
+    return blocked == null ? Collections.emptySet() : blocked;
+  }
+
+  /** Compute the set of side inputs that are not yet ready for the given main input window. */
+  public boolean storeIfBlocked(WindowedValue<InputT> elem) {
+    @SuppressWarnings("unchecked")
+    W window = (W) Iterables.getOnlyElement(elem.getWindows());
+
+    Set<Windmill.GlobalDataRequest> blocked = checkIfBlocked(window);
+    if (!blocked.isEmpty()) {
       elementBag(window).add(elem);
       watermarkHold(window).add(elem.getTimestamp());
       stepContext.addBlockingSideInputs(blocked);
@@ -219,17 +228,12 @@ public class StreamingSideInputFetcher<InputT, W extends BoundedWindow> {
     @SuppressWarnings("unchecked")
     WindowNamespace<W> windowNamespace = (WindowNamespace<W>) timer.getNamespace();
     W window = windowNamespace.getWindow();
-
-    boolean blocked = false;
-    for (PCollectionView<?> view : sideInputViews.values()) {
-      if (!stepContext.issueSideInputFetch(view, window, StateFetcher.SideInputState.UNKNOWN)) {
-        blocked = true;
-      }
-    }
-    if (blocked) {
+    Set<Windmill.GlobalDataRequest> blocked = checkIfBlocked(window);
+    if (!blocked.isEmpty()) {
       timerBag(window).add(timer);
+      return true;
     }
-    return blocked;
+    return false;
   }
 
   public void persist() {
@@ -305,12 +309,18 @@ public class StreamingSideInputFetcher<InputT, W extends BoundedWindow> {
     SideWindowT sideInputWindow =
         (SideWindowT) view.getWindowMappingFn().getSideInputWindow(mainWindow);
 
-    ByteString.Output windowStream = ByteString.newOutput();
+    ByteStringOutputStream windowStream = new ByteStringOutputStream();
     try {
       sideInputWindowCoder.encode(sideInputWindow, windowStream, Coder.Context.OUTER);
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
+
+    Instant firingAfter =
+        Ordering.natural()
+            .min(
+                LateDataUtils.garbageCollectionTime(sideInputWindow, sideWindowStrategy),
+                sideWindowStrategy.getTrigger().getWatermarkThatGuaranteesFiring(sideInputWindow));
 
     return Windmill.GlobalDataRequest.newBuilder()
         .setDataId(
@@ -318,13 +328,11 @@ public class StreamingSideInputFetcher<InputT, W extends BoundedWindow> {
                 .setTag(view.getTagInternal().getId())
                 .setVersion(windowStream.toByteString())
                 .build())
-        .setExistenceWatermarkDeadline(
-            WindmillTimeUtils.harnessToWindmillTimestamp(
-                sideWindowStrategy.getTrigger().getWatermarkThatGuaranteesFiring(sideInputWindow)))
+        .setExistenceWatermarkDeadline(WindmillTimeUtils.harnessToWindmillTimestamp(firingAfter))
         .build();
   }
 
-  private static class GlobalDataRequestCoder extends AtomicCoder<GlobalDataRequest> {
+  static class GlobalDataRequestCoder extends AtomicCoder<GlobalDataRequest> {
     private final Class<Windmill.GlobalDataRequest> protoMessageClass =
         Windmill.GlobalDataRequest.class;
     private transient Parser<Windmill.GlobalDataRequest> memoizedParser;

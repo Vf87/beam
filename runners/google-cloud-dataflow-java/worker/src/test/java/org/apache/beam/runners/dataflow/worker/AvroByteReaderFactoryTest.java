@@ -29,7 +29,7 @@ import org.apache.beam.sdk.coders.BigEndianIntegerCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.hamcrest.core.IsInstanceOf;
 import org.junit.Assert;
@@ -40,7 +40,7 @@ import org.junit.runners.JUnit4;
 /** Tests for {@link AvroByteReaderFactory}. */
 @RunWith(JUnit4.class)
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class AvroByteReaderFactoryTest {
   private final String pathToAvroFile = "/path/to/file.avro";
@@ -74,10 +74,13 @@ public class AvroByteReaderFactoryTest {
   @Test
   public void testCreatePlainAvroByteReader() throws Exception {
     Coder<?> coder =
-        WindowedValue.getFullCoder(BigEndianIntegerCoder.of(), GlobalWindow.Coder.INSTANCE);
+        WindowedValues.getFullCoder(BigEndianIntegerCoder.of(), GlobalWindow.Coder.INSTANCE);
     NativeReader<?> reader =
         runTestCreateAvroReader(
-            pathToAvroFile, null, null, CloudObjects.asCloudObject(coder, /*sdkComponents=*/ null));
+            pathToAvroFile,
+            null,
+            null,
+            CloudObjects.asCloudObject(coder, /* sdkComponents= */ null));
 
     assertThat(reader, new IsInstanceOf(AvroByteReader.class));
     AvroByteReader avroReader = (AvroByteReader) reader;
@@ -90,10 +93,13 @@ public class AvroByteReaderFactoryTest {
   @Test
   public void testCreateRichAvroByteReader() throws Exception {
     Coder<?> coder =
-        WindowedValue.getFullCoder(BigEndianIntegerCoder.of(), GlobalWindow.Coder.INSTANCE);
+        WindowedValues.getFullCoder(BigEndianIntegerCoder.of(), GlobalWindow.Coder.INSTANCE);
     NativeReader<?> reader =
         runTestCreateAvroReader(
-            pathToAvroFile, 200L, 500L, CloudObjects.asCloudObject(coder, /*sdkComponents=*/ null));
+            pathToAvroFile,
+            200L,
+            500L,
+            CloudObjects.asCloudObject(coder, /* sdkComponents= */ null));
 
     assertThat(reader, new IsInstanceOf(AvroByteReader.class));
     AvroByteReader avroReader = (AvroByteReader) reader;

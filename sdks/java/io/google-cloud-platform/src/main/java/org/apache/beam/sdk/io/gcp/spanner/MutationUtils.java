@@ -20,19 +20,24 @@ package org.apache.beam.sdk.io.gcp.spanner;
 import static java.util.stream.Collectors.toList;
 import static org.apache.beam.sdk.io.gcp.spanner.StructUtils.beamRowToStruct;
 import static org.apache.beam.sdk.io.gcp.spanner.StructUtils.beamTypeToSpannerType;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.cloud.ByteArray;
 import com.google.cloud.Timestamp;
 import com.google.cloud.spanner.Key;
 import com.google.cloud.spanner.Mutation;
+import com.google.cloud.spanner.Value;
 import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.StreamSupport;
 import org.apache.beam.sdk.schemas.Schema;
+import org.apache.beam.sdk.schemas.logicaltypes.MicrosInstant;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.ReadableDateTime;
 
@@ -58,7 +63,7 @@ final class MutationUtils {
    */
   public static SerializableFunction<Row, Mutation> beamRowToMutationFn(
       Mutation.Op operation, String table) {
-    return (row -> {
+    return row -> {
       switch (operation) {
         case INSERT:
           return MutationUtils.createMutationFromBeamRows(Mutation.newInsertBuilder(table), row);
@@ -75,7 +80,7 @@ final class MutationUtils {
           throw new IllegalArgumentException(
               String.format("Unknown mutation operation type: %s", operation));
       }
-    });
+    };
   }
 
   private static Key createKeyFromBeamRow(Row row) {
@@ -88,7 +93,7 @@ final class MutationUtils {
     return builder.build();
   }
 
-  private static Mutation createMutationFromBeamRows(
+  public static Mutation createMutationFromBeamRows(
       Mutation.WriteBuilder mutationBuilder, Row row) {
     Schema schema = row.getSchema();
     List<String> columns = schema.getFieldNames();
@@ -97,6 +102,11 @@ final class MutationUtils {
             setBeamValueToMutation(
                 mutationBuilder, schema.getField(columnName).getType(), columnName, row));
     return mutationBuilder.build();
+  }
+
+  private static Timestamp toSpannerTimestamp(Instant instant) {
+    long micros = instant.getEpochSecond() * 1_000_000L + instant.getNano() / 1_000L;
+    return Timestamp.ofTimeMicroseconds(micros);
   }
 
   private static void setBeamValueToKey(
@@ -144,6 +154,21 @@ final class MutationUtils {
         keyBuilder.append(row.getDecimal(columnName));
         break;
         // TODO: Implement logical date and datetime
+      case LOGICAL_TYPE:
+        Schema.LogicalType<?, ?> logicalType = checkNotNull(field.getLogicalType());
+        String identifier = logicalType.getIdentifier();
+        if (identifier.equals(MicrosInstant.IDENTIFIER)) {
+          Instant instant = row.getValue(columnName);
+          if (instant == null) {
+            keyBuilder.append((Timestamp) null);
+          } else {
+            keyBuilder.append(toSpannerTimestamp(instant));
+          }
+        } else {
+          throw new IllegalArgumentException(
+              String.format("Unsupported logical type in key: %s", identifier));
+        }
+        break;
       case DATETIME:
         @Nullable ReadableDateTime dateTime = row.getDateTime(columnName);
         if (dateTime == null) {
@@ -207,12 +232,7 @@ final class MutationUtils {
         mutationBuilder.set(columnName).to(row.getInt64(columnName));
         break;
       case FLOAT:
-        @Nullable Float floatValue = row.getFloat(columnName);
-        if (floatValue == null) {
-          mutationBuilder.set(columnName).to(((Double) null));
-        } else {
-          mutationBuilder.set(columnName).to(floatValue);
-        }
+        mutationBuilder.set(columnName).to(row.getFloat(columnName));
         break;
       case DOUBLE:
         mutationBuilder.set(columnName).to(row.getDouble(columnName));
@@ -221,12 +241,26 @@ final class MutationUtils {
         @Nullable BigDecimal decimal = row.getDecimal(columnName);
         // BigDecimal is not nullable
         if (decimal == null) {
-          checkNotNull(decimal, "Null decimal at column " + columnName);
+          checkNotNull(decimal, "Null decimal at column %s", columnName);
         } else {
           mutationBuilder.set(columnName).to(decimal);
         }
         break;
-        // TODO: Implement logical date and datetime
+      case LOGICAL_TYPE:
+        Schema.LogicalType<?, ?> logicalType = checkNotNull(fieldType.getLogicalType());
+        String identifier = logicalType.getIdentifier();
+        if (identifier.equals(MicrosInstant.IDENTIFIER)) {
+          @Nullable Instant instant = row.getValue(columnName);
+          if (instant == null) {
+            mutationBuilder.set(columnName).to((Timestamp) null);
+          } else {
+            mutationBuilder.set(columnName).to(toSpannerTimestamp(instant));
+          }
+        } else {
+          throw new IllegalArgumentException(
+              String.format("Unsupported logical type: %s", identifier));
+        }
+        break;
       case DATETIME:
         @Nullable ReadableDateTime dateTime = row.getDateTime(columnName);
         if (dateTime == null) {
@@ -311,6 +345,8 @@ final class MutationUtils {
         mutationBuilder.set(column).toInt64Array((Iterable<Long>) ((Object) iterable));
         break;
       case FLOAT:
+        mutationBuilder.set(column).toFloat32Array((Iterable<Float>) ((Object) iterable));
+        break;
       case DOUBLE:
         mutationBuilder.set(column).toFloat64Array((Iterable<Double>) ((Object) iterable));
         break;
@@ -335,6 +371,27 @@ final class MutationUtils {
       case STRING:
         mutationBuilder.set(column).toStringArray((Iterable<String>) ((Object) iterable));
         break;
+      case LOGICAL_TYPE:
+        String identifier = checkNotNull(beamIterableType.getLogicalType()).getIdentifier();
+        if (identifier.equals(MicrosInstant.IDENTIFIER)) {
+          if (iterable == null) {
+            mutationBuilder.set(column).toTimestampArray(null);
+          } else {
+            mutationBuilder
+                .set(column)
+                .toTimestampArray(
+                    StreamSupport.stream(iterable.spliterator(), false)
+                        .map(
+                            instant -> {
+                              return toSpannerTimestamp((java.time.Instant) instant);
+                            })
+                        .collect(toList()));
+          }
+        } else {
+          throw new IllegalArgumentException(
+              String.format("Unsupported logical type in iterable: %s", identifier));
+        }
+        break;
       case DATETIME:
         if (iterable == null) {
           mutationBuilder.set(column).toDateArray(null);
@@ -343,7 +400,7 @@ final class MutationUtils {
               .set(column)
               .toTimestampArray(
                   StreamSupport.stream(iterable.spliterator(), false)
-                      .map(datetime -> Timestamp.parseTimestamp((datetime).toString()))
+                      .map(datetime -> Timestamp.parseTimestamp(datetime.toString()))
                       .collect(toList()));
         }
         break;
@@ -352,6 +409,63 @@ final class MutationUtils {
             String.format(
                 "Unsupported iterable type '%s' while translating row to struct.",
                 beamIterableType.getTypeName()));
+    }
+  }
+
+  public static Row createRowFromMutation(Schema schema, Mutation mutation) {
+    Map<String, Object> mutationHashMap = new HashMap<>();
+    mutation
+        .asMap()
+        .forEach(
+            (column, value) -> mutationHashMap.put(column, convertValueToBeamFieldType(value)));
+    return Row.withSchema(schema).withFieldValues(mutationHashMap).build();
+  }
+
+  public static Object convertValueToBeamFieldType(Value value) {
+    switch (value.getType().getCode()) {
+      case BOOL:
+        return value.getBool();
+      case BYTES:
+        return value.getBytes();
+      case DATE:
+        return value.getDate();
+      case INT64:
+        return value.getInt64();
+      case FLOAT64:
+        return value.getFloat64();
+      case NUMERIC:
+        return value.getNumeric();
+      case TIMESTAMP:
+        return value.getTimestamp();
+      case STRING:
+        return value.getString();
+      case JSON:
+        return value.getJson();
+      case ARRAY:
+        switch (value.getType().getArrayElementType().getCode()) {
+          case BOOL:
+            return value.getBoolArray();
+          case BYTES:
+            return value.getBytesArray();
+          case DATE:
+            return value.getDateArray();
+          case INT64:
+            return value.getInt64Array();
+          case FLOAT64:
+            return value.getFloat64Array();
+          case NUMERIC:
+            return value.getNumericArray();
+          case TIMESTAMP:
+            return value.getTimestampArray();
+          case STRING:
+            return value.getStringArray();
+          case JSON:
+            return value.getJsonArray();
+          default:
+            return value.toString();
+        }
+      default:
+        return value.toString();
     }
   }
 }

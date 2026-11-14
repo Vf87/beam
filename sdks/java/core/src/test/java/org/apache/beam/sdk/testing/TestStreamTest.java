@@ -36,7 +36,6 @@ import org.apache.beam.sdk.state.Timer;
 import org.apache.beam.sdk.state.TimerSpec;
 import org.apache.beam.sdk.state.TimerSpecs;
 import org.apache.beam.sdk.state.ValueState;
-import org.apache.beam.sdk.testing.TestStream.Builder;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -66,7 +65,7 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.TypeDescriptors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Rule;
@@ -74,10 +73,12 @@ import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
 
 /** Tests for {@link TestStream}. */
-@RunWith(JUnit4.class)
+@RunWith(BeamParallelJunit4Runner.class)
+// TODO(https://github.com/apache/beam/issues/21230): Remove when new version of errorprone is
+// released (2.11.0)
+@SuppressWarnings("unused")
 public class TestStreamTest implements Serializable {
   @Rule public transient TestPipeline p = TestPipeline.create();
   @Rule public transient ExpectedException thrown = ExpectedException.none();
@@ -95,6 +96,9 @@ public class TestStreamTest implements Serializable {
             .advanceWatermarkTo(instant.plus(Duration.standardMinutes(6)))
             // These elements are late but within the allowed lateness
             .addElements(TimestampedValue.of(4L, instant), TimestampedValue.of(5L, instant))
+            .advanceWatermarkTo(instant.plus(Duration.standardMinutes(10)))
+            // FIXME: Without advancing the watermark once more the (lower) input watermark remains
+            // at 6 mins, but data in [0,5 min) won't be considered late until it passes 10 mins.
             .advanceWatermarkTo(instant.plus(Duration.standardMinutes(20)))
             // These elements are droppably late
             .addElements(
@@ -326,16 +330,18 @@ public class TestStreamTest implements Serializable {
 
   @Test
   public void testElementAtPositiveInfinityThrows() {
-    Builder<Integer> stream =
+    TestStream.Builder<Integer> stream =
         TestStream.create(VarIntCoder.of())
-            .addElements(TimestampedValue.of(-1, BoundedWindow.TIMESTAMP_MAX_VALUE.minus(1L)));
+            .addElements(
+                TimestampedValue.of(
+                    -1, BoundedWindow.TIMESTAMP_MAX_VALUE.minus(Duration.millis(1L))));
     thrown.expect(IllegalArgumentException.class);
     stream.addElements(TimestampedValue.of(1, BoundedWindow.TIMESTAMP_MAX_VALUE));
   }
 
   @Test
   public void testAdvanceWatermarkNonMonotonicThrows() {
-    Builder<Integer> stream =
+    TestStream.Builder<Integer> stream =
         TestStream.create(VarIntCoder.of()).advanceWatermarkTo(new Instant(0L));
     thrown.expect(IllegalArgumentException.class);
     stream.advanceWatermarkTo(new Instant(-1L));
@@ -343,9 +349,9 @@ public class TestStreamTest implements Serializable {
 
   @Test
   public void testAdvanceWatermarkEqualToPositiveInfinityThrows() {
-    Builder<Integer> stream =
+    TestStream.Builder<Integer> stream =
         TestStream.create(VarIntCoder.of())
-            .advanceWatermarkTo(BoundedWindow.TIMESTAMP_MAX_VALUE.minus(1L));
+            .advanceWatermarkTo(BoundedWindow.TIMESTAMP_MAX_VALUE.minus(Duration.millis(1L)));
     thrown.expect(IllegalArgumentException.class);
     stream.advanceWatermarkTo(BoundedWindow.TIMESTAMP_MAX_VALUE);
   }
@@ -356,12 +362,12 @@ public class TestStreamTest implements Serializable {
     TestStream<Long> source =
         TestStream.create(VarLongCoder.of())
             .addElements(TimestampedValue.of(1L, new Instant(1000L)))
-            .advanceProcessingTime(Duration.standardMinutes(6)) // Fire early pane
+            .advanceProcessingTime(Duration.standardMinutes(6)) // Fire early paneInfo
             .addElements(TimestampedValue.of(2L, new Instant(2000L)))
-            .advanceProcessingTime(Duration.standardMinutes(6)) // Fire early pane
+            .advanceProcessingTime(Duration.standardMinutes(6)) // Fire early paneInfo
             .addElements(TimestampedValue.of(3L, new Instant(3000L)))
-            .advanceProcessingTime(Duration.standardMinutes(6)) // Fire early pane
-            .advanceWatermarkToInfinity(); // Fire on-time pane
+            .advanceProcessingTime(Duration.standardMinutes(6)) // Fire early paneInfo
+            .advanceWatermarkToInfinity(); // Fire on-time paneInfo
 
     PCollection<KV<String, Long>> sum =
         p.apply(source)
@@ -403,7 +409,12 @@ public class TestStreamTest implements Serializable {
   }
 
   @Test
-  @Category({ValidatesRunner.class, UsesTestStream.class, UsesTestStreamWithMultipleStages.class})
+  @Category({
+    ValidatesRunner.class,
+    UsesTestStream.class,
+    UsesTestStreamWithMultipleStages.class,
+    UsesStatefulParDo.class
+  })
   public void testMultiStage() throws Exception {
     TestStream<String> testStream =
         TestStream.create(StringUtf8Coder.of())
@@ -437,6 +448,7 @@ public class TestStreamTest implements Serializable {
             .apply(
                 ParDo.of(
                     new DoFn<KV<String, String>, String>() {
+
                       @StateId("seen")
                       private final StateSpec<ValueState<String>> seenSpec =
                           StateSpecs.value(StringUtf8Coder.of());

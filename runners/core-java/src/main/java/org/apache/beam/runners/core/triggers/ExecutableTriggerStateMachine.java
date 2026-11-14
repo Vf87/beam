@@ -17,22 +17,19 @@
  */
 package org.apache.beam.runners.core.triggers;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
-import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 
 /**
  * A wrapper around a trigger used during execution. While an actual trigger may appear multiple
  * times (both in the same trigger expression and in other trigger expressions), the {@code
  * ExecutableTrigger} wrapped around them forms a tree (only one occurrence).
  */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
 public class ExecutableTriggerStateMachine implements Serializable {
 
   /** Store the index assigned to this trigger. */
@@ -42,18 +39,17 @@ public class ExecutableTriggerStateMachine implements Serializable {
   private final List<ExecutableTriggerStateMachine> subTriggers = new ArrayList<>();
   private final TriggerStateMachine trigger;
 
-  public static <W extends BoundedWindow> ExecutableTriggerStateMachine create(
-      TriggerStateMachine trigger) {
+  public static ExecutableTriggerStateMachine create(TriggerStateMachine trigger) {
     return create(trigger, 0);
   }
 
-  private static <W extends BoundedWindow> ExecutableTriggerStateMachine create(
+  private static ExecutableTriggerStateMachine create(
       TriggerStateMachine trigger, int nextUnusedIndex) {
 
     return new ExecutableTriggerStateMachine(trigger, nextUnusedIndex);
   }
 
-  public static <W extends BoundedWindow> ExecutableTriggerStateMachine createForOnceTrigger(
+  public static ExecutableTriggerStateMachine createForOnceTrigger(
       TriggerStateMachine trigger, int nextUnusedIndex) {
     return new ExecutableTriggerStateMachine(trigger, nextUnusedIndex);
   }
@@ -62,12 +58,10 @@ public class ExecutableTriggerStateMachine implements Serializable {
     this.trigger = checkNotNull(trigger, "trigger must not be null");
     this.triggerIndex = nextUnusedIndex++;
 
-    if (trigger.subTriggers() != null) {
-      for (TriggerStateMachine subTrigger : trigger.subTriggers()) {
-        ExecutableTriggerStateMachine subExecutable = create(subTrigger, nextUnusedIndex);
-        subTriggers.add(subExecutable);
-        nextUnusedIndex = subExecutable.firstIndexAfterSubtree;
-      }
+    for (TriggerStateMachine subTrigger : trigger.subTriggers()) {
+      ExecutableTriggerStateMachine subExecutable = create(subTrigger, nextUnusedIndex);
+      subTriggers.add(subExecutable);
+      nextUnusedIndex = subExecutable.firstIndexAfterSubtree;
     }
     firstIndexAfterSubtree = nextUnusedIndex;
   }
@@ -101,18 +95,19 @@ public class ExecutableTriggerStateMachine implements Serializable {
   }
 
   public ExecutableTriggerStateMachine getSubTriggerContaining(int index) {
-    checkNotNull(subTriggers);
     checkState(
         index > triggerIndex && index < firstIndexAfterSubtree,
         "Cannot find sub-trigger containing index not in this tree.");
     ExecutableTriggerStateMachine previous = null;
     for (ExecutableTriggerStateMachine subTrigger : subTriggers) {
       if (index < subTrigger.triggerIndex) {
-        return previous;
+        break;
       }
       previous = subTrigger;
     }
-    return previous;
+    // The bounds check above places the index within this subtree but past this trigger itself,
+    // so it always falls inside one of the sub-triggers.
+    return checkStateNotNull(previous, "No sub-trigger of %s contains index %s", trigger, index);
   }
 
   public void invokePrefetchOnElement(TriggerStateMachine.PrefetchContext c) {

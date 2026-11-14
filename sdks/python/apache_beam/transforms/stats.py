@@ -15,8 +15,6 @@
 # limitations under the License.
 #
 
-# cython: language_level=3
-
 """This module has all statistic related transforms.
 
 This ApproximateUnique class will be deprecated [1]. PLease look into using
@@ -30,14 +28,15 @@ ns/zetasketch/HllCount.html
 
 # pytype: skip-file
 
+# ruff: noqa: UP006
 import hashlib
 import heapq
 import itertools
 import logging
 import math
 import typing
+from collections.abc import Callable
 from typing import Any
-from typing import Callable
 from typing import List
 from typing import Tuple
 
@@ -263,7 +262,7 @@ class ApproximateUniqueCombineFn(CombineFn):
     except Exception as e:
       raise RuntimeError("Runtime exception: %s" % e)
 
-  # created an issue https://issues.apache.org/jira/browse/BEAM-7285 to speed up
+  # created an issue https://github.com/apache/beam/issues/19459 to speed up
   # merge process.
   def merge_accumulators(self, accumulators, *args, **kwargs):
     merged_accumulator = self.create_accumulator()
@@ -323,8 +322,8 @@ class ApproximateQuantiles(object):
     }
 
   @typehints.with_input_types(
-      typehints.Union[typing.Sequence[T], typing.Tuple[T, float]])
-  @typehints.with_output_types(typing.List[T])
+      typing.Union[T, typing.Sequence[T], Tuple[T, float]])
+  @typehints.with_output_types(List[T])
   class Globally(PTransform):
     """
     PTransform takes PCollection and returns a list whose single value is
@@ -376,9 +375,8 @@ class ApproximateQuantiles(object):
           input_batched=self._input_batched)
 
   @typehints.with_input_types(
-      typehints.Union[typing.Tuple[K, V],
-                      typing.Tuple[K, typing.Tuple[V, float]]])
-  @typehints.with_output_types(typing.Tuple[K, typing.List[V]])
+      typehints.Union[Tuple[K, V], Tuple[K, Tuple[V, float]]])
+  @typehints.with_output_types(Tuple[K, List[V]])
   class PerKey(PTransform):
     """
     PTransform takes PCollection of KV and returns a list based on each key
@@ -480,7 +478,7 @@ class _QuantileBuffer(object):
   &type=pdf and ApproximateQuantilesCombineFn for further information)"""
   def __init__(
       self, elements, weights, weighted, level=0, min_val=None, max_val=None):
-    # type: (List, List, bool, int, Any, Any) -> None
+    # type: (list, list, bool, int, Any, Any) -> None
     self.elements = elements
     # In non-weighted case weights contains a single element representing weight
     # of the buffer in the sense of the original algorithm. In weighted case,
@@ -919,8 +917,9 @@ class ApproximateQuantilesCombineFn(CombineFn):
       self._offset_jitter = 2 - self._offset_jitter
       return (new_weight + self._offset_jitter) / 2
 
-  # TODO(BEAM-7746): Signature incompatible with supertype
-  def create_accumulator(self):  # type: ignore[override]
+  # TODO(https://github.com/apache/beam/issues/19737): Signature incompatible
+  # with supertype
+  def create_accumulator(self):
     # type: () -> _QuantileState
     self._qs = _QuantileState(
         unbuffered_elements=[],

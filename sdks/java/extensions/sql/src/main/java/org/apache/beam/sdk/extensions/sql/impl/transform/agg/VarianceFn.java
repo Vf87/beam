@@ -29,7 +29,8 @@ import org.apache.beam.sdk.extensions.sql.impl.utils.BigDecimalConverter;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.SerializableFunction;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.runtime.SqlFunctions;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.runtime.SqlFunctions;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
  * {@link Combine.CombineFn} for <em>Variance</em> on {@link Number} types.
@@ -66,40 +67,52 @@ import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.runtime.SqlFunc
  */
 @Internal
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
-public class VarianceFn<T extends Number> extends Combine.CombineFn<T, VarianceAccumulator, T> {
+public class VarianceFn<T extends Number>
+    extends Combine.CombineFn<T, VarianceAccumulator, @Nullable T> {
 
   static final MathContext MATH_CTX = new MathContext(10, RoundingMode.HALF_UP);
 
   private static final boolean SAMPLE = true;
   private static final boolean POP = false;
 
-  private boolean isSample; // flag to determine return value should be Variance Pop or Sample
-  private SerializableFunction<BigDecimal, T> decimalConverter;
+  private final boolean isSample; // flag to determine return value should be Variance Pop or Sample
+  private final boolean isStddev;
+  private final SerializableFunction<BigDecimal, T> decimalConverter;
 
-  public static <V extends Number> VarianceFn newPopulation(Schema.TypeName typeName) {
+  public static VarianceFn newPopulation(Schema.TypeName typeName) {
     return newPopulation(BigDecimalConverter.forSqlType(typeName));
   }
 
   public static <V extends Number> VarianceFn newPopulation(
       SerializableFunction<BigDecimal, V> decimalConverter) {
 
-    return new VarianceFn<>(POP, decimalConverter);
+    return new VarianceFn<>(POP, false, decimalConverter);
   }
 
-  public static <V extends Number> VarianceFn newSample(Schema.TypeName typeName) {
+  public static VarianceFn newSample(Schema.TypeName typeName) {
     return newSample(BigDecimalConverter.forSqlType(typeName));
   }
 
   public static <V extends Number> VarianceFn newSample(
       SerializableFunction<BigDecimal, V> decimalConverter) {
 
-    return new VarianceFn<>(SAMPLE, decimalConverter);
+    return new VarianceFn<>(SAMPLE, false, decimalConverter);
   }
 
-  private VarianceFn(boolean isSample, SerializableFunction<BigDecimal, T> decimalConverter) {
+  public static VarianceFn newSampleStddev(Schema.TypeName typeName) {
+    return new VarianceFn<>(SAMPLE, true, BigDecimalConverter.forSqlType(typeName));
+  }
+
+  public static VarianceFn newPopulationStddev(Schema.TypeName typeName) {
+    return new VarianceFn<>(POP, true, BigDecimalConverter.forSqlType(typeName));
+  }
+
+  private VarianceFn(
+      boolean isSample, boolean isStddev, SerializableFunction<BigDecimal, T> decimalConverter) {
     this.isSample = isSample;
+    this.isStddev = isStddev;
     this.decimalConverter = decimalConverter;
   }
 
@@ -132,18 +145,33 @@ public class VarianceFn<T extends Number> extends Combine.CombineFn<T, VarianceA
   }
 
   @Override
-  public T extractOutput(VarianceAccumulator accumulator) {
-    return decimalConverter.apply(getVariance(accumulator));
+  public @Nullable T extractOutput(VarianceAccumulator accumulator) {
+    BigDecimal result = getVariance(accumulator);
+    if (result == null) {
+      return null;
+    }
+    if (isStddev) {
+      double doubleVal = result.doubleValue();
+      if (doubleVal < 0.0) {
+        doubleVal = 0.0; // Clamp negative variance due to numerical instability
+      }
+      double sqrtVal = Math.sqrt(doubleVal);
+      if (Double.isInfinite(sqrtVal)) {
+        return decimalConverter.apply(result.sqrt(MATH_CTX));
+      }
+      result = BigDecimal.valueOf(sqrtVal);
+    }
+    return decimalConverter.apply(result);
   }
 
-  private BigDecimal getVariance(VarianceAccumulator variance) {
+  private @Nullable BigDecimal getVariance(VarianceAccumulator variance) {
 
     BigDecimal adjustedCount =
         this.isSample ? variance.count().subtract(BigDecimal.ONE) : variance.count();
 
-    // Avoid ArithmeticException: Division is undefined when adjustedCount is 0
-    if (adjustedCount.equals(BigDecimal.ZERO)) {
-      return BigDecimal.ZERO;
+    // Sample variance of <= 1 element or population variance of 0 elements is undefined (NULL).
+    if (adjustedCount.compareTo(BigDecimal.ZERO) <= 0) {
+      return null;
     }
 
     return variance.variance().divide(adjustedCount, MATH_CTX);

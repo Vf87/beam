@@ -32,6 +32,7 @@ the stored person record.
 """
 
 import logging
+import typing
 
 import apache_beam as beam
 from apache_beam.testing.benchmarks.nexmark.models import nexmark_model
@@ -73,10 +74,8 @@ def load(events, metadata=None, pipeline_options=None):
               JoinFn(metadata.get('max_auction_waiting_time')))
           | 'query3_output' >> beam.Map(
               lambda t: {
-                  ResultNames.NAME: t[1].name,
-                  ResultNames.CITY: t[1].city,
-                  ResultNames.STATE: t[1].state,
-                  ResultNames.AUCTION_ID: t[0].id
+                  ResultNames.NAME: t[1].name, ResultNames.CITY: t[1].city,
+                  ResultNames.STATE: t[1].state, ResultNames.AUCTION_ID: t[0].id
               }))
 
 
@@ -107,9 +106,13 @@ class JoinFn(beam.DoFn):
   def __init__(self, max_auction_wait_time):
     self.max_auction_wait_time = max_auction_wait_time
 
-  def process(
+  def process(  # type: ignore
       self,
-      element,
+      element: tuple[
+          str,
+          dict[str,
+               typing.Union[list[nexmark_model.Auction],
+                            list[nexmark_model.Person]]]],
       auction_state=beam.DoFn.StateParam(auction_spec),
       person_state=beam.DoFn.StateParam(person_spec),
       person_timer=beam.DoFn.TimerParam(person_timer_spec)):

@@ -17,21 +17,21 @@
  */
 package org.apache.beam.fn.harness.control;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Throwables.getStackTraceAsString;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Throwables.getStackTraceAsString;
 
 import java.util.EnumMap;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import org.apache.beam.fn.harness.logging.BeamFnLoggingMDC;
+import org.apache.beam.fn.harness.state.WorkCancelledException;
 import org.apache.beam.model.fnexecution.v1.BeamFnApi;
 import org.apache.beam.model.fnexecution.v1.BeamFnControlGrpc;
 import org.apache.beam.model.pipeline.v1.Endpoints.ApiServiceDescriptor;
 import org.apache.beam.sdk.fn.channel.ManagedChannelFactory;
 import org.apache.beam.sdk.fn.stream.OutboundObserverFactory;
 import org.apache.beam.sdk.function.ThrowingFunction;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.Status;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.StreamObserver;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Status;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -82,11 +82,11 @@ public class BeamFnControlClient {
               BeamFnApi.InstructionRequest.RequestCase,
               ThrowingFunction<BeamFnApi.InstructionRequest, BeamFnApi.InstructionResponse.Builder>>
           handlers) {
+    this.onFinish = new CompletableFuture<>();
+    this.handlers = handlers;
     this.outboundObserver =
         outboundObserverFactory.outboundObserverFor(
             controlStub::control, new InboundObserver(executor));
-    this.handlers = handlers;
-    this.onFinish = new CompletableFuture<>();
   }
 
   private static final Object COMPLETED = new Object();
@@ -119,11 +119,11 @@ public class BeamFnControlClient {
                 sendErrorResponse(e);
                 throw e;
               } finally {
-                BeamFnLoggingMDC.setInstructionId(null);
+                BeamFnLoggingMDC.reset();
               }
             });
       } finally {
-        BeamFnLoggingMDC.setInstructionId(null);
+        BeamFnLoggingMDC.reset();
       }
     }
 
@@ -139,8 +139,8 @@ public class BeamFnControlClient {
   }
 
   /** This method blocks until the control stream has completed. */
-  public void waitForTermination() throws InterruptedException, ExecutionException {
-    onFinish.get();
+  public CompletableFuture<Object> terminationFuture() {
+    return onFinish;
   }
 
   public BeamFnApi.InstructionResponse delegateOnInstructionRequestType(
@@ -152,11 +152,19 @@ public class BeamFnControlClient {
           .setInstructionId(value.getInstructionId())
           .build();
     } catch (Exception e) {
-      LOG.error(
-          "Exception while trying to handle {} {}",
-          BeamFnApi.InstructionRequest.class.getSimpleName(),
-          value.getInstructionId(),
-          e);
+      if (WorkCancelledException.isWorkCancelledException(e)) {
+        LOG.info(
+            "Instruction {} {} cancelled by runner",
+            BeamFnApi.InstructionRequest.class.getSimpleName(),
+            value.getInstructionId(),
+            e);
+      } else {
+        LOG.error(
+            "Exception while trying to handle {} {}",
+            BeamFnApi.InstructionRequest.class.getSimpleName(),
+            value.getInstructionId(),
+            e);
+      }
       return BeamFnApi.InstructionResponse.newBuilder()
           .setInstructionId(value.getInstructionId())
           .setError(getStackTraceAsString(e))

@@ -18,95 +18,94 @@
 package org.apache.beam.runners.spark.structuredstreaming;
 
 import static org.apache.beam.runners.core.metrics.MetricsContainerStepMap.asAttemptedOnlyMetricResults;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects.firstNonNull;
 
 import java.io.IOException;
-import java.util.Objects;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 import org.apache.beam.runners.spark.structuredstreaming.metrics.MetricsAccumulator;
+import org.apache.beam.runners.spark.structuredstreaming.translation.EvaluationContext;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.metrics.MetricResults;
 import org.apache.beam.sdk.util.UserCodeException;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.Futures;
 import org.apache.spark.SparkException;
-import org.apache.spark.sql.SparkSession;
-import org.apache.spark.sql.streaming.StreamingQuery;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-/** Represents a Spark pipeline execution result. */
-@SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
+/**
+ * Result of a pipeline submitted to the {@link SparkStructuredStreamingRunner}. The pipeline runs
+ * asynchronously on a dedicated thread.
+ */
 public class SparkStructuredStreamingPipelineResult implements PipelineResult {
 
-  final Future pipelineExecution;
-  final SparkSession sparkSession;
-  PipelineResult.State state;
+  private static final Logger LOG =
+      LoggerFactory.getLogger(SparkStructuredStreamingPipelineResult.class);
 
-  boolean isStreaming;
+  private final Future<?> pipelineExecution;
+  // Supplies the context of the translated pipeline, null until translation has completed.
+  private final Supplier<? extends @Nullable EvaluationContext> evaluationContext;
+  private final MetricsAccumulator metrics;
+  private final AtomicBoolean cancelRequested;
+  private final Runnable cancelSparkJobs;
+  private volatile PipelineResult.State state;
 
   SparkStructuredStreamingPipelineResult(
-      final Future<?> pipelineExecution, final SparkSession sparkSession) {
+      Future<?> pipelineExecution,
+      Supplier<? extends @Nullable EvaluationContext> evaluationContext,
+      MetricsAccumulator metrics,
+      AtomicBoolean cancelRequested,
+      Runnable cancelSparkJobs) {
     this.pipelineExecution = pipelineExecution;
-    this.sparkSession = sparkSession;
+    this.evaluationContext = evaluationContext;
+    this.metrics = metrics;
+    this.cancelRequested = cancelRequested;
+    this.cancelSparkJobs = cancelSparkJobs;
     // pipelineExecution is expected to have started executing eagerly.
     this.state = State.RUNNING;
-    // TODO: Implement results on a streaming pipeline. Currently does not stream.
-    this.isStreaming = false;
   }
 
   private static RuntimeException runtimeExceptionFrom(final Throwable e) {
     return (e instanceof RuntimeException) ? (RuntimeException) e : new RuntimeException(e);
   }
 
-  private static RuntimeException beamExceptionFrom(final Throwable e) {
-    // Scala doesn't declare checked exceptions in the bytecode, and the Java compiler
-    // won't let you catch something that is not declared, so we can't catch
-    // SparkException directly, instead we do an instanceof check.
-
-    if (e instanceof SparkException) {
-      if (e.getCause() != null && e.getCause() instanceof UserCodeException) {
-        UserCodeException userException = (UserCodeException) e.getCause();
-        return new Pipeline.PipelineExecutionException(userException.getCause());
-      } else if (e.getCause() != null) {
-        return new Pipeline.PipelineExecutionException(e.getCause());
-      }
+  /**
+   * Unwrap cause of SparkException or UserCodeException as PipelineExecutionException. Otherwise,
+   * return {@code exception} as RuntimeException.
+   */
+  private static RuntimeException unwrapCause(Throwable exception) {
+    Throwable next = exception;
+    while (next != null && (next instanceof SparkException || next instanceof UserCodeException)) {
+      exception = next;
+      next = next.getCause();
     }
-
-    return runtimeExceptionFrom(e);
-  }
-
-  protected void stop() {
-    try {
-      // TODO: await any outstanding queries on the session if this is streaming.
-      if (isStreaming) {
-        for (StreamingQuery query : sparkSession.streams().active()) {
-          query.stop();
-        }
-      }
-    } catch (Exception e) {
-      throw beamExceptionFrom(e);
-    } finally {
-      sparkSession.stop();
-      if (Objects.equals(state, State.RUNNING)) {
-        this.state = State.STOPPED;
-      }
-    }
-  }
-
-  private State awaitTermination(Duration duration)
-      throws TimeoutException, ExecutionException, InterruptedException {
-    pipelineExecution.get(duration.getMillis(), TimeUnit.MILLISECONDS);
-    // Throws an exception if the job is not finished successfully in the given time.
-    // TODO: all streaming functionality
-    return PipelineResult.State.DONE;
+    return exception == next
+        ? runtimeExceptionFrom(exception)
+        : new Pipeline.PipelineExecutionException(firstNonNull(next, exception));
   }
 
   @Override
   public PipelineResult.State getState() {
+    if (!state.isTerminal() && pipelineExecution.isDone()) {
+      if (cancelRequested.get()) {
+        state = State.CANCELLED;
+      } else {
+        try {
+          Futures.getDone(pipelineExecution);
+          state = State.DONE;
+        } catch (ExecutionException | CancellationException e) {
+          state = State.FAILED;
+        }
+      }
+    }
     return state;
   }
 
@@ -115,41 +114,51 @@ public class SparkStructuredStreamingPipelineResult implements PipelineResult {
     return waitUntilFinish(Duration.millis(Long.MAX_VALUE));
   }
 
+  /**
+   * Waits up to {@code duration} for the execution thread. A pipeline that ends after {@link
+   * #cancel()} is CANCELLED, any other failure is rethrown and the pipeline is FAILED.
+   */
   @Override
   public State waitUntilFinish(final Duration duration) {
     try {
-      State finishState = awaitTermination(duration);
-      offerNewState(finishState);
-
+      pipelineExecution.get(duration.getMillis(), TimeUnit.MILLISECONDS);
     } catch (final TimeoutException e) {
       // ignore.
     } catch (final ExecutionException e) {
-      offerNewState(PipelineResult.State.FAILED);
-      throw beamExceptionFrom(e.getCause());
+      if (getState() != State.CANCELLED) {
+        throw unwrapCause(firstNonNull(e.getCause(), e));
+      }
+      LOG.warn("Pipeline execution failed after cancel", e.getCause());
+    } catch (final InterruptedException e) {
+      Thread.currentThread().interrupt();
+      state = State.FAILED;
+      throw unwrapCause(e);
     } catch (final Exception e) {
-      offerNewState(PipelineResult.State.FAILED);
-      throw beamExceptionFrom(e);
+      state = State.FAILED;
+      throw unwrapCause(e);
     }
 
-    return state;
+    return getState();
   }
 
   @Override
   public MetricResults metrics() {
-    return asAttemptedOnlyMetricResults(MetricsAccumulator.getInstance().value());
+    return asAttemptedOnlyMetricResults(metrics.value());
   }
 
+  /**
+   * Requests cancellation and returns the current state. The state becomes CANCELLED once the
+   * execution ends.
+   */
   @Override
   public PipelineResult.State cancel() throws IOException {
-    offerNewState(PipelineResult.State.CANCELLED);
-    return state;
-  }
-
-  private void offerNewState(State newState) {
-    State oldState = this.state;
-    this.state = newState;
-    if (!oldState.isTerminal() && newState.isTerminal()) {
-      stop();
+    if (!pipelineExecution.isDone() && cancelRequested.compareAndSet(false, true)) {
+      EvaluationContext ctx = evaluationContext.get();
+      if (ctx != null) {
+        ctx.stop();
+      }
+      cancelSparkJobs.run();
     }
+    return getState();
   }
 }

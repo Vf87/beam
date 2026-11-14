@@ -19,6 +19,8 @@ package org.apache.beam.sdk.io.gcp.bigquery;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.joda.JodaModule;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.google.api.services.bigquery.model.TableRow;
 import java.io.IOException;
 import java.io.InputStream;
@@ -26,6 +28,7 @@ import java.io.OutputStream;
 import org.apache.beam.sdk.coders.AtomicCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.util.RowJsonUtils;
 import org.apache.beam.sdk.values.TypeDescriptor;
 
 /** A {@link Coder} that encodes BigQuery {@link TableRow} objects in their native JSON format. */
@@ -67,11 +70,21 @@ public class TableRowJsonCoder extends AtomicCoder<TableRow> {
 
   // FAIL_ON_EMPTY_BEANS is disabled in order to handle null values in
   // TableRow.
-  private static final ObjectMapper MAPPER =
-      new ObjectMapper().disable(SerializationFeature.FAIL_ON_EMPTY_BEANS);
+  private static final ObjectMapper MAPPER;
+  ;
+  private static final TableRowJsonCoder INSTANCE;
+  private static final TypeDescriptor<TableRow> TYPE_DESCRIPTOR;
 
-  private static final TableRowJsonCoder INSTANCE = new TableRowJsonCoder();
-  private static final TypeDescriptor<TableRow> TYPE_DESCRIPTOR = new TypeDescriptor<TableRow>() {};
+  static {
+    MAPPER =
+        new ObjectMapper(RowJsonUtils.createJsonFactory(RowJsonUtils.MAX_STRING_LENGTH))
+            .registerModule(new JavaTimeModule())
+            .registerModule(new JodaModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            .disable(SerializationFeature.FAIL_ON_EMPTY_BEANS);
+    INSTANCE = new TableRowJsonCoder();
+    TYPE_DESCRIPTOR = new TypeDescriptor<TableRow>() {};
+  }
 
   private TableRowJsonCoder() {}
 

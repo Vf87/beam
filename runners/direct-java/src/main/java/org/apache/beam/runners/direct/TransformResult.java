@@ -27,7 +27,7 @@ import org.apache.beam.sdk.runners.AppliedPTransform;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValue;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Instant;
 
@@ -38,7 +38,7 @@ import org.joda.time.Instant;
  * there is not necesssarily a defined output type.
  */
 @SuppressWarnings({
-  "rawtypes" // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes" // TODO(https://github.com/apache/beam/issues/20447)
 })
 interface TransformResult<InputT> {
   /**
@@ -80,8 +80,7 @@ interface TransformResult<InputT> {
    *
    * <p>If this evaluation did not access state, this may return null.
    */
-  @Nullable
-  CopyOnAccessInMemoryStateInternals getState();
+  @Nullable CopyOnAccessInMemoryStateInternals getState();
 
   /**
    * Returns a TimerUpdateBuilder that was produced as a result of this evaluation. If the

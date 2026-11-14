@@ -17,11 +17,14 @@
  */
 package org.apache.beam.runners.fnexecution.artifact;
 
+import static org.apache.commons.lang3.SystemUtils.IS_OS_WINDOWS;
+
 import com.google.auto.value.AutoValue;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.channels.Channels;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -39,6 +42,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.regex.Pattern;
 import org.apache.beam.model.jobmanagement.v1.ArtifactApi;
 import org.apache.beam.model.jobmanagement.v1.ArtifactStagingServiceGrpc;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
@@ -51,26 +55,27 @@ import org.apache.beam.sdk.io.fs.MoveOptions;
 import org.apache.beam.sdk.io.fs.ResolveOptions;
 import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.util.MimeTypes;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.ByteString;
-import org.apache.beam.vendor.grpc.v1p36p0.com.google.protobuf.InvalidProtocolBufferException;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.Status;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.StatusException;
-import org.apache.beam.vendor.grpc.v1p36p0.io.grpc.stub.StreamObserver;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Charsets;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Splitter;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.hash.Hashing;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p69p0.com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.Status;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.StatusException;
+import org.apache.beam.vendor.grpc.v1p69p0.io.grpc.stub.StreamObserver;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.hash.Hashing;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class ArtifactStagingService
     extends ArtifactStagingServiceGrpc.ArtifactStagingServiceImplBase implements FnService {
 
   private static final Logger LOG = LoggerFactory.getLogger(ArtifactStagingService.class);
+
+  private static final Pattern WINDOWS_INVALID_CHARS =
+      Pattern.compile("[<>:\"/\\\\|?*\\x00-\\x1F]");
 
   private final ArtifactDestinationProvider destinationProvider;
 
@@ -123,7 +128,7 @@ public class ArtifactStagingService
   }
 
   /**
-   * A pairing of a newly created artifact type and an ouptut stream that will be readable at that
+   * A pairing of a newly created artifact type and an output stream that will be readable at that
    * type.
    */
   @AutoValue
@@ -192,7 +197,7 @@ public class ArtifactStagingService
       private ResourceId stagingDir(String stagingToken) {
         return FileSystems.matchNewResource(root, true)
             .resolve(
-                Hashing.sha256().hashString(stagingToken, Charsets.UTF_8).toString(),
+                Hashing.sha256().hashString(stagingToken, StandardCharsets.UTF_8).toString(),
                 ResolveOptions.StandardResolveOptions.RESOLVE_DIRECTORY);
       }
     };
@@ -208,9 +213,9 @@ public class ArtifactStagingService
   }
 
   /**
-   * Like the standard Semaphore, but allows an aquire to go over the limit if there is any room.
+   * Like the standard Semaphore, but allows an acquire to go over the limit if there is any room.
    *
-   * <p>Also allows setting an error, to avoid issues with un-released aquires after error.
+   * <p>Also allows setting an error, to avoid issues with un-released acquires after error.
    */
   private static class OverflowingSemaphore {
     private int totalPermits;
@@ -223,13 +228,17 @@ public class ArtifactStagingService
     }
 
     synchronized void aquire(int permits) throws Exception {
-      while (usedPermits >= totalPermits) {
-        if (exception != null) {
-          throw exception;
-        }
+      while (exception == null && usedPermits >= totalPermits) {
         this.wait();
       }
+      checkException();
       usedPermits += permits;
+    }
+
+    synchronized void checkException() throws Exception {
+      if (exception != null) {
+        throw exception;
+      }
     }
 
     synchronized void release(int permits) {
@@ -277,18 +286,25 @@ public class ArtifactStagingService
           chunk = bytesQueue.take();
         }
         dest.getOutputStream().close();
-        return originalArtifact
-            .toBuilder()
+        return originalArtifact.toBuilder()
             .setTypeUrn(dest.getTypeUrn())
             .setTypePayload(dest.getTypePayload())
             .build();
-      } catch (IOException | InterruptedException exn) {
+      } catch (Exception exn) {
         // As this thread will no longer be draining the queue, we don't want to get stuck writing
-        // to it.
+        // to it. This must happen for unchecked exceptions as well: getDestination can throw e.g.
+        // InvalidPathException, and leaving the error unset would block the producer forever.
         totalPendingBytes.setException(exn);
+        // Free a producer already blocked in put; its next aquire observes the exception.
+        bytesQueue.clear();
         LOG.error("Exception staging artifacts", exn);
+        if (exn instanceof InterruptedException) {
+          Thread.currentThread().interrupt();
+        }
         if (exn instanceof IOException) {
           throw (IOException) exn;
+        } else if (exn instanceof RuntimeException) {
+          throw (RuntimeException) exn;
         } else {
           throw new RuntimeException(exn);
         }
@@ -354,7 +370,7 @@ public class ArtifactStagingService
               pendingGets = new ArrayDeque<>();
               for (RunnerApi.ArtifactInformation artifact :
                   responseWrapper.getResolveArtifactResponse().getReplacementsList()) {
-                Optional<RunnerApi.ArtifactInformation> fetched = getLocal(artifact);
+                Optional<RunnerApi.ArtifactInformation> fetched = getLocal();
                 if (fetched.isPresent()) {
                   stagedFutures
                       .get(currentEnvironment)
@@ -421,8 +437,16 @@ public class ArtifactStagingService
                 }
               }
             } catch (Exception exn) {
-              LOG.error("Error submitting.", exn);
+              if (exn instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+              }
               onError(exn);
+              // Terminate the stream towards the client, which would otherwise wait forever.
+              responseObserver.onError(
+                  Status.INTERNAL
+                      .withDescription("Error staging artifacts: " + exn)
+                      .withCause(exn)
+                      .asException());
             }
             break;
 
@@ -479,15 +503,13 @@ public class ArtifactStagingService
        * Return an alternative artifact if we do not need to get this over the artifact API, or
        * possibly at all.
        */
-      private Optional<RunnerApi.ArtifactInformation> getLocal(
-          RunnerApi.ArtifactInformation artifact) {
+      private Optional<RunnerApi.ArtifactInformation> getLocal() {
         return Optional.empty();
       }
 
       /**
        * Attempts to provide a reasonable filename for the artifact.
        *
-       * @param index a monotonically increasing index, which provides uniqueness
        * @param environment the environment id
        * @param artifact the artifact itself
        */
@@ -508,10 +530,16 @@ public class ArtifactStagingService
         } catch (InvalidProtocolBufferException exn) {
           throw new RuntimeException(exn);
         }
-        // Limit to the last contiguous alpha-numeric sequence. In particular, this will exclude
+        // Limit to the last contiguous valid windows path chars. In particular, this will exclude
         // all path separators.
-        List<String> components = Splitter.onPattern("[^A-Za-z-_.]]").splitToList(path);
-        String base = components.get(components.size() - 1);
+        String base =
+            WINDOWS_INVALID_CHARS
+                .splitAsStream(path)
+                .reduce((first, second) -> second)
+                .orElse("artifact");
+        if (IS_OS_WINDOWS) {
+          environment = WINDOWS_INVALID_CHARS.matcher(environment).replaceAll("_");
+        }
         return clip(
             String.format("%s-%s-%s", idGenerator.getId(), clip(environment, 25), base), 100);
       }
@@ -546,7 +574,6 @@ public class ArtifactStagingService
    * @param stagingService an ArtifactStagingService stub which will request artifacts
    * @param stagingToken the staging token of the job whose artifacts will be retrieved
    * @throws InterruptedException
-   * @throws IOException
    */
   public static void offer(
       ArtifactRetrievalService retrievalService,
@@ -584,6 +611,8 @@ public class ArtifactStagingService
       if (completionFuture.isCompletedExceptionally()) {
         try {
           completionFuture.get();
+        } catch (OutOfMemoryError oom) {
+          throw oom;
         } catch (Throwable th) {
           responseObserver.onError(th);
           return;

@@ -26,53 +26,67 @@ NOTHING IN THIS FILE HAS BACKWARDS COMPATIBILITY GUARANTEES.
 """
 
 # pytype: skip-file
+# pylint: disable=wrong-import-order, wrong-import-position
 
 import datetime
 import decimal
 import io
 import json
 import logging
+import os
 import re
 import sys
 import time
+import urllib.parse
 import uuid
 from json.decoder import JSONDecodeError
-from typing import Tuple
+from typing import Optional
+from typing import Sequence
 from typing import TypeVar
 from typing import Union
 
 import fastavro
+import numpy as np
 
+import apache_beam
 from apache_beam import coders
 from apache_beam.internal.gcp import auth
 from apache_beam.internal.gcp.json_value import from_json_value
 from apache_beam.internal.http_client import get_new_http
 from apache_beam.internal.metrics.metric import MetricLogger
-from apache_beam.internal.metrics.metric import Metrics
 from apache_beam.internal.metrics.metric import ServiceCallMetric
 from apache_beam.io.gcp import bigquery_avro_tools
 from apache_beam.io.gcp import resource_identifiers
-from apache_beam.io.gcp.bigquery_io_metadata import create_bigquery_io_metadata
 from apache_beam.io.gcp.internal.clients import bigquery
 from apache_beam.metrics import monitoring_infos
+from apache_beam.metrics.metric import Metrics
 from apache_beam.options import value_provider
-from apache_beam.options.pipeline_options import GoogleCloudOptions
-from apache_beam.runners.dataflow.native_io import iobase as dataflow_io
+from apache_beam.options.pipeline_options import BigQueryOptions
+from apache_beam.options.pipeline_options import PipelineOptions
 from apache_beam.transforms import DoFn
+from apache_beam.typehints.row_type import RowTypeConstraint
 from apache_beam.typehints.typehints import Any
 from apache_beam.utils import retry
 from apache_beam.utils.histogram import LinearBucket
 
 # Protect against environments where bigquery library is not available.
-# pylint: disable=wrong-import-order, wrong-import-position
 try:
+  import regex
+  from apitools.base.py.exceptions import HttpError
+  from apitools.base.py.exceptions import HttpForbiddenError
   from apitools.base.py.transfer import Upload
-  from apitools.base.py.exceptions import HttpError, HttpForbiddenError
-  from google.api_core.exceptions import ClientError, GoogleAPICallError
+  from google.api_core.client_info import ClientInfo
+  from google.api_core.exceptions import ClientError
+  from google.api_core.exceptions import GoogleAPICallError
   from google.cloud import bigquery as gcp_bigquery
-except ImportError:
+except Exception:
   gcp_bigquery = None
   pass
+
+try:
+  from google.cloud import bigquery_storage_v1 as bq_storage
+except ImportError:
+  bq_storage = None
 
 try:
   from orjson import dumps as fast_json_dumps
@@ -98,6 +112,122 @@ UNKNOWN_MIME_TYPE = 'application/octet-stream'
 
 # Timeout for a BQ streaming insert RPC. Set to a maximum of 2 minutes.
 BQ_STREAMING_INSERT_TIMEOUT_SEC = 120
+
+_PROJECT_PATTERN = r'([a-z0-9.-]+:)?[a-z][a-z0-9-]*[a-z0-9]'
+# Dots are allowed because Lakehouse runtime catalog tables are addressed with
+# a composite 'catalog.namespace' dataset id.
+_DATASET_PATTERN = r'[-\w.]{1,1024}'
+_TABLE_PATTERN = r'[\p{L}\p{M}\p{N}\p{Pc}\p{Pd}\p{Zs}$]{1,1024}'
+# A single segment of a project id (no dots or colons).
+_PROJECT_NAME_SEGMENT_PATTERN = r'[-a-z0-9]*[a-z0-9]'
+
+try:
+  _COMPILED_TABLE_SPEC_RE = regex.compile(
+      f'((?P<project>{_PROJECT_PATTERN})[:\\.])?'
+      f'(?P<dataset>{_DATASET_PATTERN})\\.(?P<table>{_TABLE_PATTERN})')
+  _COMPILED_PROJECT_RE = regex.compile(_PROJECT_PATTERN)
+  _COMPILED_PROJECT_SEGMENT_RE = regex.compile(_PROJECT_NAME_SEGMENT_PATTERN)
+except NameError:
+  _COMPILED_TABLE_SPEC_RE = None
+  _COMPILED_PROJECT_RE = None
+  _COMPILED_PROJECT_SEGMENT_RE = None
+
+# For CI: temp dataset of this name are automatically deleted
+_TEMP_DATASET_PREFIX = 'beam_temp_dataset_'
+
+_DEFAULT_UNIVERSE_DOMAIN = 'googleapis.com'
+_UNIVERSE_DOMAIN_ENV = 'GOOGLE_CLOUD_UNIVERSE_DOMAIN'
+_BIGQUERY_SERVICE_PATH = '/bigquery/v2'
+
+
+def _get_bigquery_endpoint(
+    pipeline_options: Optional[PipelineOptions] = None) -> Optional[str]:
+  """Returns the BigQuery root URL set via ``--bigquery_endpoint``, or None.
+
+  The given pipeline options are checked first. If they do not set the
+  endpoint, the options of the running pipeline are checked; these are
+  available on workers, where BigQuery clients are often created without
+  access to the pipeline options.
+
+  The returned URL always has a scheme and never has a trailing slash or the
+  ``/bigquery/v2`` service path.
+  """
+  endpoint = None
+  if pipeline_options is not None:
+    endpoint = pipeline_options.view_as(BigQueryOptions).big_query_endpoint
+  if not endpoint:
+    endpoint = value_provider.RuntimeValueProvider.get_value(
+        'big_query_endpoint', str, None)
+  if not endpoint:
+    return None
+  endpoint = endpoint.strip().rstrip('/')
+  if endpoint.endswith(_BIGQUERY_SERVICE_PATH):
+    endpoint = endpoint[:-len(_BIGQUERY_SERVICE_PATH)]
+  if '://' not in endpoint:
+    endpoint = 'https://' + endpoint
+  return endpoint
+
+
+def get_bigquery_api_url(
+    pipeline_options: Optional[PipelineOptions] = None) -> str:
+  """Returns the base URL of the BigQuery v2 REST API.
+
+  The URL is resolved in the following order:
+
+  1. ``--bigquery_endpoint``, if set.
+  2. ``https://bigquery.<domain>``, if the ``GOOGLE_CLOUD_UNIVERSE_DOMAIN``
+     environment variable is set to a non-default universe domain. This
+     matches how the google-cloud-bigquery client library resolves its
+     endpoint.
+  3. The default public URL.
+  """
+  endpoint = _get_bigquery_endpoint(pipeline_options)
+  if endpoint is None:
+    universe_domain = (
+        os.environ.get(_UNIVERSE_DOMAIN_ENV, '').strip() or
+        _DEFAULT_UNIVERSE_DOMAIN)
+    if universe_domain == _DEFAULT_UNIVERSE_DOMAIN:
+      return bigquery.BigqueryV2.BASE_URL
+    endpoint = 'https://bigquery.%s' % universe_domain
+  return endpoint + _BIGQUERY_SERVICE_PATH + '/'
+
+
+def get_bigquery_client_options(
+    pipeline_options: Optional[PipelineOptions] = None) -> Optional[dict]:
+  """Returns ``client_options`` for a ``google.cloud.bigquery.Client``.
+
+  Returns None when ``--bigquery_endpoint`` is not set, so that the client
+  library resolves the endpoint itself (it honors
+  ``GOOGLE_CLOUD_UNIVERSE_DOMAIN``).
+  """
+  endpoint = _get_bigquery_endpoint(pipeline_options)
+  if endpoint is None:
+    return None
+  return {'api_endpoint': endpoint}
+
+
+# TODO(https://github.com/apache/beam/issues/25946): Add support for
+# more Beam portable schema types as Python types
+BIGQUERY_TYPE_TO_PYTHON_TYPE = {
+    "STRING": str,
+    "BOOL": bool,
+    "BOOLEAN": bool,
+    "BYTES": bytes,
+    "INT64": np.int64,
+    "INTEGER": np.int64,
+    "FLOAT64": np.float64,
+    "FLOAT": np.float64,
+    "NUMERIC": decimal.Decimal,
+    "TIMESTAMP": apache_beam.utils.timestamp.Timestamp,
+    "GEOGRAPHY": str,
+}
+
+# Duplicated logic with io/gcp/bigquery_change_history.py
+# Default table expiration for auto-created temp datasets: 24 hours in ms.
+# Tables created in the dataset auto-expire after this duration if not
+# explicitly deleted, acting as a safety net for orphaned temp tables
+# (e.g. pipeline crash before cleanup runs).
+_DEFAULT_TABLE_EXPIRATION_MS = 24 * 60 * 60 * 1000
 
 
 class FileFormat(object):
@@ -153,7 +283,7 @@ V = TypeVar('V')
 
 
 def to_hashable_table_ref(
-    table_ref_elem_kv: Tuple[Union[str, TableReference], V]) -> Tuple[str, V]:
+    table_ref_elem_kv: tuple[Union[str, TableReference], V]) -> tuple[str, V]:
   """Turns the key of the input tuple to its string representation. The key
   should be either a string or a TableReference.
 
@@ -216,9 +346,15 @@ def parse_table_reference(table, dataset=None, project=None):
     table: The ID of the table. The ID must contain only letters
       (a-z, A-Z), numbers (0-9), connectors (-_). If dataset argument is None
       then the table argument must contain the entire table reference:
-      'DATASET.TABLE' or 'PROJECT:DATASET.TABLE'. This argument can be a
-      TableReference instance in which case dataset and project are
-      ignored and the reference is returned as a result.  Additionally, for date
+      'DATASET.TABLE', 'PROJECT:DATASET.TABLE' or 'PROJECT.DATASET.TABLE'.
+      Lakehouse runtime catalog tables use four parts,
+      'PROJECT.CATALOG.NAMESPACE.TABLE' (the canonical spelling) or
+      'PROJECT:CATALOG.NAMESPACE.TABLE', which parse to a composite
+      'CATALOG.NAMESPACE' dataset id. The project id is required for these,
+      because a composite dataset id without one would be ambiguous with
+      'PROJECT.DATASET.TABLE'. This argument can be a TableReference instance
+      in which case dataset and project are ignored and the reference is
+      returned as a result.  Additionally, for date
       partitioned tables, appending '$YYYYmmdd' to the table name is supported,
       e.g. 'DATASET.TABLE$YYYYmmdd'.
     dataset: The ID of the dataset containing this table or null if the table
@@ -252,20 +388,79 @@ def parse_table_reference(table, dataset=None, project=None):
   # table argument will contain a full table reference instead of just a
   # table name.
   if dataset is None:
-    match = re.match(
-        r'^((?P<project>.+):)?(?P<dataset>\w+)\.(?P<table>[-\w\$]+)$', table)
-    if not match:
-      raise ValueError(
-          'Expected a table reference (PROJECT:DATASET.TABLE or '
-          'DATASET.TABLE) instead of %s.' % table)
-    table_reference.projectId = match.group('project')
-    table_reference.datasetId = match.group('dataset')
-    table_reference.tableId = match.group('table')
+    project_id, dataset_id, table_id = _split_table_spec(table)
+    table_reference.projectId = project_id
+    table_reference.datasetId = dataset_id
+    table_reference.tableId = table_id
   else:
     table_reference.projectId = project
     table_reference.datasetId = dataset
     table_reference.tableId = table
   return table_reference
+
+
+def _invalid_table_spec(table_spec):
+  return ValueError(
+      'Expected a table reference (PROJECT:DATASET.TABLE, '
+      'PROJECT.DATASET.TABLE, DATASET.TABLE, '
+      'PROJECT:CATALOG.NAMESPACE.TABLE or PROJECT.CATALOG.NAMESPACE.TABLE) '
+      'instead of %s.' % table_spec)
+
+
+def _split_table_spec(table_spec):
+  """Splits a table spec string into (project, dataset, table).
+
+  The regex only validates the character set; segment assignment is done by
+  explicit splitting so that composite Lakehouse dataset ids ('catalog.ns')
+  and domain-scoped project ids ('example.com:proj') are both handled. This
+  mirrors BigQueryHelpers.parseTableSpec in the Java SDK.
+  """
+  if not _COMPILED_TABLE_SPEC_RE.fullmatch(table_spec):
+    raise _invalid_table_spec(table_spec)
+
+  # Table ids cannot contain '.', so the table is always the last segment.
+  last_dot = table_spec.rfind('.')
+  table = table_spec[last_dot + 1:]
+  prefix = table_spec[:last_dot]
+
+  colon_count = prefix.count(':')
+  if colon_count == 0:
+    # Purely dotted form: 'd.t', 'p.d.t', 'p.catalog.ns.t'. A dataset id may
+    # itself contain dots (a composite 'catalog.namespace'), so omitting the
+    # project id would be ambiguous with 'PROJECT.DATASET.TABLE'. Only the
+    # plain two-segment 'DATASET.TABLE' may leave the project id out.
+    first_dot = prefix.find('.')
+    if first_dot < 0:
+      return None, prefix, table
+    project = prefix[:first_dot]
+    dataset = prefix[first_dot + 1:]
+    if not _COMPILED_PROJECT_RE.fullmatch(project) or not dataset:
+      raise _invalid_table_spec(table_spec)
+    return project, dataset, table
+
+  if colon_count == 1:
+    # 'p:d.t', 'p:catalog.ns.t', 'example.com:proj.ds.t'. If the part before
+    # the colon is dotted it is the domain half of a legacy domain-scoped
+    # project id; the first segment after the colon completes the project
+    # and any remaining segments are the (possibly composite) dataset.
+    colon = prefix.find(':')
+    project = prefix[:colon]
+    dataset = prefix[colon + 1:]
+    first_dot = dataset.find('.')
+    if (first_dot >= 0 and first_dot < len(dataset) - 1 and '.' in project and
+        _COMPILED_PROJECT_SEGMENT_RE.fullmatch(dataset[:first_dot])):
+      project = project + ':' + dataset[:first_dot]
+      dataset = dataset[first_dot + 1:]
+    return project, dataset, table
+
+  if colon_count == 2:
+    # The last colon terminates a domain-scoped project id spelled with its
+    # own colon: 'example.com:proj:ds.t' or 'example.com:proj:catalog.ns.t'.
+    last_colon = prefix.rfind(':')
+    return prefix[:last_colon], prefix[last_colon + 1:], table
+
+  # Project ids contain at most one colon, so more than two is never valid.
+  raise _invalid_table_spec(table_spec)
 
 
 # -----------------------------------------------------------------------------
@@ -307,13 +502,74 @@ def _build_filter_from_labels(labels):
   return filter_str
 
 
+def _build_dataset_encryption_config(kms_key):
+  return bigquery.EncryptionConfiguration(kmsKeyName=kms_key)
+
+
+def _quota_project_id_from_options(pipeline_options):
+  """Returns --bigquery_quota_project_id from pipeline options, if any."""
+  if pipeline_options is None:
+    return None
+  return pipeline_options.view_as(BigQueryOptions).bigquery_quota_project_id
+
+
+def create_bq_storage_client(quota_project_id=None):
+  """Create a BigQueryReadClient with optional quota project.
+
+  Args:
+    quota_project_id: Optional GCP project ID to use for quota and billing.
+      The client applies it to the credentials it resolves itself.
+
+  Returns:
+    A BigQueryReadClient instance.
+  """
+  if not quota_project_id:
+    return bq_storage.BigQueryReadClient()
+  return bq_storage.BigQueryReadClient(
+      client_options={'quota_project_id': quota_project_id})
+
+
+class _HttpWithHeaders(object):
+  """Wraps an httplib2.Http to add fixed headers to requests to given hosts.
+
+  Sits below the credentials layer, so the headers are applied on every
+  attempt and take precedence over headers set by the credentials. The
+  credentials refresh their token through the same Http, so requests to other
+  hosts (token endpoint, metadata server, IAM Credentials API) are passed
+  through unchanged.
+  """
+  def __init__(self, http, headers, hosts):
+    object.__setattr__(self, '_http', http)
+    object.__setattr__(self, '_headers', headers)
+    object.__setattr__(self, '_hosts', frozenset(hosts))
+
+  def request(self, uri, method='GET', body=None, headers=None, **kwargs):
+    if urllib.parse.urlsplit(uri).hostname in self._hosts:
+      headers = dict(headers or {})
+      headers.update(self._headers)
+    return self._http.request(uri, method, body=body, headers=headers, **kwargs)
+
+  def __getattr__(self, name):
+    if name == '_http':  # object created without __init__ (copy/unpickle)
+      raise AttributeError(name)
+    return getattr(self._http, name)
+
+  def __setattr__(self, name, value):
+    setattr(self._http, name, value)
+
+
 class BigQueryWrapper(object):
   """BigQuery client wrapper with utilities for querying.
 
   The wrapper is used to organize all the BigQuery integration points and
   offer a common place where retry logic for failures can be controlled.
-  In addition it offers various functions used both in sources and sinks
+  In addition, it offers various functions used both in sources and sinks
   (e.g., find and create tables, query a table, etc.).
+
+  Note that the client and gcp_client parameters in the constructor are only
+  for testing purposes and should not be used in production code. Production
+  code should pass pipeline_options (and optionally quota_project_id) so that
+  every client is built here with the right quota attribution.
   """
 
   # If updating following names, also update the corresponding pydocs in
@@ -323,16 +579,30 @@ class BigQueryWrapper(object):
 
   HISTOGRAM_METRIC_LOGGER = MetricLogger()
 
-  def __init__(self, client=None, temp_dataset_id=None, temp_table_ref=None):
-    self.client = client or bigquery.BigqueryV2(
-        http=get_new_http(),
-        credentials=auth.get_service_credentials(),
-        response_encoding='utf8')
-    self.gcp_bq_client = client or gcp_bigquery.Client()
+  def __init__(
+      self,
+      client=None,
+      temp_dataset_id=None,
+      temp_table_ref=None,
+      quota_project_id=None,
+      *,
+      gcp_client=None,
+      pipeline_options=None):
+    self.quota_project_id = (
+        quota_project_id or _quota_project_id_from_options(pipeline_options))
+    self._pipeline_options = pipeline_options
+    self.client = client or BigQueryWrapper._bigquery_client(
+        pipeline_options or PipelineOptions(),
+        quota_project_id=self.quota_project_id)
+    # Test-only overrides. `client` also stands in for the google-cloud-bigquery
+    # client, which several tests rely on; pass `gcp_client` as well as `client`
+    # to override only that one.
+    self._gcp_bq_client = gcp_client or client
+
     self._unique_row_id = 0
     # For testing scenarios where we pass in a client we do not want a
     # randomized prefix for row IDs.
-    self._row_id_prefix = '' if client else uuid.uuid4()
+    self._row_id_prefix = '' if (client or gcp_client) else uuid.uuid4()
     self._latency_histogram_metric = Metrics.histogram(
         self.__class__,
         'latency_histogram_ms',
@@ -360,6 +630,18 @@ class BigQueryWrapper(object):
     self.created_temp_dataset = False
 
   @property
+  def gcp_bq_client(self):
+    """The google-cloud-bigquery client, created on first use.
+
+    Only the streaming insert path needs it, so it is not built eagerly.
+    """
+    if self._gcp_bq_client is None:
+      self._gcp_bq_client = BigQueryWrapper._gcp_bigquery_client(
+          quota_project_id=self.quota_project_id,
+          pipeline_options=self._pipeline_options)
+    return self._gcp_bq_client
+
+  @property
   def unique_row_id(self):
     """Returns a unique row ID (str) used to avoid multiple insertions.
 
@@ -382,6 +664,17 @@ class BigQueryWrapper(object):
         table=BigQueryWrapper.TEMP_TABLE + self._temporary_table_suffix,
         dataset=self.temp_dataset_id,
         project=project_id)
+
+  def _get_temp_table_project(self, fallback_project_id):
+    """Returns the project ID for temporary table operations.
+
+    If temp_table_ref exists, returns its projectId.
+    Otherwise, returns the fallback_project_id.
+    """
+    if self.temp_table_ref:
+      return self.temp_table_ref.projectId
+    else:
+      return fallback_project_id
 
   def _get_temp_dataset(self):
     if self.temp_table_ref:
@@ -495,10 +788,9 @@ class BigQueryWrapper(object):
       job_labels=None):
 
     if not source_uris and not source_stream:
-      raise ValueError(
-          'Either a non-empty list of fully-qualified source URIs must be '
-          'provided via the source_uris parameter or an open file object must '
-          'be provided via the source_stream parameter. Got neither.')
+      _LOGGER.warning(
+          'Both source URIs and source stream are not provided. BigQuery load '
+          'job will not load any data.')
 
     if source_uris and source_stream:
       raise ValueError(
@@ -531,9 +823,22 @@ class BigQueryWrapper(object):
         ))
     return self._start_job(request, stream=source_stream).jobReference
 
+  @staticmethod
+  def _parse_location_from_exc(content, job_id):
+    """Parse job location from Exception content."""
+    if isinstance(content, bytes):
+      content = content.decode('ascii', 'replace')
+    # search for "Already Exists: Job <project-id>:<location>.<job id>"
+    m = re.search(r"Already Exists: Job \S+\:(\S+)\." + job_id, content)
+    if not m:
+      _LOGGER.warning(
+          "Not able to parse BigQuery load job location for %s", job_id)
+      return None
+    return m.group(1)
+
   def _start_job(
       self,
-      request,  # type: bigquery.BigqueryJobsInsertRequest
+      request: 'bigquery.BigqueryJobsInsertRequest',
       stream=None,
   ):
     """Inserts a BigQuery job.
@@ -558,11 +863,17 @@ class BigQueryWrapper(object):
       return response
     except HttpError as exn:
       if exn.status_code == 409:
+        jobId = request.job.jobReference.jobId
         _LOGGER.info(
             "BigQuery job %s already exists, will not retry inserting it: %s",
             request.job.jobReference,
             exn)
-        return request.job
+        job_location = self._parse_location_from_exc(exn.content, jobId)
+        response = request.job
+        if not response.jobReference.location and job_location:
+          # Request not constructed with location
+          response.jobReference.location = job_location
+        return response
       else:
         _LOGGER.info(
             "Failed to insert job %s: %s", request.job.jobReference, exn)
@@ -592,7 +903,8 @@ class BigQueryWrapper(object):
                     query=query,
                     useLegacySql=use_legacy_sql,
                     allowLargeResults=not dry_run,
-                    destinationTable=self._get_temp_table(project_id)
+                    destinationTable=self._get_temp_table(
+                        self._get_temp_table_project(project_id))
                     if not dry_run else None,
                     flattenResults=flatten_results,
                     priority=priority,
@@ -622,7 +934,7 @@ class BigQueryWrapper(object):
       retry += 1
       job = self.get_job(
           job_reference.projectId, job_reference.jobId, job_reference.location)
-      logging.info('Job status: %s', job.status.state)
+      _LOGGER.info('Job %s status: %s', job.id, job.status.state)
       if job.status.state == 'DONE' and job.status.errorResult:
         raise RuntimeError(
             'BigQuery job {} failed. Error Result: {}'.format(
@@ -663,7 +975,8 @@ class BigQueryWrapper(object):
       table_id,
       rows,
       insert_ids,
-      skip_invalid_rows=False):
+      skip_invalid_rows=False,
+      ignore_unknown_values=False):
     """Calls the insertAll BigQuery API endpoint.
 
     Docs for this BQ call: https://cloud.google.com/bigquery/docs/reference\
@@ -697,21 +1010,27 @@ class BigQueryWrapper(object):
           table_ref_str,
           json_rows=rows,
           row_ids=insert_ids,
-          skip_invalid_rows=True,
+          skip_invalid_rows=skip_invalid_rows,
+          ignore_unknown_values=ignore_unknown_values,
           timeout=BQ_STREAMING_INSERT_TIMEOUT_SEC)
       if not errors:
         service_call_metric.call('ok')
       else:
         for insert_error in errors:
-          service_call_metric.call(insert_error['errors'][0])
+          # Record the BigQuery reason (e.g. 'invalid') of the first error for
+          # each failed row.
+          row_errors = insert_error.get('errors') or [{}]
+          service_call_metric.call(row_errors[0].get('reason') or 'unknown')
     except (ClientError, GoogleAPICallError) as e:
-      # e.code.value contains the numeric http status code.
-      service_call_metric.call(e.code.value)
-      # Re-reise the exception so that we re-try appropriately.
-      raise
+      # e.code contains the numeric http status code.
+      service_call_metric.call(e.code)
+      # Package exception with required fields
+      error = {'message': e.message, 'reason': e.response.reason}
+      # Add all rows to the errors list along with the error
+      errors = [{"index": i, "errors": [error]} for i, _ in enumerate(rows)]
     except HttpError as e:
       service_call_metric.call(e)
-      # Re-reise the exception so that we re-try appropriately.
+      # Re-raise the exception so that we re-try appropriately.
       raise
     finally:
       self._latency_histogram_metric.update(
@@ -720,7 +1039,7 @@ class BigQueryWrapper(object):
 
   @retry.with_exponential_backoff(
       num_retries=MAX_RETRIES,
-      retry_filter=retry.retry_on_server_errors_and_timeout_filter)
+      retry_filter=retry.retry_on_server_errors_timeout_or_quota_issues_filter)
   def get_table(self, project_id, dataset_id, table_id):
     """Lookup a table's metadata object.
 
@@ -748,12 +1067,10 @@ class BigQueryWrapper(object):
       schema,
       additional_parameters=None):
 
-    valid_tablename = re.match(r'^[\w]{1,1024}$', table_id, re.ASCII)
+    valid_tablename = regex.fullmatch(_TABLE_PATTERN, table_id, regex.ASCII)
     if not valid_tablename:
       raise ValueError(
           'Invalid BigQuery table name: %s \n'
-          'A table name in BigQuery must contain only letters (a-z, A-Z), '
-          'numbers (0-9), or underscores (_) and be up to 1024 characters:\n'
           'See https://cloud.google.com/bigquery/docs/tables#table_naming' %
           table_id)
 
@@ -774,7 +1091,13 @@ class BigQueryWrapper(object):
       num_retries=MAX_RETRIES,
       retry_filter=retry.retry_on_server_errors_and_timeout_filter)
   def get_or_create_dataset(
-      self, project_id, dataset_id, location=None, labels=None):
+      self,
+      project_id,
+      dataset_id,
+      location=None,
+      labels=None,
+      kms_key=None,
+      default_table_expiration_ms=None):
     # Check if dataset already exists otherwise create it
     try:
       dataset = self.client.datasets.Get(
@@ -784,6 +1107,12 @@ class BigQueryWrapper(object):
       return dataset
     except HttpError as exn:
       if exn.status_code == 404:
+        _LOGGER.info(
+            'Dataset %s:%s does not exist so we will create it as temporary '
+            'with location=%s',
+            project_id,
+            dataset_id,
+            location)
         dataset_reference = bigquery.DatasetReference(
             projectId=project_id, datasetId=dataset_id)
         dataset = bigquery.Dataset(datasetReference=dataset_reference)
@@ -791,6 +1120,11 @@ class BigQueryWrapper(object):
           dataset.location = location
         if labels is not None:
           dataset.labels = _build_dataset_labels(labels)
+        if kms_key is not None:
+          dataset.defaultEncryptionConfiguration = (
+              _build_dataset_encryption_config(kms_key))
+        if default_table_expiration_ms is not None:
+          dataset.defaultTableExpirationMs = default_table_expiration_ms
         request = bigquery.BigqueryDatasetsInsertRequest(
             projectId=project_id, dataset=dataset)
         response = self.client.datasets.Insert(request)
@@ -862,30 +1196,23 @@ class BigQueryWrapper(object):
   @retry.with_exponential_backoff(
       num_retries=MAX_RETRIES,
       retry_filter=retry.retry_on_server_errors_and_timeout_filter)
-  def create_temporary_dataset(self, project_id, location, labels=None):
-    # Check if dataset exists to make sure that the temporary id is unique
-    try:
-      self.client.datasets.Get(
-          bigquery.BigqueryDatasetsGetRequest(
-              projectId=project_id, datasetId=self.temp_dataset_id))
-      if project_id is not None and not self.is_user_configured_dataset():
-        # Unittests don't pass projectIds so they can be run without error
-        # User configured datasets are allowed to pre-exist.
-        raise RuntimeError(
-            'Dataset %s:%s already exists so cannot be used as temporary.' %
-            (project_id, self.temp_dataset_id))
-    except HttpError as exn:
-      if exn.status_code == 404:
-        _LOGGER.warning(
-            'Dataset %s:%s does not exist so we will create it as temporary '
-            'with location=%s',
-            project_id,
-            self.temp_dataset_id,
-            location)
-        self.get_or_create_dataset(
-            project_id, self.temp_dataset_id, location=location, labels=labels)
-      else:
-        raise
+  def create_temporary_dataset(
+      self, project_id, location, labels=None, kms_key=None):
+    self.get_or_create_dataset(
+        project_id,
+        self.temp_dataset_id,
+        location=location,
+        default_table_expiration_ms=_DEFAULT_TABLE_EXPIRATION_MS,
+        labels=labels,
+        kms_key=kms_key)
+
+    if (project_id is not None and not self.is_user_configured_dataset() and
+        not self.created_temp_dataset):
+      # Unittests don't pass projectIds so they can be run without error
+      # User configured datasets are allowed to pre-exist.
+      raise RuntimeError(
+          'Dataset %s:%s already exists so cannot be used as temporary.' %
+          (project_id, self.temp_dataset_id))
 
   @retry.with_exponential_backoff(
       num_retries=MAX_RETRIES,
@@ -986,25 +1313,19 @@ class BigQueryWrapper(object):
       create_disposition=None,
       additional_load_parameters=None,
       source_format=None,
-      job_labels=None):
+      job_labels=None,
+      load_job_project_id=None):
     """Starts a job to load data into BigQuery.
 
     Returns:
       bigquery.JobReference with the information about the job that was started.
     """
-    if not source_uris and not source_stream:
-      raise ValueError(
-          'Either a non-empty list of fully-qualified source URIs must be '
-          'provided via the source_uris parameter or an open file object must '
-          'be provided via the source_stream parameter. Got neither.')
-
-    if source_uris and source_stream:
-      raise ValueError(
-          'Only one of source_uris and source_stream may be specified. '
-          'Got both.')
+    project_id = (
+        destination.projectId
+        if load_job_project_id is None else load_job_project_id)
 
     return self._insert_load_job(
-        destination.projectId,
+        project_id,
         job_id,
         destination,
         source_uris=source_uris,
@@ -1217,7 +1538,8 @@ class BigQueryWrapper(object):
       table_id,
       rows,
       insert_ids=None,
-      skip_invalid_rows=False):
+      skip_invalid_rows=False,
+      ignore_unknown_values=False):
     """Inserts rows into the specified table.
 
     Args:
@@ -1228,10 +1550,14 @@ class BigQueryWrapper(object):
         each key in it is the name of a field.
       skip_invalid_rows: If there are rows with insertion errors, whether they
         should be skipped, and all others should be inserted successfully.
+      ignore_unknown_values: Set this option to true to ignore unknown column
+        names. If the input rows contain columns that are not
+        part of the existing table's schema, those columns are ignored, and
+        the rows are successfully inserted.
 
     Returns:
       A tuple (bool, errors). If first element is False then the second element
-      will be a bigquery.InserttErrorsValueListEntry instance containing
+      will be a bigquery.InsertErrorsValueListEntry instance containing
       specific errors.
     """
 
@@ -1241,8 +1567,8 @@ class BigQueryWrapper(object):
     # can happen during retries on failures.
     # TODO(silviuc): Must add support to writing TableRow's instead of dicts.
     insert_ids = [
-        str(self.unique_row_id) if not insert_ids else insert_ids[i] for i,
-        _ in enumerate(rows)
+        str(self.unique_row_id) if not insert_ids else insert_ids[i]
+        for i, _ in enumerate(rows)
     ]
     rows = [
         fast_json_loads(fast_json_dumps(r, default=default_encoder))
@@ -1250,7 +1576,9 @@ class BigQueryWrapper(object):
     ]
 
     result, errors = self._insert_all_rows(
-        project_id, dataset_id, table_id, rows, insert_ids)
+        project_id, dataset_id, table_id, rows, insert_ids,
+        skip_invalid_rows=skip_invalid_rows,
+        ignore_unknown_values=ignore_unknown_values)
     return result, errors
 
   def _convert_cell_value_to_dict(self, value, field):
@@ -1327,189 +1655,77 @@ class BigQueryWrapper(object):
         result[field.name] = self._convert_cell_value_to_dict(value, field)
     return result
 
+  @staticmethod
+  def from_pipeline_options(pipeline_options: PipelineOptions):
+    """Create a BigQueryWrapper from pipeline options.
 
-# -----------------------------------------------------------------------------
-# BigQueryReader, BigQueryWriter.
-
-
-class BigQueryReader(dataflow_io.NativeSourceReader):
-  """A reader for a BigQuery source."""
-  def __init__(
-      self,
-      source,
-      test_bigquery_client=None,
-      use_legacy_sql=True,
-      flatten_results=True,
-      kms_key=None,
-      query_priority=None):
-    self.source = source
-    self.test_bigquery_client = test_bigquery_client
-    if auth.is_running_in_gce:
-      self.executing_project = auth.executing_project
-    elif hasattr(source, 'pipeline_options'):
-      self.executing_project = (
-          source.pipeline_options.view_as(GoogleCloudOptions).project)
-    else:
-      self.executing_project = None
-
-    # TODO(silviuc): Try to automatically get it from gcloud config info.
-    if not self.executing_project and test_bigquery_client is None:
-      raise RuntimeError(
-          'Missing executing project information. Please use the --project '
-          'command line option to specify it.')
-    self.row_as_dict = isinstance(self.source.coder, RowAsDictJsonCoder)
-    # Schema for the rows being read by the reader. It is initialized the
-    # first time something gets read from the table. It is not required
-    # for reading the field values in each row but could be useful for
-    # getting additional details.
-    self.schema = None
-    self.use_legacy_sql = use_legacy_sql
-    self.flatten_results = flatten_results
-    self.kms_key = kms_key
-    self.bigquery_job_labels = {}
-    self.bq_io_metadata = None
-
-    from apache_beam.io.gcp.bigquery import BigQueryQueryPriority
-    self.query_priority = query_priority or BigQueryQueryPriority.BATCH
-
-    if self.source.table_reference is not None:
-      # If table schema did not define a project we default to executing
-      # project.
-      project_id = self.source.table_reference.projectId
-      if not project_id:
-        project_id = self.executing_project
-      self.query = 'SELECT * FROM [%s:%s.%s];' % (
-          project_id,
-          self.source.table_reference.datasetId,
-          self.source.table_reference.tableId)
-    elif self.source.query is not None:
-      self.query = self.source.query
-    else:
-      # Enforce the "modes" enforced by BigQuerySource.__init__.
-      # If this exception has been raised, the BigQuerySource "modes" have
-      # changed and this method will need to be updated as well.
-      raise ValueError("BigQuerySource must have either a table or query")
-
-  def _get_source_location(self):
+    Args:
+      pipeline_options: Pipeline options containing GCP configuration.
+        The quota project is read from --bigquery_quota_project_id if set.
     """
-    Get the source location (e.g. ``"EU"`` or ``"US"``) from either
+    return BigQueryWrapper(pipeline_options=pipeline_options)
 
-    - :data:`source.table_reference`
-      or
-    - The first referenced table in :data:`source.query`
+  @staticmethod
+  def _bigquery_client(
+      pipeline_options: PipelineOptions, quota_project_id: str = None):
+    """Create a BigQuery API client from pipeline options.
 
-    See Also:
-      - :meth:`BigQueryWrapper.get_query_location`
-      - :meth:`BigQueryWrapper.get_table_location`
-
-    Returns:
-      Optional[str]: The source location, if any.
+    Args:
+      pipeline_options: Pipeline options for credentials.
+      quota_project_id: Optional quota project ID. If not provided, will be
+        extracted from pipeline_options.
     """
-    if self.source.table_reference is not None:
-      tr = self.source.table_reference
-      return self.client.get_table_location(
-          tr.projectId if tr.projectId is not None else self.executing_project,
-          tr.datasetId,
-          tr.tableId)
-    else:  # It's a query source
-      return self.client.get_query_location(
-          self.executing_project, self.source.query, self.source.use_legacy_sql)
+    credentials = auth.get_service_credentials(pipeline_options)
+    # Use explicit quota_project_id if provided, otherwise get from options
+    quota_project_id = quota_project_id or _quota_project_id_from_options(
+        pipeline_options)
+    url = get_bigquery_api_url(pipeline_options)
+    http = get_new_http()
+    if quota_project_id:
+      if credentials is None:
+        # Ignoring the request would silently bill a different project.
+        raise ValueError(
+            'quota_project_id was set to %r, but no credentials were found to '
+            'apply it to.' % quota_project_id)
+      # Send the quota project as a request header rather than deriving new
+      # credentials: credentials.with_quota_project() returns a copy without
+      # the cached token, and this keeps the shared credentials untouched.
+      # The header is set below the credentials layer so that it is applied on
+      # every attempt and wins over a quota project the credentials carry.
+      http = _HttpWithHeaders(
+          http, {'x-goog-user-project': quota_project_id},
+          hosts=[
+              urllib.parse.urlsplit(u).hostname for u in (
+                  url, bigquery.BigqueryV2.BASE_URL,
+                  bigquery.BigqueryV2.MTLS_BASE_URL)
+          ])
+    return bigquery.BigqueryV2(
+        url=url,
+        http=http,
+        credentials=credentials,
+        response_encoding='utf8',
+        additional_http_headers={
+            "user-agent": "apache-beam-%s" % apache_beam.__version__
+        })
 
-  def __enter__(self):
-    self.client = BigQueryWrapper(client=self.test_bigquery_client)
-    if not self.client.is_user_configured_dataset():
-      # Temp dataset was provided by the user so we do not have to create one.
-      self.client.create_temporary_dataset(
-          self.executing_project, location=self._get_source_location())
-    return self
+  @staticmethod
+  def _gcp_bigquery_client(
+      quota_project_id: str = None,
+      pipeline_options: Optional[PipelineOptions] = None):
+    """Create a google-cloud-bigquery Client with optional quota project.
 
-  def __exit__(self, exception_type, exception_value, traceback):
-    self.client.clean_up_temporary_dataset(self.executing_project)
-
-  def __iter__(self):
-    if not self.bq_io_metadata:
-      self.bq_io_metadata = create_bigquery_io_metadata()
-    for rows, schema in self.client.run_query(
-        project_id=self.executing_project, query=self.query,
-        use_legacy_sql=self.use_legacy_sql,
-        flatten_results=self.flatten_results,
-        priority=self.query_priority,
-        job_labels=self.bq_io_metadata.add_additional_bq_job_labels(
-            self.bigquery_job_labels)):
-      if self.schema is None:
-        self.schema = schema
-      for row in rows:
-        # return base64 encoded bytes as byte type on python 3
-        # which matches the behavior of Beam Java SDK
-        for i in range(len(row.f)):
-          if self.schema.fields[i].type == 'BYTES' and row.f[i].v:
-            row.f[i].v.string_value = row.f[i].v.string_value.encode('utf-8')
-
-        if self.row_as_dict:
-          yield self.client.convert_row_to_dict(row, schema)
-        else:
-          yield row
-
-
-class BigQueryWriter(dataflow_io.NativeSinkWriter):
-  """The sink writer for a BigQuerySink."""
-  def __init__(self, sink, test_bigquery_client=None, buffer_size=None):
-    self.sink = sink
-    self.test_bigquery_client = test_bigquery_client
-    self.row_as_dict = isinstance(self.sink.coder, RowAsDictJsonCoder)
-    # Buffer used to batch written rows so we reduce communication with the
-    # BigQuery service.
-    self.rows_buffer = []
-    self.rows_buffer_flush_threshold = buffer_size or 1000
-    # Figure out the project, dataset, and table used for the sink.
-    self.project_id = self.sink.table_reference.projectId
-
-    # If table schema did not define a project we default to executing project.
-    if self.project_id is None and hasattr(sink, 'pipeline_options'):
-      self.project_id = (
-          sink.pipeline_options.view_as(GoogleCloudOptions).project)
-
-    assert self.project_id is not None
-
-    self.dataset_id = self.sink.table_reference.datasetId
-    self.table_id = self.sink.table_reference.tableId
-
-  def _flush_rows_buffer(self):
-    if self.rows_buffer:
-      _LOGGER.info(
-          'Writing %d rows to %s:%s.%s table.',
-          len(self.rows_buffer),
-          self.project_id,
-          self.dataset_id,
-          self.table_id)
-      passed, errors = self.client.insert_rows(
-          project_id=self.project_id, dataset_id=self.dataset_id,
-          table_id=self.table_id, rows=self.rows_buffer)
-      self.rows_buffer = []
-      if not passed:
-        raise RuntimeError(
-            'Could not successfully insert rows to BigQuery'
-            ' table [%s:%s.%s]. Errors: %s' %
-            (self.project_id, self.dataset_id, self.table_id, errors))
-
-  def __enter__(self):
-    self.client = BigQueryWrapper(client=self.test_bigquery_client)
-    self.client.get_or_create_table(
-        self.project_id,
-        self.dataset_id,
-        self.table_id,
-        self.sink.table_schema,
-        self.sink.create_disposition,
-        self.sink.write_disposition)
-    return self
-
-  def __exit__(self, exception_type, exception_value, traceback):
-    self._flush_rows_buffer()
-
-  def Write(self, row):
-    self.rows_buffer.append(row)
-    if len(self.rows_buffer) > self.rows_buffer_flush_threshold:
-      self._flush_rows_buffer()
+    The client applies the quota project to the credentials it resolves
+    itself, so no credentials are derived here. If ``--bigquery_endpoint`` is
+    set, it is used as the API endpoint; otherwise the client library resolves
+    the endpoint itself, honoring ``GOOGLE_CLOUD_UNIVERSE_DOMAIN``.
+    """
+    client_options = get_bigquery_client_options(pipeline_options) or {}
+    if quota_project_id:
+      client_options['quota_project_id'] = quota_project_id
+    return gcp_bigquery.Client(
+        client_options=client_options or None,
+        client_info=ClientInfo(
+            user_agent="apache-beam-%s" % apache_beam.__version__))
 
 
 class RowAsDictJsonCoder(coders.Coder):
@@ -1525,7 +1741,10 @@ class RowAsDictJsonCoder(coders.Coder):
     # to the programmer that they have used NAN/INF values.
     try:
       return json.dumps(
-          table_row, allow_nan=False, default=default_encoder).encode('utf-8')
+          table_row,
+          allow_nan=False,
+          ensure_ascii=False,
+          default=default_encoder).encode('utf-8')
     except ValueError as e:
       raise ValueError(
           '%s. %s. Row: %r' % (e, JSON_COMPLIANCE_ERROR, table_row))
@@ -1617,8 +1836,11 @@ class AvroRowWriter(io.IOBase):
     raise io.UnsupportedOperation("AvroRowWriter is not readable")
 
   def tell(self):
-    # Flush the fastavro Writer to the underlying stream, otherwise there isn't
-    # a reliable way to determine how many bytes have been written.
+    # Include both bytes already flushed to the underlying stream and bytes
+    # currently buffered in the fastavro Writer, avoiding a costly block flush
+    # (and 16-byte sync marker) after every single row.
+    if hasattr(self._avro_writer, 'io'):
+      return self._file_handle.tell() + self._avro_writer.io.tell()
     self._avro_writer.flush()
     return self._file_handle.tell()
 
@@ -1640,7 +1862,19 @@ class RetryStrategy(object):
   RETRY_NEVER = 'RETRY_NEVER'
   RETRY_ON_TRANSIENT_ERROR = 'RETRY_ON_TRANSIENT_ERROR'
 
-  _NON_TRANSIENT_ERRORS = {'invalid', 'invalidQuery', 'notImplemented'}
+  # Values below may be found in reasons provided either in an
+  # error returned by a client method or by an http response as
+  # defined in google.api_core.exceptions
+  _NON_TRANSIENT_ERRORS = {
+      'invalid',
+      'invalidQuery',
+      'notImplemented',
+      'Bad Request',
+      'Unauthorized',
+      'Forbidden',
+      'Not Found',
+      'Not Implemented',
+  }
 
   @staticmethod
   def should_retry(strategy, error_message):
@@ -1691,13 +1925,60 @@ class AppendDestinationsFn(DoFn):
     yield (self.destination(element, *side_inputs), element)
 
 
+def beam_row_from_dict(row: dict, schema):
+  """Converts a dictionary row to a Beam Row.
+  Nested records and lists are supported.
+
+  Args:
+    row (dict):
+      The row to convert.
+    schema (str, dict, ~apache_beam.io.gcp.internal.clients.bigquery.\
+bigquery_v2_messages.TableSchema):
+      The table schema. Will be used to help convert the row.
+
+  Returns:
+    ~apache_beam.pvalue.Row: The converted row.
+  """
+  if not isinstance(schema, (bigquery.TableSchema, bigquery.TableFieldSchema)):
+    schema = get_bq_tableschema(schema)
+  beam_row = {}
+  for field in schema.fields:
+    name = field.name
+    mode = field.mode.upper()
+    type = field.type.upper()
+    # When writing with Storage Write API via xlang, we give the Beam Row
+    # PCollection a hint on the schema using `with_output_types`.
+    # This requires that each row has all the fields in the schema.
+    # However, it's possible that some nullable fields don't appear in the row.
+    # For this case, we create the field with a `None` value
+    # None is also set when a repeated field is missing as BigQuery
+    # converts Null Repeated fields to empty lists
+    if name not in row and mode != "REQUIRED":
+      row[name] = None
+
+    value = row[name]
+    if type in ["RECORD", "STRUCT"] and value:
+      # if this is a list of records, we create a list of Beam Rows
+      if mode == "REPEATED":
+        list_of_beam_rows = []
+        for record in value:
+          list_of_beam_rows.append(beam_row_from_dict(record, field))
+        beam_row[name] = list_of_beam_rows
+      # otherwise, create a Beam Row from this record
+      else:
+        beam_row[name] = beam_row_from_dict(value, field)
+    else:
+      beam_row[name] = value
+  return apache_beam.pvalue.Row(**beam_row)
+
+
 def get_table_schema_from_string(schema):
   """Transform the string table schema into a
   :class:`~apache_beam.io.gcp.internal.clients.bigquery.\
 bigquery_v2_messages.TableSchema` instance.
 
   Args:
-    schema (str): The sting schema to be used if the BigQuery table to write
+    schema (str): The string schema to be used if the BigQuery table to write
       has to be created.
 
   Returns:
@@ -1768,6 +2049,32 @@ bigquery_v2_messages.TableSchema):
     raise TypeError('Unexpected schema argument: %s.' % schema)
 
 
+def get_bq_tableschema(schema):
+  """Convert the table schema to a TableSchema object.
+
+  Args:
+    schema (str, dict, ~apache_beam.io.gcp.internal.clients.bigquery.\
+bigquery_v2_messages.TableSchema):
+      The schema to be used if the BigQuery table to write has to be created.
+      This can either be a dict or string or in the TableSchema format.
+
+  Returns:
+    ~apache_beam.io.gcp.internal.clients.bigquery.\
+bigquery_v2_messages.TableSchema: The schema as a TableSchema object.
+  """
+  if (isinstance(schema,
+                 (bigquery.TableSchema, value_provider.ValueProvider)) or
+      callable(schema) or schema is None):
+    return schema
+  elif isinstance(schema, str):
+    return get_table_schema_from_string(schema)
+  elif isinstance(schema, dict):
+    schema_string = json.dumps(schema)
+    return parse_table_schema_from_json(schema_string)
+  else:
+    raise TypeError('Unexpected schema argument: %s.' % schema)
+
+
 def get_avro_schema_from_table_schema(schema):
   """Transform the table schema into an Avro schema.
 
@@ -1783,6 +2090,49 @@ bigquery_v2_messages.TableSchema):
   dict_table_schema = get_dict_table_schema(schema)
   return bigquery_avro_tools.get_record_schema_from_dict_table_schema(
       "root", dict_table_schema)
+
+
+def get_beam_typehints_from_tableschema(schema, type_overrides=None):
+  """Extracts Beam Python type hints from the schema.
+
+  Args:
+    schema (~apache_beam.io.gcp.internal.clients.bigquery.\
+bigquery_v2_messages.TableSchema):
+      The TableSchema to extract type hints from.
+    type_overrides (dict): Optional mapping of BigQuery type names (uppercase)
+      to Python types. These override the default mappings in
+      BIGQUERY_TYPE_TO_PYTHON_TYPE. For example:
+      ``{'DATE': datetime.date, 'JSON': dict}``
+
+  Returns:
+    List[Tuple[str, Any]]: A list of type hints that describe the input schema.
+    Nested and repeated fields are supported.
+  """
+  effective_types = {**BIGQUERY_TYPE_TO_PYTHON_TYPE, **(type_overrides or {})}
+  if not isinstance(schema, (bigquery.TableSchema, bigquery.TableFieldSchema)):
+    schema = get_bq_tableschema(schema)
+  typehints = []
+  for field in schema.fields:
+    name, field_type, mode = field.name, field.type.upper(), field.mode.upper()
+
+    if field_type in ["STRUCT", "RECORD"]:
+      # Structs can be represented as Beam Rows.
+      typehint = RowTypeConstraint.from_fields(
+          get_beam_typehints_from_tableschema(field, type_overrides))
+    elif field_type in effective_types:
+      typehint = effective_types[field_type]
+    else:
+      raise ValueError(
+          f"Converting BigQuery type [{field_type}] to "
+          "Python Beam type is not supported.")
+
+    if mode == "REPEATED":
+      typehint = Sequence[typehint]
+    elif mode != "REQUIRED":
+      typehint = Optional[typehint]
+
+    typehints.append((name, typehint))
+  return typehints
 
 
 class BigQueryJobTypes:
@@ -1804,9 +2154,11 @@ def generate_bq_job_name(job_name, step_id, job_type, random=None):
 
 
 def check_schema_equal(
-    left, right, *, ignore_descriptions=False, ignore_field_order=False):
-  # type: (Union[bigquery.TableSchema, bigquery.TableFieldSchema], Union[bigquery.TableSchema, bigquery.TableFieldSchema], bool, bool) -> bool
-
+    left: Union['bigquery.TableSchema', 'bigquery.TableFieldSchema'],
+    right: Union['bigquery.TableSchema', 'bigquery.TableFieldSchema'],
+    *,
+    ignore_descriptions: bool = False,
+    ignore_field_order: bool = False) -> bool:
   """Check whether schemas are equivalent.
 
   This comparison function differs from using == to compare TableSchema

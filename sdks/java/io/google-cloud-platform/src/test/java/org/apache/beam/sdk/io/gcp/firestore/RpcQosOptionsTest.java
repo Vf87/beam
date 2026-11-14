@@ -17,8 +17,9 @@
  */
 package org.apache.beam.sdk.io.gcp.firestore;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists.newArrayList;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists.newArrayList;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
@@ -39,7 +40,7 @@ import org.junit.runners.model.MultipleFailureException;
 import org.mockito.ArgumentCaptor;
 
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public final class RpcQosOptionsTest {
 
@@ -57,6 +58,20 @@ public final class RpcQosOptionsTest {
 
     assertNotEquals(rpcQosOptions, build);
     assertEquals(newMaxAttempts, build.getMaxAttempts());
+  }
+
+  @Test
+  public void rampupThrottlingEnabledByDefault() {
+    assertTrue(RpcQosOptions.defaultOptions().isShouldThrottleRampup());
+  }
+
+  @Test
+  public void withRampupThrottlingDisabled_survivesToBuilder() {
+    RpcQosOptions disabled = RpcQosOptions.newBuilder().withRampupThrottlingDisabled().build();
+
+    assertFalse(disabled.isShouldThrottleRampup());
+    assertNotEquals(RpcQosOptions.defaultOptions(), disabled);
+    assertEquals(disabled, disabled.toBuilder().build());
   }
 
   @Test
@@ -85,6 +100,7 @@ public final class RpcQosOptionsTest {
             "samplePeriod",
             "samplePeriodBucketSize",
             "shouldReportDiagnosticMetrics",
+            "shouldThrottleRampup",
             "throttleDuration");
 
     assertEquals(expectedKeys, actualKeys);

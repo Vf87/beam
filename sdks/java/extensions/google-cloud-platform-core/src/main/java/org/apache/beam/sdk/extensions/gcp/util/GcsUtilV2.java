@@ -1,0 +1,1244 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.beam.sdk.extensions.gcp.util;
+
+import static org.apache.beam.sdk.io.FileSystemUtils.wildcardToRegexp;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
+
+import com.google.api.client.http.HttpRequestInitializer;
+import com.google.api.gax.paging.Page;
+import com.google.auth.Credentials;
+import com.google.auto.value.AutoValue;
+import com.google.cloud.NoCredentials;
+import com.google.cloud.ReadChannel;
+import com.google.cloud.ServiceOptions;
+import com.google.cloud.TransportOptions;
+import com.google.cloud.WriteChannel;
+import com.google.cloud.http.HttpTransportOptions;
+import com.google.cloud.storage.Blob;
+import com.google.cloud.storage.BlobId;
+import com.google.cloud.storage.BlobInfo;
+import com.google.cloud.storage.Bucket;
+import com.google.cloud.storage.BucketInfo;
+import com.google.cloud.storage.CopyWriter;
+import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.Storage.BlobField;
+import com.google.cloud.storage.Storage.BlobGetOption;
+import com.google.cloud.storage.Storage.BlobListOption;
+import com.google.cloud.storage.Storage.BlobSourceOption;
+import com.google.cloud.storage.Storage.BlobWriteOption;
+import com.google.cloud.storage.Storage.BucketField;
+import com.google.cloud.storage.Storage.BucketGetOption;
+import com.google.cloud.storage.Storage.BucketTargetOption;
+import com.google.cloud.storage.Storage.CopyRequest;
+import com.google.cloud.storage.StorageBatch;
+import com.google.cloud.storage.StorageBatchResult;
+import com.google.cloud.storage.StorageChannelUtils;
+import com.google.cloud.storage.StorageException;
+import com.google.cloud.storage.StorageOptions;
+import com.google.cloud.storage.StorageRetryStrategy;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.io.Closeable;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.nio.ByteBuffer;
+import java.nio.channels.ClosedChannelException;
+import java.nio.channels.SeekableByteChannel;
+import java.nio.channels.WritableByteChannel;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.FileAlreadyExistsException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+import java.util.regex.Pattern;
+import org.apache.beam.runners.core.metrics.GcpResourceIdentifiers;
+import org.apache.beam.runners.core.metrics.MonitoringInfoConstants;
+import org.apache.beam.runners.core.metrics.ServiceCallMetric;
+import org.apache.beam.sdk.extensions.gcp.options.GcpOptions;
+import org.apache.beam.sdk.extensions.gcp.options.GcsOptions;
+import org.apache.beam.sdk.extensions.gcp.util.channels.CountingSeekableByteChannel;
+import org.apache.beam.sdk.extensions.gcp.util.channels.CountingWritableByteChannel;
+import org.apache.beam.sdk.extensions.gcp.util.gcsfs.GcsPath;
+import org.apache.beam.sdk.metrics.Counter;
+import org.apache.beam.sdk.metrics.MetricName;
+import org.apache.beam.sdk.metrics.Metrics;
+import org.apache.beam.sdk.metrics.MetricsContainer;
+import org.apache.beam.sdk.metrics.MetricsEnvironment;
+import org.apache.beam.sdk.options.DefaultValueFactory;
+import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.checkerframework.checker.nullness.qual.Nullable;
+
+@SuppressFBWarnings(
+    value = "CT_CONSTRUCTOR_THROW",
+    justification =
+        "Pre-existing finding, not triaged yet."
+            + " Making the class final or moving the throwing code"
+            + " into a static factory method may fix it.")
+class GcsUtilV2 {
+  private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(GcsUtilV2.class);
+
+  /** Environment variable that selects the Google Cloud universe domain. */
+  @VisibleForTesting static final String UNIVERSE_DOMAIN_ENV_VAR = "GOOGLE_CLOUD_UNIVERSE_DOMAIN";
+
+  public static class GcsUtilFactory implements DefaultValueFactory<GcsUtilV2> {
+    @Override
+    public GcsUtilV2 create(PipelineOptions options) {
+      // GcsOptions gcsOptions = options.as(GcsOptions.class);
+      // Storage.Builder storageBuilder = Transport.newStorageClient(gcsOptions);
+      return new GcsUtilV2(options);
+    }
+  }
+
+  private final Storage storage;
+
+  /**
+   * The shared client. Every operation reaches it through this method, so that tests can substitute
+   * a mocked client for a spied instance.
+   */
+  @VisibleForTesting
+  Storage storage() {
+    return storage;
+  }
+
+  private final @Nullable Integer uploadBufferSizeBytes;
+
+  private final GcsUtilV1.GcsCountersOptions gcsCountersOptions;
+
+  private final boolean gcsPerformanceMetrics;
+
+  private final @Nullable String projectId;
+
+  /** Maximum number of items to retrieve per Objects.List request. */
+  private static final long MAX_LIST_BLOBS_PER_CALL = 1024;
+
+  /** Maximum number of requests permitted in a GCS batch request. */
+  private static final int MAX_REQUESTS_PER_BATCH = 100;
+
+  /**
+   * Upload chunk size applied when the pipeline does not ask for one. Mirrors gcsio's {@code
+   * AsyncWriteChannelOptions} default, which java-storage does not share. Reference link:
+   * https://github.com/GoogleCloudDataproc/hadoop-connectors/blob/v3.1.14/util/src/main/java/com/google/cloud/hadoop/util/AsyncWriteChannelOptions.java#L72
+   */
+  @VisibleForTesting
+  static final int DEFAULT_UPLOAD_CHUNK_SIZE_BYTES =
+      Runtime.getRuntime().maxMemory() < 512 * 1024 * 1024 ? 8 * 1024 * 1024 : 3 * 8 * 1024 * 1024;
+
+  /**
+   * Limit the number of bytes Cloud Storage will attempt to copy before responding to an individual
+   * request. If you see Read Timeout errors, try reducing this value.
+   */
+  private static final long MEGABYTES_COPIED_PER_CHUNK = 2048L;
+
+  /**
+   * Default maximum number of files rewritten concurrently by {@link #copy} and {@link #move}, used
+   * when {@link GcsOptions#getGcsMaxConcurrentRewrites} is unset.
+   *
+   * <p>A copy or move never uses more threads than it has files, so this only caps large ones, such
+   * as the temp-to-final renames that finish a write of thousands of shards. There 128 brought the
+   * rename time close to {@code GcsUtilV1}'s batched rewrites without any request being throttled.
+   */
+  private static final int DEFAULT_MAX_CONCURRENT_REWRITES = 128;
+
+  /**
+   * How long {@link #copy} and {@link #move} wait for in-flight rewrites to finish after a failure
+   * before interrupting them.
+   */
+  private static final long REWRITE_TERMINATION_TIMEOUT_MINUTES = 5;
+
+  /**
+   * Starts the resumable upload sessions of {@link #create} in the background. Unbounded, so that a
+   * burst of creates is never queued behind one another, and daemon, so that an abandoned upload
+   * cannot keep the JVM alive.
+   */
+  private static final ExecutorService UPLOAD_SESSION_EXECUTOR =
+      Executors.newCachedThreadPool(
+          new ThreadFactoryBuilder()
+              .setDaemon(true)
+              .setNameFormat("gcsutil-v2-upload-session-%d")
+              .build());
+
+  /** Maximum number of files rewritten concurrently by {@link #copy} and {@link #move}. */
+  private final int maxConcurrentRewrites;
+
+  GcsUtilV2(PipelineOptions options) {
+    GcsOptions gcsOptions = options.as(GcsOptions.class);
+    this.projectId = options.as(GcpOptions.class).getProject();
+    StorageOptions.Builder storageOptionsBuilder =
+        StorageOptions.newBuilder().setProjectId(this.projectId);
+
+    // Use the pipeline's configured credentials rather than falling back to application default
+    // credentials, so that --gcpCredentialFactoryClass, impersonation and explicit service account
+    // keys are honored. A null credential means the pipeline opted out of authentication
+    // (e.g. NoopCredentialFactory), which maps to NoCredentials for this client.
+    Credentials credentials = gcsOptions.getGcpCredential();
+    storageOptionsBuilder.setCredentials(
+        credentials != null ? credentials : NoCredentials.getInstance());
+
+    // GcsOptions#getGcsEndpoint may carry a service path (as the JSON client in Transport expects),
+    // but this client derives its own path, so only the root is applicable here.
+    String endpoint = gcsOptions.getGcsEndpoint();
+    if (endpoint != null) {
+      storageOptionsBuilder.setHost(rootUrlOf(endpoint));
+    } else {
+      // java-storage only takes the universe domain from StorageOptions; unlike the Google API
+      // client used by GcsUtilV1, it ignores GOOGLE_CLOUD_UNIVERSE_DOMAIN and the credentials'
+      // universe domain. Set it explicitly so that non-default universes (e.g. Trusted Partner
+      // Cloud) resolve to their own storage endpoint instead of storage.googleapis.com.
+      @Nullable String universeDomain =
+          resolveUniverseDomain(System.getenv(UNIVERSE_DOMAIN_ENV_VAR), credentials);
+      if (universeDomain != null) {
+        storageOptionsBuilder.setUniverseDomain(universeDomain);
+      }
+    }
+
+    // Use the process-wide shared HTTP transport rather than letting each client create its own, so
+    // a new client reuses established connections instead of opening new ones on its first request.
+    storageOptionsBuilder.setTransportOptions(
+        StorageOptions.getDefaultHttpTransportOptions().toBuilder()
+            .setHttpTransportFactory(Transport::getTransport)
+            .build());
+    // Use the uniform retry strategy so that unconditional deletes and overwrites (such as in
+    // rewriteOne, remove, and removeBucket) also retry transient 5xx/429/408 storage errors,
+    // matching GcsUtilV1's HttpRequestInitializer retry behavior.
+    storageOptionsBuilder.setStorageRetryStrategy(
+        StorageRetryStrategy.getUniformStorageRetryStrategy());
+
+    storage = storageOptionsBuilder.build().getService();
+    uploadBufferSizeBytes = gcsOptions.getGcsUploadBufferSizeBytes();
+    this.gcsCountersOptions =
+        GcsUtilV1.GcsCountersOptions.create(
+            gcsOptions.getEnableBucketReadMetricCounter()
+                ? gcsOptions.getGcsReadCounterPrefix()
+                : null,
+            gcsOptions.getEnableBucketWriteMetricCounter()
+                ? gcsOptions.getGcsWriteCounterPrefix()
+                : null);
+    this.gcsPerformanceMetrics = Boolean.TRUE.equals(gcsOptions.getGcsPerformanceMetrics());
+
+    Integer configuredMaxConcurrentRewrites = gcsOptions.getGcsMaxConcurrentRewrites();
+    checkArgument(
+        configuredMaxConcurrentRewrites == null || configuredMaxConcurrentRewrites > 0,
+        "gcsMaxConcurrentRewrites must be positive, but was %s",
+        configuredMaxConcurrentRewrites);
+    this.maxConcurrentRewrites =
+        configuredMaxConcurrentRewrites != null
+            ? configuredMaxConcurrentRewrites
+            : DEFAULT_MAX_CONCURRENT_REWRITES;
+  }
+
+  /**
+   * Creates an integer consumer that updates the counter identified by a prefix and a bucket name.
+   */
+  private static Consumer<Integer> createCounterConsumer(String counterNamePrefix, String bucket) {
+    return Metrics.counter(GcsUtil.class, String.format("%s_%s", counterNamePrefix, bucket))::inc;
+  }
+
+  /** Returns the {@link MetricsContainer} to attribute wire-byte counters to, if enabled. */
+  @VisibleForTesting
+  @Nullable MetricsContainer performanceMetricsContainer() {
+    return gcsPerformanceMetrics ? MetricsEnvironment.getCurrentContainer() : null;
+  }
+
+  @VisibleForTesting
+  WritableByteChannel wrapInCounting(
+      WritableByteChannel writableByteChannel,
+      String bucket,
+      @Nullable MetricsContainer container) {
+    Consumer<Integer> writeConsumer =
+        Optional.ofNullable(gcsCountersOptions.getWriteCounterPrefix())
+            .map(prefix -> createCounterConsumer(prefix, bucket))
+            .orElse(null);
+
+    if (this.gcsPerformanceMetrics && container != null) {
+      Counter perfWriteCounter =
+          container.getCounter(
+              MetricName.named(GcsUtil.METRIC_NAMESPACE, "gcs_http_write_wire_bytes_sent"));
+      Consumer<Integer> perfConsumer = perfWriteCounter::inc;
+      writeConsumer = writeConsumer == null ? perfConsumer : writeConsumer.andThen(perfConsumer);
+    }
+
+    if (writeConsumer == null) {
+      return writableByteChannel;
+    }
+    return new CountingWritableByteChannel(writableByteChannel, writeConsumer);
+  }
+
+  @VisibleForTesting
+  SeekableByteChannel wrapInCounting(
+      SeekableByteChannel seekableByteChannel,
+      String bucket,
+      @Nullable MetricsContainer container) {
+    Consumer<Integer> readConsumer =
+        Optional.ofNullable(gcsCountersOptions.getReadCounterPrefix())
+            .map(prefix -> createCounterConsumer(prefix, bucket))
+            .orElse(null);
+
+    if (this.gcsPerformanceMetrics && container != null) {
+      Counter perfReadCounter =
+          container.getCounter(
+              MetricName.named(GcsUtil.METRIC_NAMESPACE, "gcs_http_read_wire_bytes_received"));
+      Consumer<Integer> perfConsumer = perfReadCounter::inc;
+      readConsumer = readConsumer == null ? perfConsumer : readConsumer.andThen(perfConsumer);
+    }
+
+    if (readConsumer == null) {
+      return seekableByteChannel;
+    }
+    return CountingSeekableByteChannel.createWithBytesReadConsumer(
+        seekableByteChannel, readConsumer);
+  }
+
+  /** Builds the API request metric for {@code method} (e.g. {@code GcsGet}) on {@code bucket}. */
+  private ServiceCallMetric serviceCallMetric(String method, String bucket) {
+    HashMap<String, String> baseLabels = new HashMap<>();
+    baseLabels.put(MonitoringInfoConstants.Labels.PTRANSFORM, "");
+    baseLabels.put(MonitoringInfoConstants.Labels.SERVICE, "Storage");
+    baseLabels.put(MonitoringInfoConstants.Labels.METHOD, method);
+    baseLabels.put(
+        MonitoringInfoConstants.Labels.RESOURCE, GcpResourceIdentifiers.cloudStorageBucket(bucket));
+    baseLabels.put(MonitoringInfoConstants.Labels.GCS_PROJECT_ID, String.valueOf(projectId));
+    baseLabels.put(MonitoringInfoConstants.Labels.GCS_BUCKET, bucket);
+    return new ServiceCallMetric(MonitoringInfoConstants.Urns.API_REQUEST_COUNT, baseLabels);
+  }
+
+  /**
+   * {@link HttpTransportOptions} that wraps the request initializer so that HTTP-level counters
+   * (request counts, request shape, and status classes) are incremented against a pre-bound {@link
+   * MetricsContainer}.
+   *
+   * <p>The container is bound eagerly rather than resolved per request because requests may execute
+   * on background threads, where {@link MetricsEnvironment#getCurrentContainer} would not resolve
+   * to the step that initiated the operation.
+   */
+  private static class MetricsHttpTransportOptions extends HttpTransportOptions {
+    private static final long serialVersionUID = 1L;
+
+    // Not serializable, and only meaningful in the process that created it.
+    private final transient @Nullable MetricsContainer container;
+    private final boolean isWrite;
+
+    MetricsHttpTransportOptions(
+        HttpTransportOptions base, @Nullable MetricsContainer container, boolean isWrite) {
+      super(base.toBuilder());
+      this.container = container;
+      this.isWrite = isWrite;
+    }
+
+    @Override
+    public HttpRequestInitializer getHttpRequestInitializer(ServiceOptions<?, ?> serviceOptions) {
+      // withMetricsContainer returns the delegate unchanged when the container is null, which is
+      // also the case after deserialization.
+      return Transport.withMetricsContainer(
+          super.getHttpRequestInitializer(serviceOptions), container, isWrite);
+    }
+
+    @Override
+    public boolean equals(@Nullable Object obj) {
+      if (this == obj) {
+        return true;
+      }
+      if (!(obj instanceof MetricsHttpTransportOptions)) {
+        return false;
+      }
+      if (!super.equals(obj)) {
+        return false;
+      }
+      MetricsHttpTransportOptions other = (MetricsHttpTransportOptions) obj;
+      return isWrite == other.isWrite && Objects.equals(container, other.container);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(super.hashCode(), container, isWrite);
+    }
+  }
+
+  /**
+   * Returns a client whose HTTP requests are counted against {@code container}, or the shared
+   * client when HTTP metrics are not being collected.
+   *
+   * <p>A distinct client is required because the interceptors are installed on the transport, which
+   * is fixed when the client is built. This mirrors {@code GcsUtilV1}, which likewise builds a
+   * scoped client per operation while performance metrics are enabled.
+   */
+  @VisibleForTesting
+  Storage storageWithHttpMetrics(@Nullable MetricsContainer container, boolean isWrite) {
+    if (container == null) {
+      return storage();
+    }
+    StorageOptions options = storage().getOptions();
+    TransportOptions transportOptions = options.getTransportOptions();
+    if (!(transportOptions instanceof HttpTransportOptions)) {
+      // A non-HTTP transport (e.g. gRPC) has no HttpRequestInitializer to wrap.
+      return storage();
+    }
+    return options.toBuilder()
+        .setTransportOptions(
+            new MetricsHttpTransportOptions(
+                (HttpTransportOptions) transportOptions, container, isWrite))
+        .build()
+        .getService();
+  }
+
+  /** Returns the {@code scheme://host[:port]} prefix of {@code endpoint}, discarding any path. */
+  private static String rootUrlOf(String endpoint) {
+    try {
+      URL url = new URL(endpoint);
+      return url.getProtocol()
+          + "://"
+          + url.getHost()
+          + (url.getPort() > 0 ? ":" + url.getPort() : "");
+    } catch (MalformedURLException e) {
+      throw new IllegalArgumentException("Invalid gcsEndpoint URL: " + endpoint, e);
+    }
+  }
+
+  /**
+   * Returns the non-default universe domain to use for the storage client, or null for the default
+   * universe ({@code googleapis.com}).
+   *
+   * <p>{@code envUniverseDomain} (the value of {@code GOOGLE_CLOUD_UNIVERSE_DOMAIN}) takes
+   * precedence; otherwise the credentials' universe domain is used. This matches how the Google API
+   * client libraries, and Beam's Python SDK, resolve the universe domain.
+   */
+  @VisibleForTesting
+  static @Nullable String resolveUniverseDomain(
+      @Nullable String envUniverseDomain, @Nullable Credentials credentials) {
+    String universeDomain = envUniverseDomain == null ? "" : envUniverseDomain.trim();
+    if (universeDomain.isEmpty() && credentials != null) {
+      try {
+        universeDomain = credentials.getUniverseDomain();
+      } catch (IOException e) {
+        LOG.warn(
+            "Unable to determine the universe domain of the credentials; using the default.", e);
+        return null;
+      }
+    }
+    if (universeDomain == null
+        || universeDomain.isEmpty()
+        || Credentials.GOOGLE_DEFAULT_UNIVERSE.equals(universeDomain)) {
+      return null;
+    }
+    return universeDomain;
+  }
+
+  // AccessDeniedException/FileAlreadyExistsException permit a null "other" argument, and these
+  // exceptions permit a null detail message, but the JDK constructor stubs are not annotated for
+  // nullness.
+  @SuppressWarnings("nullness")
+  private static IOException translateStorageException(GcsPath gcsPath, StorageException e) {
+    switch (e.getCode()) {
+      case 403:
+        return new AccessDeniedException(gcsPath.toString(), null, e.getMessage());
+      case 404:
+        return new FileNotFoundException(e.getMessage());
+      case 409:
+        return new FileAlreadyExistsException(gcsPath.toString(), null, e.getMessage());
+      default:
+        return new IOException(e);
+    }
+  }
+
+  private IOException translateStorageException(
+      String bucketName, @Nullable String blobName, StorageException e) {
+    return translateStorageException(GcsPath.fromComponents(bucketName, blobName), e);
+  }
+
+  public Blob getBlob(GcsPath gcsPath, BlobGetOption... options) throws IOException {
+    return getBlob(storage(), gcsPath, options);
+  }
+
+  /** As {@link #getBlob(GcsPath, BlobGetOption...)}, but issued through a specific client. */
+  private Blob getBlob(Storage client, GcsPath gcsPath, BlobGetOption... options)
+      throws IOException {
+    try {
+      Blob blob = client.get(gcsPath.getBucket(), gcsPath.getObject(), options);
+      if (blob == null) {
+        throw new FileNotFoundException(
+            String.format("The specified file does not exist: %s", gcsPath.toString()));
+      }
+      return blob;
+    } catch (StorageException e) {
+      throw translateStorageException(gcsPath, e);
+    }
+  }
+
+  public long fileSize(GcsPath gcsPath) throws IOException {
+    return getBlob(gcsPath, BlobGetOption.fields(BlobField.SIZE)).getSize();
+  }
+
+  /** A class that holds either a {@link Blob} or an {@link IOException}. */
+  @AutoValue
+  public abstract static class BlobResult {
+
+    /** Returns the {@link Blob}. */
+    public abstract @Nullable Blob blob();
+
+    /** Returns the {@link IOException}. */
+    public abstract @Nullable IOException ioException();
+
+    @VisibleForTesting
+    public static BlobResult create(Blob blob) {
+      return new AutoValue_GcsUtilV2_BlobResult(checkNotNull(blob, "blob"), null /* ioException */);
+    }
+
+    @VisibleForTesting
+    public static BlobResult create(IOException ioException) {
+      return new AutoValue_GcsUtilV2_BlobResult(
+          null /* blob */, checkNotNull(ioException, "ioException"));
+    }
+  }
+
+  public List<BlobResult> getBlobs(Iterable<GcsPath> gcsPaths, BlobGetOption... options)
+      throws IOException {
+
+    List<BlobResult> results = new ArrayList<>();
+
+    for (List<GcsPath> pathPartition :
+        Lists.partition(Lists.newArrayList(gcsPaths), MAX_REQUESTS_PER_BATCH)) {
+
+      // Create a new empty batch every time
+      StorageBatch batch = storage().batch();
+      List<StorageBatchResult<Blob>> batchResultFutures = new ArrayList<>();
+
+      for (GcsPath path : pathPartition) {
+        batchResultFutures.add(batch.get(path.getBucket(), path.getObject(), options));
+      }
+      batch.submit();
+
+      for (int i = 0; i < batchResultFutures.size(); i++) {
+        GcsPath path = pathPartition.get(i);
+        StorageBatchResult<Blob> future = batchResultFutures.get(i);
+        try {
+          Blob blob;
+          try {
+            blob = future.get();
+          } catch (StorageException e) {
+            if (!e.isRetryable()) {
+              throw e;
+            }
+            // StorageBatch.submit() does not retry individual sub-requests inside a multipart
+            // batch when one fails with a transient 5xx/429 error; fall back to an individual
+            // get() so the client's retry strategy can retry it.
+            blob = storage().get(path.getBucket(), path.getObject(), options);
+          }
+          if (blob != null) {
+            results.add(BlobResult.create(blob));
+          } else {
+            results.add(
+                BlobResult.create(
+                    new FileNotFoundException(
+                        String.format("The specified file does not exist: %s", path.toString()))));
+          }
+        } catch (StorageException e) {
+          results.add(BlobResult.create(translateStorageException(path, e)));
+        }
+      }
+    }
+    return results;
+  }
+
+  /** Lists {@link Blob}s given the {@code bucket}, {@code prefix}, {@code pageToken}. */
+  public Page<Blob> listBlobs(
+      String bucket,
+      String prefix,
+      @Nullable String pageToken,
+      @Nullable String delimiter,
+      BlobListOption... options)
+      throws IOException {
+    List<BlobListOption> blobListOptions = new ArrayList<>();
+    blobListOptions.add(BlobListOption.pageSize(MAX_LIST_BLOBS_PER_CALL));
+    if (pageToken != null) {
+      blobListOptions.add(BlobListOption.pageToken(pageToken));
+    }
+    if (prefix != null) {
+      blobListOptions.add(BlobListOption.prefix(prefix));
+    }
+    if (delimiter != null) {
+      blobListOptions.add(BlobListOption.delimiter(delimiter));
+    }
+    if (options != null && options.length > 0) {
+      for (BlobListOption option : options) {
+        blobListOptions.add(option);
+      }
+    }
+
+    try {
+      return storage().list(bucket, blobListOptions.toArray(new BlobListOption[0]));
+    } catch (StorageException e) {
+      throw translateStorageException(bucket, prefix, e);
+    }
+  }
+
+  public Page<Blob> listBlobs(
+      String bucket, String prefix, @Nullable String pageToken, BlobListOption... options)
+      throws IOException {
+    return listBlobs(bucket, prefix, pageToken, null, options);
+  }
+
+  /**
+   * Expands a pattern into matched paths. The pattern path may contain globs, which are expanded in
+   * the result. For patterns that only match a single object, we ensure that the object exists.
+   */
+  public List<GcsPath> expand(GcsPath gcsPattern) throws IOException {
+    // Handle Non-Wildcard Path
+    if (!GcsPath.isWildcard(gcsPattern)) {
+      try {
+        // Use a get request to fetch the metadata of the object, and ignore the return value.
+        // The request has strong global consistency.
+        getBlob(gcsPattern, BlobGetOption.fields(BlobField.NAME));
+        return ImmutableList.of(gcsPattern);
+      } catch (FileNotFoundException e) {
+        // If the path was not found, return an empty list.
+        return ImmutableList.of();
+      }
+    }
+
+    // Handle Wildcard Path
+    // TODO: check out BlobListOption.matchGlob() for a similar function.
+    String prefix = GcsPath.getNonWildcardPrefix(gcsPattern.getObject());
+    Pattern p = Pattern.compile(wildcardToRegexp(gcsPattern.getObject()));
+
+    LOG.debug(
+        "matching files in bucket {}, prefix {} against pattern {}",
+        gcsPattern.getBucket(),
+        prefix,
+        p.toString());
+
+    List<GcsPath> results = new ArrayList<>();
+    Page<Blob> blobs =
+        listBlobs(
+            gcsPattern.getBucket(),
+            prefix,
+            null,
+            BlobListOption.fields(BlobField.NAME, BlobField.BUCKET));
+    // Iterate through all elements page by page (lazily)
+    for (Blob b : blobs.iterateAll()) {
+      String name = b.getName();
+      // Filter objects based on the regex. Skip directories, which end with a slash.
+      if (p.matcher(name).matches() && !name.endsWith("/")) {
+        LOG.debug("Matched object: {}", name);
+        results.add(GcsPath.fromComponents(b.getBucket(), b.getName()));
+      }
+    }
+    return results;
+  }
+
+  public enum MissingStrategy {
+    FAIL_IF_MISSING,
+    SKIP_IF_MISSING,
+  }
+
+  public void remove(Iterable<GcsPath> paths, MissingStrategy strategy) throws IOException {
+    for (List<GcsPath> pathPartition :
+        Lists.partition(Lists.newArrayList(paths), MAX_REQUESTS_PER_BATCH)) {
+
+      // Create a new empty batch every time
+      StorageBatch batch = storage().batch();
+      List<StorageBatchResult<Boolean>> batchResultFutures = new ArrayList<>();
+
+      for (GcsPath path : pathPartition) {
+        batchResultFutures.add(batch.delete(path.getBucket(), path.getObject()));
+      }
+      batch.submit();
+
+      for (int i = 0; i < batchResultFutures.size(); i++) {
+        GcsPath path = pathPartition.get(i);
+        StorageBatchResult<Boolean> future = batchResultFutures.get(i);
+        try {
+          Boolean deleted;
+          try {
+            deleted = future.get();
+          } catch (StorageException e) {
+            if (!e.isRetryable()) {
+              throw e;
+            }
+            // StorageBatch.submit() does not retry individual sub-requests inside a multipart
+            // batch when one fails with a transient 5xx/429 error; fall back to an individual
+            // delete() so the client's retry strategy can retry it.
+            deleted = storage().delete(BlobId.of(path.getBucket(), path.getObject()));
+          }
+          if (!Boolean.TRUE.equals(deleted)) {
+            if (strategy == MissingStrategy.FAIL_IF_MISSING) {
+              throw new FileNotFoundException(
+                  String.format("The specified file does not exist: %s", path.toString()));
+            } else {
+              LOG.warn("Ignoring failed deletion on file {}.", path.toString());
+            }
+          }
+        } catch (StorageException e) {
+          throw translateStorageException(path, e);
+        }
+      }
+    }
+  }
+
+  public enum OverwriteStrategy {
+    FAIL_IF_EXISTS, // Fail if target exists
+    SKIP_IF_EXISTS, // Skip if target exists
+    SAFE_OVERWRITE, // Overwrite only if the generation matches (atomic)
+    ALWAYS_OVERWRITE // Overwrite regardless of state
+  }
+
+  private void rewriteHelper(
+      Iterable<GcsPath> srcPaths,
+      Iterable<GcsPath> dstPaths,
+      boolean deleteSrc,
+      MissingStrategy srcMissing,
+      OverwriteStrategy dstOverwrite)
+      throws IOException {
+    List<GcsPath> srcList = Lists.newArrayList(srcPaths);
+    List<GcsPath> dstList = Lists.newArrayList(dstPaths);
+    checkArgument(
+        srcList.size() == dstList.size(),
+        "Number of source files %s must equal number of destination files %s",
+        srcList.size(),
+        dstList.size());
+
+    if (srcList.isEmpty()) {
+      return;
+    }
+    if (srcList.size() == 1) {
+      // Nothing to overlap, so skip the thread pool.
+      rewriteOne(srcList.get(0), dstList.get(0), deleteSrc, srcMissing, dstOverwrite);
+      return;
+    }
+
+    // Each file costs up to three dependent round trips (target lookup, rewrite, source delete),
+    // and java-storage cannot batch rewrites, so issue the files concurrently instead.
+    int numThreads = Math.min(srcList.size(), maxConcurrentRewrites);
+    ExecutorService executor =
+        Executors.newFixedThreadPool(
+            numThreads,
+            new ThreadFactoryBuilder()
+                .setDaemon(true)
+                .setNameFormat("gcsutil-v2-rewrite-%d")
+                .build());
+    // Requests run on the pool's threads, so carry the caller's container over to them.
+    MetricsContainer container = MetricsEnvironment.getCurrentContainer();
+    List<Future<Void>> futures = new ArrayList<>(srcList.size());
+    try {
+      for (int i = 0; i < srcList.size(); i++) {
+        GcsPath srcPath = srcList.get(i);
+        GcsPath dstPath = dstList.get(i);
+        futures.add(
+            executor.submit(
+                () -> {
+                  if (container != null) {
+                    try (Closeable scope = MetricsEnvironment.scopedMetricsContainer(container)) {
+                      rewriteOne(srcPath, dstPath, deleteSrc, srcMissing, dstOverwrite);
+                    }
+                  } else {
+                    rewriteOne(srcPath, dstPath, deleteSrc, srcMissing, dstOverwrite);
+                  }
+                  return null;
+                }));
+      }
+
+      // Like the sequential loop this replaces, stop at the first failure: files not yet started
+      // are cancelled, while the ones already in flight are allowed to finish (awaited below).
+      @Nullable Throwable failure = null;
+      for (Future<Void> future : futures) {
+        try {
+          future.get();
+        } catch (CancellationException e) {
+          // Cancelled below after an earlier failure.
+        } catch (ExecutionException e) {
+          Throwable cause = e.getCause() != null ? e.getCause() : e;
+          if (failure == null) {
+            failure = cause;
+            for (Future<Void> other : futures) {
+              other.cancel(false);
+            }
+          } else {
+            failure.addSuppressed(cause);
+          }
+        }
+      }
+      if (failure != null) {
+        // Rethrow as is, so that callers still see the specific type (e.g. FileNotFoundException,
+        // FileAlreadyExistsException, AccessDeniedException) the sequential version threw.
+        if (failure instanceof IOException) {
+          throw (IOException) failure;
+        }
+        if (failure instanceof RuntimeException) {
+          throw (RuntimeException) failure;
+        }
+        if (failure instanceof Error) {
+          throw (Error) failure;
+        }
+        throw new IOException("Error rewriting objects", failure);
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IOException("Interrupted while rewriting objects", e);
+    } finally {
+      // A cancelled future reports done even if its task is still running, so wait for the pool
+      // itself: no file is left mid-rewrite when this method returns. If the wait times out or the
+      // caller is interrupted (including above), stop waiting and interrupt the in-flight rewrites.
+      executor.shutdown();
+      try {
+        if (!executor.awaitTermination(REWRITE_TERMINATION_TIMEOUT_MINUTES, TimeUnit.MINUTES)) {
+          LOG.warn(
+              "Timed out after {} minutes waiting for in-flight GCS rewrites to finish; "
+                  + "interrupting them. Some objects may be left partially copied or moved.",
+              REWRITE_TERMINATION_TIMEOUT_MINUTES);
+          executor.shutdownNow();
+        }
+      } catch (InterruptedException e) {
+        executor.shutdownNow();
+        Thread.currentThread().interrupt();
+      }
+    }
+  }
+
+  /** Rewrites a single object, then deletes the source if {@code deleteSrc}. */
+  private void rewriteOne(
+      GcsPath srcPath,
+      GcsPath dstPath,
+      boolean deleteSrc,
+      MissingStrategy srcMissing,
+      OverwriteStrategy dstOverwrite)
+      throws IOException {
+    BlobId srcId = BlobId.of(srcPath.getBucket(), srcPath.getObject());
+    BlobId dstId = BlobId.of(dstPath.getBucket(), dstPath.getObject());
+
+    CopyRequest.Builder copyRequestBuilder =
+        CopyRequest.newBuilder()
+            .setSource(srcId)
+            .setMegabytesCopiedPerChunk(MEGABYTES_COPIED_PER_CHUNK);
+
+    if (dstOverwrite == OverwriteStrategy.ALWAYS_OVERWRITE) {
+      copyRequestBuilder.setTarget(dstId);
+    } else {
+      // FAIL_IF_EXISTS, SKIP_IF_EXISTS and SAFE_OVERWRITE require checking the target blob
+      BlobInfo existingTarget;
+      try {
+        existingTarget = storage().get(dstId);
+      } catch (StorageException e) {
+        throw translateStorageException(dstPath, e);
+      }
+
+      if (existingTarget == null) {
+        copyRequestBuilder.setTarget(dstId, Storage.BlobTargetOption.doesNotExist());
+      } else {
+        switch (dstOverwrite) {
+          case SKIP_IF_EXISTS:
+            LOG.warn("Ignoring rewriting from {} to {} because target exists.", srcPath, dstPath);
+            return; // Skip this file
+
+          case SAFE_OVERWRITE:
+            copyRequestBuilder.setTarget(
+                dstId, Storage.BlobTargetOption.generationMatch(existingTarget.getGeneration()));
+            break;
+
+          case FAIL_IF_EXISTS:
+            throw new FileAlreadyExistsException(
+                srcPath.toString(),
+                dstPath.toString(),
+                "Target object already exists and strategy is FAIL_IF_EXISTS");
+          default:
+            throw new IllegalStateException("Unknown OverwriteStrategy: " + dstOverwrite);
+        }
+      }
+    }
+
+    try {
+      CopyWriter copyWriter = storage().copy(copyRequestBuilder.build());
+      copyWriter.getResult();
+
+      if (deleteSrc) {
+        if (!storage().delete(srcId)) {
+          // This may happen if the source file is deleted by another process after copy.
+          LOG.warn(
+              "Source file {} could not be deleted after move to {}. It may not have existed.",
+              srcPath,
+              dstPath);
+        }
+      }
+    } catch (StorageException e) {
+      if (e.getCode() == 404 && srcMissing == MissingStrategy.SKIP_IF_MISSING) {
+        LOG.warn(
+            "Ignoring rewriting from {} to {} because source does not exist.", srcPath, dstPath);
+        return;
+      }
+      throw translateStorageException(srcPath, e);
+    }
+  }
+
+  public void copy(
+      Iterable<GcsPath> srcPaths, Iterable<GcsPath> dstPaths, OverwriteStrategy strategy)
+      throws IOException {
+    rewriteHelper(srcPaths, dstPaths, false, MissingStrategy.FAIL_IF_MISSING, strategy);
+  }
+
+  public void move(
+      Iterable<GcsPath> srcPaths,
+      Iterable<GcsPath> dstPaths,
+      MissingStrategy srcMissing,
+      OverwriteStrategy dstOverwrite)
+      throws IOException {
+    rewriteHelper(srcPaths, dstPaths, true, srcMissing, dstOverwrite);
+  }
+
+  /** Get the {@link Bucket} from Cloud Storage path or propagates an exception. */
+  public Bucket getBucket(GcsPath path, BucketGetOption... options) throws IOException {
+    String bucketName = path.getBucket();
+    try {
+      Bucket bucket = storage().get(bucketName, options);
+      if (bucket == null) {
+        throw new FileNotFoundException(
+            String.format("The specified bucket does not exist: gs://%s", bucketName));
+      }
+      return bucket;
+    } catch (StorageException e) {
+      throw translateStorageException(bucketName, null, e);
+    }
+  }
+
+  /**
+   * Returns whether the GCS bucket exists and is accessible. This will return false if the bucket
+   * does not exist or is inaccessible due to permissions; any other failure is propagated, as
+   * {@link GcsUtilV1} does.
+   */
+  public boolean bucketAccessible(GcsPath path) throws IOException {
+    try {
+      // Fetch only the name field to minimize data transfer
+      getBucket(path, BucketGetOption.fields(BucketField.NAME));
+      return true;
+    } catch (AccessDeniedException | FileNotFoundException e) {
+      return false;
+    }
+  }
+
+  /**
+   * Checks whether the GCS bucket exists. Similar to {@link #bucketAccessible(GcsPath)}, but throws
+   * exception if the bucket is inaccessible due to permissions or does not exist.
+   */
+  public void verifyBucketAccessible(GcsPath path) throws IOException {
+    // Fetch only the name field to minimize data transfer
+    getBucket(path, BucketGetOption.fields(BucketField.NAME));
+  }
+
+  /**
+   * Returns the project number of the project which owns this bucket. If the bucket exists, it must
+   * be accessible otherwise the permissions exception will be propagated. If the bucket does not
+   * exist, an exception will be thrown.
+   */
+  public long bucketProject(GcsPath path) throws IOException {
+    Bucket bucket = getBucket(path, BucketGetOption.fields(BucketField.PROJECT));
+    return bucket.getProject().longValue();
+  }
+
+  public void createBucket(BucketInfo bucketInfo, BucketTargetOption... options)
+      throws IOException {
+    createBucket(null, bucketInfo, options);
+  }
+
+  /**
+   * As {@link #createBucket(BucketInfo, BucketTargetOption...)}, but creates the bucket in the
+   * given project instead of the one this instance is configured with.
+   */
+  public void createBucket(
+      @Nullable String projectId, BucketInfo bucketInfo, BucketTargetOption... options)
+      throws IOException {
+    Storage client = storage();
+    if (projectId != null && !projectId.equals(this.projectId)) {
+      // The owning project is a property of the client rather than of the insert request, so
+      // asking for a different one means deriving a client for it. The derived client shares the
+      // credentials, host and transport of the original.
+      client = storage().getOptions().toBuilder().setProjectId(projectId).build().getService();
+    }
+    try {
+      client.create(bucketInfo, options);
+    } catch (StorageException e) {
+      throw translateStorageException(bucketInfo.getName(), null, e);
+    }
+  }
+
+  public void removeBucket(BucketInfo bucketInfo) throws IOException {
+    try {
+      if (!storage().delete(bucketInfo.getName())) {
+        throw new FileNotFoundException(
+            String.format("The specified bucket does not exist: gs://%s", bucketInfo.getName()));
+      }
+    } catch (StorageException e) {
+      throw translateStorageException(bucketInfo.getName(), null, e);
+    }
+  }
+
+  /** A bridge that allows a GCS ReadChannel to behave as a SeekableByteChannel. */
+  private static class GcsSeekableByteChannel implements SeekableByteChannel {
+    private final ReadChannel reader;
+    private final long size;
+    private long position = 0;
+
+    GcsSeekableByteChannel(ReadChannel reader, long size) {
+      this.reader = reader;
+      this.size = size;
+      this.position = 0;
+    }
+
+    @Override
+    public int read(ByteBuffer dst) throws IOException {
+      int count = StorageChannelUtils.blockingFillFrom(dst, reader);
+      if (count > 0) {
+        this.position += count;
+      }
+      return count;
+    }
+
+    @Override
+    public SeekableByteChannel position(long newPosition) throws IOException {
+      checkArgument(newPosition >= 0, "Position must be non-negative: %s", newPosition);
+      reader.seek(newPosition);
+      this.position = newPosition;
+      return this;
+    }
+
+    @Override
+    public long position() throws IOException {
+      return this.position;
+    }
+
+    @Override
+    public long size() throws IOException {
+      return size;
+    }
+
+    @Override
+    public SeekableByteChannel truncate(long size) throws IOException {
+      throw new UnsupportedOperationException(
+          "GcsSeekableByteChannels are read-only and cannot be truncated.");
+    }
+
+    @Override
+    public int write(ByteBuffer src) throws IOException {
+      throw new UnsupportedOperationException(
+          "GcsSeekableByteChannel are read-only and does not support writing.");
+    }
+
+    @Override
+    public boolean isOpen() {
+      return reader.isOpen();
+    }
+
+    @Override
+    public void close() throws IOException {
+      if (isOpen()) {
+        reader.close();
+      }
+    }
+  }
+
+  public SeekableByteChannel open(GcsPath path, BlobSourceOption... sourceOptions)
+      throws IOException {
+    ServiceCallMetric serviceCallMetric = serviceCallMetric("GcsGet", path.getBucket());
+    MetricsContainer container = performanceMetricsContainer();
+    try {
+      Storage client = storageWithHttpMetrics(container, false);
+      Blob blob = getBlob(client, path, BlobGetOption.fields(BlobField.SIZE));
+      ReadChannel reader = client.reader(blob.getBlobId(), sourceOptions);
+      // disable internal buffering, and make the channel non-blocking
+      reader.setChunkSize(0);
+      serviceCallMetric.call("ok");
+      return wrapInCounting(
+          new GcsSeekableByteChannel(reader, blob.getSize()), path.getBucket(), container);
+    } catch (FileNotFoundException e) {
+      // getBlob reports a missing object as a FileNotFoundException rather than a
+      // StorageException, so record its status here like GcsUtilV1 does.
+      serviceCallMetric.call(404);
+      throw e;
+    } catch (StorageException e) {
+      serviceCallMetric.call(e.getCode());
+      throw translateStorageException(path, e);
+    }
+  }
+
+  /**
+   * A bridge that allows a GCS WriteChannel to behave as a WritableByteChannel.
+   *
+   * <p>The WriteChannel is opened in the background, because java-storage starts the resumable
+   * upload session with a blocking request when it opens one. Waiting for it on the first write, or
+   * on close, rather than in {@link #create} lets that request overlap with the caller's own work,
+   * as gcsio does for {@code GcsUtilV1}. A failure to start the session surfaces there instead.
+   */
+  private static class GcsWritableByteChannel implements WritableByteChannel {
+    private final Future<WriteChannel> pendingWriter;
+    private final GcsPath gcsPath;
+    private boolean closed = false;
+    // Set when the upload session could not be started (it failed, or waiting for it was
+    // interrupted). There is then nothing to finalize, and the failure has already been reported.
+    private boolean sessionFailed = false;
+
+    GcsWritableByteChannel(Future<WriteChannel> pendingWriter, GcsPath gcsPath) {
+      this.pendingWriter = pendingWriter;
+      this.gcsPath = gcsPath;
+    }
+
+    /** Waits for the upload session to start and returns its channel. */
+    private WriteChannel writer() throws IOException {
+      try {
+        return pendingWriter.get();
+      } catch (InterruptedException e) {
+        sessionFailed = true;
+        Thread.currentThread().interrupt();
+        pendingWriter.cancel(true);
+        throw new InterruptedIOException("Interrupted while starting the upload to " + gcsPath);
+      } catch (CancellationException e) {
+        // Only cancelled above, by an earlier interrupted wait, which abandoned the upload.
+        sessionFailed = true;
+        throw new InterruptedIOException(
+            "The upload to " + gcsPath + " was abandoned after an earlier interrupt");
+      } catch (ExecutionException e) {
+        sessionFailed = true;
+        Throwable cause = e.getCause();
+        if (cause instanceof StorageException) {
+          throw translateStorageException(gcsPath, (StorageException) cause);
+        }
+        if (cause instanceof IOException) {
+          throw (IOException) cause;
+        }
+        if (cause instanceof RuntimeException) {
+          throw (RuntimeException) cause;
+        }
+        if (cause instanceof Error) {
+          throw (Error) cause;
+        }
+        throw new IOException("Failed to start the upload to " + gcsPath, cause);
+      }
+    }
+
+    @Override
+    public int write(ByteBuffer src) throws IOException {
+      if (closed) {
+        throw new ClosedChannelException();
+      }
+      try {
+        return writer().write(src);
+      } catch (StorageException e) {
+        throw translateStorageException(gcsPath, e);
+      }
+    }
+
+    @Override
+    public boolean isOpen() {
+      return !closed;
+    }
+
+    @Override
+    public void close() throws IOException {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      if (sessionFailed) {
+        // An earlier write already reported that the session could not be started, and there is
+        // nothing to finalize.
+        return;
+      }
+      // The upload is finalized here, so this is where a failed precondition surfaces.
+      try {
+        writer().close();
+      } catch (StorageException e) {
+        throw translateStorageException(gcsPath, e);
+      }
+    }
+  }
+
+  public WritableByteChannel create(
+      GcsPath path, GcsUtilV1.CreateOptions options, BlobWriteOption... writeOptions)
+      throws IOException {
+    ServiceCallMetric serviceCallMetric = serviceCallMetric("GcsInsert", path.getBucket());
+    MetricsContainer container = performanceMetricsContainer();
+    try {
+      // Define the metadata for the new object
+      BlobInfo.Builder builder = BlobInfo.newBuilder(path.getBucket(), path.getObject());
+      String type = options.getContentType();
+      if (type != null) {
+        builder.setContentType(type);
+      }
+
+      BlobInfo blobInfo = builder.build();
+
+      Storage client = storageWithHttpMetrics(container, true);
+      List<BlobWriteOption> writeOptionList = new ArrayList<>(Arrays.asList(writeOptions));
+      if (options.getExpectFileToNotExist()) {
+        writeOptionList.add(BlobWriteOption.doesNotExist());
+      } else {
+        // We do not merge this check with the getExpectFileToNotExist() branch above
+        // because we don't want to always make the storage.get() RPC call.
+        Blob blob = client.get(path.getBucket(), path.getObject());
+        if (blob == null) {
+          writeOptionList.add(BlobWriteOption.doesNotExist());
+        } else {
+          writeOptionList.add(BlobWriteOption.generationMatch(blob.getGeneration()));
+        }
+      }
+      // Open a WriteChannel from the storage service. Opening one starts the resumable upload
+      // session with a blocking request, so it is done in the background and the returned channel
+      // waits for it on its first write or on close (see GcsWritableByteChannel).
+      BlobWriteOption[] writeOptionArray = writeOptionList.toArray(new BlobWriteOption[0]);
+      Integer uploadBufferSizeBytes =
+          options.getUploadBufferSizeBytes() != null
+              ? options.getUploadBufferSizeBytes()
+              : this.uploadBufferSizeBytes;
+      int chunkSize =
+          uploadBufferSizeBytes != null ? uploadBufferSizeBytes : DEFAULT_UPLOAD_CHUNK_SIZE_BYTES;
+      Future<WriteChannel> pendingWriter =
+          UPLOAD_SESSION_EXECUTOR.submit(
+              () -> {
+                try {
+                  WriteChannel writer = client.writer(blobInfo, writeOptionArray);
+                  writer.setChunkSize(chunkSize);
+                  serviceCallMetric.call("ok");
+                  return writer;
+                } catch (StorageException e) {
+                  serviceCallMetric.call(e.getCode());
+                  throw e;
+                }
+              });
+
+      // Return the bridge wrapper
+      return wrapInCounting(
+          new GcsWritableByteChannel(pendingWriter, path), path.getBucket(), container);
+
+    } catch (StorageException e) {
+      serviceCallMetric.call(e.getCode());
+      throw translateStorageException(path, e);
+    }
+  }
+}

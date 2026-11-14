@@ -51,7 +51,7 @@ import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TypeDescriptors;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Throwables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Throwables;
 import org.apache.qpid.server.SystemLauncher;
 import org.apache.qpid.server.model.SystemConfig;
 import org.junit.AfterClass;
@@ -63,13 +63,10 @@ import org.junit.rules.TemporaryFolder;
 import org.junit.rules.Timeout;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /** Test of {@link RabbitMqIO}. */
 @RunWith(JUnit4.class)
 public class RabbitMqIOTest implements Serializable {
-  private static final Logger LOG = LoggerFactory.getLogger(RabbitMqIOTest.class);
 
   private static int port;
   private static String defaultPort;

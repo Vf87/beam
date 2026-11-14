@@ -22,6 +22,7 @@ import (
 	"reflect"
 
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/runtime/exec"
+	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/sdf"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/typex"
 )
 
@@ -1041,24 +1042,31 @@ func init() {
 }
 
 type emitNative struct {
-	n  exec.ElementProcessor
-	fn interface{}
+	n   exec.ElementProcessor
+	fn  any
+	est *sdf.WatermarkEstimator
 
 	ctx   context.Context
+	pn    typex.PaneInfo
 	ws    []typex.Window
 	et    typex.EventTime
 	value exec.FullValue
 }
 
-func (e *emitNative) Init(ctx context.Context, ws []typex.Window, et typex.EventTime) error {
+func (e *emitNative) Init(ctx context.Context, pn typex.PaneInfo, ws []typex.Window, et typex.EventTime) error {
 	e.ctx = ctx
+	e.pn = pn
 	e.ws = ws
 	e.et = et
 	return nil
 }
 
-func (e *emitNative) Value() interface{} {
+func (e *emitNative) Value() any {
 	return e.fn
+}
+
+func (e *emitNative) AttachEstimator(est *sdf.WatermarkEstimator) {
+	e.est = est
 }
 
 func emitMakerByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
@@ -1068,7 +1076,10 @@ func emitMakerByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSlice(elm []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1081,7 +1092,10 @@ func emitMakerETByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSlice(t typex.EventTime, elm []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1094,7 +1108,10 @@ func emitMakerByteSliceByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceByteSlice(key []byte, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1107,7 +1124,10 @@ func emitMakerETByteSliceByteSlice(n exec.ElementProcessor) exec.ReusableEmitter
 }
 
 func (e *emitNative) invokeETByteSliceByteSlice(t typex.EventTime, key []byte, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1120,7 +1140,10 @@ func emitMakerByteSliceBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceBool(key []byte, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1133,7 +1156,10 @@ func emitMakerETByteSliceBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceBool(t typex.EventTime, key []byte, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1146,7 +1172,10 @@ func emitMakerByteSliceString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceString(key []byte, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1159,7 +1188,10 @@ func emitMakerETByteSliceString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceString(t typex.EventTime, key []byte, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1172,7 +1204,10 @@ func emitMakerByteSliceInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceInt(key []byte, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1185,7 +1220,10 @@ func emitMakerETByteSliceInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceInt(t typex.EventTime, key []byte, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1198,7 +1236,10 @@ func emitMakerByteSliceInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceInt8(key []byte, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1211,7 +1252,10 @@ func emitMakerETByteSliceInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceInt8(t typex.EventTime, key []byte, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1224,7 +1268,10 @@ func emitMakerByteSliceInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceInt16(key []byte, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1237,7 +1284,10 @@ func emitMakerETByteSliceInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceInt16(t typex.EventTime, key []byte, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1250,7 +1300,10 @@ func emitMakerByteSliceInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceInt32(key []byte, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1263,7 +1316,10 @@ func emitMakerETByteSliceInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceInt32(t typex.EventTime, key []byte, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1276,7 +1332,10 @@ func emitMakerByteSliceInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceInt64(key []byte, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1289,7 +1348,10 @@ func emitMakerETByteSliceInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceInt64(t typex.EventTime, key []byte, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1302,7 +1364,10 @@ func emitMakerByteSliceUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceUint(key []byte, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1315,7 +1380,10 @@ func emitMakerETByteSliceUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceUint(t typex.EventTime, key []byte, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1328,7 +1396,10 @@ func emitMakerByteSliceUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceUint8(key []byte, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1341,7 +1412,10 @@ func emitMakerETByteSliceUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceUint8(t typex.EventTime, key []byte, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1354,7 +1428,10 @@ func emitMakerByteSliceUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceUint16(key []byte, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1367,7 +1444,10 @@ func emitMakerETByteSliceUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceUint16(t typex.EventTime, key []byte, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1380,7 +1460,10 @@ func emitMakerByteSliceUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceUint32(key []byte, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1393,7 +1476,10 @@ func emitMakerETByteSliceUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceUint32(t typex.EventTime, key []byte, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1406,7 +1492,10 @@ func emitMakerByteSliceUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceUint64(key []byte, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1419,7 +1508,10 @@ func emitMakerETByteSliceUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceUint64(t typex.EventTime, key []byte, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1432,7 +1524,10 @@ func emitMakerByteSliceFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceFloat32(key []byte, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1445,7 +1540,10 @@ func emitMakerETByteSliceFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceFloat32(t typex.EventTime, key []byte, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1458,7 +1556,10 @@ func emitMakerByteSliceFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceFloat64(key []byte, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1471,7 +1572,10 @@ func emitMakerETByteSliceFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceFloat64(t typex.EventTime, key []byte, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1484,7 +1588,10 @@ func emitMakerByteSliceTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceTypex_T(key []byte, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1497,7 +1604,10 @@ func emitMakerETByteSliceTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceTypex_T(t typex.EventTime, key []byte, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1510,7 +1620,10 @@ func emitMakerByteSliceTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceTypex_U(key []byte, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1523,7 +1636,10 @@ func emitMakerETByteSliceTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceTypex_U(t typex.EventTime, key []byte, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1536,7 +1652,10 @@ func emitMakerByteSliceTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceTypex_V(key []byte, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1549,7 +1668,10 @@ func emitMakerETByteSliceTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceTypex_V(t typex.EventTime, key []byte, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1562,7 +1684,10 @@ func emitMakerByteSliceTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceTypex_W(key []byte, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1575,7 +1700,10 @@ func emitMakerETByteSliceTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceTypex_W(t typex.EventTime, key []byte, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1588,7 +1716,10 @@ func emitMakerByteSliceTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceTypex_X(key []byte, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1601,7 +1732,10 @@ func emitMakerETByteSliceTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceTypex_X(t typex.EventTime, key []byte, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1614,7 +1748,10 @@ func emitMakerByteSliceTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceTypex_Y(key []byte, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1627,7 +1764,10 @@ func emitMakerETByteSliceTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceTypex_Y(t typex.EventTime, key []byte, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1640,7 +1780,10 @@ func emitMakerByteSliceTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeByteSliceTypex_Z(key []byte, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1653,7 +1796,10 @@ func emitMakerETByteSliceTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETByteSliceTypex_Z(t typex.EventTime, key []byte, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1666,7 +1812,10 @@ func emitMakerBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBool(elm bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1679,7 +1828,10 @@ func emitMakerETBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBool(t typex.EventTime, elm bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1692,7 +1844,10 @@ func emitMakerBoolByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolByteSlice(key bool, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1705,7 +1860,10 @@ func emitMakerETBoolByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolByteSlice(t typex.EventTime, key bool, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1718,7 +1876,10 @@ func emitMakerBoolBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolBool(key bool, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1731,7 +1892,10 @@ func emitMakerETBoolBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolBool(t typex.EventTime, key bool, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1744,7 +1908,10 @@ func emitMakerBoolString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolString(key bool, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1757,7 +1924,10 @@ func emitMakerETBoolString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolString(t typex.EventTime, key bool, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1770,7 +1940,10 @@ func emitMakerBoolInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolInt(key bool, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1783,7 +1956,10 @@ func emitMakerETBoolInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolInt(t typex.EventTime, key bool, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1796,7 +1972,10 @@ func emitMakerBoolInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolInt8(key bool, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1809,7 +1988,10 @@ func emitMakerETBoolInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolInt8(t typex.EventTime, key bool, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1822,7 +2004,10 @@ func emitMakerBoolInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolInt16(key bool, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1835,7 +2020,10 @@ func emitMakerETBoolInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolInt16(t typex.EventTime, key bool, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1848,7 +2036,10 @@ func emitMakerBoolInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolInt32(key bool, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1861,7 +2052,10 @@ func emitMakerETBoolInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolInt32(t typex.EventTime, key bool, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1874,7 +2068,10 @@ func emitMakerBoolInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolInt64(key bool, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1887,7 +2084,10 @@ func emitMakerETBoolInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolInt64(t typex.EventTime, key bool, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1900,7 +2100,10 @@ func emitMakerBoolUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolUint(key bool, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1913,7 +2116,10 @@ func emitMakerETBoolUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolUint(t typex.EventTime, key bool, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1926,7 +2132,10 @@ func emitMakerBoolUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolUint8(key bool, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1939,7 +2148,10 @@ func emitMakerETBoolUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolUint8(t typex.EventTime, key bool, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1952,7 +2164,10 @@ func emitMakerBoolUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolUint16(key bool, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1965,7 +2180,10 @@ func emitMakerETBoolUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolUint16(t typex.EventTime, key bool, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1978,7 +2196,10 @@ func emitMakerBoolUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolUint32(key bool, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -1991,7 +2212,10 @@ func emitMakerETBoolUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolUint32(t typex.EventTime, key bool, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2004,7 +2228,10 @@ func emitMakerBoolUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolUint64(key bool, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2017,7 +2244,10 @@ func emitMakerETBoolUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolUint64(t typex.EventTime, key bool, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2030,7 +2260,10 @@ func emitMakerBoolFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolFloat32(key bool, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2043,7 +2276,10 @@ func emitMakerETBoolFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolFloat32(t typex.EventTime, key bool, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2056,7 +2292,10 @@ func emitMakerBoolFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolFloat64(key bool, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2069,7 +2308,10 @@ func emitMakerETBoolFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolFloat64(t typex.EventTime, key bool, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2082,7 +2324,10 @@ func emitMakerBoolTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolTypex_T(key bool, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2095,7 +2340,10 @@ func emitMakerETBoolTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolTypex_T(t typex.EventTime, key bool, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2108,7 +2356,10 @@ func emitMakerBoolTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolTypex_U(key bool, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2121,7 +2372,10 @@ func emitMakerETBoolTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolTypex_U(t typex.EventTime, key bool, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2134,7 +2388,10 @@ func emitMakerBoolTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolTypex_V(key bool, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2147,7 +2404,10 @@ func emitMakerETBoolTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolTypex_V(t typex.EventTime, key bool, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2160,7 +2420,10 @@ func emitMakerBoolTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolTypex_W(key bool, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2173,7 +2436,10 @@ func emitMakerETBoolTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolTypex_W(t typex.EventTime, key bool, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2186,7 +2452,10 @@ func emitMakerBoolTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolTypex_X(key bool, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2199,7 +2468,10 @@ func emitMakerETBoolTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolTypex_X(t typex.EventTime, key bool, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2212,7 +2484,10 @@ func emitMakerBoolTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolTypex_Y(key bool, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2225,7 +2500,10 @@ func emitMakerETBoolTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolTypex_Y(t typex.EventTime, key bool, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2238,7 +2516,10 @@ func emitMakerBoolTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeBoolTypex_Z(key bool, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2251,7 +2532,10 @@ func emitMakerETBoolTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETBoolTypex_Z(t typex.EventTime, key bool, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2264,7 +2548,10 @@ func emitMakerString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeString(elm string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2277,7 +2564,10 @@ func emitMakerETString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETString(t typex.EventTime, elm string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2290,7 +2580,10 @@ func emitMakerStringByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringByteSlice(key string, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2303,7 +2596,10 @@ func emitMakerETStringByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringByteSlice(t typex.EventTime, key string, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2316,7 +2612,10 @@ func emitMakerStringBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringBool(key string, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2329,7 +2628,10 @@ func emitMakerETStringBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringBool(t typex.EventTime, key string, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2342,7 +2644,10 @@ func emitMakerStringString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringString(key string, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2355,7 +2660,10 @@ func emitMakerETStringString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringString(t typex.EventTime, key string, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2368,7 +2676,10 @@ func emitMakerStringInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringInt(key string, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2381,7 +2692,10 @@ func emitMakerETStringInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringInt(t typex.EventTime, key string, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2394,7 +2708,10 @@ func emitMakerStringInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringInt8(key string, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2407,7 +2724,10 @@ func emitMakerETStringInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringInt8(t typex.EventTime, key string, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2420,7 +2740,10 @@ func emitMakerStringInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringInt16(key string, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2433,7 +2756,10 @@ func emitMakerETStringInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringInt16(t typex.EventTime, key string, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2446,7 +2772,10 @@ func emitMakerStringInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringInt32(key string, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2459,7 +2788,10 @@ func emitMakerETStringInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringInt32(t typex.EventTime, key string, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2472,7 +2804,10 @@ func emitMakerStringInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringInt64(key string, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2485,7 +2820,10 @@ func emitMakerETStringInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringInt64(t typex.EventTime, key string, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2498,7 +2836,10 @@ func emitMakerStringUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringUint(key string, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2511,7 +2852,10 @@ func emitMakerETStringUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringUint(t typex.EventTime, key string, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2524,7 +2868,10 @@ func emitMakerStringUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringUint8(key string, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2537,7 +2884,10 @@ func emitMakerETStringUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringUint8(t typex.EventTime, key string, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2550,7 +2900,10 @@ func emitMakerStringUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringUint16(key string, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2563,7 +2916,10 @@ func emitMakerETStringUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringUint16(t typex.EventTime, key string, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2576,7 +2932,10 @@ func emitMakerStringUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringUint32(key string, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2589,7 +2948,10 @@ func emitMakerETStringUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringUint32(t typex.EventTime, key string, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2602,7 +2964,10 @@ func emitMakerStringUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringUint64(key string, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2615,7 +2980,10 @@ func emitMakerETStringUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringUint64(t typex.EventTime, key string, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2628,7 +2996,10 @@ func emitMakerStringFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringFloat32(key string, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2641,7 +3012,10 @@ func emitMakerETStringFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringFloat32(t typex.EventTime, key string, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2654,7 +3028,10 @@ func emitMakerStringFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringFloat64(key string, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2667,7 +3044,10 @@ func emitMakerETStringFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringFloat64(t typex.EventTime, key string, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2680,7 +3060,10 @@ func emitMakerStringTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringTypex_T(key string, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2693,7 +3076,10 @@ func emitMakerETStringTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringTypex_T(t typex.EventTime, key string, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2706,7 +3092,10 @@ func emitMakerStringTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringTypex_U(key string, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2719,7 +3108,10 @@ func emitMakerETStringTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringTypex_U(t typex.EventTime, key string, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2732,7 +3124,10 @@ func emitMakerStringTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringTypex_V(key string, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2745,7 +3140,10 @@ func emitMakerETStringTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringTypex_V(t typex.EventTime, key string, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2758,7 +3156,10 @@ func emitMakerStringTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringTypex_W(key string, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2771,7 +3172,10 @@ func emitMakerETStringTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringTypex_W(t typex.EventTime, key string, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2784,7 +3188,10 @@ func emitMakerStringTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringTypex_X(key string, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2797,7 +3204,10 @@ func emitMakerETStringTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringTypex_X(t typex.EventTime, key string, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2810,7 +3220,10 @@ func emitMakerStringTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringTypex_Y(key string, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2823,7 +3236,10 @@ func emitMakerETStringTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringTypex_Y(t typex.EventTime, key string, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2836,7 +3252,10 @@ func emitMakerStringTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeStringTypex_Z(key string, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2849,7 +3268,10 @@ func emitMakerETStringTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETStringTypex_Z(t typex.EventTime, key string, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2862,7 +3284,10 @@ func emitMakerInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt(elm int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2875,7 +3300,10 @@ func emitMakerETInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt(t typex.EventTime, elm int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2888,7 +3316,10 @@ func emitMakerIntByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntByteSlice(key int, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2901,7 +3332,10 @@ func emitMakerETIntByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntByteSlice(t typex.EventTime, key int, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2914,7 +3348,10 @@ func emitMakerIntBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntBool(key int, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2927,7 +3364,10 @@ func emitMakerETIntBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntBool(t typex.EventTime, key int, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2940,7 +3380,10 @@ func emitMakerIntString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntString(key int, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2953,7 +3396,10 @@ func emitMakerETIntString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntString(t typex.EventTime, key int, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2966,7 +3412,10 @@ func emitMakerIntInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntInt(key int, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2979,7 +3428,10 @@ func emitMakerETIntInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntInt(t typex.EventTime, key int, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -2992,7 +3444,10 @@ func emitMakerIntInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntInt8(key int, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3005,7 +3460,10 @@ func emitMakerETIntInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntInt8(t typex.EventTime, key int, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3018,7 +3476,10 @@ func emitMakerIntInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntInt16(key int, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3031,7 +3492,10 @@ func emitMakerETIntInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntInt16(t typex.EventTime, key int, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3044,7 +3508,10 @@ func emitMakerIntInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntInt32(key int, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3057,7 +3524,10 @@ func emitMakerETIntInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntInt32(t typex.EventTime, key int, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3070,7 +3540,10 @@ func emitMakerIntInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntInt64(key int, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3083,7 +3556,10 @@ func emitMakerETIntInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntInt64(t typex.EventTime, key int, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3096,7 +3572,10 @@ func emitMakerIntUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntUint(key int, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3109,7 +3588,10 @@ func emitMakerETIntUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntUint(t typex.EventTime, key int, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3122,7 +3604,10 @@ func emitMakerIntUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntUint8(key int, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3135,7 +3620,10 @@ func emitMakerETIntUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntUint8(t typex.EventTime, key int, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3148,7 +3636,10 @@ func emitMakerIntUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntUint16(key int, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3161,7 +3652,10 @@ func emitMakerETIntUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntUint16(t typex.EventTime, key int, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3174,7 +3668,10 @@ func emitMakerIntUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntUint32(key int, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3187,7 +3684,10 @@ func emitMakerETIntUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntUint32(t typex.EventTime, key int, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3200,7 +3700,10 @@ func emitMakerIntUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntUint64(key int, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3213,7 +3716,10 @@ func emitMakerETIntUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntUint64(t typex.EventTime, key int, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3226,7 +3732,10 @@ func emitMakerIntFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntFloat32(key int, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3239,7 +3748,10 @@ func emitMakerETIntFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntFloat32(t typex.EventTime, key int, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3252,7 +3764,10 @@ func emitMakerIntFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntFloat64(key int, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3265,7 +3780,10 @@ func emitMakerETIntFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntFloat64(t typex.EventTime, key int, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3278,7 +3796,10 @@ func emitMakerIntTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntTypex_T(key int, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3291,7 +3812,10 @@ func emitMakerETIntTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntTypex_T(t typex.EventTime, key int, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3304,7 +3828,10 @@ func emitMakerIntTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntTypex_U(key int, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3317,7 +3844,10 @@ func emitMakerETIntTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntTypex_U(t typex.EventTime, key int, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3330,7 +3860,10 @@ func emitMakerIntTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntTypex_V(key int, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3343,7 +3876,10 @@ func emitMakerETIntTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntTypex_V(t typex.EventTime, key int, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3356,7 +3892,10 @@ func emitMakerIntTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntTypex_W(key int, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3369,7 +3908,10 @@ func emitMakerETIntTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntTypex_W(t typex.EventTime, key int, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3382,7 +3924,10 @@ func emitMakerIntTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntTypex_X(key int, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3395,7 +3940,10 @@ func emitMakerETIntTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntTypex_X(t typex.EventTime, key int, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3408,7 +3956,10 @@ func emitMakerIntTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntTypex_Y(key int, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3421,7 +3972,10 @@ func emitMakerETIntTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntTypex_Y(t typex.EventTime, key int, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3434,7 +3988,10 @@ func emitMakerIntTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeIntTypex_Z(key int, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3447,7 +4004,10 @@ func emitMakerETIntTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETIntTypex_Z(t typex.EventTime, key int, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3460,7 +4020,10 @@ func emitMakerInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8(elm int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3473,7 +4036,10 @@ func emitMakerETInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8(t typex.EventTime, elm int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3486,7 +4052,10 @@ func emitMakerInt8ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8ByteSlice(key int8, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3499,7 +4068,10 @@ func emitMakerETInt8ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8ByteSlice(t typex.EventTime, key int8, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3512,7 +4084,10 @@ func emitMakerInt8Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Bool(key int8, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3525,7 +4100,10 @@ func emitMakerETInt8Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Bool(t typex.EventTime, key int8, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3538,7 +4116,10 @@ func emitMakerInt8String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8String(key int8, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3551,7 +4132,10 @@ func emitMakerETInt8String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8String(t typex.EventTime, key int8, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3564,7 +4148,10 @@ func emitMakerInt8Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Int(key int8, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3577,7 +4164,10 @@ func emitMakerETInt8Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Int(t typex.EventTime, key int8, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3590,7 +4180,10 @@ func emitMakerInt8Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Int8(key int8, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3603,7 +4196,10 @@ func emitMakerETInt8Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Int8(t typex.EventTime, key int8, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3616,7 +4212,10 @@ func emitMakerInt8Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Int16(key int8, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3629,7 +4228,10 @@ func emitMakerETInt8Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Int16(t typex.EventTime, key int8, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3642,7 +4244,10 @@ func emitMakerInt8Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Int32(key int8, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3655,7 +4260,10 @@ func emitMakerETInt8Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Int32(t typex.EventTime, key int8, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3668,7 +4276,10 @@ func emitMakerInt8Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Int64(key int8, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3681,7 +4292,10 @@ func emitMakerETInt8Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Int64(t typex.EventTime, key int8, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3694,7 +4308,10 @@ func emitMakerInt8Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Uint(key int8, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3707,7 +4324,10 @@ func emitMakerETInt8Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Uint(t typex.EventTime, key int8, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3720,7 +4340,10 @@ func emitMakerInt8Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Uint8(key int8, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3733,7 +4356,10 @@ func emitMakerETInt8Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Uint8(t typex.EventTime, key int8, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3746,7 +4372,10 @@ func emitMakerInt8Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Uint16(key int8, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3759,7 +4388,10 @@ func emitMakerETInt8Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Uint16(t typex.EventTime, key int8, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3772,7 +4404,10 @@ func emitMakerInt8Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Uint32(key int8, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3785,7 +4420,10 @@ func emitMakerETInt8Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Uint32(t typex.EventTime, key int8, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3798,7 +4436,10 @@ func emitMakerInt8Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Uint64(key int8, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3811,7 +4452,10 @@ func emitMakerETInt8Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Uint64(t typex.EventTime, key int8, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3824,7 +4468,10 @@ func emitMakerInt8Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Float32(key int8, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3837,7 +4484,10 @@ func emitMakerETInt8Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Float32(t typex.EventTime, key int8, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3850,7 +4500,10 @@ func emitMakerInt8Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Float64(key int8, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3863,7 +4516,10 @@ func emitMakerETInt8Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Float64(t typex.EventTime, key int8, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3876,7 +4532,10 @@ func emitMakerInt8Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Typex_T(key int8, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3889,7 +4548,10 @@ func emitMakerETInt8Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Typex_T(t typex.EventTime, key int8, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3902,7 +4564,10 @@ func emitMakerInt8Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Typex_U(key int8, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3915,7 +4580,10 @@ func emitMakerETInt8Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Typex_U(t typex.EventTime, key int8, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3928,7 +4596,10 @@ func emitMakerInt8Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Typex_V(key int8, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3941,7 +4612,10 @@ func emitMakerETInt8Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Typex_V(t typex.EventTime, key int8, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3954,7 +4628,10 @@ func emitMakerInt8Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Typex_W(key int8, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3967,7 +4644,10 @@ func emitMakerETInt8Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Typex_W(t typex.EventTime, key int8, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3980,7 +4660,10 @@ func emitMakerInt8Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Typex_X(key int8, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -3993,7 +4676,10 @@ func emitMakerETInt8Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Typex_X(t typex.EventTime, key int8, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4006,7 +4692,10 @@ func emitMakerInt8Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Typex_Y(key int8, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4019,7 +4708,10 @@ func emitMakerETInt8Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Typex_Y(t typex.EventTime, key int8, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4032,7 +4724,10 @@ func emitMakerInt8Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt8Typex_Z(key int8, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4045,7 +4740,10 @@ func emitMakerETInt8Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt8Typex_Z(t typex.EventTime, key int8, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4058,7 +4756,10 @@ func emitMakerInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16(elm int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4071,7 +4772,10 @@ func emitMakerETInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16(t typex.EventTime, elm int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4084,7 +4788,10 @@ func emitMakerInt16ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16ByteSlice(key int16, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4097,7 +4804,10 @@ func emitMakerETInt16ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16ByteSlice(t typex.EventTime, key int16, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4110,7 +4820,10 @@ func emitMakerInt16Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Bool(key int16, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4123,7 +4836,10 @@ func emitMakerETInt16Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Bool(t typex.EventTime, key int16, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4136,7 +4852,10 @@ func emitMakerInt16String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16String(key int16, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4149,7 +4868,10 @@ func emitMakerETInt16String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16String(t typex.EventTime, key int16, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4162,7 +4884,10 @@ func emitMakerInt16Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Int(key int16, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4175,7 +4900,10 @@ func emitMakerETInt16Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Int(t typex.EventTime, key int16, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4188,7 +4916,10 @@ func emitMakerInt16Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Int8(key int16, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4201,7 +4932,10 @@ func emitMakerETInt16Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Int8(t typex.EventTime, key int16, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4214,7 +4948,10 @@ func emitMakerInt16Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Int16(key int16, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4227,7 +4964,10 @@ func emitMakerETInt16Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Int16(t typex.EventTime, key int16, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4240,7 +4980,10 @@ func emitMakerInt16Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Int32(key int16, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4253,7 +4996,10 @@ func emitMakerETInt16Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Int32(t typex.EventTime, key int16, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4266,7 +5012,10 @@ func emitMakerInt16Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Int64(key int16, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4279,7 +5028,10 @@ func emitMakerETInt16Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Int64(t typex.EventTime, key int16, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4292,7 +5044,10 @@ func emitMakerInt16Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Uint(key int16, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4305,7 +5060,10 @@ func emitMakerETInt16Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Uint(t typex.EventTime, key int16, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4318,7 +5076,10 @@ func emitMakerInt16Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Uint8(key int16, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4331,7 +5092,10 @@ func emitMakerETInt16Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Uint8(t typex.EventTime, key int16, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4344,7 +5108,10 @@ func emitMakerInt16Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Uint16(key int16, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4357,7 +5124,10 @@ func emitMakerETInt16Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Uint16(t typex.EventTime, key int16, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4370,7 +5140,10 @@ func emitMakerInt16Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Uint32(key int16, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4383,7 +5156,10 @@ func emitMakerETInt16Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Uint32(t typex.EventTime, key int16, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4396,7 +5172,10 @@ func emitMakerInt16Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Uint64(key int16, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4409,7 +5188,10 @@ func emitMakerETInt16Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Uint64(t typex.EventTime, key int16, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4422,7 +5204,10 @@ func emitMakerInt16Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Float32(key int16, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4435,7 +5220,10 @@ func emitMakerETInt16Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Float32(t typex.EventTime, key int16, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4448,7 +5236,10 @@ func emitMakerInt16Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Float64(key int16, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4461,7 +5252,10 @@ func emitMakerETInt16Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Float64(t typex.EventTime, key int16, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4474,7 +5268,10 @@ func emitMakerInt16Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Typex_T(key int16, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4487,7 +5284,10 @@ func emitMakerETInt16Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Typex_T(t typex.EventTime, key int16, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4500,7 +5300,10 @@ func emitMakerInt16Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Typex_U(key int16, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4513,7 +5316,10 @@ func emitMakerETInt16Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Typex_U(t typex.EventTime, key int16, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4526,7 +5332,10 @@ func emitMakerInt16Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Typex_V(key int16, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4539,7 +5348,10 @@ func emitMakerETInt16Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Typex_V(t typex.EventTime, key int16, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4552,7 +5364,10 @@ func emitMakerInt16Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Typex_W(key int16, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4565,7 +5380,10 @@ func emitMakerETInt16Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Typex_W(t typex.EventTime, key int16, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4578,7 +5396,10 @@ func emitMakerInt16Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Typex_X(key int16, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4591,7 +5412,10 @@ func emitMakerETInt16Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Typex_X(t typex.EventTime, key int16, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4604,7 +5428,10 @@ func emitMakerInt16Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Typex_Y(key int16, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4617,7 +5444,10 @@ func emitMakerETInt16Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Typex_Y(t typex.EventTime, key int16, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4630,7 +5460,10 @@ func emitMakerInt16Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt16Typex_Z(key int16, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4643,7 +5476,10 @@ func emitMakerETInt16Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt16Typex_Z(t typex.EventTime, key int16, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4656,7 +5492,10 @@ func emitMakerInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32(elm int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4669,7 +5508,10 @@ func emitMakerETInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32(t typex.EventTime, elm int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4682,7 +5524,10 @@ func emitMakerInt32ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32ByteSlice(key int32, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4695,7 +5540,10 @@ func emitMakerETInt32ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32ByteSlice(t typex.EventTime, key int32, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4708,7 +5556,10 @@ func emitMakerInt32Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Bool(key int32, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4721,7 +5572,10 @@ func emitMakerETInt32Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Bool(t typex.EventTime, key int32, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4734,7 +5588,10 @@ func emitMakerInt32String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32String(key int32, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4747,7 +5604,10 @@ func emitMakerETInt32String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32String(t typex.EventTime, key int32, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4760,7 +5620,10 @@ func emitMakerInt32Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Int(key int32, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4773,7 +5636,10 @@ func emitMakerETInt32Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Int(t typex.EventTime, key int32, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4786,7 +5652,10 @@ func emitMakerInt32Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Int8(key int32, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4799,7 +5668,10 @@ func emitMakerETInt32Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Int8(t typex.EventTime, key int32, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4812,7 +5684,10 @@ func emitMakerInt32Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Int16(key int32, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4825,7 +5700,10 @@ func emitMakerETInt32Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Int16(t typex.EventTime, key int32, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4838,7 +5716,10 @@ func emitMakerInt32Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Int32(key int32, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4851,7 +5732,10 @@ func emitMakerETInt32Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Int32(t typex.EventTime, key int32, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4864,7 +5748,10 @@ func emitMakerInt32Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Int64(key int32, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4877,7 +5764,10 @@ func emitMakerETInt32Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Int64(t typex.EventTime, key int32, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4890,7 +5780,10 @@ func emitMakerInt32Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Uint(key int32, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4903,7 +5796,10 @@ func emitMakerETInt32Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Uint(t typex.EventTime, key int32, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4916,7 +5812,10 @@ func emitMakerInt32Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Uint8(key int32, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4929,7 +5828,10 @@ func emitMakerETInt32Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Uint8(t typex.EventTime, key int32, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4942,7 +5844,10 @@ func emitMakerInt32Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Uint16(key int32, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4955,7 +5860,10 @@ func emitMakerETInt32Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Uint16(t typex.EventTime, key int32, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4968,7 +5876,10 @@ func emitMakerInt32Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Uint32(key int32, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4981,7 +5892,10 @@ func emitMakerETInt32Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Uint32(t typex.EventTime, key int32, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -4994,7 +5908,10 @@ func emitMakerInt32Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Uint64(key int32, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5007,7 +5924,10 @@ func emitMakerETInt32Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Uint64(t typex.EventTime, key int32, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5020,7 +5940,10 @@ func emitMakerInt32Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Float32(key int32, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5033,7 +5956,10 @@ func emitMakerETInt32Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Float32(t typex.EventTime, key int32, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5046,7 +5972,10 @@ func emitMakerInt32Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Float64(key int32, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5059,7 +5988,10 @@ func emitMakerETInt32Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Float64(t typex.EventTime, key int32, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5072,7 +6004,10 @@ func emitMakerInt32Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Typex_T(key int32, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5085,7 +6020,10 @@ func emitMakerETInt32Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Typex_T(t typex.EventTime, key int32, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5098,7 +6036,10 @@ func emitMakerInt32Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Typex_U(key int32, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5111,7 +6052,10 @@ func emitMakerETInt32Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Typex_U(t typex.EventTime, key int32, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5124,7 +6068,10 @@ func emitMakerInt32Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Typex_V(key int32, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5137,7 +6084,10 @@ func emitMakerETInt32Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Typex_V(t typex.EventTime, key int32, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5150,7 +6100,10 @@ func emitMakerInt32Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Typex_W(key int32, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5163,7 +6116,10 @@ func emitMakerETInt32Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Typex_W(t typex.EventTime, key int32, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5176,7 +6132,10 @@ func emitMakerInt32Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Typex_X(key int32, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5189,7 +6148,10 @@ func emitMakerETInt32Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Typex_X(t typex.EventTime, key int32, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5202,7 +6164,10 @@ func emitMakerInt32Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Typex_Y(key int32, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5215,7 +6180,10 @@ func emitMakerETInt32Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Typex_Y(t typex.EventTime, key int32, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5228,7 +6196,10 @@ func emitMakerInt32Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt32Typex_Z(key int32, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5241,7 +6212,10 @@ func emitMakerETInt32Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt32Typex_Z(t typex.EventTime, key int32, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5254,7 +6228,10 @@ func emitMakerInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64(elm int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5267,7 +6244,10 @@ func emitMakerETInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64(t typex.EventTime, elm int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5280,7 +6260,10 @@ func emitMakerInt64ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64ByteSlice(key int64, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5293,7 +6276,10 @@ func emitMakerETInt64ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64ByteSlice(t typex.EventTime, key int64, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5306,7 +6292,10 @@ func emitMakerInt64Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Bool(key int64, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5319,7 +6308,10 @@ func emitMakerETInt64Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Bool(t typex.EventTime, key int64, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5332,7 +6324,10 @@ func emitMakerInt64String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64String(key int64, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5345,7 +6340,10 @@ func emitMakerETInt64String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64String(t typex.EventTime, key int64, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5358,7 +6356,10 @@ func emitMakerInt64Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Int(key int64, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5371,7 +6372,10 @@ func emitMakerETInt64Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Int(t typex.EventTime, key int64, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5384,7 +6388,10 @@ func emitMakerInt64Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Int8(key int64, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5397,7 +6404,10 @@ func emitMakerETInt64Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Int8(t typex.EventTime, key int64, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5410,7 +6420,10 @@ func emitMakerInt64Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Int16(key int64, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5423,7 +6436,10 @@ func emitMakerETInt64Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Int16(t typex.EventTime, key int64, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5436,7 +6452,10 @@ func emitMakerInt64Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Int32(key int64, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5449,7 +6468,10 @@ func emitMakerETInt64Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Int32(t typex.EventTime, key int64, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5462,7 +6484,10 @@ func emitMakerInt64Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Int64(key int64, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5475,7 +6500,10 @@ func emitMakerETInt64Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Int64(t typex.EventTime, key int64, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5488,7 +6516,10 @@ func emitMakerInt64Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Uint(key int64, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5501,7 +6532,10 @@ func emitMakerETInt64Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Uint(t typex.EventTime, key int64, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5514,7 +6548,10 @@ func emitMakerInt64Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Uint8(key int64, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5527,7 +6564,10 @@ func emitMakerETInt64Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Uint8(t typex.EventTime, key int64, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5540,7 +6580,10 @@ func emitMakerInt64Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Uint16(key int64, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5553,7 +6596,10 @@ func emitMakerETInt64Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Uint16(t typex.EventTime, key int64, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5566,7 +6612,10 @@ func emitMakerInt64Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Uint32(key int64, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5579,7 +6628,10 @@ func emitMakerETInt64Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Uint32(t typex.EventTime, key int64, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5592,7 +6644,10 @@ func emitMakerInt64Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Uint64(key int64, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5605,7 +6660,10 @@ func emitMakerETInt64Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Uint64(t typex.EventTime, key int64, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5618,7 +6676,10 @@ func emitMakerInt64Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Float32(key int64, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5631,7 +6692,10 @@ func emitMakerETInt64Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Float32(t typex.EventTime, key int64, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5644,7 +6708,10 @@ func emitMakerInt64Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Float64(key int64, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5657,7 +6724,10 @@ func emitMakerETInt64Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Float64(t typex.EventTime, key int64, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5670,7 +6740,10 @@ func emitMakerInt64Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Typex_T(key int64, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5683,7 +6756,10 @@ func emitMakerETInt64Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Typex_T(t typex.EventTime, key int64, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5696,7 +6772,10 @@ func emitMakerInt64Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Typex_U(key int64, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5709,7 +6788,10 @@ func emitMakerETInt64Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Typex_U(t typex.EventTime, key int64, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5722,7 +6804,10 @@ func emitMakerInt64Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Typex_V(key int64, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5735,7 +6820,10 @@ func emitMakerETInt64Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Typex_V(t typex.EventTime, key int64, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5748,7 +6836,10 @@ func emitMakerInt64Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Typex_W(key int64, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5761,7 +6852,10 @@ func emitMakerETInt64Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Typex_W(t typex.EventTime, key int64, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5774,7 +6868,10 @@ func emitMakerInt64Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Typex_X(key int64, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5787,7 +6884,10 @@ func emitMakerETInt64Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Typex_X(t typex.EventTime, key int64, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5800,7 +6900,10 @@ func emitMakerInt64Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Typex_Y(key int64, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5813,7 +6916,10 @@ func emitMakerETInt64Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Typex_Y(t typex.EventTime, key int64, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5826,7 +6932,10 @@ func emitMakerInt64Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeInt64Typex_Z(key int64, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5839,7 +6948,10 @@ func emitMakerETInt64Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETInt64Typex_Z(t typex.EventTime, key int64, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5852,7 +6964,10 @@ func emitMakerUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint(elm uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5865,7 +6980,10 @@ func emitMakerETUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint(t typex.EventTime, elm uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5878,7 +6996,10 @@ func emitMakerUintByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintByteSlice(key uint, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5891,7 +7012,10 @@ func emitMakerETUintByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintByteSlice(t typex.EventTime, key uint, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5904,7 +7028,10 @@ func emitMakerUintBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintBool(key uint, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5917,7 +7044,10 @@ func emitMakerETUintBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintBool(t typex.EventTime, key uint, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5930,7 +7060,10 @@ func emitMakerUintString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintString(key uint, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5943,7 +7076,10 @@ func emitMakerETUintString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintString(t typex.EventTime, key uint, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5956,7 +7092,10 @@ func emitMakerUintInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintInt(key uint, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5969,7 +7108,10 @@ func emitMakerETUintInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintInt(t typex.EventTime, key uint, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5982,7 +7124,10 @@ func emitMakerUintInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintInt8(key uint, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -5995,7 +7140,10 @@ func emitMakerETUintInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintInt8(t typex.EventTime, key uint, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6008,7 +7156,10 @@ func emitMakerUintInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintInt16(key uint, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6021,7 +7172,10 @@ func emitMakerETUintInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintInt16(t typex.EventTime, key uint, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6034,7 +7188,10 @@ func emitMakerUintInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintInt32(key uint, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6047,7 +7204,10 @@ func emitMakerETUintInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintInt32(t typex.EventTime, key uint, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6060,7 +7220,10 @@ func emitMakerUintInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintInt64(key uint, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6073,7 +7236,10 @@ func emitMakerETUintInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintInt64(t typex.EventTime, key uint, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6086,7 +7252,10 @@ func emitMakerUintUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintUint(key uint, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6099,7 +7268,10 @@ func emitMakerETUintUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintUint(t typex.EventTime, key uint, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6112,7 +7284,10 @@ func emitMakerUintUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintUint8(key uint, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6125,7 +7300,10 @@ func emitMakerETUintUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintUint8(t typex.EventTime, key uint, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6138,7 +7316,10 @@ func emitMakerUintUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintUint16(key uint, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6151,7 +7332,10 @@ func emitMakerETUintUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintUint16(t typex.EventTime, key uint, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6164,7 +7348,10 @@ func emitMakerUintUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintUint32(key uint, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6177,7 +7364,10 @@ func emitMakerETUintUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintUint32(t typex.EventTime, key uint, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6190,7 +7380,10 @@ func emitMakerUintUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintUint64(key uint, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6203,7 +7396,10 @@ func emitMakerETUintUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintUint64(t typex.EventTime, key uint, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6216,7 +7412,10 @@ func emitMakerUintFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintFloat32(key uint, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6229,7 +7428,10 @@ func emitMakerETUintFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintFloat32(t typex.EventTime, key uint, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6242,7 +7444,10 @@ func emitMakerUintFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintFloat64(key uint, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6255,7 +7460,10 @@ func emitMakerETUintFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintFloat64(t typex.EventTime, key uint, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6268,7 +7476,10 @@ func emitMakerUintTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintTypex_T(key uint, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6281,7 +7492,10 @@ func emitMakerETUintTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintTypex_T(t typex.EventTime, key uint, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6294,7 +7508,10 @@ func emitMakerUintTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintTypex_U(key uint, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6307,7 +7524,10 @@ func emitMakerETUintTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintTypex_U(t typex.EventTime, key uint, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6320,7 +7540,10 @@ func emitMakerUintTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintTypex_V(key uint, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6333,7 +7556,10 @@ func emitMakerETUintTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintTypex_V(t typex.EventTime, key uint, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6346,7 +7572,10 @@ func emitMakerUintTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintTypex_W(key uint, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6359,7 +7588,10 @@ func emitMakerETUintTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintTypex_W(t typex.EventTime, key uint, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6372,7 +7604,10 @@ func emitMakerUintTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintTypex_X(key uint, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6385,7 +7620,10 @@ func emitMakerETUintTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintTypex_X(t typex.EventTime, key uint, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6398,7 +7636,10 @@ func emitMakerUintTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintTypex_Y(key uint, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6411,7 +7652,10 @@ func emitMakerETUintTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintTypex_Y(t typex.EventTime, key uint, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6424,7 +7668,10 @@ func emitMakerUintTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUintTypex_Z(key uint, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6437,7 +7684,10 @@ func emitMakerETUintTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUintTypex_Z(t typex.EventTime, key uint, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6450,7 +7700,10 @@ func emitMakerUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8(elm uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6463,7 +7716,10 @@ func emitMakerETUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8(t typex.EventTime, elm uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6476,7 +7732,10 @@ func emitMakerUint8ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8ByteSlice(key uint8, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6489,7 +7748,10 @@ func emitMakerETUint8ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8ByteSlice(t typex.EventTime, key uint8, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6502,7 +7764,10 @@ func emitMakerUint8Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Bool(key uint8, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6515,7 +7780,10 @@ func emitMakerETUint8Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Bool(t typex.EventTime, key uint8, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6528,7 +7796,10 @@ func emitMakerUint8String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8String(key uint8, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6541,7 +7812,10 @@ func emitMakerETUint8String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8String(t typex.EventTime, key uint8, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6554,7 +7828,10 @@ func emitMakerUint8Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Int(key uint8, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6567,7 +7844,10 @@ func emitMakerETUint8Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Int(t typex.EventTime, key uint8, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6580,7 +7860,10 @@ func emitMakerUint8Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Int8(key uint8, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6593,7 +7876,10 @@ func emitMakerETUint8Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Int8(t typex.EventTime, key uint8, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6606,7 +7892,10 @@ func emitMakerUint8Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Int16(key uint8, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6619,7 +7908,10 @@ func emitMakerETUint8Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Int16(t typex.EventTime, key uint8, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6632,7 +7924,10 @@ func emitMakerUint8Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Int32(key uint8, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6645,7 +7940,10 @@ func emitMakerETUint8Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Int32(t typex.EventTime, key uint8, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6658,7 +7956,10 @@ func emitMakerUint8Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Int64(key uint8, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6671,7 +7972,10 @@ func emitMakerETUint8Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Int64(t typex.EventTime, key uint8, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6684,7 +7988,10 @@ func emitMakerUint8Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Uint(key uint8, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6697,7 +8004,10 @@ func emitMakerETUint8Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Uint(t typex.EventTime, key uint8, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6710,7 +8020,10 @@ func emitMakerUint8Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Uint8(key uint8, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6723,7 +8036,10 @@ func emitMakerETUint8Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Uint8(t typex.EventTime, key uint8, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6736,7 +8052,10 @@ func emitMakerUint8Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Uint16(key uint8, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6749,7 +8068,10 @@ func emitMakerETUint8Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Uint16(t typex.EventTime, key uint8, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6762,7 +8084,10 @@ func emitMakerUint8Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Uint32(key uint8, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6775,7 +8100,10 @@ func emitMakerETUint8Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Uint32(t typex.EventTime, key uint8, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6788,7 +8116,10 @@ func emitMakerUint8Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Uint64(key uint8, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6801,7 +8132,10 @@ func emitMakerETUint8Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Uint64(t typex.EventTime, key uint8, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6814,7 +8148,10 @@ func emitMakerUint8Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Float32(key uint8, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6827,7 +8164,10 @@ func emitMakerETUint8Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Float32(t typex.EventTime, key uint8, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6840,7 +8180,10 @@ func emitMakerUint8Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Float64(key uint8, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6853,7 +8196,10 @@ func emitMakerETUint8Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Float64(t typex.EventTime, key uint8, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6866,7 +8212,10 @@ func emitMakerUint8Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Typex_T(key uint8, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6879,7 +8228,10 @@ func emitMakerETUint8Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Typex_T(t typex.EventTime, key uint8, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6892,7 +8244,10 @@ func emitMakerUint8Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Typex_U(key uint8, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6905,7 +8260,10 @@ func emitMakerETUint8Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Typex_U(t typex.EventTime, key uint8, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6918,7 +8276,10 @@ func emitMakerUint8Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Typex_V(key uint8, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6931,7 +8292,10 @@ func emitMakerETUint8Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Typex_V(t typex.EventTime, key uint8, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6944,7 +8308,10 @@ func emitMakerUint8Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Typex_W(key uint8, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6957,7 +8324,10 @@ func emitMakerETUint8Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Typex_W(t typex.EventTime, key uint8, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6970,7 +8340,10 @@ func emitMakerUint8Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Typex_X(key uint8, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6983,7 +8356,10 @@ func emitMakerETUint8Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Typex_X(t typex.EventTime, key uint8, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -6996,7 +8372,10 @@ func emitMakerUint8Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Typex_Y(key uint8, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7009,7 +8388,10 @@ func emitMakerETUint8Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Typex_Y(t typex.EventTime, key uint8, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7022,7 +8404,10 @@ func emitMakerUint8Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint8Typex_Z(key uint8, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7035,7 +8420,10 @@ func emitMakerETUint8Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint8Typex_Z(t typex.EventTime, key uint8, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7048,7 +8436,10 @@ func emitMakerUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16(elm uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7061,7 +8452,10 @@ func emitMakerETUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16(t typex.EventTime, elm uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7074,7 +8468,10 @@ func emitMakerUint16ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16ByteSlice(key uint16, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7087,7 +8484,10 @@ func emitMakerETUint16ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16ByteSlice(t typex.EventTime, key uint16, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7100,7 +8500,10 @@ func emitMakerUint16Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Bool(key uint16, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7113,7 +8516,10 @@ func emitMakerETUint16Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Bool(t typex.EventTime, key uint16, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7126,7 +8532,10 @@ func emitMakerUint16String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16String(key uint16, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7139,7 +8548,10 @@ func emitMakerETUint16String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16String(t typex.EventTime, key uint16, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7152,7 +8564,10 @@ func emitMakerUint16Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Int(key uint16, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7165,7 +8580,10 @@ func emitMakerETUint16Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Int(t typex.EventTime, key uint16, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7178,7 +8596,10 @@ func emitMakerUint16Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Int8(key uint16, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7191,7 +8612,10 @@ func emitMakerETUint16Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Int8(t typex.EventTime, key uint16, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7204,7 +8628,10 @@ func emitMakerUint16Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Int16(key uint16, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7217,7 +8644,10 @@ func emitMakerETUint16Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Int16(t typex.EventTime, key uint16, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7230,7 +8660,10 @@ func emitMakerUint16Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Int32(key uint16, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7243,7 +8676,10 @@ func emitMakerETUint16Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Int32(t typex.EventTime, key uint16, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7256,7 +8692,10 @@ func emitMakerUint16Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Int64(key uint16, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7269,7 +8708,10 @@ func emitMakerETUint16Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Int64(t typex.EventTime, key uint16, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7282,7 +8724,10 @@ func emitMakerUint16Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Uint(key uint16, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7295,7 +8740,10 @@ func emitMakerETUint16Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Uint(t typex.EventTime, key uint16, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7308,7 +8756,10 @@ func emitMakerUint16Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Uint8(key uint16, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7321,7 +8772,10 @@ func emitMakerETUint16Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Uint8(t typex.EventTime, key uint16, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7334,7 +8788,10 @@ func emitMakerUint16Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Uint16(key uint16, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7347,7 +8804,10 @@ func emitMakerETUint16Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Uint16(t typex.EventTime, key uint16, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7360,7 +8820,10 @@ func emitMakerUint16Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Uint32(key uint16, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7373,7 +8836,10 @@ func emitMakerETUint16Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Uint32(t typex.EventTime, key uint16, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7386,7 +8852,10 @@ func emitMakerUint16Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Uint64(key uint16, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7399,7 +8868,10 @@ func emitMakerETUint16Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Uint64(t typex.EventTime, key uint16, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7412,7 +8884,10 @@ func emitMakerUint16Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Float32(key uint16, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7425,7 +8900,10 @@ func emitMakerETUint16Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Float32(t typex.EventTime, key uint16, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7438,7 +8916,10 @@ func emitMakerUint16Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Float64(key uint16, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7451,7 +8932,10 @@ func emitMakerETUint16Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Float64(t typex.EventTime, key uint16, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7464,7 +8948,10 @@ func emitMakerUint16Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Typex_T(key uint16, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7477,7 +8964,10 @@ func emitMakerETUint16Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Typex_T(t typex.EventTime, key uint16, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7490,7 +8980,10 @@ func emitMakerUint16Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Typex_U(key uint16, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7503,7 +8996,10 @@ func emitMakerETUint16Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Typex_U(t typex.EventTime, key uint16, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7516,7 +9012,10 @@ func emitMakerUint16Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Typex_V(key uint16, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7529,7 +9028,10 @@ func emitMakerETUint16Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Typex_V(t typex.EventTime, key uint16, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7542,7 +9044,10 @@ func emitMakerUint16Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Typex_W(key uint16, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7555,7 +9060,10 @@ func emitMakerETUint16Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Typex_W(t typex.EventTime, key uint16, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7568,7 +9076,10 @@ func emitMakerUint16Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Typex_X(key uint16, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7581,7 +9092,10 @@ func emitMakerETUint16Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Typex_X(t typex.EventTime, key uint16, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7594,7 +9108,10 @@ func emitMakerUint16Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Typex_Y(key uint16, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7607,7 +9124,10 @@ func emitMakerETUint16Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Typex_Y(t typex.EventTime, key uint16, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7620,7 +9140,10 @@ func emitMakerUint16Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint16Typex_Z(key uint16, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7633,7 +9156,10 @@ func emitMakerETUint16Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint16Typex_Z(t typex.EventTime, key uint16, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7646,7 +9172,10 @@ func emitMakerUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32(elm uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7659,7 +9188,10 @@ func emitMakerETUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32(t typex.EventTime, elm uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7672,7 +9204,10 @@ func emitMakerUint32ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32ByteSlice(key uint32, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7685,7 +9220,10 @@ func emitMakerETUint32ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32ByteSlice(t typex.EventTime, key uint32, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7698,7 +9236,10 @@ func emitMakerUint32Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Bool(key uint32, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7711,7 +9252,10 @@ func emitMakerETUint32Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Bool(t typex.EventTime, key uint32, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7724,7 +9268,10 @@ func emitMakerUint32String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32String(key uint32, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7737,7 +9284,10 @@ func emitMakerETUint32String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32String(t typex.EventTime, key uint32, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7750,7 +9300,10 @@ func emitMakerUint32Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Int(key uint32, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7763,7 +9316,10 @@ func emitMakerETUint32Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Int(t typex.EventTime, key uint32, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7776,7 +9332,10 @@ func emitMakerUint32Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Int8(key uint32, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7789,7 +9348,10 @@ func emitMakerETUint32Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Int8(t typex.EventTime, key uint32, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7802,7 +9364,10 @@ func emitMakerUint32Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Int16(key uint32, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7815,7 +9380,10 @@ func emitMakerETUint32Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Int16(t typex.EventTime, key uint32, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7828,7 +9396,10 @@ func emitMakerUint32Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Int32(key uint32, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7841,7 +9412,10 @@ func emitMakerETUint32Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Int32(t typex.EventTime, key uint32, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7854,7 +9428,10 @@ func emitMakerUint32Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Int64(key uint32, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7867,7 +9444,10 @@ func emitMakerETUint32Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Int64(t typex.EventTime, key uint32, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7880,7 +9460,10 @@ func emitMakerUint32Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Uint(key uint32, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7893,7 +9476,10 @@ func emitMakerETUint32Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Uint(t typex.EventTime, key uint32, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7906,7 +9492,10 @@ func emitMakerUint32Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Uint8(key uint32, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7919,7 +9508,10 @@ func emitMakerETUint32Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Uint8(t typex.EventTime, key uint32, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7932,7 +9524,10 @@ func emitMakerUint32Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Uint16(key uint32, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7945,7 +9540,10 @@ func emitMakerETUint32Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Uint16(t typex.EventTime, key uint32, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7958,7 +9556,10 @@ func emitMakerUint32Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Uint32(key uint32, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7971,7 +9572,10 @@ func emitMakerETUint32Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Uint32(t typex.EventTime, key uint32, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7984,7 +9588,10 @@ func emitMakerUint32Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Uint64(key uint32, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -7997,7 +9604,10 @@ func emitMakerETUint32Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Uint64(t typex.EventTime, key uint32, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8010,7 +9620,10 @@ func emitMakerUint32Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Float32(key uint32, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8023,7 +9636,10 @@ func emitMakerETUint32Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Float32(t typex.EventTime, key uint32, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8036,7 +9652,10 @@ func emitMakerUint32Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Float64(key uint32, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8049,7 +9668,10 @@ func emitMakerETUint32Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Float64(t typex.EventTime, key uint32, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8062,7 +9684,10 @@ func emitMakerUint32Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Typex_T(key uint32, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8075,7 +9700,10 @@ func emitMakerETUint32Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Typex_T(t typex.EventTime, key uint32, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8088,7 +9716,10 @@ func emitMakerUint32Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Typex_U(key uint32, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8101,7 +9732,10 @@ func emitMakerETUint32Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Typex_U(t typex.EventTime, key uint32, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8114,7 +9748,10 @@ func emitMakerUint32Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Typex_V(key uint32, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8127,7 +9764,10 @@ func emitMakerETUint32Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Typex_V(t typex.EventTime, key uint32, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8140,7 +9780,10 @@ func emitMakerUint32Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Typex_W(key uint32, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8153,7 +9796,10 @@ func emitMakerETUint32Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Typex_W(t typex.EventTime, key uint32, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8166,7 +9812,10 @@ func emitMakerUint32Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Typex_X(key uint32, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8179,7 +9828,10 @@ func emitMakerETUint32Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Typex_X(t typex.EventTime, key uint32, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8192,7 +9844,10 @@ func emitMakerUint32Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Typex_Y(key uint32, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8205,7 +9860,10 @@ func emitMakerETUint32Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Typex_Y(t typex.EventTime, key uint32, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8218,7 +9876,10 @@ func emitMakerUint32Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint32Typex_Z(key uint32, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8231,7 +9892,10 @@ func emitMakerETUint32Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint32Typex_Z(t typex.EventTime, key uint32, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8244,7 +9908,10 @@ func emitMakerUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64(elm uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8257,7 +9924,10 @@ func emitMakerETUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64(t typex.EventTime, elm uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8270,7 +9940,10 @@ func emitMakerUint64ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64ByteSlice(key uint64, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8283,7 +9956,10 @@ func emitMakerETUint64ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64ByteSlice(t typex.EventTime, key uint64, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8296,7 +9972,10 @@ func emitMakerUint64Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Bool(key uint64, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8309,7 +9988,10 @@ func emitMakerETUint64Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Bool(t typex.EventTime, key uint64, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8322,7 +10004,10 @@ func emitMakerUint64String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64String(key uint64, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8335,7 +10020,10 @@ func emitMakerETUint64String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64String(t typex.EventTime, key uint64, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8348,7 +10036,10 @@ func emitMakerUint64Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Int(key uint64, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8361,7 +10052,10 @@ func emitMakerETUint64Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Int(t typex.EventTime, key uint64, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8374,7 +10068,10 @@ func emitMakerUint64Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Int8(key uint64, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8387,7 +10084,10 @@ func emitMakerETUint64Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Int8(t typex.EventTime, key uint64, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8400,7 +10100,10 @@ func emitMakerUint64Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Int16(key uint64, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8413,7 +10116,10 @@ func emitMakerETUint64Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Int16(t typex.EventTime, key uint64, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8426,7 +10132,10 @@ func emitMakerUint64Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Int32(key uint64, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8439,7 +10148,10 @@ func emitMakerETUint64Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Int32(t typex.EventTime, key uint64, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8452,7 +10164,10 @@ func emitMakerUint64Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Int64(key uint64, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8465,7 +10180,10 @@ func emitMakerETUint64Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Int64(t typex.EventTime, key uint64, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8478,7 +10196,10 @@ func emitMakerUint64Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Uint(key uint64, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8491,7 +10212,10 @@ func emitMakerETUint64Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Uint(t typex.EventTime, key uint64, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8504,7 +10228,10 @@ func emitMakerUint64Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Uint8(key uint64, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8517,7 +10244,10 @@ func emitMakerETUint64Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Uint8(t typex.EventTime, key uint64, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8530,7 +10260,10 @@ func emitMakerUint64Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Uint16(key uint64, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8543,7 +10276,10 @@ func emitMakerETUint64Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Uint16(t typex.EventTime, key uint64, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8556,7 +10292,10 @@ func emitMakerUint64Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Uint32(key uint64, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8569,7 +10308,10 @@ func emitMakerETUint64Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Uint32(t typex.EventTime, key uint64, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8582,7 +10324,10 @@ func emitMakerUint64Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Uint64(key uint64, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8595,7 +10340,10 @@ func emitMakerETUint64Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Uint64(t typex.EventTime, key uint64, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8608,7 +10356,10 @@ func emitMakerUint64Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Float32(key uint64, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8621,7 +10372,10 @@ func emitMakerETUint64Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Float32(t typex.EventTime, key uint64, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8634,7 +10388,10 @@ func emitMakerUint64Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Float64(key uint64, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8647,7 +10404,10 @@ func emitMakerETUint64Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Float64(t typex.EventTime, key uint64, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8660,7 +10420,10 @@ func emitMakerUint64Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Typex_T(key uint64, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8673,7 +10436,10 @@ func emitMakerETUint64Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Typex_T(t typex.EventTime, key uint64, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8686,7 +10452,10 @@ func emitMakerUint64Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Typex_U(key uint64, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8699,7 +10468,10 @@ func emitMakerETUint64Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Typex_U(t typex.EventTime, key uint64, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8712,7 +10484,10 @@ func emitMakerUint64Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Typex_V(key uint64, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8725,7 +10500,10 @@ func emitMakerETUint64Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Typex_V(t typex.EventTime, key uint64, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8738,7 +10516,10 @@ func emitMakerUint64Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Typex_W(key uint64, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8751,7 +10532,10 @@ func emitMakerETUint64Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Typex_W(t typex.EventTime, key uint64, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8764,7 +10548,10 @@ func emitMakerUint64Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Typex_X(key uint64, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8777,7 +10564,10 @@ func emitMakerETUint64Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Typex_X(t typex.EventTime, key uint64, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8790,7 +10580,10 @@ func emitMakerUint64Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Typex_Y(key uint64, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8803,7 +10596,10 @@ func emitMakerETUint64Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Typex_Y(t typex.EventTime, key uint64, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8816,7 +10612,10 @@ func emitMakerUint64Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeUint64Typex_Z(key uint64, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8829,7 +10628,10 @@ func emitMakerETUint64Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETUint64Typex_Z(t typex.EventTime, key uint64, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8842,7 +10644,10 @@ func emitMakerFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32(elm float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8855,7 +10660,10 @@ func emitMakerETFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32(t typex.EventTime, elm float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8868,7 +10676,10 @@ func emitMakerFloat32ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32ByteSlice(key float32, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8881,7 +10692,10 @@ func emitMakerETFloat32ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32ByteSlice(t typex.EventTime, key float32, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8894,7 +10708,10 @@ func emitMakerFloat32Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Bool(key float32, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8907,7 +10724,10 @@ func emitMakerETFloat32Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Bool(t typex.EventTime, key float32, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8920,7 +10740,10 @@ func emitMakerFloat32String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32String(key float32, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8933,7 +10756,10 @@ func emitMakerETFloat32String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32String(t typex.EventTime, key float32, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8946,7 +10772,10 @@ func emitMakerFloat32Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Int(key float32, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8959,7 +10788,10 @@ func emitMakerETFloat32Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Int(t typex.EventTime, key float32, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8972,7 +10804,10 @@ func emitMakerFloat32Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Int8(key float32, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8985,7 +10820,10 @@ func emitMakerETFloat32Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Int8(t typex.EventTime, key float32, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -8998,7 +10836,10 @@ func emitMakerFloat32Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Int16(key float32, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9011,7 +10852,10 @@ func emitMakerETFloat32Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Int16(t typex.EventTime, key float32, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9024,7 +10868,10 @@ func emitMakerFloat32Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Int32(key float32, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9037,7 +10884,10 @@ func emitMakerETFloat32Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Int32(t typex.EventTime, key float32, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9050,7 +10900,10 @@ func emitMakerFloat32Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Int64(key float32, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9063,7 +10916,10 @@ func emitMakerETFloat32Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Int64(t typex.EventTime, key float32, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9076,7 +10932,10 @@ func emitMakerFloat32Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Uint(key float32, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9089,7 +10948,10 @@ func emitMakerETFloat32Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Uint(t typex.EventTime, key float32, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9102,7 +10964,10 @@ func emitMakerFloat32Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Uint8(key float32, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9115,7 +10980,10 @@ func emitMakerETFloat32Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Uint8(t typex.EventTime, key float32, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9128,7 +10996,10 @@ func emitMakerFloat32Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Uint16(key float32, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9141,7 +11012,10 @@ func emitMakerETFloat32Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Uint16(t typex.EventTime, key float32, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9154,7 +11028,10 @@ func emitMakerFloat32Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Uint32(key float32, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9167,7 +11044,10 @@ func emitMakerETFloat32Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Uint32(t typex.EventTime, key float32, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9180,7 +11060,10 @@ func emitMakerFloat32Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Uint64(key float32, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9193,7 +11076,10 @@ func emitMakerETFloat32Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Uint64(t typex.EventTime, key float32, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9206,7 +11092,10 @@ func emitMakerFloat32Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Float32(key float32, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9219,7 +11108,10 @@ func emitMakerETFloat32Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Float32(t typex.EventTime, key float32, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9232,7 +11124,10 @@ func emitMakerFloat32Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Float64(key float32, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9245,7 +11140,10 @@ func emitMakerETFloat32Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Float64(t typex.EventTime, key float32, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9258,7 +11156,10 @@ func emitMakerFloat32Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Typex_T(key float32, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9271,7 +11172,10 @@ func emitMakerETFloat32Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Typex_T(t typex.EventTime, key float32, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9284,7 +11188,10 @@ func emitMakerFloat32Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Typex_U(key float32, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9297,7 +11204,10 @@ func emitMakerETFloat32Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Typex_U(t typex.EventTime, key float32, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9310,7 +11220,10 @@ func emitMakerFloat32Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Typex_V(key float32, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9323,7 +11236,10 @@ func emitMakerETFloat32Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Typex_V(t typex.EventTime, key float32, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9336,7 +11252,10 @@ func emitMakerFloat32Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Typex_W(key float32, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9349,7 +11268,10 @@ func emitMakerETFloat32Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Typex_W(t typex.EventTime, key float32, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9362,7 +11284,10 @@ func emitMakerFloat32Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Typex_X(key float32, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9375,7 +11300,10 @@ func emitMakerETFloat32Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Typex_X(t typex.EventTime, key float32, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9388,7 +11316,10 @@ func emitMakerFloat32Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Typex_Y(key float32, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9401,7 +11332,10 @@ func emitMakerETFloat32Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Typex_Y(t typex.EventTime, key float32, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9414,7 +11348,10 @@ func emitMakerFloat32Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat32Typex_Z(key float32, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9427,7 +11364,10 @@ func emitMakerETFloat32Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat32Typex_Z(t typex.EventTime, key float32, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9440,7 +11380,10 @@ func emitMakerFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64(elm float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9453,7 +11396,10 @@ func emitMakerETFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64(t typex.EventTime, elm float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9466,7 +11412,10 @@ func emitMakerFloat64ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64ByteSlice(key float64, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9479,7 +11428,10 @@ func emitMakerETFloat64ByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64ByteSlice(t typex.EventTime, key float64, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9492,7 +11444,10 @@ func emitMakerFloat64Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Bool(key float64, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9505,7 +11460,10 @@ func emitMakerETFloat64Bool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Bool(t typex.EventTime, key float64, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9518,7 +11476,10 @@ func emitMakerFloat64String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64String(key float64, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9531,7 +11492,10 @@ func emitMakerETFloat64String(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64String(t typex.EventTime, key float64, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9544,7 +11508,10 @@ func emitMakerFloat64Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Int(key float64, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9557,7 +11524,10 @@ func emitMakerETFloat64Int(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Int(t typex.EventTime, key float64, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9570,7 +11540,10 @@ func emitMakerFloat64Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Int8(key float64, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9583,7 +11556,10 @@ func emitMakerETFloat64Int8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Int8(t typex.EventTime, key float64, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9596,7 +11572,10 @@ func emitMakerFloat64Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Int16(key float64, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9609,7 +11588,10 @@ func emitMakerETFloat64Int16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Int16(t typex.EventTime, key float64, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9622,7 +11604,10 @@ func emitMakerFloat64Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Int32(key float64, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9635,7 +11620,10 @@ func emitMakerETFloat64Int32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Int32(t typex.EventTime, key float64, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9648,7 +11636,10 @@ func emitMakerFloat64Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Int64(key float64, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9661,7 +11652,10 @@ func emitMakerETFloat64Int64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Int64(t typex.EventTime, key float64, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9674,7 +11668,10 @@ func emitMakerFloat64Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Uint(key float64, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9687,7 +11684,10 @@ func emitMakerETFloat64Uint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Uint(t typex.EventTime, key float64, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9700,7 +11700,10 @@ func emitMakerFloat64Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Uint8(key float64, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9713,7 +11716,10 @@ func emitMakerETFloat64Uint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Uint8(t typex.EventTime, key float64, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9726,7 +11732,10 @@ func emitMakerFloat64Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Uint16(key float64, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9739,7 +11748,10 @@ func emitMakerETFloat64Uint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Uint16(t typex.EventTime, key float64, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9752,7 +11764,10 @@ func emitMakerFloat64Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Uint32(key float64, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9765,7 +11780,10 @@ func emitMakerETFloat64Uint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Uint32(t typex.EventTime, key float64, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9778,7 +11796,10 @@ func emitMakerFloat64Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Uint64(key float64, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9791,7 +11812,10 @@ func emitMakerETFloat64Uint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Uint64(t typex.EventTime, key float64, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9804,7 +11828,10 @@ func emitMakerFloat64Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Float32(key float64, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9817,7 +11844,10 @@ func emitMakerETFloat64Float32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Float32(t typex.EventTime, key float64, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9830,7 +11860,10 @@ func emitMakerFloat64Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Float64(key float64, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9843,7 +11876,10 @@ func emitMakerETFloat64Float64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Float64(t typex.EventTime, key float64, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9856,7 +11892,10 @@ func emitMakerFloat64Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Typex_T(key float64, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9869,7 +11908,10 @@ func emitMakerETFloat64Typex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Typex_T(t typex.EventTime, key float64, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9882,7 +11924,10 @@ func emitMakerFloat64Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Typex_U(key float64, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9895,7 +11940,10 @@ func emitMakerETFloat64Typex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Typex_U(t typex.EventTime, key float64, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9908,7 +11956,10 @@ func emitMakerFloat64Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Typex_V(key float64, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9921,7 +11972,10 @@ func emitMakerETFloat64Typex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Typex_V(t typex.EventTime, key float64, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9934,7 +11988,10 @@ func emitMakerFloat64Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Typex_W(key float64, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9947,7 +12004,10 @@ func emitMakerETFloat64Typex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Typex_W(t typex.EventTime, key float64, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9960,7 +12020,10 @@ func emitMakerFloat64Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Typex_X(key float64, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9973,7 +12036,10 @@ func emitMakerETFloat64Typex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Typex_X(t typex.EventTime, key float64, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9986,7 +12052,10 @@ func emitMakerFloat64Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Typex_Y(key float64, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -9999,7 +12068,10 @@ func emitMakerETFloat64Typex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Typex_Y(t typex.EventTime, key float64, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10012,7 +12084,10 @@ func emitMakerFloat64Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeFloat64Typex_Z(key float64, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10025,7 +12100,10 @@ func emitMakerETFloat64Typex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETFloat64Typex_Z(t typex.EventTime, key float64, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10038,7 +12116,10 @@ func emitMakerTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_T(elm typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10051,7 +12132,10 @@ func emitMakerETTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_T(t typex.EventTime, elm typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10064,7 +12148,10 @@ func emitMakerTypex_TByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TByteSlice(key typex.T, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10077,7 +12164,10 @@ func emitMakerETTypex_TByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TByteSlice(t typex.EventTime, key typex.T, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10090,7 +12180,10 @@ func emitMakerTypex_TBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TBool(key typex.T, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10103,7 +12196,10 @@ func emitMakerETTypex_TBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TBool(t typex.EventTime, key typex.T, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10116,7 +12212,10 @@ func emitMakerTypex_TString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TString(key typex.T, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10129,7 +12228,10 @@ func emitMakerETTypex_TString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TString(t typex.EventTime, key typex.T, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10142,7 +12244,10 @@ func emitMakerTypex_TInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TInt(key typex.T, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10155,7 +12260,10 @@ func emitMakerETTypex_TInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TInt(t typex.EventTime, key typex.T, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10168,7 +12276,10 @@ func emitMakerTypex_TInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TInt8(key typex.T, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10181,7 +12292,10 @@ func emitMakerETTypex_TInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TInt8(t typex.EventTime, key typex.T, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10194,7 +12308,10 @@ func emitMakerTypex_TInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TInt16(key typex.T, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10207,7 +12324,10 @@ func emitMakerETTypex_TInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TInt16(t typex.EventTime, key typex.T, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10220,7 +12340,10 @@ func emitMakerTypex_TInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TInt32(key typex.T, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10233,7 +12356,10 @@ func emitMakerETTypex_TInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TInt32(t typex.EventTime, key typex.T, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10246,7 +12372,10 @@ func emitMakerTypex_TInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TInt64(key typex.T, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10259,7 +12388,10 @@ func emitMakerETTypex_TInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TInt64(t typex.EventTime, key typex.T, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10272,7 +12404,10 @@ func emitMakerTypex_TUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TUint(key typex.T, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10285,7 +12420,10 @@ func emitMakerETTypex_TUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TUint(t typex.EventTime, key typex.T, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10298,7 +12436,10 @@ func emitMakerTypex_TUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TUint8(key typex.T, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10311,7 +12452,10 @@ func emitMakerETTypex_TUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TUint8(t typex.EventTime, key typex.T, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10324,7 +12468,10 @@ func emitMakerTypex_TUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TUint16(key typex.T, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10337,7 +12484,10 @@ func emitMakerETTypex_TUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TUint16(t typex.EventTime, key typex.T, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10350,7 +12500,10 @@ func emitMakerTypex_TUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TUint32(key typex.T, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10363,7 +12516,10 @@ func emitMakerETTypex_TUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TUint32(t typex.EventTime, key typex.T, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10376,7 +12532,10 @@ func emitMakerTypex_TUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TUint64(key typex.T, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10389,7 +12548,10 @@ func emitMakerETTypex_TUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TUint64(t typex.EventTime, key typex.T, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10402,7 +12564,10 @@ func emitMakerTypex_TFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TFloat32(key typex.T, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10415,7 +12580,10 @@ func emitMakerETTypex_TFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TFloat32(t typex.EventTime, key typex.T, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10428,7 +12596,10 @@ func emitMakerTypex_TFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TFloat64(key typex.T, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10441,7 +12612,10 @@ func emitMakerETTypex_TFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TFloat64(t typex.EventTime, key typex.T, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10454,7 +12628,10 @@ func emitMakerTypex_TTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TTypex_T(key typex.T, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10467,7 +12644,10 @@ func emitMakerETTypex_TTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TTypex_T(t typex.EventTime, key typex.T, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10480,7 +12660,10 @@ func emitMakerTypex_TTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TTypex_U(key typex.T, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10493,7 +12676,10 @@ func emitMakerETTypex_TTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TTypex_U(t typex.EventTime, key typex.T, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10506,7 +12692,10 @@ func emitMakerTypex_TTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TTypex_V(key typex.T, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10519,7 +12708,10 @@ func emitMakerETTypex_TTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TTypex_V(t typex.EventTime, key typex.T, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10532,7 +12724,10 @@ func emitMakerTypex_TTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TTypex_W(key typex.T, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10545,7 +12740,10 @@ func emitMakerETTypex_TTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TTypex_W(t typex.EventTime, key typex.T, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10558,7 +12756,10 @@ func emitMakerTypex_TTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TTypex_X(key typex.T, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10571,7 +12772,10 @@ func emitMakerETTypex_TTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TTypex_X(t typex.EventTime, key typex.T, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10584,7 +12788,10 @@ func emitMakerTypex_TTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TTypex_Y(key typex.T, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10597,7 +12804,10 @@ func emitMakerETTypex_TTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TTypex_Y(t typex.EventTime, key typex.T, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10610,7 +12820,10 @@ func emitMakerTypex_TTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_TTypex_Z(key typex.T, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10623,7 +12836,10 @@ func emitMakerETTypex_TTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_TTypex_Z(t typex.EventTime, key typex.T, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10636,7 +12852,10 @@ func emitMakerTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_U(elm typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10649,7 +12868,10 @@ func emitMakerETTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_U(t typex.EventTime, elm typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10662,7 +12884,10 @@ func emitMakerTypex_UByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UByteSlice(key typex.U, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10675,7 +12900,10 @@ func emitMakerETTypex_UByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UByteSlice(t typex.EventTime, key typex.U, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10688,7 +12916,10 @@ func emitMakerTypex_UBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UBool(key typex.U, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10701,7 +12932,10 @@ func emitMakerETTypex_UBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UBool(t typex.EventTime, key typex.U, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10714,7 +12948,10 @@ func emitMakerTypex_UString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UString(key typex.U, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10727,7 +12964,10 @@ func emitMakerETTypex_UString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UString(t typex.EventTime, key typex.U, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10740,7 +12980,10 @@ func emitMakerTypex_UInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UInt(key typex.U, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10753,7 +12996,10 @@ func emitMakerETTypex_UInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UInt(t typex.EventTime, key typex.U, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10766,7 +13012,10 @@ func emitMakerTypex_UInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UInt8(key typex.U, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10779,7 +13028,10 @@ func emitMakerETTypex_UInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UInt8(t typex.EventTime, key typex.U, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10792,7 +13044,10 @@ func emitMakerTypex_UInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UInt16(key typex.U, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10805,7 +13060,10 @@ func emitMakerETTypex_UInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UInt16(t typex.EventTime, key typex.U, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10818,7 +13076,10 @@ func emitMakerTypex_UInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UInt32(key typex.U, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10831,7 +13092,10 @@ func emitMakerETTypex_UInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UInt32(t typex.EventTime, key typex.U, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10844,7 +13108,10 @@ func emitMakerTypex_UInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UInt64(key typex.U, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10857,7 +13124,10 @@ func emitMakerETTypex_UInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UInt64(t typex.EventTime, key typex.U, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10870,7 +13140,10 @@ func emitMakerTypex_UUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UUint(key typex.U, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10883,7 +13156,10 @@ func emitMakerETTypex_UUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UUint(t typex.EventTime, key typex.U, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10896,7 +13172,10 @@ func emitMakerTypex_UUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UUint8(key typex.U, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10909,7 +13188,10 @@ func emitMakerETTypex_UUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UUint8(t typex.EventTime, key typex.U, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10922,7 +13204,10 @@ func emitMakerTypex_UUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UUint16(key typex.U, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10935,7 +13220,10 @@ func emitMakerETTypex_UUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UUint16(t typex.EventTime, key typex.U, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10948,7 +13236,10 @@ func emitMakerTypex_UUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UUint32(key typex.U, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10961,7 +13252,10 @@ func emitMakerETTypex_UUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UUint32(t typex.EventTime, key typex.U, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10974,7 +13268,10 @@ func emitMakerTypex_UUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UUint64(key typex.U, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -10987,7 +13284,10 @@ func emitMakerETTypex_UUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UUint64(t typex.EventTime, key typex.U, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11000,7 +13300,10 @@ func emitMakerTypex_UFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UFloat32(key typex.U, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11013,7 +13316,10 @@ func emitMakerETTypex_UFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UFloat32(t typex.EventTime, key typex.U, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11026,7 +13332,10 @@ func emitMakerTypex_UFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UFloat64(key typex.U, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11039,7 +13348,10 @@ func emitMakerETTypex_UFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UFloat64(t typex.EventTime, key typex.U, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11052,7 +13364,10 @@ func emitMakerTypex_UTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UTypex_T(key typex.U, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11065,7 +13380,10 @@ func emitMakerETTypex_UTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UTypex_T(t typex.EventTime, key typex.U, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11078,7 +13396,10 @@ func emitMakerTypex_UTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UTypex_U(key typex.U, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11091,7 +13412,10 @@ func emitMakerETTypex_UTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UTypex_U(t typex.EventTime, key typex.U, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11104,7 +13428,10 @@ func emitMakerTypex_UTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UTypex_V(key typex.U, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11117,7 +13444,10 @@ func emitMakerETTypex_UTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UTypex_V(t typex.EventTime, key typex.U, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11130,7 +13460,10 @@ func emitMakerTypex_UTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UTypex_W(key typex.U, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11143,7 +13476,10 @@ func emitMakerETTypex_UTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UTypex_W(t typex.EventTime, key typex.U, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11156,7 +13492,10 @@ func emitMakerTypex_UTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UTypex_X(key typex.U, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11169,7 +13508,10 @@ func emitMakerETTypex_UTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UTypex_X(t typex.EventTime, key typex.U, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11182,7 +13524,10 @@ func emitMakerTypex_UTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UTypex_Y(key typex.U, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11195,7 +13540,10 @@ func emitMakerETTypex_UTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UTypex_Y(t typex.EventTime, key typex.U, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11208,7 +13556,10 @@ func emitMakerTypex_UTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_UTypex_Z(key typex.U, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11221,7 +13572,10 @@ func emitMakerETTypex_UTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_UTypex_Z(t typex.EventTime, key typex.U, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11234,7 +13588,10 @@ func emitMakerTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_V(elm typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11247,7 +13604,10 @@ func emitMakerETTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_V(t typex.EventTime, elm typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11260,7 +13620,10 @@ func emitMakerTypex_VByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VByteSlice(key typex.V, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11273,7 +13636,10 @@ func emitMakerETTypex_VByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VByteSlice(t typex.EventTime, key typex.V, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11286,7 +13652,10 @@ func emitMakerTypex_VBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VBool(key typex.V, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11299,7 +13668,10 @@ func emitMakerETTypex_VBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VBool(t typex.EventTime, key typex.V, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11312,7 +13684,10 @@ func emitMakerTypex_VString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VString(key typex.V, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11325,7 +13700,10 @@ func emitMakerETTypex_VString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VString(t typex.EventTime, key typex.V, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11338,7 +13716,10 @@ func emitMakerTypex_VInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VInt(key typex.V, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11351,7 +13732,10 @@ func emitMakerETTypex_VInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VInt(t typex.EventTime, key typex.V, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11364,7 +13748,10 @@ func emitMakerTypex_VInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VInt8(key typex.V, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11377,7 +13764,10 @@ func emitMakerETTypex_VInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VInt8(t typex.EventTime, key typex.V, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11390,7 +13780,10 @@ func emitMakerTypex_VInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VInt16(key typex.V, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11403,7 +13796,10 @@ func emitMakerETTypex_VInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VInt16(t typex.EventTime, key typex.V, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11416,7 +13812,10 @@ func emitMakerTypex_VInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VInt32(key typex.V, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11429,7 +13828,10 @@ func emitMakerETTypex_VInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VInt32(t typex.EventTime, key typex.V, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11442,7 +13844,10 @@ func emitMakerTypex_VInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VInt64(key typex.V, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11455,7 +13860,10 @@ func emitMakerETTypex_VInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VInt64(t typex.EventTime, key typex.V, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11468,7 +13876,10 @@ func emitMakerTypex_VUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VUint(key typex.V, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11481,7 +13892,10 @@ func emitMakerETTypex_VUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VUint(t typex.EventTime, key typex.V, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11494,7 +13908,10 @@ func emitMakerTypex_VUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VUint8(key typex.V, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11507,7 +13924,10 @@ func emitMakerETTypex_VUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VUint8(t typex.EventTime, key typex.V, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11520,7 +13940,10 @@ func emitMakerTypex_VUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VUint16(key typex.V, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11533,7 +13956,10 @@ func emitMakerETTypex_VUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VUint16(t typex.EventTime, key typex.V, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11546,7 +13972,10 @@ func emitMakerTypex_VUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VUint32(key typex.V, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11559,7 +13988,10 @@ func emitMakerETTypex_VUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VUint32(t typex.EventTime, key typex.V, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11572,7 +14004,10 @@ func emitMakerTypex_VUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VUint64(key typex.V, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11585,7 +14020,10 @@ func emitMakerETTypex_VUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VUint64(t typex.EventTime, key typex.V, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11598,7 +14036,10 @@ func emitMakerTypex_VFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VFloat32(key typex.V, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11611,7 +14052,10 @@ func emitMakerETTypex_VFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VFloat32(t typex.EventTime, key typex.V, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11624,7 +14068,10 @@ func emitMakerTypex_VFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VFloat64(key typex.V, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11637,7 +14084,10 @@ func emitMakerETTypex_VFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VFloat64(t typex.EventTime, key typex.V, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11650,7 +14100,10 @@ func emitMakerTypex_VTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VTypex_T(key typex.V, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11663,7 +14116,10 @@ func emitMakerETTypex_VTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VTypex_T(t typex.EventTime, key typex.V, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11676,7 +14132,10 @@ func emitMakerTypex_VTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VTypex_U(key typex.V, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11689,7 +14148,10 @@ func emitMakerETTypex_VTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VTypex_U(t typex.EventTime, key typex.V, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11702,7 +14164,10 @@ func emitMakerTypex_VTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VTypex_V(key typex.V, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11715,7 +14180,10 @@ func emitMakerETTypex_VTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VTypex_V(t typex.EventTime, key typex.V, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11728,7 +14196,10 @@ func emitMakerTypex_VTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VTypex_W(key typex.V, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11741,7 +14212,10 @@ func emitMakerETTypex_VTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VTypex_W(t typex.EventTime, key typex.V, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11754,7 +14228,10 @@ func emitMakerTypex_VTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VTypex_X(key typex.V, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11767,7 +14244,10 @@ func emitMakerETTypex_VTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VTypex_X(t typex.EventTime, key typex.V, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11780,7 +14260,10 @@ func emitMakerTypex_VTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VTypex_Y(key typex.V, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11793,7 +14276,10 @@ func emitMakerETTypex_VTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VTypex_Y(t typex.EventTime, key typex.V, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11806,7 +14292,10 @@ func emitMakerTypex_VTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_VTypex_Z(key typex.V, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11819,7 +14308,10 @@ func emitMakerETTypex_VTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_VTypex_Z(t typex.EventTime, key typex.V, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11832,7 +14324,10 @@ func emitMakerTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_W(elm typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11845,7 +14340,10 @@ func emitMakerETTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_W(t typex.EventTime, elm typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11858,7 +14356,10 @@ func emitMakerTypex_WByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WByteSlice(key typex.W, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11871,7 +14372,10 @@ func emitMakerETTypex_WByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WByteSlice(t typex.EventTime, key typex.W, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11884,7 +14388,10 @@ func emitMakerTypex_WBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WBool(key typex.W, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11897,7 +14404,10 @@ func emitMakerETTypex_WBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WBool(t typex.EventTime, key typex.W, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11910,7 +14420,10 @@ func emitMakerTypex_WString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WString(key typex.W, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11923,7 +14436,10 @@ func emitMakerETTypex_WString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WString(t typex.EventTime, key typex.W, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11936,7 +14452,10 @@ func emitMakerTypex_WInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WInt(key typex.W, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11949,7 +14468,10 @@ func emitMakerETTypex_WInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WInt(t typex.EventTime, key typex.W, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11962,7 +14484,10 @@ func emitMakerTypex_WInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WInt8(key typex.W, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11975,7 +14500,10 @@ func emitMakerETTypex_WInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WInt8(t typex.EventTime, key typex.W, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -11988,7 +14516,10 @@ func emitMakerTypex_WInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WInt16(key typex.W, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12001,7 +14532,10 @@ func emitMakerETTypex_WInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WInt16(t typex.EventTime, key typex.W, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12014,7 +14548,10 @@ func emitMakerTypex_WInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WInt32(key typex.W, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12027,7 +14564,10 @@ func emitMakerETTypex_WInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WInt32(t typex.EventTime, key typex.W, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12040,7 +14580,10 @@ func emitMakerTypex_WInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WInt64(key typex.W, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12053,7 +14596,10 @@ func emitMakerETTypex_WInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WInt64(t typex.EventTime, key typex.W, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12066,7 +14612,10 @@ func emitMakerTypex_WUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WUint(key typex.W, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12079,7 +14628,10 @@ func emitMakerETTypex_WUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WUint(t typex.EventTime, key typex.W, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12092,7 +14644,10 @@ func emitMakerTypex_WUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WUint8(key typex.W, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12105,7 +14660,10 @@ func emitMakerETTypex_WUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WUint8(t typex.EventTime, key typex.W, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12118,7 +14676,10 @@ func emitMakerTypex_WUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WUint16(key typex.W, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12131,7 +14692,10 @@ func emitMakerETTypex_WUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WUint16(t typex.EventTime, key typex.W, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12144,7 +14708,10 @@ func emitMakerTypex_WUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WUint32(key typex.W, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12157,7 +14724,10 @@ func emitMakerETTypex_WUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WUint32(t typex.EventTime, key typex.W, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12170,7 +14740,10 @@ func emitMakerTypex_WUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WUint64(key typex.W, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12183,7 +14756,10 @@ func emitMakerETTypex_WUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WUint64(t typex.EventTime, key typex.W, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12196,7 +14772,10 @@ func emitMakerTypex_WFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WFloat32(key typex.W, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12209,7 +14788,10 @@ func emitMakerETTypex_WFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WFloat32(t typex.EventTime, key typex.W, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12222,7 +14804,10 @@ func emitMakerTypex_WFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WFloat64(key typex.W, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12235,7 +14820,10 @@ func emitMakerETTypex_WFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WFloat64(t typex.EventTime, key typex.W, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12248,7 +14836,10 @@ func emitMakerTypex_WTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WTypex_T(key typex.W, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12261,7 +14852,10 @@ func emitMakerETTypex_WTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WTypex_T(t typex.EventTime, key typex.W, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12274,7 +14868,10 @@ func emitMakerTypex_WTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WTypex_U(key typex.W, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12287,7 +14884,10 @@ func emitMakerETTypex_WTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WTypex_U(t typex.EventTime, key typex.W, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12300,7 +14900,10 @@ func emitMakerTypex_WTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WTypex_V(key typex.W, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12313,7 +14916,10 @@ func emitMakerETTypex_WTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WTypex_V(t typex.EventTime, key typex.W, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12326,7 +14932,10 @@ func emitMakerTypex_WTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WTypex_W(key typex.W, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12339,7 +14948,10 @@ func emitMakerETTypex_WTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WTypex_W(t typex.EventTime, key typex.W, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12352,7 +14964,10 @@ func emitMakerTypex_WTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WTypex_X(key typex.W, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12365,7 +14980,10 @@ func emitMakerETTypex_WTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WTypex_X(t typex.EventTime, key typex.W, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12378,7 +14996,10 @@ func emitMakerTypex_WTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WTypex_Y(key typex.W, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12391,7 +15012,10 @@ func emitMakerETTypex_WTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WTypex_Y(t typex.EventTime, key typex.W, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12404,7 +15028,10 @@ func emitMakerTypex_WTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_WTypex_Z(key typex.W, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12417,7 +15044,10 @@ func emitMakerETTypex_WTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_WTypex_Z(t typex.EventTime, key typex.W, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12430,7 +15060,10 @@ func emitMakerTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_X(elm typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12443,7 +15076,10 @@ func emitMakerETTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_X(t typex.EventTime, elm typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12456,7 +15092,10 @@ func emitMakerTypex_XByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XByteSlice(key typex.X, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12469,7 +15108,10 @@ func emitMakerETTypex_XByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XByteSlice(t typex.EventTime, key typex.X, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12482,7 +15124,10 @@ func emitMakerTypex_XBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XBool(key typex.X, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12495,7 +15140,10 @@ func emitMakerETTypex_XBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XBool(t typex.EventTime, key typex.X, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12508,7 +15156,10 @@ func emitMakerTypex_XString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XString(key typex.X, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12521,7 +15172,10 @@ func emitMakerETTypex_XString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XString(t typex.EventTime, key typex.X, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12534,7 +15188,10 @@ func emitMakerTypex_XInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XInt(key typex.X, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12547,7 +15204,10 @@ func emitMakerETTypex_XInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XInt(t typex.EventTime, key typex.X, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12560,7 +15220,10 @@ func emitMakerTypex_XInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XInt8(key typex.X, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12573,7 +15236,10 @@ func emitMakerETTypex_XInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XInt8(t typex.EventTime, key typex.X, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12586,7 +15252,10 @@ func emitMakerTypex_XInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XInt16(key typex.X, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12599,7 +15268,10 @@ func emitMakerETTypex_XInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XInt16(t typex.EventTime, key typex.X, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12612,7 +15284,10 @@ func emitMakerTypex_XInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XInt32(key typex.X, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12625,7 +15300,10 @@ func emitMakerETTypex_XInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XInt32(t typex.EventTime, key typex.X, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12638,7 +15316,10 @@ func emitMakerTypex_XInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XInt64(key typex.X, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12651,7 +15332,10 @@ func emitMakerETTypex_XInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XInt64(t typex.EventTime, key typex.X, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12664,7 +15348,10 @@ func emitMakerTypex_XUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XUint(key typex.X, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12677,7 +15364,10 @@ func emitMakerETTypex_XUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XUint(t typex.EventTime, key typex.X, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12690,7 +15380,10 @@ func emitMakerTypex_XUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XUint8(key typex.X, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12703,7 +15396,10 @@ func emitMakerETTypex_XUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XUint8(t typex.EventTime, key typex.X, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12716,7 +15412,10 @@ func emitMakerTypex_XUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XUint16(key typex.X, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12729,7 +15428,10 @@ func emitMakerETTypex_XUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XUint16(t typex.EventTime, key typex.X, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12742,7 +15444,10 @@ func emitMakerTypex_XUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XUint32(key typex.X, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12755,7 +15460,10 @@ func emitMakerETTypex_XUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XUint32(t typex.EventTime, key typex.X, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12768,7 +15476,10 @@ func emitMakerTypex_XUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XUint64(key typex.X, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12781,7 +15492,10 @@ func emitMakerETTypex_XUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XUint64(t typex.EventTime, key typex.X, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12794,7 +15508,10 @@ func emitMakerTypex_XFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XFloat32(key typex.X, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12807,7 +15524,10 @@ func emitMakerETTypex_XFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XFloat32(t typex.EventTime, key typex.X, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12820,7 +15540,10 @@ func emitMakerTypex_XFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XFloat64(key typex.X, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12833,7 +15556,10 @@ func emitMakerETTypex_XFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XFloat64(t typex.EventTime, key typex.X, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12846,7 +15572,10 @@ func emitMakerTypex_XTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XTypex_T(key typex.X, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12859,7 +15588,10 @@ func emitMakerETTypex_XTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XTypex_T(t typex.EventTime, key typex.X, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12872,7 +15604,10 @@ func emitMakerTypex_XTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XTypex_U(key typex.X, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12885,7 +15620,10 @@ func emitMakerETTypex_XTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XTypex_U(t typex.EventTime, key typex.X, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12898,7 +15636,10 @@ func emitMakerTypex_XTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XTypex_V(key typex.X, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12911,7 +15652,10 @@ func emitMakerETTypex_XTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XTypex_V(t typex.EventTime, key typex.X, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12924,7 +15668,10 @@ func emitMakerTypex_XTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XTypex_W(key typex.X, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12937,7 +15684,10 @@ func emitMakerETTypex_XTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XTypex_W(t typex.EventTime, key typex.X, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12950,7 +15700,10 @@ func emitMakerTypex_XTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XTypex_X(key typex.X, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12963,7 +15716,10 @@ func emitMakerETTypex_XTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XTypex_X(t typex.EventTime, key typex.X, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12976,7 +15732,10 @@ func emitMakerTypex_XTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XTypex_Y(key typex.X, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -12989,7 +15748,10 @@ func emitMakerETTypex_XTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XTypex_Y(t typex.EventTime, key typex.X, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13002,7 +15764,10 @@ func emitMakerTypex_XTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_XTypex_Z(key typex.X, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13015,7 +15780,10 @@ func emitMakerETTypex_XTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_XTypex_Z(t typex.EventTime, key typex.X, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13028,7 +15796,10 @@ func emitMakerTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_Y(elm typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13041,7 +15812,10 @@ func emitMakerETTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_Y(t typex.EventTime, elm typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13054,7 +15828,10 @@ func emitMakerTypex_YByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YByteSlice(key typex.Y, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13067,7 +15844,10 @@ func emitMakerETTypex_YByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YByteSlice(t typex.EventTime, key typex.Y, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13080,7 +15860,10 @@ func emitMakerTypex_YBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YBool(key typex.Y, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13093,7 +15876,10 @@ func emitMakerETTypex_YBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YBool(t typex.EventTime, key typex.Y, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13106,7 +15892,10 @@ func emitMakerTypex_YString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YString(key typex.Y, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13119,7 +15908,10 @@ func emitMakerETTypex_YString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YString(t typex.EventTime, key typex.Y, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13132,7 +15924,10 @@ func emitMakerTypex_YInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YInt(key typex.Y, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13145,7 +15940,10 @@ func emitMakerETTypex_YInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YInt(t typex.EventTime, key typex.Y, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13158,7 +15956,10 @@ func emitMakerTypex_YInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YInt8(key typex.Y, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13171,7 +15972,10 @@ func emitMakerETTypex_YInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YInt8(t typex.EventTime, key typex.Y, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13184,7 +15988,10 @@ func emitMakerTypex_YInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YInt16(key typex.Y, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13197,7 +16004,10 @@ func emitMakerETTypex_YInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YInt16(t typex.EventTime, key typex.Y, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13210,7 +16020,10 @@ func emitMakerTypex_YInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YInt32(key typex.Y, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13223,7 +16036,10 @@ func emitMakerETTypex_YInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YInt32(t typex.EventTime, key typex.Y, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13236,7 +16052,10 @@ func emitMakerTypex_YInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YInt64(key typex.Y, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13249,7 +16068,10 @@ func emitMakerETTypex_YInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YInt64(t typex.EventTime, key typex.Y, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13262,7 +16084,10 @@ func emitMakerTypex_YUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YUint(key typex.Y, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13275,7 +16100,10 @@ func emitMakerETTypex_YUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YUint(t typex.EventTime, key typex.Y, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13288,7 +16116,10 @@ func emitMakerTypex_YUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YUint8(key typex.Y, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13301,7 +16132,10 @@ func emitMakerETTypex_YUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YUint8(t typex.EventTime, key typex.Y, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13314,7 +16148,10 @@ func emitMakerTypex_YUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YUint16(key typex.Y, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13327,7 +16164,10 @@ func emitMakerETTypex_YUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YUint16(t typex.EventTime, key typex.Y, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13340,7 +16180,10 @@ func emitMakerTypex_YUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YUint32(key typex.Y, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13353,7 +16196,10 @@ func emitMakerETTypex_YUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YUint32(t typex.EventTime, key typex.Y, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13366,7 +16212,10 @@ func emitMakerTypex_YUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YUint64(key typex.Y, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13379,7 +16228,10 @@ func emitMakerETTypex_YUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YUint64(t typex.EventTime, key typex.Y, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13392,7 +16244,10 @@ func emitMakerTypex_YFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YFloat32(key typex.Y, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13405,7 +16260,10 @@ func emitMakerETTypex_YFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YFloat32(t typex.EventTime, key typex.Y, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13418,7 +16276,10 @@ func emitMakerTypex_YFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YFloat64(key typex.Y, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13431,7 +16292,10 @@ func emitMakerETTypex_YFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YFloat64(t typex.EventTime, key typex.Y, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13444,7 +16308,10 @@ func emitMakerTypex_YTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YTypex_T(key typex.Y, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13457,7 +16324,10 @@ func emitMakerETTypex_YTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YTypex_T(t typex.EventTime, key typex.Y, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13470,7 +16340,10 @@ func emitMakerTypex_YTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YTypex_U(key typex.Y, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13483,7 +16356,10 @@ func emitMakerETTypex_YTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YTypex_U(t typex.EventTime, key typex.Y, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13496,7 +16372,10 @@ func emitMakerTypex_YTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YTypex_V(key typex.Y, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13509,7 +16388,10 @@ func emitMakerETTypex_YTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YTypex_V(t typex.EventTime, key typex.Y, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13522,7 +16404,10 @@ func emitMakerTypex_YTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YTypex_W(key typex.Y, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13535,7 +16420,10 @@ func emitMakerETTypex_YTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YTypex_W(t typex.EventTime, key typex.Y, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13548,7 +16436,10 @@ func emitMakerTypex_YTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YTypex_X(key typex.Y, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13561,7 +16452,10 @@ func emitMakerETTypex_YTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YTypex_X(t typex.EventTime, key typex.Y, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13574,7 +16468,10 @@ func emitMakerTypex_YTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YTypex_Y(key typex.Y, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13587,7 +16484,10 @@ func emitMakerETTypex_YTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YTypex_Y(t typex.EventTime, key typex.Y, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13600,7 +16500,10 @@ func emitMakerTypex_YTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_YTypex_Z(key typex.Y, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13613,7 +16516,10 @@ func emitMakerETTypex_YTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_YTypex_Z(t typex.EventTime, key typex.Y, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13626,7 +16532,10 @@ func emitMakerTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_Z(elm typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13639,7 +16548,10 @@ func emitMakerETTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_Z(t typex.EventTime, elm typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: elm}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: elm}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13652,7 +16564,10 @@ func emitMakerTypex_ZByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZByteSlice(key typex.Z, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13665,7 +16580,10 @@ func emitMakerETTypex_ZByteSlice(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZByteSlice(t typex.EventTime, key typex.Z, val []byte) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13678,7 +16596,10 @@ func emitMakerTypex_ZBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZBool(key typex.Z, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13691,7 +16612,10 @@ func emitMakerETTypex_ZBool(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZBool(t typex.EventTime, key typex.Z, val bool) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13704,7 +16628,10 @@ func emitMakerTypex_ZString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZString(key typex.Z, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13717,7 +16644,10 @@ func emitMakerETTypex_ZString(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZString(t typex.EventTime, key typex.Z, val string) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13730,7 +16660,10 @@ func emitMakerTypex_ZInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZInt(key typex.Z, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13743,7 +16676,10 @@ func emitMakerETTypex_ZInt(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZInt(t typex.EventTime, key typex.Z, val int) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13756,7 +16692,10 @@ func emitMakerTypex_ZInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZInt8(key typex.Z, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13769,7 +16708,10 @@ func emitMakerETTypex_ZInt8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZInt8(t typex.EventTime, key typex.Z, val int8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13782,7 +16724,10 @@ func emitMakerTypex_ZInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZInt16(key typex.Z, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13795,7 +16740,10 @@ func emitMakerETTypex_ZInt16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZInt16(t typex.EventTime, key typex.Z, val int16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13808,7 +16756,10 @@ func emitMakerTypex_ZInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZInt32(key typex.Z, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13821,7 +16772,10 @@ func emitMakerETTypex_ZInt32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZInt32(t typex.EventTime, key typex.Z, val int32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13834,7 +16788,10 @@ func emitMakerTypex_ZInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZInt64(key typex.Z, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13847,7 +16804,10 @@ func emitMakerETTypex_ZInt64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZInt64(t typex.EventTime, key typex.Z, val int64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13860,7 +16820,10 @@ func emitMakerTypex_ZUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZUint(key typex.Z, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13873,7 +16836,10 @@ func emitMakerETTypex_ZUint(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZUint(t typex.EventTime, key typex.Z, val uint) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13886,7 +16852,10 @@ func emitMakerTypex_ZUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZUint8(key typex.Z, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13899,7 +16868,10 @@ func emitMakerETTypex_ZUint8(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZUint8(t typex.EventTime, key typex.Z, val uint8) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13912,7 +16884,10 @@ func emitMakerTypex_ZUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZUint16(key typex.Z, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13925,7 +16900,10 @@ func emitMakerETTypex_ZUint16(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZUint16(t typex.EventTime, key typex.Z, val uint16) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13938,7 +16916,10 @@ func emitMakerTypex_ZUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZUint32(key typex.Z, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13951,7 +16932,10 @@ func emitMakerETTypex_ZUint32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZUint32(t typex.EventTime, key typex.Z, val uint32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13964,7 +16948,10 @@ func emitMakerTypex_ZUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZUint64(key typex.Z, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13977,7 +16964,10 @@ func emitMakerETTypex_ZUint64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZUint64(t typex.EventTime, key typex.Z, val uint64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -13990,7 +16980,10 @@ func emitMakerTypex_ZFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZFloat32(key typex.Z, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14003,7 +16996,10 @@ func emitMakerETTypex_ZFloat32(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZFloat32(t typex.EventTime, key typex.Z, val float32) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14016,7 +17012,10 @@ func emitMakerTypex_ZFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZFloat64(key typex.Z, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14029,7 +17028,10 @@ func emitMakerETTypex_ZFloat64(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZFloat64(t typex.EventTime, key typex.Z, val float64) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14042,7 +17044,10 @@ func emitMakerTypex_ZTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZTypex_T(key typex.Z, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14055,7 +17060,10 @@ func emitMakerETTypex_ZTypex_T(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZTypex_T(t typex.EventTime, key typex.Z, val typex.T) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14068,7 +17076,10 @@ func emitMakerTypex_ZTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZTypex_U(key typex.Z, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14081,7 +17092,10 @@ func emitMakerETTypex_ZTypex_U(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZTypex_U(t typex.EventTime, key typex.Z, val typex.U) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14094,7 +17108,10 @@ func emitMakerTypex_ZTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZTypex_V(key typex.Z, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14107,7 +17124,10 @@ func emitMakerETTypex_ZTypex_V(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZTypex_V(t typex.EventTime, key typex.Z, val typex.V) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14120,7 +17140,10 @@ func emitMakerTypex_ZTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZTypex_W(key typex.Z, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14133,7 +17156,10 @@ func emitMakerETTypex_ZTypex_W(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZTypex_W(t typex.EventTime, key typex.Z, val typex.W) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14146,7 +17172,10 @@ func emitMakerTypex_ZTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZTypex_X(key typex.Z, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14159,7 +17188,10 @@ func emitMakerETTypex_ZTypex_X(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZTypex_X(t typex.EventTime, key typex.Z, val typex.X) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14172,7 +17204,10 @@ func emitMakerTypex_ZTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZTypex_Y(key typex.Z, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14185,7 +17220,10 @@ func emitMakerETTypex_ZTypex_Y(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZTypex_Y(t typex.EventTime, key typex.Z, val typex.Y) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14198,7 +17236,10 @@ func emitMakerTypex_ZTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeTypex_ZTypex_Z(key typex.Z, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: e.et, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(e.et.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}
@@ -14211,7 +17252,10 @@ func emitMakerETTypex_ZTypex_Z(n exec.ElementProcessor) exec.ReusableEmitter {
 }
 
 func (e *emitNative) invokeETTypex_ZTypex_Z(t typex.EventTime, key typex.Z, val typex.Z) {
-	e.value = exec.FullValue{Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	e.value = exec.FullValue{Pane: e.pn, Windows: e.ws, Timestamp: t, Elm: key, Elm2: val}
+	if e.est != nil {
+		(*e.est).(sdf.TimestampObservingEstimator).ObserveTimestamp(t.ToTime())
+	}
 	if err := e.n.ProcessElement(e.ctx, &e.value); err != nil {
 		panic(err)
 	}

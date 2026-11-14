@@ -18,8 +18,6 @@
 package org.apache.beam.sdk.io.fs;
 
 import java.io.Serializable;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.io.FileSystem;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.fs.ResolveOptions.StandardResolveOptions;
@@ -46,7 +44,6 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  *       or files to generate {@link ResourceId ResourceIds} for resources that may not yet exist.
  * </ul>
  */
-@Experimental(Kind.FILESYSTEM)
 public interface ResourceId extends Serializable {
 
   /**
@@ -110,8 +107,7 @@ public interface ResourceId extends Serializable {
    * @return a string representing the name of file or directory, or null if there are zero
    *     components.
    */
-  @Nullable
-  String getFilename();
+  @Nullable String getFilename();
 
   /** Returns {@code true} if this {@link ResourceId} represents a directory, false otherwise. */
   boolean isDirectory();

@@ -29,10 +29,11 @@ import org.apache.beam.sdk.metrics.MetricName;
 import org.apache.beam.sdk.metrics.MetricsEnvironment;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
-import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValue;
+import org.apache.beam.sdk.values.WindowedValues;
 import org.apache.beam.sdk.values.WindowingStrategy;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterables;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Before;
@@ -48,6 +49,7 @@ public class LateDataDroppingDoFnRunnerTest {
   private static final FixedWindows WINDOW_FN = FixedWindows.of(Duration.millis(10));
 
   @Mock private TimerInternals mockTimerInternals;
+  @Mock private StepContext mockStepContext;
 
   @Before
   public void setUp() {
@@ -59,9 +61,10 @@ public class LateDataDroppingDoFnRunnerTest {
     MetricsContainerImpl container = new MetricsContainerImpl("any");
     MetricsEnvironment.setCurrentContainer(container);
     when(mockTimerInternals.currentInputWatermarkTime()).thenReturn(new Instant(15L));
+    when(mockStepContext.timerInternals()).thenReturn(mockTimerInternals);
 
     LateDataFilter lateDataFilter =
-        new LateDataFilter(WindowingStrategy.of(WINDOW_FN), mockTimerInternals);
+        new LateDataFilter(WindowingStrategy.of(WINDOW_FN), mockStepContext);
 
     Iterable<WindowedValue<Integer>> actual =
         lateDataFilter.filter(
@@ -97,7 +100,7 @@ public class LateDataDroppingDoFnRunnerTest {
 
   private <T> WindowedValue<T> createDatum(T element, long timestampMillis) {
     Instant timestamp = new Instant(timestampMillis);
-    return WindowedValue.of(
+    return WindowedValues.of(
         element, timestamp, Arrays.asList(WINDOW_FN.assignWindow(timestamp)), PaneInfo.NO_FIRING);
   }
 }

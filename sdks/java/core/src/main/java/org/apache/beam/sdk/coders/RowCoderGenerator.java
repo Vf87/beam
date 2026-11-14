@@ -17,7 +17,8 @@
  */
 package org.apache.beam.sdk.coders;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.sdk.util.ByteBuddyUtils.getClassLoadingStrategy;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -29,35 +30,36 @@ import java.util.BitSet;
 import java.util.Map;
 import java.util.UUID;
 import javax.annotation.Nullable;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
+import javax.annotation.concurrent.GuardedBy;
+import net.bytebuddy.ByteBuddy;
+import net.bytebuddy.description.modifier.FieldManifestation;
+import net.bytebuddy.description.modifier.Ownership;
+import net.bytebuddy.description.modifier.Visibility;
+import net.bytebuddy.description.type.TypeDescription;
+import net.bytebuddy.description.type.TypeDescription.ForLoadedType;
+import net.bytebuddy.dynamic.DynamicType;
+import net.bytebuddy.dynamic.scaffold.InstrumentedType;
+import net.bytebuddy.implementation.FixedValue;
+import net.bytebuddy.implementation.Implementation;
+import net.bytebuddy.implementation.bytecode.ByteCodeAppender;
+import net.bytebuddy.implementation.bytecode.ByteCodeAppender.Size;
+import net.bytebuddy.implementation.bytecode.Duplication;
+import net.bytebuddy.implementation.bytecode.StackManipulation;
+import net.bytebuddy.implementation.bytecode.member.FieldAccess;
+import net.bytebuddy.implementation.bytecode.member.MethodInvocation;
+import net.bytebuddy.implementation.bytecode.member.MethodReturn;
+import net.bytebuddy.implementation.bytecode.member.MethodVariableAccess;
+import net.bytebuddy.matcher.ElementMatchers;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.Field;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.schemas.SchemaCoder;
+import org.apache.beam.sdk.util.StringUtils;
+import org.apache.beam.sdk.util.common.ReflectHelpers;
 import org.apache.beam.sdk.values.Row;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.ByteBuddy;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.description.modifier.FieldManifestation;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.description.modifier.Ownership;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.description.modifier.Visibility;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.description.type.TypeDescription;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.description.type.TypeDescription.ForLoadedType;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.dynamic.DynamicType;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.dynamic.loading.ClassLoadingStrategy;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.dynamic.scaffold.InstrumentedType;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.FixedValue;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.Implementation;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.ByteCodeAppender;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.ByteCodeAppender.Size;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.Duplication;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.StackManipulation;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.member.FieldAccess;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.member.MethodInvocation;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.member.MethodReturn;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.implementation.bytecode.member.MethodVariableAccess;
-import org.apache.beam.vendor.bytebuddy.v1_11_0.net.bytebuddy.matcher.ElementMatchers;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Maps;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.annotations.VisibleForTesting;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Maps;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -89,7 +91,7 @@ import org.slf4j.LoggerFactory;
  *     encodeDelegate(FIELD_CODERS, value, outStream);
  *   }
  *
- *  {@literal @}Overide
+ *  {@literal @}Override
  *   public abstract T decode(InputStream inStream) {
  *     // Delegate to a method that evaluates each coder in the static array.
  *     return decodeDelegate(FIELD_CODERS, inStream);
@@ -97,9 +99,8 @@ import org.slf4j.LoggerFactory;
  * }
  * </code></pre>
  */
-@Experimental(Kind.SCHEMAS)
 @SuppressWarnings({
-  "nullness", // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness", // TODO(https://github.com/apache/beam/issues/20497)
   "rawtypes"
 })
 public abstract class RowCoderGenerator {
@@ -112,24 +113,100 @@ public abstract class RowCoderGenerator {
 
   private static final String CODERS_FIELD_NAME = "FIELD_CODERS";
   private static final String POSITIONS_FIELD_NAME = "FIELD_ENCODING_POSITIONS";
+  private static final String SCHEMA_OPTION_STATIC_ENCODING = "beam:option:row:static_encoding";
+
+  static class WithStackTrace<T> {
+    private final T value;
+    private final String stackTrace;
+
+    public WithStackTrace(T value, String stackTrace) {
+      this.value = value;
+      this.stackTrace = stackTrace;
+    }
+
+    public T getValue() {
+      return value;
+    }
+
+    public String getStackTrace() {
+      return stackTrace;
+    }
+  }
 
   // Cache for Coder class that are already generated.
-  private static final Map<UUID, Coder<Row>> GENERATED_CODERS = Maps.newConcurrentMap();
-  private static final Map<UUID, Map<String, Integer>> ENCODING_POSITION_OVERRIDES =
-      Maps.newConcurrentMap();
+  @GuardedBy("cacheLock")
+  private static final Map<UUID, WithStackTrace<Coder<Row>>> GENERATED_CODERS = Maps.newHashMap();
+
+  @GuardedBy("cacheLock")
+  private static final Map<UUID, WithStackTrace<Map<String, Integer>>> ENCODING_POSITION_OVERRIDES =
+      Maps.newHashMap();
+
+  private static final Object cacheLock = new Object();
 
   private static final Logger LOG = LoggerFactory.getLogger(RowCoderGenerator.class);
 
+  private static String getStackTrace() {
+    return StringUtils.arrayToNewlines(Thread.currentThread().getStackTrace(), 10);
+  }
+
   public static void overrideEncodingPositions(UUID uuid, Map<String, Integer> encodingPositions) {
-    ENCODING_POSITION_OVERRIDES.put(uuid, encodingPositions);
+    final String stackTrace = getStackTrace();
+    synchronized (cacheLock) {
+      @Nullable
+      WithStackTrace<Map<String, Integer>> previousEncodingPositions =
+          ENCODING_POSITION_OVERRIDES.put(
+              uuid, new WithStackTrace<>(encodingPositions, stackTrace));
+      @Nullable WithStackTrace<Coder<Row>> existingCoder = GENERATED_CODERS.get(uuid);
+      if (previousEncodingPositions == null) {
+        if (existingCoder != null) {
+          LOG.error(
+              "Received encoding positions for uuid {} too late after creating RowCoder. Created: {}\n Override: {}",
+              uuid,
+              existingCoder.getStackTrace(),
+              stackTrace);
+        } else {
+          LOG.info("Received encoding positions {} for uuid {}.", encodingPositions, uuid);
+        }
+      } else if (!previousEncodingPositions.getValue().equals(encodingPositions)) {
+        if (existingCoder == null) {
+          LOG.error(
+              "Received differing encoding positions for uuid {} before coder creation. Was {} at {}\n Now {} at {}",
+              uuid,
+              previousEncodingPositions.getValue(),
+              encodingPositions,
+              previousEncodingPositions.getStackTrace(),
+              stackTrace);
+        } else {
+          LOG.error(
+              "Received differing encoding positions for uuid {} after coder creation at {}\n. "
+                  + "Was {} at {}\n Now {} at {}\n",
+              uuid,
+              existingCoder.getStackTrace(),
+              previousEncodingPositions.getValue(),
+              encodingPositions,
+              previousEncodingPositions.getStackTrace(),
+              stackTrace);
+        }
+      }
+    }
+  }
+
+  @VisibleForTesting
+  static void clearRowCoderCache() {
+    synchronized (cacheLock) {
+      GENERATED_CODERS.clear();
+    }
   }
 
   @SuppressWarnings("unchecked")
   public static Coder<Row> generate(Schema schema) {
-    // Using ConcurrentHashMap::computeIfAbsent here would deadlock in case of nested
-    // coders. Using HashMap::computeIfAbsent generates ConcurrentModificationExceptions in Java 11.
-    Coder<Row> rowCoder = GENERATED_CODERS.get(schema.getUUID());
-    if (rowCoder == null) {
+    UUID uuid = Preconditions.checkNotNull(schema.getUUID());
+    // Avoid using computeIfAbsent which may cause issues with nested schemas.
+    synchronized (cacheLock) {
+      @Nullable WithStackTrace<Coder<Row>> existingRowCoder = GENERATED_CODERS.get(uuid);
+      if (existingRowCoder != null) {
+        return existingRowCoder.getValue();
+      }
       TypeDescription.Generic coderType =
           TypeDescription.Generic.Builder.parameterizedType(Coder.class, Row.class).build();
       DynamicType.Builder<Coder> builder =
@@ -137,8 +214,13 @@ public abstract class RowCoderGenerator {
       builder = implementMethods(schema, builder);
 
       int[] encodingPosToRowIndex = new int[schema.getFieldCount()];
+      @Nullable
+      WithStackTrace<Map<String, Integer>> existingEncodingPositions =
+          ENCODING_POSITION_OVERRIDES.get(uuid);
       Map<String, Integer> encodingPositions =
-          ENCODING_POSITION_OVERRIDES.getOrDefault(schema.getUUID(), schema.getEncodingPositions());
+          existingEncodingPositions == null
+              ? schema.getEncodingPositions()
+              : existingEncodingPositions.getValue();
       for (int recordIndex = 0; recordIndex < schema.getFieldCount(); ++recordIndex) {
         String name = schema.getField(recordIndex).getName();
         int encodingPosition = encodingPositions.get(name);
@@ -169,11 +251,14 @@ public abstract class RowCoderGenerator {
               .withParameters(Coder[].class, int[].class)
               .intercept(new GeneratedCoderConstructor());
 
+      Coder<Row> rowCoder;
       try {
         rowCoder =
             builder
                 .make()
-                .load(Coder.class.getClassLoader(), ClassLoadingStrategy.Default.INJECTION)
+                .load(
+                    ReflectHelpers.findClassLoader(Coder.class.getClassLoader()),
+                    getClassLoadingStrategy(Coder.class))
                 .getLoaded()
                 .getDeclaredConstructor(Coder[].class, int[].class)
                 .newInstance((Object) componentCoders, (Object) encodingPosToRowIndex);
@@ -183,9 +268,15 @@ public abstract class RowCoderGenerator {
           | InvocationTargetException e) {
         throw new RuntimeException("Unable to generate coder for schema " + schema, e);
       }
-      GENERATED_CODERS.put(schema.getUUID(), rowCoder);
+      String stackTrace = getStackTrace();
+      GENERATED_CODERS.put(uuid, new WithStackTrace<>(rowCoder, stackTrace));
+      LOG.debug(
+          "Created row coder for uuid {} with encoding positions {} at {}",
+          uuid,
+          encodingPositions,
+          stackTrace);
+      return rowCoder;
     }
-    return rowCoder;
   }
 
   private static class GeneratedCoderConstructor implements Implementation {
@@ -317,8 +408,13 @@ public abstract class RowCoderGenerator {
       checkState(value.getFieldCount() == value.getSchema().getFieldCount());
       checkState(encodingPosToIndex.length == value.getFieldCount());
 
+      boolean staticEncoding =
+          value.getSchema().getOptions().getValueOrDefault(SCHEMA_OPTION_STATIC_ENCODING, false);
+
       // Encode the field count. This allows us to handle compatible schema changes.
-      VAR_INT_CODER.encode(value.getFieldCount(), outputStream);
+      if (!staticEncoding) {
+        VAR_INT_CODER.encode(value.getFieldCount(), outputStream);
+      }
 
       if (hasNullableFields) {
         // If the row has null fields, extract the values out once so that both scanNullFields and
@@ -330,7 +426,9 @@ public abstract class RowCoderGenerator {
         }
 
         // Encode a bitmap for the null fields to save having to encode a bunch of nulls.
-        NULL_LIST_CODER.encode(scanNullFields(fieldValues), outputStream);
+        if (!staticEncoding) {
+          NULL_LIST_CODER.encode(scanNullFields(fieldValues, encodingPosToIndex), outputStream);
+        }
         for (int encodingPos = 0; encodingPos < fieldValues.length; ++encodingPos) {
           @Nullable Object fieldValue = fieldValues[encodingPosToIndex[encodingPos]];
           if (fieldValue != null) {
@@ -340,7 +438,9 @@ public abstract class RowCoderGenerator {
       } else {
         // Otherwise, we know all fields are non-null, so the null list is always empty.
 
-        NULL_LIST_CODER.encode(EMPTY_BIT_SET, outputStream);
+        if (!staticEncoding) {
+          NULL_LIST_CODER.encode(EMPTY_BIT_SET, outputStream);
+        }
         for (int encodingPos = 0; encodingPos < value.getFieldCount(); ++encodingPos) {
           @Nullable Object fieldValue = value.getValue(encodingPosToIndex[encodingPos]);
           if (fieldValue != null) {
@@ -352,14 +452,15 @@ public abstract class RowCoderGenerator {
 
     // Figure out which fields of the Row are null, and returns a BitSet. This allows us to save
     // on encoding each null field separately.
-    private static BitSet scanNullFields(Object[] fieldValues) {
+    private static BitSet scanNullFields(Object[] fieldValues, int[] encodingPosToIndex) {
+      Preconditions.checkState(fieldValues.length == encodingPosToIndex.length);
       BitSet nullFields = new BitSet(fieldValues.length);
-      for (int idx = 0; idx < fieldValues.length; ++idx) {
-        if (fieldValues[idx] == null) {
-          nullFields.set(idx);
+      for (int encodingPos = 0; encodingPos < encodingPosToIndex.length; ++encodingPos) {
+        int fieldIndex = encodingPosToIndex[encodingPos];
+        if (fieldValues[fieldIndex] == null) {
+          nullFields.set(encodingPos);
         }
       }
-
       return nullFields;
     }
   }
@@ -420,16 +521,22 @@ public abstract class RowCoderGenerator {
     static Row decodeDelegate(
         Schema schema, Coder[] coders, int[] encodingPosToIndex, InputStream inputStream)
         throws IOException {
-      int fieldCount = VAR_INT_CODER.decode(inputStream);
-
-      BitSet nullFields = NULL_LIST_CODER.decode(inputStream);
+      int fieldCount;
+      BitSet nullFields;
+      if (schema.getOptions().getValueOrDefault(SCHEMA_OPTION_STATIC_ENCODING, false)) {
+        fieldCount = schema.getFieldCount();
+        nullFields = new BitSet();
+      } else {
+        fieldCount = VAR_INT_CODER.decode(inputStream);
+        nullFields = NULL_LIST_CODER.decode(inputStream);
+      }
       Object[] fieldValues = new Object[coders.length];
       for (int encodingPos = 0; encodingPos < fieldCount; ++encodingPos) {
         // In the case of a schema change going backwards, fieldCount might be > coders.length,
         // in which case we drop the extra fields.
         if (encodingPos < coders.length) {
           int rowIndex = encodingPosToIndex[encodingPos];
-          if (nullFields.get(rowIndex)) {
+          if (nullFields.get(encodingPos)) {
             fieldValues[rowIndex] = null;
           } else {
             Object fieldValue = coders[encodingPos].decode(inputStream);

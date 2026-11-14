@@ -20,13 +20,10 @@ package org.apache.beam.sdk.io.cassandra;
 import java.io.Serializable;
 import java.math.BigInteger;
 import javax.annotation.Nullable;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 
 /** Models a Cassandra token range. */
-@Experimental(Kind.SOURCE_SINK)
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public final class RingRange implements Serializable {
   private final BigInteger start;
@@ -54,7 +51,9 @@ public final class RingRange implements Serializable {
     return (start.compareTo(end) >= 0) ? end.subtract(start).add(ringSize) : end.subtract(start);
   }
 
-  /** @return true if 0 is inside of this range. Note that if start == end, then wrapping is true */
+  /**
+   * Returns true if 0 is inside of this range. Note that if start == end, then wrapping is true.
+   */
   public boolean isWrapping() {
     return start.compareTo(end) >= 0;
   }

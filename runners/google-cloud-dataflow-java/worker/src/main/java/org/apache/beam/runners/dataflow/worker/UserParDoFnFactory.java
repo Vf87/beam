@@ -19,27 +19,31 @@ package org.apache.beam.runners.dataflow.worker;
 
 import static org.apache.beam.runners.dataflow.DataflowRunner.StreamingPCollectionViewWriterFn;
 import static org.apache.beam.runners.dataflow.util.Structs.getBytes;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.google.api.services.dataflow.model.SideInputInfo;
 import java.util.List;
 import java.util.Map;
+import org.apache.beam.runners.core.KeyedWorkItemCoder;
 import org.apache.beam.runners.core.SideInputReader;
 import org.apache.beam.runners.dataflow.BatchStatefulParDoOverrides;
 import org.apache.beam.runners.dataflow.DataflowRunner;
 import org.apache.beam.runners.dataflow.util.CloudObject;
 import org.apache.beam.runners.dataflow.util.PropertyNames;
 import org.apache.beam.runners.dataflow.worker.util.common.worker.ParDoFn;
+import org.apache.beam.sdk.coders.ByteArrayCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.options.StreamingOptions;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.util.DoFnInfo;
 import org.apache.beam.sdk.util.SerializableUtils;
+import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TupleTag;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.Cache;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.CacheBuilder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.Cache;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.CacheBuilder;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -47,12 +51,12 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * specifications from the Dataflow service.
  */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 class UserParDoFnFactory implements ParDoFnFactory {
   static UserParDoFnFactory createDefault() {
-    return new UserParDoFnFactory(new UserDoFnExtractor(), SimpleDoFnRunnerFactory.INSTANCE);
+    return new UserParDoFnFactory(new UserDoFnExtractor(), SimpleDoFnRunnerFactory.INSTANCE, false);
   }
 
   interface DoFnExtractor {
@@ -74,10 +78,15 @@ class UserParDoFnFactory implements ParDoFnFactory {
 
   private final DoFnExtractor doFnExtractor;
   private final DoFnRunnerFactory runnerFactory;
+  private final boolean streamingKeyedWorkItem;
 
-  UserParDoFnFactory(DoFnExtractor doFnExtractor, DoFnRunnerFactory runnerFactory) {
+  UserParDoFnFactory(
+      DoFnExtractor doFnExtractor,
+      DoFnRunnerFactory runnerFactory,
+      boolean streamingKeyedWorkItem) {
     this.doFnExtractor = doFnExtractor;
     this.runnerFactory = runnerFactory;
+    this.streamingKeyedWorkItem = streamingKeyedWorkItem;
   }
 
   @Override
@@ -144,17 +153,38 @@ class UserParDoFnFactory implements ParDoFnFactory {
           writerFn.getDataCoder(),
           (Coder<BoundedWindow>) doFnInfo.getWindowingStrategy().getWindowFn().windowCoder());
     } else {
-      return new SimpleParDoFn(
-          options,
-          instanceManager,
-          sideInputReader,
-          doFnInfo.getMainOutput(),
-          outputTupleTagsToReceiverIndices,
-          stepContext,
-          operationContext,
-          doFnInfo.getDoFnSchemaInformation(),
-          doFnInfo.getSideInputMapping(),
-          runnerFactory);
+      boolean hasStreamingSideInput =
+          options.as(StreamingOptions.class).isStreaming() && !sideInputReader.isEmpty();
+
+      if (streamingKeyedWorkItem && hasStreamingSideInput) {
+        KeyedWorkItemCoder<byte[], KV<?, ?>> kwiCoder =
+            (KeyedWorkItemCoder<byte[], KV<?, ?>>) doFnInfo.getInputCoder();
+        return new StreamingKeyedWorkItemSideInputParDoFn<>(
+            options,
+            instanceManager,
+            sideInputReader,
+            doFnInfo.getMainOutput(),
+            outputTupleTagsToReceiverIndices,
+            stepContext,
+            operationContext,
+            doFnInfo.getDoFnSchemaInformation(),
+            doFnInfo.getSideInputMapping(),
+            runnerFactory,
+            ByteArrayCoder.of(),
+            kwiCoder.getElementCoder());
+      } else {
+        return new SimpleParDoFn(
+            options,
+            instanceManager,
+            sideInputReader,
+            doFnInfo.getMainOutput(),
+            outputTupleTagsToReceiverIndices,
+            stepContext,
+            operationContext,
+            doFnInfo.getDoFnSchemaInformation(),
+            doFnInfo.getSideInputMapping(),
+            runnerFactory);
+      }
     }
   }
 }

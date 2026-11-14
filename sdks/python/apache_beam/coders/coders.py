@@ -37,34 +37,34 @@ encoded.
 # pytype: skip-file
 
 import base64
+import decimal
+import logging
 import pickle
 from functools import lru_cache
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
-from typing import Dict
 from typing import Iterable
-from typing import List
 from typing import Optional
 from typing import Sequence
-from typing import Tuple
-from typing import Type
 from typing import TypeVar
 from typing import overload
 
 import google.protobuf.wrappers_pb2
+import proto
+from google.protobuf import message
 
 from apache_beam.coders import coder_impl
 from apache_beam.coders.avro_record import AvroRecord
+from apache_beam.internal import cloudpickle_pickler
 from apache_beam.portability import common_urns
 from apache_beam.portability import python_urns
 from apache_beam.portability.api import beam_runner_api_pb2
 from apache_beam.typehints import typehints
 from apache_beam.utils import proto_utils
+from apache_beam.utils import windowed_value
 
 if TYPE_CHECKING:
-  from google.protobuf import message  # pylint: disable=ungrouped-imports
-  from apache_beam.coders.typecoders import CoderRegistry
   from apache_beam.runners.pipeline_context import PipelineContext
 
 # pylint: disable=wrong-import-order, wrong-import-position, ungrouped-imports
@@ -79,17 +79,17 @@ except ImportError:
 try:
   # Import dill from the pickler module to make sure our monkey-patching of dill
   # occurs.
-  from apache_beam.internal.pickler import dill
+  from apache_beam.internal.dill_pickler import dill
 except ImportError:
-  # We fall back to using the stock dill library in tests that don't use the
-  # full Python SDK.
-  import dill
+  dill = None
 
 __all__ = [
     'Coder',
     'AvroGenericCoder',
     'BooleanCoder',
+    'ByteCoder',
     'BytesCoder',
+    'CloudpickleCoder',
     'DillCoder',
     'FastPrimitivesCoder',
     'FloatCoder',
@@ -99,7 +99,9 @@ __all__ = [
     'NullableCoder',
     'PickleCoder',
     'ProtoCoder',
+    'ProtoPlusCoder',
     'ShardedKeyCoder',
+    'SinglePrecisionFloatCoder',
     'SingletonCoder',
     'StrUtf8Coder',
     'TimestampCoder',
@@ -107,13 +109,18 @@ __all__ = [
     'TupleSequenceCoder',
     'VarIntCoder',
     'WindowedValueCoder',
-    'ParamWindowedValueCoder'
+    'ParamWindowedValueCoder',
+    'BigIntegerCoder',
+    'DecimalCoder',
+    'PaneInfoCoder'
 ]
+
+_LOGGER = logging.getLogger(__name__)
 
 T = TypeVar('T')
 CoderT = TypeVar('CoderT', bound='Coder')
 ProtoCoderT = TypeVar('ProtoCoderT', bound='ProtoCoder')
-ConstructorFn = Callable[[Optional[Any], List['Coder'], 'PipelineContext'], Any]
+ConstructorFn = Callable[[Optional[Any], list['Coder'], 'PipelineContext'], Any]
 
 
 def serialize_coder(coder):
@@ -236,7 +243,10 @@ class Coder(object):
     return self.__dict__
 
   def to_type_hint(self):
-    raise NotImplementedError('BEAM-2717: %s' % self.__class__.__name__)
+    # TODO: After https://github.com/apache/beam/issues/18490 we should be
+    # able to infer the type hint rather than require every subclass define
+    # it
+    raise NotImplementedError
 
   @classmethod
   def from_type_hint(cls, unused_typehint, unused_registry):
@@ -271,29 +281,6 @@ class Coder(object):
     # This is an internal detail of the Coder API and does not need to be
     # refined in user-defined Coders.
     return []
-
-  def as_cloud_object(self, coders_context=None):
-    """For internal use only; no backwards-compatibility guarantees.
-
-    Returns Google Cloud Dataflow API description of this coder."""
-    # This is an internal detail of the Coder API and does not need to be
-    # refined in user-defined Coders.
-
-    value = {
-        # We pass coders in the form "<coder_name>$<pickled_data>" to make the
-        # job description JSON more readable.  Data before the $ is ignored by
-        # the worker.
-        '@type': serialize_coder(self),
-        'component_encodings': [
-            component.as_cloud_object(coders_context)
-            for component in self._get_component_coders()
-        ],
-    }
-
-    if coders_context:
-      value['pipeline_proto_coder_id'] = coders_context.get_id(self)
-
-    return value
 
   def __repr__(self):
     return self.__class__.__name__
@@ -396,9 +383,8 @@ class Coder(object):
     """
     setattr(
         cls,
-        'to_runner_api_parameter',
-        lambda self,
-        unused_context: (urn, None, self._get_component_coders()))
+        'to_runner_api_parameter', lambda self, unused_context:
+        (urn, None, self._get_component_coders()))
 
     # pylint: disable=unused-variable
     @Coder.register_urn(urn, None)
@@ -407,6 +393,15 @@ class Coder(object):
         return cls(*components)
       else:
         return cls()
+
+  def version_tag(self) -> str:
+    """For internal use. Appends a version tag to the coder key in the pipeline
+    proto. Some runners (e.g. DataflowRunner) use coder key/id to verify if a
+    pipeline is update compatible. If the implementation of a coder changed
+    in an update incompatible way a version tag can be added to fail
+    compatibility checks.
+    """
+    return ""
 
 
 @Coder.register_urn(
@@ -485,11 +480,6 @@ class BytesCoder(FastCoder):
   def to_type_hint(self):
     return bytes
 
-  def as_cloud_object(self, coders_context=None):
-    return {
-        '@type': 'kind:bytes',
-    }
-
   def __eq__(self, other):
     return type(self) == type(other)
 
@@ -547,6 +537,11 @@ class MapCoder(FastCoder):
     # Map ordering is non-deterministic
     return False
 
+  def as_deterministic_coder(self, step_label, error_message=None):
+    return DeterministicMapCoder(
+        self._key_coder.as_deterministic_coder(step_label, error_message),
+        self._value_coder.as_deterministic_coder(step_label, error_message))
+
   def __eq__(self, other):
     return (
         type(self) == type(other) and self._key_coder == other._key_coder and
@@ -557,6 +552,36 @@ class MapCoder(FastCoder):
 
   def __repr__(self):
     return 'MapCoder[%s, %s]' % (self._key_coder, self._value_coder)
+
+
+# This is a separate class from MapCoder as the former is a standard coder with
+# no way to carry the is_deterministic bit.
+class DeterministicMapCoder(FastCoder):
+  def __init__(self, key_coder, value_coder):
+    # type: (Coder, Coder) -> None
+    assert key_coder.is_deterministic()
+    assert value_coder.is_deterministic()
+    self._key_coder = key_coder
+    self._value_coder = value_coder
+
+  def _create_impl(self):
+    return coder_impl.MapCoderImpl(
+        self._key_coder.get_impl(), self._value_coder.get_impl(), True)
+
+  def is_deterministic(self):
+    return True
+
+  def __eq__(self, other):
+    return (
+        type(self) == type(other) and self._key_coder == other._key_coder and
+        self._value_coder == other._value_coder)
+
+  def __hash__(self):
+    return hash(type(self)) + hash(self._key_coder) + hash(self._value_coder)
+
+  def __repr__(self):
+    return 'DeterministicMapCoder[%s, %s]' % (
+        self._key_coder, self._value_coder)
 
 
 class NullableCoder(FastCoder):
@@ -570,9 +595,33 @@ class NullableCoder(FastCoder):
   def to_type_hint(self):
     return typehints.Optional[self._value_coder.to_type_hint()]
 
+  def _get_component_coders(self):
+    # type: () -> List[Coder]
+    return [self._value_coder]
+
+  @classmethod
+  def from_type_hint(cls, typehint, registry):
+    if typehints.is_nullable(typehint):
+      return cls(
+          registry.get_coder(
+              typehints.get_concrete_type_from_nullable(typehint)))
+    else:
+      raise TypeError(
+          'Typehint is not of nullable type, '
+          'and cannot be converted to a NullableCoder',
+          typehint)
+
   def is_deterministic(self):
     # type: () -> bool
     return self._value_coder.is_deterministic()
+
+  def as_deterministic_coder(self, step_label, error_message=None):
+    if self.is_deterministic():
+      return self
+    else:
+      deterministic_value_coder = self._value_coder.as_deterministic_coder(
+          step_label, error_message)
+      return NullableCoder(deterministic_value_coder)
 
   def __eq__(self, other):
     return (
@@ -581,9 +630,15 @@ class NullableCoder(FastCoder):
   def __hash__(self):
     return hash(type(self)) + hash(self._value_coder)
 
+  def __repr__(self):
+    return 'NullableCoder[%s]' % self._value_coder
+
+
+Coder.register_structured_urn(common_urns.coders.NULLABLE.urn, NullableCoder)
+
 
 class VarIntCoder(FastCoder):
-  """Variable-length integer coder."""
+  """Variable-length integer coder  matches Java SDK's VarLongCoder."""
   def _create_impl(self):
     return coder_impl.VarIntCoderImpl()
 
@@ -593,11 +648,6 @@ class VarIntCoder(FastCoder):
 
   def to_type_hint(self):
     return int
-
-  def as_cloud_object(self, coders_context=None):
-    return {
-        '@type': 'kind:varint',
-    }
 
   def __eq__(self, other):
     return type(self) == type(other)
@@ -609,8 +659,90 @@ class VarIntCoder(FastCoder):
 Coder.register_structured_urn(common_urns.coders.VARINT.urn, VarIntCoder)
 
 
+class VarInt32Coder(FastCoder):
+  """Variable-length integer coder matches Java SDK's VarIntCoder."""
+  def _create_impl(self):
+    return coder_impl.VarInt32CoderImpl()
+
+  def is_deterministic(self):
+    # type: () -> bool
+    return True
+
+  def to_type_hint(self):
+    return int
+
+  def __eq__(self, other):
+    return type(self) == type(other)
+
+  def __hash__(self):
+    return hash(type(self))
+
+
+class BigEndianShortCoder(FastCoder):
+  """A coder used for big-endian int16 values."""
+  def _create_impl(self):
+    return coder_impl.BigEndianShortCoderImpl()
+
+  def is_deterministic(self):
+    # type: () -> bool
+    return True
+
+  def to_type_hint(self):
+    return int
+
+  def __eq__(self, other):
+    return type(self) == type(other)
+
+  def __hash__(self):
+    return hash(type(self))
+
+
+class ByteCoder(FastCoder):
+  """A coder used for single byte values"""
+  def _create_impl(self):
+    return coder_impl.ByteCoderImpl()
+
+  def is_deterministic(self):
+    # type: () -> bool
+    return True
+
+  def to_type_hint(self):
+    return int
+
+  def __eq__(self, other):
+    return type(self) == type(other)
+
+  def __hash__(self):
+    return hash(type(self))
+
+
+class SinglePrecisionFloatCoder(FastCoder):
+  """A coder used for single-precision floating-point values."""
+  def _create_impl(self):
+    return coder_impl.SinglePrecisionFloatCoderImpl()
+
+  def is_deterministic(self):
+    # type: () -> bool
+    return True
+
+  def to_type_hint(self):
+    return float
+
+  def __eq__(self, other):
+    return type(self) == type(other)
+
+  def __hash__(self):
+    return hash(type(self))
+
+
 class FloatCoder(FastCoder):
-  """A coder used for floating-point values."""
+  """A coder used for **double-precision** floating-point values.
+
+  Note that the name "FloatCoder" is in reference to Python's ``float`` built-in
+  which is generally implemented using C doubles. See
+  :class:`SinglePrecisionFloatCoder` for a single-precision version of this
+  coder.
+  """
   def _create_impl(self):
     return coder_impl.FloatCoderImpl()
 
@@ -729,21 +861,6 @@ class _PickleCoderBase(FastCoder):
     # GroupByKey operations.
     return False
 
-  def as_cloud_object(self, coders_context=None, is_pair_like=True):
-    value = super().as_cloud_object(coders_context)
-    # We currently use this coder in places where we cannot infer the coder to
-    # use for the value type in a more granular way.  In places where the
-    # service expects a pair, it checks for the "is_pair_like" key, in which
-    # case we would fail without the hack below.
-    if is_pair_like:
-      value['is_pair_like'] = True
-      value['component_encodings'] = [
-          self.as_cloud_object(coders_context, is_pair_like=False),
-          self.as_cloud_object(coders_context, is_pair_like=False)
-      ]
-
-    return value
-
   # We allow .key_coder() and .value_coder() to be called on PickleCoder since
   # we can't always infer the return values of lambdas in ParDo operations, the
   # result of which may be used in a GroupBykey.
@@ -785,7 +902,20 @@ class _MemoizingPickleCoder(_PickleCoderBase):
     return coder_impl.CallbackCoderImpl(_nonhashable_dumps, pickler.loads)
 
   def as_deterministic_coder(self, step_label, error_message=None):
-    return FastPrimitivesCoder(self, requires_deterministic=step_label)
+    _LOGGER.warning(
+        "PickleCoder was registered for a key type in '%s', but the runner "
+        "requires a deterministic key encoding and pickle is not "
+        "deterministic. Keys in this step will be encoded with the "
+        "deterministic fallback coder instead of pickle. That coder "
+        "supports primitives, containers, protobuf messages, frozen "
+        "dataclasses, NamedTuples, enums, and classes defining both "
+        "__getstate__ and __setstate__. Any other key type will fail at "
+        "encode time. If your key type is not one of these, register a "
+        "deterministic custom Coder for it or add a type hint so the "
+        "default coder is used.",
+        step_label)
+    return _update_compatible_deterministic_fast_primitives_coder(
+        self, step_label)
 
   def to_type_hint(self):
     return Any
@@ -800,7 +930,20 @@ class PickleCoder(_PickleCoderBase):
         lambda x: dumps(x, protocol), pickle.loads)
 
   def as_deterministic_coder(self, step_label, error_message=None):
-    return FastPrimitivesCoder(self, requires_deterministic=step_label)
+    _LOGGER.warning(
+        "PickleCoder was registered for a key type in '%s', but the runner "
+        "requires a deterministic key encoding and pickle is not "
+        "deterministic. Keys in this step will be encoded with the "
+        "deterministic fallback coder instead of pickle. That coder "
+        "supports primitives, containers, protobuf messages, frozen "
+        "dataclasses, NamedTuples, enums, and classes defining both "
+        "__getstate__ and __setstate__. Any other key type will fail at "
+        "encode time. If your key type is not one of these, register a "
+        "deterministic custom Coder for it or add a type hint so the "
+        "default coder is used.",
+        step_label)
+    return _update_compatible_deterministic_fast_primitives_coder(
+        self, step_label)
 
   def to_type_hint(self):
     return Any
@@ -808,20 +951,45 @@ class PickleCoder(_PickleCoderBase):
 
 class DillCoder(_PickleCoderBase):
   """Coder using dill's pickle functionality."""
+  def __init__(self):
+    if not dill:
+      raise RuntimeError(
+          "This pipeline contains a DillCoder which requires "
+          "the dill package. Install the dill package with the dill extra "
+          "e.g. apache-beam[dill]")
+
   def _create_impl(self):
     return coder_impl.CallbackCoderImpl(maybe_dill_dumps, maybe_dill_loads)
 
 
-class DeterministicFastPrimitivesCoder(FastCoder):
+class CloudpickleCoder(_PickleCoderBase):
+  """Coder using Apache Beam's vendored Cloudpickle pickler."""
+  def _create_impl(self):
+    return coder_impl.CallbackCoderImpl(
+        cloudpickle_pickler.dumps, cloudpickle_pickler.loads)
+
+
+class DeterministicFastPrimitivesCoderV2(FastCoder):
   """Throws runtime errors when encoding non-deterministic values."""
   def __init__(self, coder, step_label):
     self._underlying_coder = coder
     self._step_label = step_label
+    self._use_relative_filepaths = True
+    self._version_tag = "v2_69"
+
+    # Versions prior to 2.69.0 did not use relative filepaths.
+    from apache_beam.options.pipeline_options_context import get_pipeline_options
+    opts = get_pipeline_options()
+    if opts and opts.is_compat_version_prior_to("2.69.0"):
+      self._version_tag = ""
+      self._use_relative_filepaths = False
 
   def _create_impl(self):
     return coder_impl.FastPrimitivesCoderImpl(
         self._underlying_coder.get_impl(),
-        requires_deterministic_step_label=self._step_label)
+        requires_deterministic_step_label=self._step_label,
+        force_use_dill=False,
+        use_relative_filepaths=self._use_relative_filepaths)
 
   def is_deterministic(self):
     # type: () -> bool
@@ -839,6 +1007,80 @@ class DeterministicFastPrimitivesCoder(FastCoder):
 
   def to_type_hint(self):
     return Any
+
+  def to_runner_api_parameter(self, context):
+    # type: (Optional[PipelineContext]) -> Tuple[str, Any, Sequence[Coder]]
+    return (
+        python_urns.PICKLED_CODER,
+        google.protobuf.wrappers_pb2.BytesValue(value=serialize_coder(self)),
+        ())
+
+  def version_tag(self):
+    return self._version_tag
+
+
+class DeterministicFastPrimitivesCoder(FastCoder):
+  """Throws runtime errors when encoding non-deterministic values."""
+  def __init__(self, coder, step_label):
+    self._underlying_coder = coder
+    self._step_label = step_label
+
+  def _create_impl(self):
+    return coder_impl.FastPrimitivesCoderImpl(
+        self._underlying_coder.get_impl(),
+        requires_deterministic_step_label=self._step_label,
+        force_use_dill=True)
+
+  def is_deterministic(self):
+    # type: () -> bool
+    return True
+
+  def is_kv_coder(self):
+    # type: () -> bool
+    return True
+
+  def key_coder(self):
+    return self
+
+  def value_coder(self):
+    return self
+
+  def to_type_hint(self):
+    return Any
+
+
+def _should_force_use_dill():
+  from apache_beam.options.pipeline_options_context import get_pipeline_options
+
+  opts = get_pipeline_options()
+  if opts is None or not opts.is_compat_version_prior_to("2.68.0"):
+    return False
+
+  try:
+    import dill
+    assert dill.__version__ == "0.3.1.1"
+  except Exception as e:
+    raise RuntimeError("This pipeline runs with the pipeline option " \
+    "--update_compatibility_version=2.67.0 or earlier. When running with " \
+    "this option on SDKs 2.68.0 or later, you must ensure dill==0.3.1.1 " \
+    f"is installed. Error {e}")
+  return True
+
+
+def _update_compatible_deterministic_fast_primitives_coder(coder, step_label):
+  """ Returns the update compatible version of DeterministicFastPrimitivesCoder
+   The differences are in how "special types" e.g. NamedTuples, Dataclasses are
+   deterministically encoded.
+
+   - In SDK version <= 2.67.0 dill is used to encode "special types"
+   - In SDK version 2.68.0 cloudpickle is used to encode "special types" with
+   absolute filepaths in code objects and dynamic functions.
+   - In SDK version 2.69.0 cloudpickle is used to encode "special types" with
+   relative filepaths in code objects and dynamic functions.
+  """
+  if _should_force_use_dill():
+    return DeterministicFastPrimitivesCoder(coder, step_label)
+  return DeterministicFastPrimitivesCoderV2(coder, step_label)
 
 
 class FastPrimitivesCoder(FastCoder):
@@ -861,25 +1103,11 @@ class FastPrimitivesCoder(FastCoder):
     if self.is_deterministic():
       return self
     else:
-      return DeterministicFastPrimitivesCoder(self, step_label)
+      return _update_compatible_deterministic_fast_primitives_coder(
+          self, step_label)
 
   def to_type_hint(self):
     return Any
-
-  def as_cloud_object(self, coders_context=None, is_pair_like=True):
-    value = super().as_cloud_object(coders_context)
-    # We currently use this coder in places where we cannot infer the coder to
-    # use for the value type in a more granular way.  In places where the
-    # service expects a pair, it checks for the "is_pair_like" key, in which
-    # case we would fail without the hack below.
-    if is_pair_like:
-      value['is_pair_like'] = True
-      value['component_encodings'] = [
-          self.as_cloud_object(coders_context, is_pair_like=False),
-          self.as_cloud_object(coders_context, is_pair_like=False)
-      ]
-
-    return value
 
   # We allow .key_coder() and .value_coder() to be called on FastPrimitivesCoder
   # since we can't always infer the return values of lambdas in ParDo
@@ -959,7 +1187,7 @@ class ProtoCoder(FastCoder):
 
   """
   def __init__(self, proto_message_type):
-    # type: (google.protobuf.message.Message) -> None
+    # type: (Type[google.protobuf.message.Message]) -> None
     self.proto_message_type = proto_message_type
 
   def _create_impl(self):
@@ -984,11 +1212,18 @@ class ProtoCoder(FastCoder):
 
   @classmethod
   def from_type_hint(cls, typehint, unused_registry):
-    if issubclass(typehint, proto_utils.message_types):
+    # The typehint must be a strict subclass of google.protobuf.message.Message.
+    # ProtoCoder cannot work with message.Message itself, as deserialization of
+    # a serialized proto requires knowledge of the desired concrete proto
+    # subclass which is not stored in the encoded bytes themselves. If this
+    # occurs, an error is raised and the system defaults to other fallback
+    # coders.
+    if (issubclass(typehint, proto_utils.message_types) and
+        typehint != message.Message):
       return cls(typehint)
     else:
       raise ValueError((
-          'Expected a subclass of google.protobuf.message.Message'
+          'Expected a strict subclass of google.protobuf.message.Message'
           ', but got a %s' % typehint))
 
   def to_type_hint(self):
@@ -1014,6 +1249,42 @@ class DeterministicProtoCoder(ProtoCoder):
     return self
 
 
+class ProtoPlusCoder(FastCoder):
+  """A Coder for Google Protocol Buffers wrapped using the proto-plus library.
+
+  ProtoPlusCoder is registered in the global CoderRegistry as the default coder
+  for any proto.Message object.
+  """
+  def __init__(self, proto_plus_message_type):
+    # type: (Type[proto.Message]) -> None
+    self.proto_plus_message_type = proto_plus_message_type
+
+  def _create_impl(self):
+    return coder_impl.ProtoPlusCoderImpl(self.proto_plus_message_type)
+
+  def is_deterministic(self):
+    return True
+
+  def __eq__(self, other):
+    return (
+        type(self) == type(other) and
+        self.proto_plus_message_type == other.proto_plus_message_type)
+
+  def __hash__(self):
+    return hash(self.proto_plus_message_type)
+
+  @classmethod
+  def from_type_hint(cls, typehint, unused_registry):
+    if issubclass(typehint, proto.Message):
+      return cls(typehint)
+    else:
+      raise ValueError(
+          'Expected a subclass of proto.Message, but got a %s' % typehint)
+
+  def to_type_hint(self):
+    return self.proto_plus_message_type
+
+
 AVRO_GENERIC_CODER_URN = "beam:coder:avro:generic:v1"
 
 
@@ -1026,7 +1297,8 @@ class AvroGenericCoder(FastCoder):
     return coder_impl.AvroCoderImpl(self.schema)
 
   def is_deterministic(self):
-    # TODO(BEAM-7903): need to confirm if it's deterministic
+    # TODO(https://github.com/apache/beam/issues/19628): need to confirm if
+    # it's deterministic
     return False
 
   def __eq__(self, other):
@@ -1076,19 +1348,6 @@ class TupleCoder(FastCoder):
   def from_type_hint(cls, typehint, registry):
     # type: (typehints.TupleConstraint, CoderRegistry) -> TupleCoder
     return cls([registry.get_coder(t) for t in typehint.tuple_types])
-
-  def as_cloud_object(self, coders_context=None):
-    if self.is_kv_coder():
-      return {
-          '@type': 'kind:pair',
-          'is_pair_like': True,
-          'component_encodings': [
-              component.as_cloud_object(coders_context)
-              for component in self._get_component_coders()
-          ],
-      }
-
-    return super().as_cloud_object(coders_context)
 
   def _get_component_coders(self):
     # type: () -> Tuple[Coder, ...]
@@ -1199,15 +1458,6 @@ class ListLikeCoder(FastCoder):
       return type(self)(
           self._elem_coder.as_deterministic_coder(step_label, error_message))
 
-  def as_cloud_object(self, coders_context=None):
-    return {
-        '@type': 'kind:stream',
-        'is_stream_like': True,
-        'component_encodings': [
-            self._elem_coder.as_cloud_object(coders_context)
-        ],
-    }
-
   def value_coder(self):
     return self._elem_coder
 
@@ -1245,17 +1495,15 @@ class ListCoder(ListLikeCoder):
   def to_type_hint(self):
     return typehints.List[self._elem_coder.to_type_hint()]
 
+  def _create_impl(self):
+    return coder_impl.ListCoderImpl(self._elem_coder.get_impl())
+
 
 class GlobalWindowCoder(SingletonCoder):
   """Coder for global windows."""
   def __init__(self):
     from apache_beam.transforms import window
     super().__init__(window.GlobalWindow())
-
-  def as_cloud_object(self, coders_context=None):
-    return {
-        '@type': 'kind:global_window',
-    }
 
 
 Coder.register_structured_urn(
@@ -1271,11 +1519,6 @@ class IntervalWindowCoder(FastCoder):
     # type: () -> bool
     return True
 
-  def as_cloud_object(self, coders_context=None):
-    return {
-        '@type': 'kind:interval_window',
-    }
-
   def __eq__(self, other):
     return type(self) == type(other)
 
@@ -1287,12 +1530,48 @@ Coder.register_structured_urn(
     common_urns.coders.INTERVAL_WINDOW.urn, IntervalWindowCoder)
 
 
+class _OrderedUnionCoder(FastCoder):
+  def __init__(
+      self, *coder_types: tuple[type, Coder], fallback_coder: Optional[Coder]):
+    self._coder_types = coder_types
+    self._fallback_coder = fallback_coder
+
+  def _create_impl(self):
+    return coder_impl._OrderedUnionCoderImpl(
+        [(t, c.get_impl()) for t, c in self._coder_types],
+        fallback_coder_impl=self._fallback_coder.get_impl()
+        if self._fallback_coder else None)
+
+  def is_deterministic(self) -> bool:
+    return (
+        all(c.is_deterministic() for _, c in self._coder_types) and (
+            self._fallback_coder is None or
+            self._fallback_coder.is_deterministic()))
+
+  def to_type_hint(self):
+    return Any
+
+  def __eq__(self, other):
+    return (
+        type(self) == type(other) and
+        self._coder_types == other._coder_types and
+        self._fallback_coder == other._fallback_coder)
+
+  def __hash__(self):
+    return hash((type(self), tuple(self._coder_types), self._fallback_coder))
+
+
 class WindowedValueCoder(FastCoder):
   """Coder for windowed values."""
   def __init__(self, wrapped_value_coder, window_coder=None):
     # type: (Coder, Optional[Coder]) -> None
     if not window_coder:
-      window_coder = PickleCoder()
+      # Avoid circular imports.
+      from apache_beam.transforms import window
+      window_coder = _OrderedUnionCoder(
+          (window.GlobalWindow, GlobalWindowCoder()),
+          (window.IntervalWindow, IntervalWindowCoder()),
+          fallback_coder=PickleCoder())
     self.wrapped_value_coder = wrapped_value_coder
     self.timestamp_coder = TimestampCoder()
     self.window_coder = window_coder
@@ -1308,16 +1587,6 @@ class WindowedValueCoder(FastCoder):
     return all(
         c.is_deterministic() for c in
         [self.wrapped_value_coder, self.timestamp_coder, self.window_coder])
-
-  def as_cloud_object(self, coders_context=None):
-    return {
-        '@type': 'kind:windowed_value',
-        'is_wrapper': True,
-        'component_encodings': [
-            component.as_cloud_object(coders_context)
-            for component in self._get_component_coders()
-        ],
-    }
 
   def _get_component_coders(self):
     # type: () -> List[Coder]
@@ -1336,7 +1605,9 @@ class WindowedValueCoder(FastCoder):
     return self.wrapped_value_coder.value_coder()
 
   def __repr__(self):
-    return 'WindowedValueCoder[%s]' % self.wrapped_value_coder
+    return (
+        f'WindowedValueCoder[window_coder={self.window_coder}, '
+        f'wrapped_value_coder={self.wrapped_value_coder}]')
 
   def __eq__(self, other):
     return (
@@ -1348,6 +1619,17 @@ class WindowedValueCoder(FastCoder):
   def __hash__(self):
     return hash(
         (self.wrapped_value_coder, self.timestamp_coder, self.window_coder))
+
+  @classmethod
+  def from_type_hint(cls, typehint, registry):
+    # type: (Any, CoderRegistry) -> WindowedValueCoder
+    # Ideally this'd take two parameters so that one could hint at
+    # the window type as well instead of falling back to the
+    # pickle coders.
+    return cls(registry.get_coder(typehint.inner_type))
+
+  def to_type_hint(self):
+    return typehints.WindowedValue[self.wrapped_value_coder.to_type_hint()]
 
 
 Coder.register_structured_urn(
@@ -1369,10 +1651,6 @@ class ParamWindowedValueCoder(WindowedValueCoder):
   def is_deterministic(self):
     # type: () -> bool
     return self.wrapped_value_coder.is_deterministic()
-
-  def as_cloud_object(self, coders_context=None):
-    raise NotImplementedError(
-        "as_cloud_object not supported for ParamWindowedValueCoder")
 
   def __repr__(self):
     return 'ParamWindowedValueCoder[%s]' % self.wrapped_value_coder
@@ -1420,14 +1698,6 @@ class LengthPrefixCoder(FastCoder):
   def value_coder(self):
     return self._value_coder
 
-  def as_cloud_object(self, coders_context=None):
-    return {
-        '@type': 'kind:length_prefix',
-        'component_encodings': [
-            self._value_coder.as_cloud_object(coders_context)
-        ],
-    }
-
   def _get_component_coders(self):
     # type: () -> Tuple[Coder, ...]
     return (self._value_coder, )
@@ -1442,13 +1712,15 @@ class LengthPrefixCoder(FastCoder):
   def __hash__(self):
     return hash((type(self), self._value_coder))
 
+  def to_type_hint(length_prefix_coder):
+    return length_prefix_coder.value_coder().to_type_hint()
+
 
 Coder.register_structured_urn(
     common_urns.coders.LENGTH_PREFIX.urn, LengthPrefixCoder)
 
 
 class StateBackedIterableCoder(FastCoder):
-
   DEFAULT_WRITE_THRESHOLD = 1
 
   def __init__(
@@ -1524,14 +1796,6 @@ class ShardedKeyCoder(FastCoder):
     # type: () -> bool
     return self._key_coder.is_deterministic()
 
-  def as_cloud_object(self, coders_context=None):
-    return {
-        '@type': 'kind:sharded_key',
-        'component_encodings': [
-            self._key_coder.as_cloud_object(coders_context)
-        ],
-    }
-
   def to_type_hint(self):
     from apache_beam.typehints import sharded_key_type
     return sharded_key_type.ShardedKeyTypeConstraint(
@@ -1576,19 +1840,11 @@ class TimestampPrefixingWindowCoder(FastCoder):
   def to_type_hint(self):
     return self._window_coder.to_type_hint()
 
-  def _get_component_coders(self) -> List[Coder]:
+  def _get_component_coders(self) -> list[Coder]:
     return [self._window_coder]
 
   def is_deterministic(self) -> bool:
     return self._window_coder.is_deterministic()
-
-  def as_cloud_object(self, coders_context=None):
-    return {
-        '@type': 'kind:custom_window',
-        'component_encodings': [
-            self._window_coder.as_cloud_object(coders_context)
-        ],
-    }
 
   def __repr__(self):
     return 'TimestampPrefixingWindowCoder[%r]' % self._window_coder
@@ -1603,3 +1859,85 @@ class TimestampPrefixingWindowCoder(FastCoder):
 
 Coder.register_structured_urn(
     common_urns.coders.CUSTOM_WINDOW.urn, TimestampPrefixingWindowCoder)
+
+
+class TimestampPrefixingOpaqueWindowCoder(FastCoder):
+  """For internal use only; no backwards-compatibility guarantees.
+
+  Coder which decodes windows as bytes."""
+  def __init__(self) -> None:
+    pass
+
+  def _create_impl(self):
+    return coder_impl.TimestampPrefixingOpaqueWindowCoderImpl()
+
+  def is_deterministic(self) -> bool:
+    return True
+
+  def __repr__(self):
+    return 'TimestampPrefixingOpaqueWindowCoder'
+
+  def __eq__(self, other):
+    return type(self) == type(other)
+
+  def __hash__(self):
+    return hash((type(self)))
+
+
+Coder.register_structured_urn(
+    python_urns.TIMESTAMP_PREFIXED_OPAQUE_WINDOW_CODER,
+    TimestampPrefixingOpaqueWindowCoder)
+
+
+class BigIntegerCoder(FastCoder):
+  def _create_impl(self):
+    return coder_impl.BigIntegerCoderImpl()
+
+  def is_deterministic(self):
+    # type: () -> bool
+    return True
+
+  def to_type_hint(self):
+    return int
+
+  def __eq__(self, other):
+    return type(self) == type(other)
+
+  def __hash__(self):
+    return hash(type(self))
+
+
+class PaneInfoCoder(FastCoder):
+  def _create_impl(self):
+    return coder_impl.PaneInfoCoderImpl()
+
+  def is_deterministic(self):
+    # type: () -> bool
+    return True
+
+  def to_type_hint(self):
+    return windowed_value.PaneInfo
+
+  def __eq__(self, other):
+    return type(self) == type(other)
+
+  def __hash__(self):
+    return hash(type(self))
+
+
+class DecimalCoder(FastCoder):
+  def _create_impl(self):
+    return coder_impl.DecimalCoderImpl()
+
+  def is_deterministic(self):
+    # type: () -> bool
+    return True
+
+  def to_type_hint(self):
+    return decimal.Decimal
+
+  def __eq__(self, other):
+    return type(self) == type(other)
+
+  def __hash__(self):
+    return hash(type(self))

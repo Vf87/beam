@@ -93,35 +93,36 @@ import logging
 import random
 import uuid
 from collections import namedtuple
-from typing import TYPE_CHECKING
 from typing import Any
 from typing import BinaryIO  # pylint: disable=unused-import
 from typing import Callable
-from typing import DefaultDict
-from typing import Dict
 from typing import Iterable
-from typing import List
-from typing import Tuple
+from typing import Optional
 from typing import Union
 
 import apache_beam as beam
+from apache_beam.coders.coders import VarIntCoder
 from apache_beam.io import filesystem
 from apache_beam.io import filesystems
 from apache_beam.io.filesystem import BeamIOError
 from apache_beam.io.filesystem import CompressionTypes
+from apache_beam.io.watch import PollFn
+from apache_beam.io.watch import PollResult
+from apache_beam.io.watch import TerminationCondition
+from apache_beam.io.watch import Watch
+from apache_beam.io.watch import never
 from apache_beam.options.pipeline_options import GoogleCloudOptions
 from apache_beam.options.value_provider import StaticValueProvider
 from apache_beam.options.value_provider import ValueProvider
 from apache_beam.transforms.periodicsequence import PeriodicImpulse
-from apache_beam.transforms.userstate import CombiningValueStateSpec
+from apache_beam.transforms.window import BoundedWindow
+from apache_beam.transforms.window import FixedWindows
 from apache_beam.transforms.window import GlobalWindow
 from apache_beam.transforms.window import IntervalWindow
-from apache_beam.utils.annotations import experimental
+from apache_beam.transforms.window import TimestampedValue
 from apache_beam.utils.timestamp import MAX_TIMESTAMP
+from apache_beam.utils.timestamp import Duration
 from apache_beam.utils.timestamp import Timestamp
-
-if TYPE_CHECKING:
-  from apache_beam.transforms.window import BoundedWindow
 
 __all__ = [
     'EmptyMatchTreatment',
@@ -129,7 +130,8 @@ __all__ = [
     'MatchAll',
     'MatchContinuously',
     'ReadableFile',
-    'ReadMatches'
+    'ReadMatches',
+    'WriteToFiles'
 ]
 
 _LOGGER = logging.getLogger(__name__)
@@ -165,7 +167,7 @@ class _MatchAllFn(beam.DoFn):
   def __init__(self, empty_match_treatment):
     self._empty_match_treatment = empty_match_treatment
 
-  def process(self, file_pattern: str) -> List[filesystem.FileMetadata]:
+  def process(self, file_pattern: str) -> list[filesystem.FileMetadata]:
     # TODO: Should we batch the lookups?
     match_results = filesystems.FileSystems.match([file_pattern])
     match_result = match_results[0]
@@ -192,7 +194,8 @@ class MatchFiles(beam.PTransform):
     self._empty_match_treatment = empty_match_treatment
 
   def expand(self, pcoll) -> beam.PCollection[filesystem.FileMetadata]:
-    return pcoll.pipeline | beam.Create([self._file_pattern]) | MatchAll()
+    return pcoll.pipeline | beam.Create([self._file_pattern]) | MatchAll(
+        empty_match_treatment=self._empty_match_treatment)
 
 
 class MatchAll(beam.PTransform):
@@ -255,12 +258,134 @@ class _ReadMatchesFn(beam.DoFn):
     yield ReadableFile(metadata, self._compression)
 
 
-@experimental()
+class _PollClock(object):
+  """Shares one clock reading per poll round, so the start gate and the poll
+  budget judge the ``start_timestamp`` boundary consistently."""
+  def __init__(self):
+    self.last_poll_micros: Optional[int] = None
+
+
+class _WatchWindowTermination(TerminationCondition):
+  """Stops after the polls that fall in the ``[start, stop)`` window.
+
+  ``max_polls`` is the ``PeriodicImpulse`` tick count
+  ``ceil((stop - start) / interval)``; polls before ``start`` are waiting
+  rounds and do not consume the budget.
+  """
+  def __init__(self, clock: _PollClock, start_micros: int, max_polls: int):
+    self._clock = clock
+    self._start_micros = start_micros
+    self._max_polls = max_polls
+
+  def for_new_input(self, now, element):
+    return 0
+
+  def on_poll_complete(self, state):
+    poll_micros = self._clock.last_poll_micros
+    if poll_micros is not None and poll_micros >= self._start_micros:
+      return state + 1
+    return state
+
+  def can_stop_polling(self, now, state):
+    return state >= self._max_polls
+
+  def state_coder(self):
+    return VarIntCoder()
+
+
+def _ensure_mtime(metadata: filesystem.FileMetadata) -> float:
+  # A missing (zero) timestamp is rejected because every file would then carry
+  # the same one, and updates could never be told apart.
+  if not metadata.last_updated_in_seconds:
+    raise BeamIOError(
+        'MatchContinuously deduplicates by last-modified time, but %s reports '
+        'none.' % metadata.path)
+  return metadata.last_updated_in_seconds
+
+
+def _file_path_key(metadata: filesystem.FileMetadata) -> str:
+  return metadata.path
+
+
+def _file_path_and_mtime_key(
+    metadata: filesystem.FileMetadata) -> tuple[str, float]:
+  # Keying on the last-modified time makes a changed file look new again.
+  return metadata.path, _ensure_mtime(metadata)
+
+
+class _MatchContinuouslyPollFn(PollFn):
+  """Polls a file pattern, honoring empty-match rules.
+
+  A poll before ``start_timestamp`` emits nothing. Matches carry the poll time
+  as their event time, or their last-modified time under ``mtime_timestamps``,
+  where the watermark trails the newest last-modified time for as long as
+  polls keep turning up newer ones.
+  """
+  def __init__(
+      self,
+      empty_match_treatment,
+      start_timestamp,
+      clock=None,
+      mtime_timestamps=False):
+    self._empty_match_treatment = empty_match_treatment
+    self._start_micros = Timestamp.of(start_timestamp).micros
+    self._clock = clock if clock is not None else _PollClock()
+    self._mtime_timestamps = mtime_timestamps
+    # Greatest last-modified time handed out so far, to tell a poll that found
+    # something newer from one that only re-listed what was already there.
+    self._newest_mtime = None  # type: Optional[Timestamp]
+
+  def __call__(self, file_pattern: str) -> PollResult[filesystem.FileMetadata]:
+    now = Timestamp.now()
+    self._clock.last_poll_micros = now.micros
+    if now.micros < self._start_micros:
+      return PollResult.incomplete(())
+    match_result = filesystems.FileSystems.match([file_pattern])[0]
+    if (not match_result.metadata_list and
+        not EmptyMatchTreatment.allow_empty_match(file_pattern,
+                                                  self._empty_match_treatment)):
+      raise BeamIOError(
+          'Empty match for pattern %s. Disallowed.' % file_pattern)
+    if not self._mtime_timestamps:
+      return PollResult.incomplete(
+          match_result.metadata_list, timestamp=now).with_watermark(now)
+    outputs = [
+        TimestampedValue(metadata, Timestamp.of(_ensure_mtime(metadata)))
+        for metadata in match_result.metadata_list
+    ]
+    # A poll that turned up a newer last-modified time has just read the
+    # filesystem clock, so the watermark stops there, capped at the poll time.
+    # A poll that found nothing newer takes the poll time, so a quiet
+    # directory does not stall event-time windows.
+    newest = max((output.timestamp for output in outputs), default=None)
+    if newest is not None and (self._newest_mtime is None or
+                               newest > self._newest_mtime):
+      self._newest_mtime = newest
+      watermark = min(newest, now)
+    else:
+      watermark = now
+    return PollResult.incomplete(outputs).with_watermark(watermark)
+
+
 class MatchContinuously(beam.PTransform):
   """Checks for new files for a given pattern every interval.
 
   This ``PTransform`` returns a ``PCollection`` of matching files in the form
   of ``FileMetadata`` objects.
+
+  MatchContinuously is experimental.  No backwards-compatibility
+  guarantees.
+
+  Deduplication state is checkpointed, so a runner with checkpointing enabled
+  restores it after a restart and does not reprocess files. That state grows
+  with the number of files matched, unless ``timestamp_cursor`` bounds it. For
+  a growing directory on GCS, consider an alternate technique such as Pub/Sub
+  Notifications (https://cloud.google.com/storage/docs/pubsub-notifications).
+
+  A match carries the poll time as its event time, and the watermark follows
+  the poll time. Under ``timestamp_cursor`` a match carries its last-modified
+  time instead, and the watermark holds at the newest one matched, capped at
+  the poll time, until a poll turns up nothing newer and releases it.
   """
   def __init__(
       self,
@@ -268,15 +393,30 @@ class MatchContinuously(beam.PTransform):
       interval=360.0,
       has_deduplication=True,
       start_timestamp=Timestamp.now(),
-      stop_timestamp=MAX_TIMESTAMP):
+      stop_timestamp=MAX_TIMESTAMP,
+      match_updated_files=False,
+      apply_windowing=False,
+      empty_match_treatment=EmptyMatchTreatment.ALLOW,
+      timestamp_cursor=False):
     """Initializes a MatchContinuously transform.
 
     Args:
       file_pattern: The file path to read from.
       interval: Interval at which to check for files in seconds.
       has_deduplication: Whether files already read are discarded or not.
-      start_timestamp: Timestamp for start file checking.
+      start_timestamp: Timestamp for start file checking. Defaults to the time
+        this module was first imported, not the time the transform is created.
       stop_timestamp: Timestamp after which no more files will be checked.
+      match_updated_files: (When has_deduplication is set to True) whether match
+        file with timestamp changes.
+      apply_windowing: Whether each element should be assigned to
+        individual window. If false, all elements will reside in global window.
+      timestamp_cursor: (When match_updated_files and has_deduplication are set
+        to True) bound the deduplication state by last-modified time. By
+        default, all file modification history is tracked. If set to true, file
+        modification history prior to the max(mtime of last poll result) are
+        dropped, for better performance. A file that appears with an older
+        last-modified time is then taken as already seen and skipped.
     """
 
     self.file_pattern = file_pattern
@@ -284,26 +424,99 @@ class MatchContinuously(beam.PTransform):
     self.has_deduplication = has_deduplication
     self.start_ts = start_timestamp
     self.stop_ts = stop_timestamp
+    self.match_upd = match_updated_files
+    self.apply_windowing = apply_windowing
+    self.empty_match_treatment = empty_match_treatment
+    self.timestamp_cursor = timestamp_cursor
+    if timestamp_cursor:
+      if not has_deduplication:
+        raise ValueError(
+            'MatchContinuously(timestamp_cursor=True) deduplicates, so it '
+            'requires has_deduplication=True.')
+      if not match_updated_files:
+        _LOGGER.warning(
+            'MatchContinuously(timestamp_cursor=True) implies '
+            'match_updated_files=True.')
+        self.match_upd = True
+    else:
+      _LOGGER.warning(
+          'Matching Continuously is stateful, and can scale poorly. '
+          'Consider using Pub/Sub Notifications '
+          '(https://cloud.google.com/storage/docs/pubsub-notifications) '
+          'if possible')
 
-  def expand(self, pcoll):
-    impulse = pcoll | PeriodicImpulse(
-        start_timestamp=self.start_ts,
-        stop_timestamp=self.stop_ts,
-        fire_interval=self.interval)
-
-    match_files = (
-        impulse
-        | 'GetFilePattern' >> beam.Map(lambda x: self.file_pattern)
-        | MatchAll())
-
+  def expand(self, pbegin) -> beam.PCollection[filesystem.FileMetadata]:
+    if Duration.of(self.interval).micros <= 0:
+      raise ValueError('MatchContinuously interval must be positive.')
     if self.has_deduplication:
-      match_files = (
-          match_files
-          # Making a Key Value so each file has its own state.
-          | 'ToKV' >> beam.Map(lambda x: (x.path, x))
-          | 'RemoveAlreadyRead' >> beam.ParDo(_RemoveDuplicates()))
+      match_files = self._match_deduplicated(pbegin)
+    else:
+      match_files = self._match_all_each_poll(pbegin)
+
+    # Apply windowing last because dedup relies on the global window.
+    if self.apply_windowing:
+      match_files = match_files | beam.WindowInto(FixedWindows(self.interval))
 
     return match_files
+
+  def _match_deduplicated(self,
+                          pbegin) -> beam.PCollection[filesystem.FileMetadata]:
+    # Watch emits each file once per dedup key: the path, joined by the mtime
+    # when matching updated files. stop_timestamp bounds the polls to
+    # [start, stop).
+    clock = _PollClock()
+    if self.stop_ts == MAX_TIMESTAMP:
+      termination = never()
+    else:
+      start_ts = Timestamp.of(self.start_ts)
+      stop_ts = Timestamp.of(self.stop_ts)
+      if stop_ts < start_ts:
+        raise ValueError(
+            'MatchContinuously stop_timestamp %s precedes start_timestamp %s' %
+            (stop_ts, start_ts))
+      interval_micros = Duration.of(self.interval).micros
+      span_micros = (stop_ts - start_ts).micros
+      # Ceiling division reproduces PeriodicImpulse's tick count; the window
+      # upper bound is exclusive.
+      max_polls = -(-span_micros // interval_micros)
+      if max_polls == 0:
+        # An empty [start, stop) window never ticks; the impulse path keeps
+        # the output empty without Watch's unconditional first poll.
+        return self._match_all_each_poll(pbegin)
+      termination = _WatchWindowTermination(clock, start_ts.micros, max_polls)
+    poll_fn = _MatchContinuouslyPollFn(
+        self.empty_match_treatment,
+        self.start_ts,
+        clock,
+        mtime_timestamps=self.timestamp_cursor)
+    # The key coder is inferred from the key function's return annotation.
+    watch = Watch(
+        poll_fn,
+        poll_interval=self.interval,
+        termination=termination,
+        output_key_fn=(
+            _file_path_and_mtime_key if self.match_upd else _file_path_key),
+        timestamp_cursor=self.timestamp_cursor)
+    # Watch emits (pattern, file) pairs; keep the FileMetadata output type so
+    # downstream transforms stay typed instead of falling back to Any.
+    return (
+        pbegin
+        | 'Impulse' >> beam.Create([self.file_pattern])
+        | 'Watch' >> watch
+        | 'DropPattern' >> beam.Map(lambda kv: kv[1]).with_output_types(
+            filesystem.FileMetadata))
+
+  def _match_all_each_poll(self,
+                           pbegin) -> beam.PCollection[filesystem.FileMetadata]:
+    # No deduplication: re-emit every match on each poll.
+    return (
+        pbegin
+        | PeriodicImpulse(
+            start_timestamp=self.start_ts,
+            stop_timestamp=self.stop_ts,
+            fire_interval=self.interval)
+        | 'GetFilePattern' >> beam.Map(lambda x: self.file_pattern)
+        | MatchAll(self.empty_match_treatment))
 
 
 class ReadMatches(beam.PTransform):
@@ -344,8 +557,7 @@ class FileSink(object):
         mime_type="application/octet-stream",
         compression_type=CompressionTypes.AUTO)
 
-  def open(self, fh):
-    # type: (BinaryIO) -> None
+  def open(self, fh: BinaryIO) -> None:
     raise NotImplementedError
 
   def write(self, record):
@@ -404,7 +616,7 @@ def _format_shard(
     kwargs['start'] = window.start.to_utc_datetime().isoformat()
     kwargs['end'] = window.end.to_utc_datetime().isoformat()
 
-  # TODO(BEAM-3759): Add support for PaneInfo
+  # TODO(https://github.com/apache/beam/issues/18721): Add support for PaneInfo
   # If the PANE is the ONLY firing in the window, we don't add it.
   #if pane and not (pane.is_first and pane.is_last):
   #  kwargs['pane'] = pane.index
@@ -428,7 +640,10 @@ def _format_shard(
   return format.format(**kwargs)
 
 
-def destination_prefix_naming(suffix=None):
+FileNaming = Callable[[Any, Any, int, int, Any, str, str], str]
+
+
+def destination_prefix_naming(suffix=None) -> FileNaming:
   def _inner(window, pane, shard_index, total_shards, compression, destination):
     prefix = str(destination)
     return _format_shard(
@@ -437,10 +652,19 @@ def destination_prefix_naming(suffix=None):
   return _inner
 
 
-def default_file_naming(prefix, suffix=None):
+def default_file_naming(prefix, suffix=None) -> FileNaming:
   def _inner(window, pane, shard_index, total_shards, compression, destination):
     return _format_shard(
         window, pane, shard_index, total_shards, compression, prefix, suffix)
+
+  return _inner
+
+
+def single_file_naming(prefix, suffix=None) -> FileNaming:
+  def _inner(window, pane, shard_index, total_shards, compression, destination):
+    assert shard_index in (0, None), shard_index
+    assert total_shards in (1, None), total_shards
+    return _format_shard(window, pane, None, None, compression, prefix, suffix)
 
   return _inner
 
@@ -462,13 +686,12 @@ class FileResult(_FileResult):
   pass
 
 
-@experimental()
 class WriteToFiles(beam.PTransform):
-  """Write the incoming PCollection to a set of output files.
+  r"""Write the incoming PCollection to a set of output files.
 
   The incoming ``PCollection`` may be bounded or unbounded.
 
-  **Note:** For unbounded ``PCollection``s, this transform does not support
+  **Note:** For unbounded ``PCollection``\s, this transform does not support
   multiple firings per Window (due to the fact that files are named only by
   their destination, and window, at the moment).
   """
@@ -502,11 +725,14 @@ class WriteToFiles(beam.PTransform):
         directory that is meant to be temporary as well. Once the whole output
         has been written, the files are moved into their final destination, and
         given their final names. By default, the temporary directory will be
-         within the temp_location of your pipeline.
-      sink (callable, FileSink): The sink to use to write into a file. It should
-        implement the methods of a ``FileSink``. If none is provided, a
-        ``TextSink`` is used.
+        within the temp_location of your pipeline.
+      sink (callable, ~apache_beam.io.fileio.FileSink): The sink to use to write
+        into a file. It should implement the methods of a ``FileSink``. Pass a
+        class signature or an instance of FileSink to this parameter. If none is
+        provided, a ``TextSink`` is used.
       shards (int): The number of shards per destination and trigger firing.
+      output_fn (callable, optional): A callable to process the output. This
+        parameter is currently unused and retained for backward compatibility.
       max_writers_per_bundle (int): The number of writers that can be open
         concurrently in a single worker that's processing one bundle.
     """
@@ -523,18 +749,19 @@ class WriteToFiles(beam.PTransform):
     self._max_num_writers_per_bundle = max_writers_per_bundle
 
   @staticmethod
-  def _get_sink_fn(input_sink):
-    # type: (...) -> Callable[[Any], FileSink]
-    if isinstance(input_sink, FileSink):
-      return lambda x: input_sink
+  def _get_sink_fn(input_sink) -> Callable[[Any], FileSink]:
+    if isinstance(input_sink, type) and issubclass(input_sink, FileSink):
+      return lambda x: input_sink()
+    elif isinstance(input_sink, FileSink):
+      kls = input_sink.__class__
+      return lambda x: kls()
     elif callable(input_sink):
       return input_sink
     else:
       return lambda x: TextSink()
 
   @staticmethod
-  def _get_destination_fn(destination):
-    # type: (...) -> Callable[[Any], str]
+  def _get_destination_fn(destination) -> Callable[[Any], str]:
     if isinstance(destination, ValueProvider):
       return lambda elm: destination.get()
     elif callable(destination):
@@ -598,7 +825,7 @@ class WriteToFiles(beam.PTransform):
 
 def _create_writer(
     base_path,
-    writer_key: Tuple[str, IntervalWindow],
+    writer_key: tuple[str, IntervalWindow],
     create_metadata_fn: CreateFileMetadataFn,
 ):
   try:
@@ -627,40 +854,58 @@ class _MoveTempFilesIntoFinalDestinationFn(beam.DoFn):
 
   def process(self, element, w=beam.DoFn.WindowParam):
     destination = element[0]
-    file_results = list(element[1])
+    # list of FileResult objects for temp files
+    temp_file_results = list(element[1])
+    # list of FileResult objects for final files
+    final_file_results = []
 
-    for i, r in enumerate(file_results):
+    for i, r in enumerate(temp_file_results):
       # TODO(pabloem): Handle compression for files.
       final_file_name = self.file_naming_fn(
-          r.window, r.pane, i, len(file_results), '', destination)
+          r.window, r.pane, i, len(temp_file_results), '', destination)
 
-      _LOGGER.info(
-          'Moving temporary file %s to dir: %s as %s. Res: %s',
-          r.file_name,
-          self.path.get(),
-          final_file_name,
-          r)
+      final_file_results.append(
+          FileResult(
+              final_file_name,
+              i,
+              len(temp_file_results),
+              r.window,
+              r.pane,
+              destination))
 
-      final_full_path = filesystems.FileSystems.join(
-          self.path.get(), final_file_name)
-
-      # TODO(pabloem): Batch rename requests?
-      try:
-        filesystems.FileSystems.rename([r.file_name], [final_full_path])
-      except BeamIOError:
-        # This error is not serious, because it may happen on a retry of the
-        # bundle. We simply log it.
-        _LOGGER.debug(
-            'File %s failed to be copied. This may be due to a bundle'
-            ' being retried.',
-            r.file_name)
-
-      yield FileResult(
-          final_file_name, i, len(file_results), r.window, r.pane, destination)
+    move_from = [f.file_name for f in temp_file_results]
+    move_to = [f.file_name for f in final_file_results]
 
     _LOGGER.info(
-        'Checking orphaned temporary files for'
-        ' destination %s and window %s',
+        'Moving %d temporary files to dir: %s as %s',
+        len(move_from),
+        self.path.get(),
+        move_to)
+
+    try:
+      filesystems.FileSystems.mkdirs(self.path.get())
+    except IOError as e:
+      cause = repr(e)
+      if 'FileExistsError' not in cause:
+        # Usually harmless. Especially if see FileExistsError so no need to log
+        _LOGGER.debug('Fail to create dir for final destination: %s', cause)
+
+    try:
+      filesystems.FileSystems.rename(
+          move_from,
+          [filesystems.FileSystems.join(self.path.get(), f) for f in move_to])
+    except BeamIOError:
+      # This error is not serious, because it may happen on a retry of the
+      # bundle. We simply log it.
+      _LOGGER.debug(
+          'Exception occurred during moving files: %s. This may be due to a'
+          ' bundle being retried.',
+          move_from)
+
+    yield from final_file_results
+
+    _LOGGER.debug(
+        'Checking orphaned temporary files for destination %s and window %s',
         destination,
         w)
     writer_key = (destination, w)
@@ -673,20 +918,19 @@ class _MoveTempFilesIntoFinalDestinationFn(beam.DoFn):
       match_result = filesystems.FileSystems.match(['%s*' % prefix])
       orphaned_files = [m.path for m in match_result[0].metadata_list]
 
-      _LOGGER.info(
-          'Some files may be left orphaned in the temporary folder: %s',
-          orphaned_files)
+      if len(orphaned_files) > 0:
+        _LOGGER.warning(
+            'Some files may be left orphaned in the temporary folder: %s. '
+            'This may be a result of retried work items or insufficient'
+            'permissions to delete these temp files.',
+            orphaned_files)
     except BeamIOError as e:
-      _LOGGER.info('Exceptions when checking orphaned files: %s', e)
+      _LOGGER.warning('Exceptions when checking orphaned files: %s', e)
 
 
 class _WriteShardedRecordsFn(beam.DoFn):
-
-  def __init__(self,
-               base_path,
-               sink_fn,  # type: Callable[[Any], FileSink]
-               shards  # type: int
-              ):
+  def __init__(
+      self, base_path, sink_fn: Callable[[Any], FileSink], shards: int):
     self.base_path = base_path
     self.sink_fn = sink_fn
     self.shards = shards
@@ -729,17 +973,14 @@ class _WriteShardedRecordsFn(beam.DoFn):
 
 
 class _AppendShardedDestination(beam.DoFn):
-  def __init__(
-      self,
-      destination,  # type: Callable[[Any], str]
-      shards  # type: int
-  ):
+  def __init__(self, destination: Callable[[Any], str], shards: int):
     self.destination_fn = destination
     self.shards = shards
 
     # We start the shards for a single destination at an arbitrary point.
-    self._shard_counter = collections.defaultdict(
-        lambda: random.randrange(self.shards))  # type: DefaultDict[str, int]
+    self._shard_counter: collections.defaultdict[
+        str,
+        int] = collections.defaultdict(lambda: random.randrange(self.shards))
 
   def _next_shard_for_destination(self, destination):
     self._shard_counter[destination] = ((self._shard_counter[destination] + 1) %
@@ -759,8 +1000,9 @@ class _WriteUnshardedRecordsFn(beam.DoFn):
   SPILLED_RECORDS = 'spilled_records'
   WRITTEN_FILES = 'written_files'
 
-  _writers_and_sinks = None  # type: Dict[Tuple[str, BoundedWindow], Tuple[BinaryIO, FileSink]]
-  _file_names = None  # type: Dict[Tuple[str, BoundedWindow], str]
+  _writers_and_sinks: dict[tuple[str, BoundedWindow], tuple[BinaryIO,
+                                                            FileSink]] = None
+  _file_names: dict[tuple[str, BoundedWindow], str] = None
 
   def __init__(
       self,
@@ -791,7 +1033,6 @@ class _WriteUnshardedRecordsFn(beam.DoFn):
   def _get_or_create_writer_and_sink(self, destination, window):
     """Returns a tuple of writer, sink."""
     writer_key = (destination, window)
-
     if writer_key in self._writers_and_sinks:
       return self._writers_and_sinks.get(writer_key)
     elif len(self._writers_and_sinks) >= self.max_num_writers_per_bundle:
@@ -807,7 +1048,6 @@ class _WriteUnshardedRecordsFn(beam.DoFn):
           create_metadata_fn=sink.create_metadata)
 
       sink.open(writer)
-
       self._writers_and_sinks[writer_key] = (writer, sink)
       self._file_names[writer_key] = full_file_name
       return self._writers_and_sinks[writer_key]
@@ -818,12 +1058,13 @@ class _WriteUnshardedRecordsFn(beam.DoFn):
       sink.flush()
       writer.close()
 
-      file_result = FileResult(self._file_names[key],
-                               shard_index=-1,
-                               total_shards=0,
-                               window=key[1],
-                               pane=None,  # TODO(pabloem): get the pane info
-                               destination=key[0])
+      file_result = FileResult(
+          self._file_names[key],
+          shard_index=-1,
+          total_shards=0,
+          window=key[1],
+          pane=None,  # TODO(pabloem): get the pane info
+          destination=key[0])
 
       yield beam.pvalue.TaggedOutput(
           self.WRITTEN_FILES,
@@ -832,21 +1073,3 @@ class _WriteUnshardedRecordsFn(beam.DoFn):
               timestamp=key[1].start,
               windows=[key[1]]  # TODO(pabloem) HOW DO WE GET THE PANE
           ))
-
-
-class _RemoveDuplicates(beam.DoFn):
-
-  COUNT_STATE = CombiningValueStateSpec('count', combine_fn=sum)
-
-  def process(self, element, count_state=beam.DoFn.StateParam(COUNT_STATE)):
-
-    path = element[0]
-    file_metadata = element[1]
-    counter = count_state.read()
-
-    if counter == 0:
-      count_state.add(1)
-      _LOGGER.debug('Generated entry for file %s', path)
-      yield file_metadata
-    else:
-      _LOGGER.debug('File %s was already read, seen %d times', path, counter)

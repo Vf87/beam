@@ -19,8 +19,40 @@
 apply plugin: org.apache.beam.gradle.BeamModulePlugin
 applyPythonNature()
 
-task mongodbioIT {
+tasks.register("mongodbioIT") {
   getVersionsAsList('direct_mongodbio_it_task_py_versions').each {
     dependsOn.add(":sdks:python:test-suites:direct:py${getVersionSuffix(it)}:mongodbioIT")
   }
+}
+
+tasks.register("examplesPostCommit") {
+  getVersionsAsList('python_versions').each {
+    dependsOn.add(":sdks:python:test-suites:direct:py${getVersionSuffix(it)}:examples")
+  }
+}
+
+task gcpCrossLanguagePostCommit {
+  getVersionsAsList('cross_language_validates_py_versions').each {
+    dependsOn.add(":sdks:python:test-suites:direct:py${getVersionSuffix(it)}:gcpCrossLanguagePythonUsingJava")
+  }
+}
+
+task ioCrossLanguagePostCommit {
+  getVersionsAsList('cross_language_validates_py_versions').each {
+    dependsOn.add(":sdks:python:test-suites:direct:py${getVersionSuffix(it)}:ioCrossLanguagePythonUsingJava")
+  }
+}
+
+task messagingCrossLanguagePostCommit {
+  // Messaging E2E tests has testcontainers overhead. Single Python version suffices and reducing CI flakiness
+  getVersionsAsList('cross_language_validates_py_versions').take(1).each {
+    dependsOn.add(":sdks:python:test-suites:direct:py${getVersionSuffix(it)}:messagingCrossLanguagePythonUsingJava")
+  }
+}
+
+task crossLanguageWrapperValidationPreCommit {
+  // Different python versions may output types that look different and lead to
+  // false failures. To be consistent, we test on the lowest version only
+  def lowestSupportedVersion = getVersionsAsList('cross_language_validates_py_versions')[0]
+  dependsOn.add(":sdks:python:test-suites:direct:py${getVersionSuffix(lowestSupportedVersion)}:xlangWrapperValidationPythonUsingJava")
 }

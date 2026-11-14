@@ -17,33 +17,50 @@
  */
 package org.apache.beam.sdk.extensions.sql.impl;
 
+import static org.apache.beam.sdk.util.Preconditions.checkArgumentNotNull;
+
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import org.apache.beam.sdk.extensions.sql.impl.parser.TableClause;
+import org.apache.beam.sdk.extensions.sql.meta.BeamSqlTable;
+import org.apache.beam.sdk.extensions.sql.meta.ChangeRange;
 import org.apache.beam.sdk.extensions.sql.meta.Table;
+import org.apache.beam.sdk.extensions.sql.meta.catalog.Catalog;
+import org.apache.beam.sdk.extensions.sql.meta.catalog.CatalogManager;
 import org.apache.beam.sdk.extensions.sql.meta.provider.TableProvider;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.linq4j.tree.Expression;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.rel.type.RelProtoDataType;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.Function;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.Schema;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.SchemaPlus;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.SchemaVersion;
-import org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.Schemas;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.tree.Expression;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelProtoDataType;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.Function;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.Schema;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.SchemaPlus;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.SchemaVersion;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.Schemas;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
-/** Adapter from {@link TableProvider} to {@link Schema}. */
-@SuppressWarnings({"keyfor", "nullness"}) // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+/**
+ * A Calcite {@link Schema} that corresponds to a {@link TableProvider} or {@link
+ * org.apache.beam.sdk.extensions.sql.meta.store.MetaStore}. In Beam SQL, a DATABASE refers to a
+ * {@link BeamCalciteSchema}.
+ */
 public class BeamCalciteSchema implements Schema {
   private JdbcConnection connection;
   private TableProvider tableProvider;
   private Map<String, BeamCalciteSchema> subSchemas;
+  private final String name;
 
-  BeamCalciteSchema(JdbcConnection jdbcConnection, TableProvider tableProvider) {
+  /** Creates a {@link BeamCalciteSchema} representing a {@link TableProvider}. */
+  BeamCalciteSchema(String name, JdbcConnection jdbcConnection, TableProvider tableProvider) {
     this.connection = jdbcConnection;
     this.tableProvider = tableProvider;
     this.subSchemas = new HashMap<>();
+    this.name = name;
+  }
+
+  public String name() {
+    return name;
   }
 
   public TableProvider getTableProvider() {
@@ -81,7 +98,9 @@ public class BeamCalciteSchema implements Schema {
   }
 
   @Override
-  public Expression getExpression(SchemaPlus parentSchema, String name) {
+  public Expression getExpression(@Nullable SchemaPlus parentSchema, String name) {
+    checkArgumentNotNull(
+        parentSchema, "Cannot convert BeamCalciteSchema to Expression without parent schema");
     return Schemas.subSchemaExpression(parentSchema, name, getClass());
   }
 
@@ -100,17 +119,42 @@ public class BeamCalciteSchema implements Schema {
     return Collections.emptySet();
   }
 
+  /**
+   * Returns the named table. For a name that encodes a {@link TableClause}, returns its base table
+   * as derived by {@link BeamSqlTable#forRead} or {@link BeamSqlTable#forWrite}.
+   */
   @Override
-  public org.apache.beam.vendor.calcite.v1_26_0.org.apache.calcite.schema.Table getTable(
+  public org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.@Nullable Table getTable(
       String name) {
-    Table table = tableProvider.getTable(name);
+    @Nullable TableClause clause = TableClause.decode(name);
+    Table table = tableProvider.getTable(clause == null ? name : clause.baseName());
     if (table == null) {
       return null;
     }
+    BeamSqlTable beamTable = tableProvider.buildBeamSqlTable(table);
     return new BeamCalciteTable(
-        tableProvider.buildBeamSqlTable(table),
-        getPipelineOptions(),
+        clause == null ? beamTable : derive(beamTable, clause),
+        connection.getPipelineOptionsMap(),
         connection.getPipelineOptions());
+  }
+
+  private static BeamSqlTable derive(BeamSqlTable table, TableClause clause) {
+    try {
+      @Nullable ChangeRange changes = clause.changes();
+      if (clause.role() == TableClause.Role.WRITE) {
+        return table.forWrite(clause.options());
+      }
+      return changes != null
+          ? table.forChanges(changes, clause.options(), clause.metadataColumns())
+          : table.forRead(clause.options());
+    } catch (RuntimeException e) {
+      throw new IllegalArgumentException(
+          String.format("Cannot resolve %s: %s", clause.encode(), e.getMessage()), e);
+    }
+  }
+
+  public Collection<Table> getTables() {
+    return tableProvider.getTables().values();
   }
 
   @Override
@@ -128,14 +172,30 @@ public class BeamCalciteSchema implements Schema {
     return tableProvider.getSubProviders();
   }
 
+  /**
+   * If this is the root schema (in other words, a {@link CatalogManager}), the sub schema will be a
+   * {@link Catalog}'s metastore.
+   *
+   * <p>Otherwise, the sub-schema is derived from the {@link TableProvider} implementation.
+   */
   @Override
-  public Schema getSubSchema(String name) {
-    if (!subSchemas.containsKey(name)) {
-      TableProvider subProvider = tableProvider.getSubProvider(name);
-      BeamCalciteSchema subSchema =
-          subProvider == null ? null : new BeamCalciteSchema(connection, subProvider);
-      subSchemas.put(name, subSchema);
+  public @Nullable Schema getSubSchema(String name) {
+    if (TableClause.decode(name) != null) {
+      return null;
     }
-    return subSchemas.get(name);
+    BeamCalciteSchema subSchema = subSchemas.get(name);
+
+    if (subSchema != null) {
+      return subSchema;
+    }
+
+    @Nullable TableProvider subProvider = tableProvider.getSubProvider(name);
+    if (subProvider == null) {
+      return null;
+    }
+
+    subSchema = new BeamCalciteSchema(name, connection, subProvider);
+    subSchemas.put(name, subSchema);
+    return subSchema;
   }
 }

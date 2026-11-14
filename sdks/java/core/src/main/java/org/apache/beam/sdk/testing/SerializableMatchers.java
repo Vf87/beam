@@ -29,9 +29,10 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderException;
 import org.apache.beam.sdk.coders.ListCoder;
 import org.apache.beam.sdk.util.CoderUtils;
+import org.apache.beam.sdk.util.SerializableSupplier;
 import org.apache.beam.sdk.util.UserCodeException;
 import org.apache.beam.sdk.values.KV;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.hamcrest.BaseMatcher;
 import org.hamcrest.Description;
@@ -59,7 +60,7 @@ import org.hamcrest.Matchers;
  * 3))}.
  */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class SerializableMatchers implements Serializable {
 
@@ -71,7 +72,7 @@ public class SerializableMatchers implements Serializable {
       Iterable<SerializableMatcher<? super T>> serializableMatchers) {
 
     @SuppressWarnings({
-      "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+      "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
       "unchecked"
     }) // safe covariant cast
     final Iterable<Matcher<? super T>> matchers = (Iterable) serializableMatchers;
@@ -90,7 +91,7 @@ public class SerializableMatchers implements Serializable {
       Iterable<SerializableMatcher<? super T>> serializableMatchers) {
 
     @SuppressWarnings({
-      "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+      "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
       "unchecked"
     }) // safe covariant cast
     final Iterable<Matcher<? super T>> matchers = (Iterable) serializableMatchers;
@@ -152,7 +153,7 @@ public class SerializableMatchers implements Serializable {
       List<SerializableMatcher<? super T>> serializableMatchers) {
 
     @SuppressWarnings({
-      "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+      "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
       "unchecked"
     }) // safe covariant cast
     final List<Matcher<? super T>> matchers = (List) serializableMatchers;
@@ -204,7 +205,7 @@ public class SerializableMatchers implements Serializable {
       Collection<SerializableMatcher<? super T>> serializableMatchers) {
 
     @SuppressWarnings({
-      "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+      "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
       "unchecked"
     }) // safe covariant cast
     final Collection<Matcher<? super T>> matchers = (Collection) serializableMatchers;
@@ -274,7 +275,7 @@ public class SerializableMatchers implements Serializable {
       List<SerializableMatcher<? super T>> serializableMatchers) {
 
     @SuppressWarnings({
-      "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+      "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
       "unchecked"
     }) // safe covariant cast
     final List<Matcher<? super T>> matchers = (List) serializableMatchers;
@@ -326,7 +327,7 @@ public class SerializableMatchers implements Serializable {
       Collection<SerializableMatcher<? super T>> serializableMatchers) {
 
     @SuppressWarnings({
-      "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+      "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
       "unchecked"
     }) // safe covariant cast
     final Collection<Matcher<? super T>> matchers = (Collection) serializableMatchers;
@@ -735,24 +736,13 @@ public class SerializableMatchers implements Serializable {
   }
 
   /**
-   * Supplies values of type {@code T}, and is serializable. Thus, even if {@code T} is not
-   * serializable, the supplier can be serialized and provide a {@code T} wherever it is
-   * deserialized.
-   *
-   * @param <T> the type of value supplied.
-   */
-  public interface SerializableSupplier<T> extends Serializable {
-    T get();
-  }
-
-  /**
    * Since the delegate {@link Matcher} is not generally serializable, instead this takes a nullary
    * SerializableFunction to return such a matcher.
    */
   private static class SerializableMatcherFromSupplier<T> extends BaseMatcher<T>
       implements SerializableMatcher<T> {
 
-    private SerializableSupplier<Matcher<T>> supplier;
+    private final SerializableSupplier<Matcher<T>> supplier;
 
     public SerializableMatcherFromSupplier(SerializableSupplier<Matcher<T>> supplier) {
       this.supplier = supplier;
@@ -779,7 +769,7 @@ public class SerializableMatchers implements Serializable {
    * is not likely to be a good encoding, so should be used only for tests, where data volume is
    * small and minor costs are not critical.
    */
-  private static class SerializableViaCoder<T> implements SerializableSupplier<T> {
+  private static final class SerializableViaCoder<T> implements SerializableSupplier<T> {
     /** Cached value that is not serialized. */
     private transient @Nullable T value;
 
@@ -816,7 +806,7 @@ public class SerializableMatchers implements Serializable {
    * Serializable}. This is not likely to be a good encoding, so should be used only for tests,
    * where data volume is small and minor costs are not critical.
    */
-  private static class SerializableArrayViaCoder<T> implements SerializableSupplier<T[]> {
+  private static final class SerializableArrayViaCoder<T> implements SerializableSupplier<T[]> {
     /** Cached value that is not serialized. */
     @SuppressFBWarnings("SE_TRANSIENT_FIELD_NOT_RESTORED")
     private transient T @Nullable [] value;

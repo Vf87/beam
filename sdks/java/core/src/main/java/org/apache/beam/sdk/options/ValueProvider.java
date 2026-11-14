@@ -17,7 +17,8 @@
  */
 package org.apache.beam.sdk.options;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.beam.sdk.util.Preconditions.checkArgumentNotNull;
+import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
 
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
@@ -43,7 +44,7 @@ import org.apache.beam.sdk.annotations.Internal;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.MoreObjects;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -62,7 +63,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
 @JsonSerialize(using = ValueProvider.Serializer.class)
 @JsonDeserialize(using = ValueProvider.Deserializer.class)
 @SuppressWarnings({
-  "nullness", // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness", // TODO(https://github.com/apache/beam/issues/20497)
   "rawtypes"
 })
 public interface ValueProvider<T> extends Serializable {
@@ -129,8 +130,8 @@ public interface ValueProvider<T> extends Serializable {
     private transient volatile T cachedValue;
 
     NestedValueProvider(ValueProvider<X> value, SerializableFunction<X, T> translator) {
-      this.value = checkNotNull(value);
-      this.translator = checkNotNull(translator);
+      this.value = checkArgumentNotNull(value);
+      this.translator = checkArgumentNotNull(translator);
     }
 
     /** Creates a {@link NestedValueProvider} that wraps the provided value. */
@@ -261,13 +262,15 @@ public interface ValueProvider<T> extends Serializable {
         @SuppressWarnings("unchecked")
         ValueProvider<T> result = (ValueProvider<T>) handler.invoke(methodOptions, method, null);
         // Two cases: If we have deserialized a new value from JSON, it will
-        // be wrapped in a StaticValueProvider, which we can provide here.  If
+        // be wrapped in a StaticValueProvider, which we can provide here. If
         // not, there was no JSON value, and we return the default, whether or
         // not it is null.
         if (result instanceof StaticValueProvider) {
           return result.get();
         }
         return defaultValue;
+      } catch (OutOfMemoryError oom) {
+        throw oom;
       } catch (Throwable e) {
         throw new RuntimeException("Unable to load runtime value.", e);
       }
@@ -342,8 +345,8 @@ public interface ValueProvider<T> extends Serializable {
     @Override
     public JsonDeserializer<?> createContextual(DeserializationContext ctxt, BeanProperty property)
         throws JsonMappingException {
-      checkNotNull(ctxt, "Null DeserializationContext.");
-      JavaType type = checkNotNull(ctxt.getContextualType(), "Invalid type: %s", getClass());
+      checkArgumentNotNull(ctxt, "Null DeserializationContext.");
+      JavaType type = checkStateNotNull(ctxt.getContextualType(), "Invalid type: %s", getClass());
       JavaType[] params = type.findTypeParameters(ValueProvider.class);
       if (params.length != 1) {
         throw new RuntimeException("Unable to derive type for ValueProvider: " + type.toString());
@@ -357,7 +360,7 @@ public interface ValueProvider<T> extends Serializable {
         throws IOException, JsonProcessingException {
       JsonDeserializer dser =
           ctxt.findRootValueDeserializer(
-              checkNotNull(
+              checkStateNotNull(
                   innerType, "Invalid %s: innerType is null. Serialization error?", getClass()));
       Object o = dser.deserialize(jp, ctxt);
       return StaticValueProvider.of(o);

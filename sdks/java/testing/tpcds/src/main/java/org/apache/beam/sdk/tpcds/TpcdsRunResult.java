@@ -48,11 +48,13 @@ public class TpcdsRunResult {
     return isSuccessful;
   }
 
+  @SuppressWarnings("JavaUtilDate")
   public Date getStartDate() {
     Timestamp startTimeStamp = new Timestamp(startTime);
     return new Date(startTimeStamp.getTime());
   }
 
+  @SuppressWarnings("JavaUtilDate")
   public Date getEndDate() {
     Timestamp endTimeStamp = new Timestamp(endTime);
     return new Date(endTimeStamp.getTime());
@@ -81,9 +83,9 @@ public class TpcdsRunResult {
     return jobName.substring(0, endIndex);
   }
 
-  public String getDataSize() throws Exception {
+  public String getDataSize() {
     PipelineOptions pipelineOptions = getPipelineOptions();
-    return TpcdsParametersReader.getAndCheckDataSize(pipelineOptions.as(TpcdsOptions.class));
+    return pipelineOptions.as(TpcdsOptions.class).getDataSize();
   }
 
   public String getDialect() {
@@ -93,7 +95,7 @@ public class TpcdsRunResult {
     String dialect;
     if (queryPlannerClassName.equals(
         "org.apache.beam.sdk.extensions.sql.zetasql.ZetaSQLQueryPlanner")) {
-      dialect = "ZetaSQL";
+      throw new IllegalArgumentException("ZetaSQL support is removed in Tpcds benchmark");
     } else {
       dialect = "Calcite";
     }

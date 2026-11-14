@@ -17,8 +17,8 @@
  */
 package org.apache.beam.runners.dataflow.util;
 
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
 
 import com.google.api.client.util.BackOff;
 import com.google.api.client.util.Sleeper;
@@ -43,7 +43,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.apache.beam.runners.core.construction.Environments;
 import org.apache.beam.sdk.extensions.gcp.storage.GcsCreateOptions;
 import org.apache.beam.sdk.extensions.gcp.util.BackOffAdapter;
 import org.apache.beam.sdk.io.FileSystems;
@@ -52,12 +51,13 @@ import org.apache.beam.sdk.io.fs.ResolveOptions.StandardResolveOptions;
 import org.apache.beam.sdk.util.FluentBackoff;
 import org.apache.beam.sdk.util.MimeTypes;
 import org.apache.beam.sdk.util.MoreFutures;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Sets;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.hash.HashCode;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.hash.Hashing;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.ByteSource;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.io.Files;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.MoreExecutors;
+import org.apache.beam.sdk.util.construction.Environments;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Sets;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.hash.HashCode;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.hash.Hashing;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.ByteSource;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.io.Files;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.util.concurrent.MoreExecutors;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -67,7 +67,7 @@ import org.slf4j.LoggerFactory;
 
 /** Helper routines for packages. */
 @SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 public class PackageUtil implements Closeable {
 
@@ -149,11 +149,6 @@ public class PackageUtil implements Closeable {
     String sourceDescription = attributes.getSourceDescription();
     String target = attributes.getDestination().getLocation();
 
-    if (alreadyStaged(attributes)) {
-      LOG.debug("Skipping file already staged: {} at {}", sourceDescription, target);
-      return StagingResult.cached(attributes);
-    }
-
     try {
       return tryStagePackageWithRetry(attributes, retrySleeper, createOptions);
     } catch (Exception miscException) {
@@ -162,6 +157,7 @@ public class PackageUtil implements Closeable {
     }
   }
 
+  @SuppressWarnings("Slf4jFormatShouldBeConst")
   private StagingResult tryStagePackageWithRetry(
       PackageAttributes attributes, Sleeper retrySleeper, CreateOptions createOptions)
       throws IOException, InterruptedException {
@@ -170,6 +166,11 @@ public class PackageUtil implements Closeable {
     BackOff backoff = BackOffAdapter.toGcpBackOff(BACKOFF_FACTORY.backoff());
 
     while (true) {
+      if (alreadyStaged(attributes)) {
+        LOG.debug("Skipping file already staged: {} at {}", sourceDescription, target);
+        return StagingResult.cached(attributes);
+      }
+
       try {
         return tryStagePackage(attributes, createOptions);
       } catch (IOException ioException) {
@@ -381,8 +382,10 @@ public class PackageUtil implements Closeable {
 
     /** The file to stage. */
     public abstract String getSource();
+
     /** The SHA-256 hash of the source file. */
     public abstract String getSha256();
+
     /** Staged target for this file. */
     public abstract String getDestination();
   }
@@ -422,9 +425,7 @@ public class PackageUtil implements Closeable {
       switch (dest) {
         case "dataflow-worker.jar":
         case "windmill_main":
-          target =
-              Environments.createStagingFileName(
-                  file, Files.asByteSource(file).hash(Hashing.sha256()));
+          target = Environments.createStagingFileName(file, Environments.getFileHash(file));
           LOG.info("Staging custom {} as {}", dest, target);
           break;
         default:
@@ -437,6 +438,7 @@ public class PackageUtil implements Closeable {
               .toString();
       destination.setLocation(resourcePath);
       destination.setName(dest);
+      destination.setSha256(hash);
       return new AutoValue_PackageUtil_PackageAttributes(
           file, null, destination, file.length(), hash);
     }
@@ -455,6 +457,7 @@ public class PackageUtil implements Closeable {
       DataflowPackage targetPackage = new DataflowPackage();
       targetPackage.setName(target);
       targetPackage.setLocation(resourcePath);
+      targetPackage.setSha256(hashCode.toString());
 
       return new AutoValue_PackageUtil_PackageAttributes(
           null, bytes, targetPackage, size, hashCode.toString());
@@ -464,25 +467,26 @@ public class PackageUtil implements Closeable {
       DataflowPackage newDestination = new DataflowPackage();
       newDestination.setName(overridePackageName);
       newDestination.setLocation(getDestination().getLocation());
+      newDestination.setSha256(getHash());
 
       return new AutoValue_PackageUtil_PackageAttributes(
           getSource(), getBytes(), newDestination, getSize(), getHash());
     }
 
-    /** @return the file to be uploaded, if any */
+    /** Returns the file to be uploaded, if any. */
     public abstract @Nullable File getSource();
 
-    /** @return the bytes to be uploaded, if any */
+    /** Returns the bytes to be uploaded, if any. */
     @SuppressWarnings("mutable")
     public abstract byte @Nullable [] getBytes();
 
-    /** @return the dataflowPackage */
+    /** Returns the dataflowPackage. */
     public abstract DataflowPackage getDestination();
 
-    /** @return the size */
+    /** Returns the size. */
     public abstract long getSize();
 
-    /** @return the hash */
+    /** Returns the hash. */
     public abstract String getHash();
 
     public String getSourceDescription() {

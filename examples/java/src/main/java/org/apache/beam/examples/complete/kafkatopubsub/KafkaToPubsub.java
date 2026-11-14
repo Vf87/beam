@@ -22,7 +22,7 @@ import static org.apache.beam.examples.complete.kafkatopubsub.kafka.consumer.Uti
 import static org.apache.beam.examples.complete.kafkatopubsub.kafka.consumer.Utils.getKafkaCredentialsFromVault;
 import static org.apache.beam.examples.complete.kafkatopubsub.kafka.consumer.Utils.isSslSpecified;
 import static org.apache.beam.examples.complete.kafkatopubsub.kafka.consumer.Utils.parseKafkaConsumerConfig;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkArgument;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -68,7 +68,7 @@ import org.slf4j.LoggerFactory;
  * to execute the pipeline:
  * {@code
  * task execute (type:JavaExec) {
- *     main = System.getProperty("mainClass")
+ *     mainClass = System.getProperty("mainClass")
  *     classpath = sourceSets.main.runtimeClasspath
  *     systemProperties System.getProperties()
  *     args System.getProperty("exec.args", "").split()
@@ -199,12 +199,10 @@ public class KafkaToPubsub {
         "bootstrapServers cannot be an empty string.");
 
     LOG.info(
-        "Starting Kafka-To-PubSub pipeline with parameters bootstrap servers:"
-            + options.getBootstrapServers()
-            + " input topics: "
-            + options.getInputTopics()
-            + " output pubsub topic: "
-            + options.getOutputTopic());
+        "Starting Kafka-To-PubSub pipeline with parameters bootstrap servers:{} input topics: {} output pubsub topic: {}",
+        options.getBootstrapServers(),
+        options.getInputTopics(),
+        options.getOutputTopic());
 
     /*
      * Steps:

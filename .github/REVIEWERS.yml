@@ -1,0 +1,98 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# If you would like to be excluded from consideration for reviewing a certain label,
+# add yourself to that label's exclusionList
+# FallbackReviewers is for reviewers who can review any area of the code base that might
+# not receive a label. These should generally be more experienced committers.
+# Priority determines which label is used to select a reviewer when a PR has multiple labels
+# (lower number = higher priority).
+labels:
+  - name: Go
+    priority: 2
+    reviewers:
+      - jrmccluskey
+      - lostluck
+      - shunping
+    exclusionList: []
+  - name: Python
+    priority: 2
+    reviewers:
+      - claudevdm
+      - damccorm
+      - jrmccluskey
+      - tvalentyn
+      - shunping
+    exclusionList: []
+  - name: Java
+    priority: 2
+    reviewers:
+      - Abacn
+      - ahmedabu98
+      - chamikaramj
+      - damccorm
+      - kennknowles
+    exclusionList: []
+  - name: spanner
+    priority: 1
+    reviewers:
+      - nielm
+  - name: bigtable
+    priority: 1
+    reviewers:
+      - igorbernstein2
+      - mutianf
+    exclusionList: []
+  - name: delta
+    priority: 1
+    reviewers:
+      - ahmedabu98
+      - chamikaramj
+    exclusionList: []
+  - name: iceberg
+    priority: 1
+    reviewers:
+      - ahmedabu98
+      - chamikaramj
+    exclusionList: []
+  - name: yaml
+    priority: 1
+    reviewers:
+      - chamikaramj
+      - derrickaw
+  - name: Build
+    priority: 3
+    reviewers:
+      - Abacn
+      - Amar3tto
+      - damccorm
+      - derrickaw
+    exclusionList: []
+  - name: website
+    priority: 3
+    reviewers:
+      - Abacn
+      - damccorm
+      - kennknowles
+      - shunping
+    exclusionList: []
+fallbackReviewers:
+  - Abacn
+  - chamikaramj
+  - damccorm
+  - jrmccluskey
+  - kennknowles
+  - shunping
+  - tvalentyn

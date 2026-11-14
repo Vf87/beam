@@ -36,9 +36,9 @@ import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.schemas.logicaltypes.EnumerationType;
 import org.apache.beam.sdk.schemas.logicaltypes.FixedBytes;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Lists;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 import org.junit.Rule;
@@ -47,7 +47,7 @@ import org.junit.rules.ExpectedException;
 
 /** Unit tests for {@link Row}. */
 @SuppressWarnings({
-  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
 })
 public class RowTest {
 
@@ -132,7 +132,16 @@ public class RowTest {
     Row row =
         Row.withSchema(schema)
             .addValues(
-                (byte) 0, (short) 1, 2, 3L, new BigDecimal(2.3), 1.2f, 3.0d, "str", dateTime, false)
+                (byte) 0,
+                (short) 1,
+                2,
+                3L,
+                new BigDecimal("2.3"),
+                1.2f,
+                3.0d,
+                "str",
+                dateTime,
+                false)
             .build();
 
     assertEquals((byte) 0, (Object) row.getByte("f_byte"));
@@ -143,8 +152,8 @@ public class RowTest {
     assertEquals((int) 2, (Object) row.getInt32(2));
     assertEquals((long) 3, (Object) row.getInt64("f_int64"));
     assertEquals((long) 3, (Object) row.getInt64(3));
-    assertEquals(new BigDecimal(2.3), row.getDecimal("f_decimal"));
-    assertEquals(new BigDecimal(2.3), row.getDecimal(4));
+    assertEquals(new BigDecimal("2.3"), row.getDecimal("f_decimal"));
+    assertEquals(new BigDecimal("2.3"), row.getDecimal(4));
     assertEquals(1.2f, row.getFloat("f_float"), 0);
     assertEquals(1.2f, row.getFloat(5), 0);
     assertEquals(3.0d, row.getDouble("f_double"), 0);
@@ -180,7 +189,7 @@ public class RowTest {
         Stream.of(Schema.Field.of("array", Schema.FieldType.array(Schema.FieldType.INT32)))
             .collect(toSchema());
     Row row = Row.withSchema(type).addArray(data).build();
-    assertEquals(data, row.getArray("array"));
+    assertEquals(data, (List) row.getArray("array"));
   }
 
   @Test
@@ -190,7 +199,7 @@ public class RowTest {
         Stream.of(Schema.Field.of("iter", Schema.FieldType.iterable(Schema.FieldType.INT32)))
             .collect(toSchema());
     Row row = Row.withSchema(type).addIterable(data).build();
-    assertEquals(data, row.getIterable("iter"));
+    assertEquals(data, Lists.newArrayList(row.getIterable("iter")));
   }
 
   @Test
@@ -200,7 +209,7 @@ public class RowTest {
         Stream.of(Schema.Field.nullable("array", Schema.FieldType.array(Schema.FieldType.INT32)))
             .collect(toSchema());
     Row row = Row.withSchema(type).addArray(data).build();
-    assertEquals(data, row.getArray("array"));
+    assertEquals(data, (List) row.getArray("array"));
 
     Row otherNonNull = Row.withSchema(type).addValue(ImmutableList.of(1, 2, 3)).build();
     Row otherNull = Row.withSchema(type).addValue(null).build();
@@ -215,7 +224,7 @@ public class RowTest {
         Stream.of(Schema.Field.nullable("iter", Schema.FieldType.iterable(Schema.FieldType.INT32)))
             .collect(toSchema());
     Row row = Row.withSchema(type).addIterable(data).build();
-    assertEquals(data, row.getArray("iter"));
+    assertEquals(data, (List) row.getArray("iter"));
 
     Row otherNonNull = Row.withSchema(type).addValue(ImmutableList.of(1, 2, 3)).build();
     Row otherNull = Row.withSchema(type).addValue(null).build();
@@ -232,7 +241,7 @@ public class RowTest {
                     "array", Schema.FieldType.array(Schema.FieldType.INT32.withNullable(true))))
             .collect(toSchema());
     Row row = Row.withSchema(type).addArray(data).build();
-    assertEquals(data, row.getArray("array"));
+    assertEquals(data, (List) row.getArray("array"));
   }
 
   @Test
@@ -244,7 +253,7 @@ public class RowTest {
                     "iter", Schema.FieldType.iterable(Schema.FieldType.INT32.withNullable(true))))
             .collect(toSchema());
     Row row = Row.withSchema(type).addIterable(data).build();
-    assertEquals(data, row.getIterable("iter"));
+    assertEquals(data, Lists.newArrayList(row.getIterable("iter")));
   }
 
   @Test
@@ -260,7 +269,7 @@ public class RowTest {
         Stream.of(Schema.Field.of("array", FieldType.array(FieldType.row(nestedType))))
             .collect(toSchema());
     Row row = Row.withSchema(type).addArray(data).build();
-    assertEquals(data, row.getArray("array"));
+    assertEquals(data, (List) row.getArray("array"));
   }
 
   @Test
@@ -276,7 +285,7 @@ public class RowTest {
         Stream.of(Schema.Field.of("iter", FieldType.iterable(FieldType.row(nestedType))))
             .collect(toSchema());
     Row row = Row.withSchema(type).addIterable(data).build();
-    assertEquals(data, row.getIterable("iter"));
+    assertEquals(data, Lists.newArrayList(row.getIterable("iter")));
   }
 
   @Test
@@ -286,7 +295,7 @@ public class RowTest {
         Stream.of(Schema.Field.of("array", FieldType.array(FieldType.array(FieldType.INT32))))
             .collect(toSchema());
     Row row = Row.withSchema(type).addArray(data).build();
-    assertEquals(data, row.getArray("array"));
+    assertEquals(data, (List) row.getArray("array"));
   }
 
   @Test
@@ -296,7 +305,7 @@ public class RowTest {
         Stream.of(Schema.Field.of("iter", FieldType.iterable(FieldType.array(FieldType.INT32))))
             .collect(toSchema());
     Row row = Row.withSchema(type).addIterable(data).build();
-    assertEquals(data, row.getIterable("iter"));
+    assertEquals(data, Lists.newArrayList(row.getIterable("iter")));
   }
 
   @Test
@@ -312,7 +321,7 @@ public class RowTest {
                         .withNullable(true)))
             .collect(toSchema());
     Row row = Row.withSchema(type).addArray(data).build();
-    assertEquals(data, row.getArray("array"));
+    assertEquals(data, (List) row.getArray("array"));
   }
 
   @Test
@@ -329,7 +338,7 @@ public class RowTest {
                         .withNullable(true)))
             .collect(toSchema());
     Row row = Row.withSchema(type).addIterable(data).build();
-    assertEquals(data, row.getIterable("iter"));
+    assertEquals(data, Lists.newArrayList(row.getIterable("iter")));
   }
 
   @Test
@@ -345,7 +354,7 @@ public class RowTest {
                     "array", FieldType.array(FieldType.map(FieldType.INT32, FieldType.STRING))))
             .collect(toSchema());
     Row row = Row.withSchema(type).addArray(data).build();
-    assertEquals(data, row.getArray("array"));
+    assertEquals(data, (List) row.getArray("array"));
   }
 
   @Test
@@ -361,7 +370,7 @@ public class RowTest {
                     "iter", FieldType.iterable(FieldType.map(FieldType.INT32, FieldType.STRING))))
             .collect(toSchema());
     Row row = Row.withSchema(type).addIterable(data).build();
-    assertEquals(data, row.getIterable("iter"));
+    assertEquals(data, Lists.newArrayList(row.getIterable("iter")));
   }
 
   @Test
@@ -387,7 +396,7 @@ public class RowTest {
         Stream.of(Schema.Field.nullable("map", FieldType.map(FieldType.INT32, FieldType.STRING)))
             .collect(toSchema());
     Row row = Row.withSchema(type).addValue(data).build();
-    assertEquals(data, row.getArray("map"));
+    assertEquals(data, (List) row.getArray("map"));
 
     Row otherNonNull = Row.withSchema(type).addValue(ImmutableMap.of(1, "value1")).build();
     Row otherNull = Row.withSchema(type).addValue(null).build();
@@ -396,7 +405,7 @@ public class RowTest {
   }
 
   @Test
-  public void testCreateMapWithNullValue() {
+  public void testCreateAndCompareMapWithNullValue() {
     Map<Integer, String> data = new HashMap();
     data.put(1, "value1");
     data.put(2, "value2");
@@ -407,6 +416,25 @@ public class RowTest {
             .collect(toSchema());
     Row row = Row.withSchema(type).addValue(data).build();
     assertEquals(data, row.getMap("map"));
+
+    Map<Integer, String> onlyNullValueData = new HashMap();
+    onlyNullValueData.put(1, null);
+    onlyNullValueData.put(2, null);
+
+    Map<Integer, String> otherOnlyNullValueData = new HashMap();
+    otherOnlyNullValueData.put(3, null);
+    otherOnlyNullValueData.put(4, null);
+
+    Row otherNonNullValue =
+        Row.withSchema(type)
+            .addValue(ImmutableMap.of(1, "value1", 2, "value2", 3, "value3", 4, "value4"))
+            .build();
+    Row otherNullValue = Row.withSchema(type).addValue(data).build();
+    Row onlyNullValue = Row.withSchema(type).addValue(onlyNullValueData).build();
+    Row otherOnlyNullValue = Row.withSchema(type).addValue(otherOnlyNullValueData).build();
+    assertNotEquals(otherNonNullValue, row);
+    assertEquals(otherNullValue, row);
+    assertNotEquals(onlyNullValue, otherOnlyNullValue);
   }
 
   @Test
@@ -556,7 +584,7 @@ public class RowTest {
             .withFieldValue("f_long", (long) 45)
             .withFieldValue("f_float", (float) 3.14)
             .withFieldValue("f_double", (double) 3.141)
-            .withFieldValue("f_decimal", new BigDecimal(3.1415))
+            .withFieldValue("f_decimal", new BigDecimal("3.1415"))
             .withFieldValue("f_boolean", true)
             .withFieldValue("f_datetime", dateTime)
             .withFieldValue("f_bytes", bytes)
@@ -575,7 +603,7 @@ public class RowTest {
                 (long) 45,
                 (float) 3.14,
                 (double) 3.141,
-                new BigDecimal(3.1415),
+                new BigDecimal("3.1415"),
                 true,
                 dateTime,
                 bytes,
@@ -748,14 +776,14 @@ public class RowTest {
   public void testLogicalTypeWithInvalidInputValueByFieldName() {
     Schema schema = Schema.builder().addLogicalTypeField("char", FixedBytes.of(10)).build();
     byte[] byteArrayWithLengthFive = {1, 2, 3, 4, 5};
-    Row row = Row.withSchema(schema).withFieldValue("char", byteArrayWithLengthFive).build();
+    Row.withSchema(schema).withFieldValue("char", byteArrayWithLengthFive).build();
   }
 
   @Test(expected = IllegalArgumentException.class)
   public void testLogicalTypeWithInvalidInputValueByFieldIndex() {
     Schema schema = Schema.builder().addLogicalTypeField("char", FixedBytes.of(10)).build();
     byte[] byteArrayWithLengthFive = {1, 2, 3, 4, 5};
-    Row row = Row.withSchema(schema).addValues(byteArrayWithLengthFive).build();
+    Row.withSchema(schema).addValues(byteArrayWithLengthFive).build();
   }
 
   @Test
@@ -777,5 +805,95 @@ public class RowTest {
     assertEquals(enumerationType.valueOf(0), row.getValue(0));
     assertEquals(
         enumerationType.valueOf("zero"), row.getLogicalTypeValue(0, EnumerationType.Value.class));
+  }
+
+  @Test
+  public void testSorted() {
+    Schema unsortedNestedSchema =
+        Schema.builder().addStringField("bb").addStringField("aa").addStringField("cc").build();
+    Schema unsortedSchema =
+        Schema.builder()
+            .addStringField("d")
+            .addStringField("c")
+            .addRowField("e", unsortedNestedSchema)
+            .addStringField("b")
+            .addStringField("a")
+            .build();
+    Row unsortedNestedRow =
+        Row.withSchema(unsortedNestedSchema).addValues("bb_val", "aa_val", "cc_val").build();
+    Row unsortedRow =
+        Row.withSchema(unsortedSchema)
+            .addValues("d_val", "c_val", unsortedNestedRow, "b_val", "a_val")
+            .build();
+
+    Row expectedSortedNestedRow =
+        Row.withSchema(unsortedNestedSchema.sorted())
+            .addValues("aa_val", "bb_val", "cc_val")
+            .build();
+    Row expectedSortedRow =
+        Row.withSchema(unsortedSchema.sorted())
+            .addValues("a_val", "b_val", "c_val", "d_val", expectedSortedNestedRow)
+            .build();
+
+    Row sortedRow = unsortedRow.sorted();
+    assertEquals(expectedSortedNestedRow, sortedRow.getRow("e"));
+    assertEquals(expectedSortedRow, sortedRow);
+    assertNotEquals(unsortedRow, sortedRow);
+  }
+
+  @Test
+  public void testToSnakeCase() {
+    Schema innerSchema =
+        Schema.builder()
+            .addStringField("myFirstNestedStringField")
+            .addStringField("mySecondNestedStringField")
+            .build();
+    Schema schema =
+        Schema.builder()
+            .addStringField("myFirstStringField")
+            .addStringField("mySecondStringField")
+            .addRowField("myRowField", innerSchema)
+            .build();
+
+    Row innerRow = Row.withSchema(innerSchema).addValues("nested1", "nested2").build();
+    Row row = Row.withSchema(schema).addValues("str1", "str2", innerRow).build();
+
+    Row expectedSnakeCaseInnerRow =
+        Row.withSchema(innerSchema.toSnakeCase()).addValues("nested1", "nested2").build();
+    Row expectedSnakeCaseRow =
+        Row.withSchema(schema.toSnakeCase())
+            .addValues("str1", "str2", expectedSnakeCaseInnerRow)
+            .build();
+
+    assertEquals(expectedSnakeCaseInnerRow, row.toSnakeCase().getRow("my_row_field"));
+    assertEquals(expectedSnakeCaseRow, row.toSnakeCase());
+  }
+
+  @Test
+  public void testToCamelCase() {
+    Schema innerSchema =
+        Schema.builder()
+            .addStringField("my_first_nested_string_field")
+            .addStringField("my_second_nested_string_field")
+            .build();
+    Schema schema =
+        Schema.builder()
+            .addStringField("my_first_string_field")
+            .addStringField("my_second_string_field")
+            .addRowField("my_row_field", innerSchema)
+            .build();
+
+    Row innerRow = Row.withSchema(innerSchema).addValues("nested1", "nested2").build();
+    Row row = Row.withSchema(schema).addValues("str1", "str2", innerRow).build();
+
+    Row expectedCamelCaseInnerRow =
+        Row.withSchema(innerSchema.toCamelCase()).addValues("nested1", "nested2").build();
+    Row expectedCamelCaseRow =
+        Row.withSchema(schema.toCamelCase())
+            .addValues("str1", "str2", expectedCamelCaseInnerRow)
+            .build();
+
+    assertEquals(expectedCamelCaseInnerRow, row.toCamelCase().getRow("myRowField"));
+    assertEquals(expectedCamelCaseRow, row.toCamelCase());
   }
 }

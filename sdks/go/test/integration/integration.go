@@ -27,7 +27,8 @@
 // Running integration tests can be done with a go test call with any flags that
 // are required by the test pipelines, such as --runner or --endpoint.
 // Example:
-//    go test -v ./sdks/go/test/integration/... --runner=portable --endpoint=localhost:8099
+//
+//	go test -v ./sdks/go/test/integration/... --runner=portable --endpoint=localhost:8099
 //
 // Alternatively, tests can be executed by running the
 // run_validatesrunner_tests.sh script, which also performs much of the
@@ -37,9 +38,13 @@ package integration
 import (
 	"fmt"
 	"regexp"
+	"strings"
 	"testing"
 
+	// common runner flag.
+	"github.com/apache/beam/sdks/v2/go/pkg/beam/options/jobopts"
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/testing/ptest"
+	"github.com/google/uuid"
 )
 
 // Filters for temporarily skipping integration tests. All filters are regex
@@ -47,7 +52,7 @@ import (
 // CheckFilters is called. Multiple tests can be skipped by using regex
 // wildcards. (ex. "TestXLang_.*" filters all tests starting with TestXLang_)
 //
-// It is strongly recommended to include, TODOs, Jira issues, or just comments
+// It is strongly recommended to include, TODOs, GitHub issues, or just comments
 // describing why tests are being skipped.
 
 // sickbay filters tests that fail due to Go SDK errors. These tests will not
@@ -61,42 +66,148 @@ var directFilters = []string{
 	// The direct runner does not yet support cross-language.
 	"TestXLang.*",
 	"TestKafkaIO.*",
-	// Triggers are not yet supported
+	"TestBigQueryIO_[^WQ].*",
+	"TestBigtableIO.*",
+	"TestSpannerIO.*",
+	"TestDebeziumIO_BasicRead",
+	"TestJDBCIO_BasicReadWrite",
+	"TestJDBCIO_PostgresReadWrite",
+	"TestDataframe",
+	// Triggers, Panes are not yet supported
 	"TestTrigger.*",
+	"TestPanes",
+	// TestStream-based wait tests run on Prism; bounded variants run here.
+	"TestWaitStream.*",
 	// The direct runner does not support the TestStream primitive
 	"TestTestStream.*",
+	// (https://github.com/apache/beam/issues/21130): The direct runner does not support windowed side inputs
+	"TestValidateWindowedSideInputs",
+	// (https://github.com/apache/beam/issues/21130): The direct runner does not currently support multimap side inputs
+	"TestParDoMultiMapSideInput",
+	"TestLargeWordcount_Loopback",
+	// The direct runner does not support self-checkpointing
+	"TestCheckpointing",
+	// The direct runner does not support pipeline drain for SDF.
+	"TestDrain",
+	// FhirIO currently only supports Dataflow runner
+	"TestFhirIO.*",
+	// OOMs currently only lead to heap dumps on Dataflow runner
+	"TestOomParDo",
+	// The direct runner does not support user state.
+	"TestValueState",
+	"TestValueStateWindowed",
+	"TestValueStateClear",
+	"TestBagState",
+	"TestBagStateClear",
+	"TestBagStateBlindWrite",
+	"TestCombiningState",
+	"TestMapState",
+	"TestMapStateClear",
+	"TestSetState",
+	"TestSetStateClear",
+	"TestOrderedListState",
+	"TestTimers.*", // no timer support for the go direct runner.
+
+	// no support for BundleFinalizer
+	"TestParDoBundleFinalizer.*",
 }
 
 var portableFilters = []string{
 	// The portable runner does not support the TestStream primitive
 	"TestTestStream.*",
-	// The trigger tests uses TestStream
+	// The trigger and pane tests uses TestStream
 	"TestTrigger.*",
-	// TODO(BEAM-12797): Python portable runner times out on Kafka reads.
+	"TestPanes",
+	// The portable runner does not support the TestStream primitive; only bounded tests run here.
+	"TestWaitStream.*",
+	// TODO(https://github.com/apache/beam/issues/21058): Python portable runner times out on Kafka reads.
 	"TestKafkaIO.*",
+	// TODO(BEAM-13215): GCP IOs currently do not work in non-Dataflow portable runners.
+	"TestBigQueryIO.*",
+	"TestBigtableIO.*",
+	"TestSpannerIO.*",
+	// The portable runner does not support self-checkpointing
+	"TestCheckpointing",
+	// The portable runner does not support pipeline drain for SDF.
+	"TestDrain",
+	// FhirIO currently only supports Dataflow runner
+	"TestFhirIO.*",
+	// OOMs currently only lead to heap dumps on Dataflow runner
+	"TestOomParDo",
+	// The portable runner does not support user map states.
+	"TestMapState",
+	"TestMapStateClear",
+	"TestSetState",
+	"TestSetStateClear",
+	"TestOrderedListState",
+
+	// The portable runner does not uniquify timers. (data elements re-fired)
+	"TestTimers.*",
+
+	// no support for BundleFinalizer
+	"TestParDoBundleFinalizer.*",
+}
+
+var prismFilters = []string{
+	// The prism runner does not yet support Java's CoGBK.
+	"TestXLang_CoGroupBy",
+
+	// TODO(https://github.com/apache/beam/issues/21058): Xlang ios don't yet work on prism.
+	"TestKafkaIO.*",
+	// TODO(BEAM-13215): GCP IOs currently do not work in non-Dataflow portable runners.
+	"TestBigQueryIO.*",
+	"TestSpannerIO.*",
+	// The prism runner does not support pipeline drain for SDF.
+	"TestDrain",
+	// FhirIO currently only supports Dataflow runner
+	"TestFhirIO.*",
+	// OOMs currently only lead to heap dumps on Dataflow runner
+	"TestOomParDo",
 }
 
 var flinkFilters = []string{
-	// TODO(BEAM-11500): Flink tests timing out on reads.
+	// TODO(https://github.com/apache/beam/issues/20723): Flink tests timing out on reads.
 	"TestXLang_Combine.*",
-	// TODO(BEAM-12815): Test fails: "Insufficient number of network buffers".
-	"TestXLang_Multi",
-	// TODO(BEAM-12753): Flink test stream fails for non-string/byte slice inputs
-	"TestTestStream.*Sequence.*",
-	// Triggers are not yet supported
-	"TestTrigger.*",
-}
+	"TestDebeziumIO_BasicRead",
+	// TODO(BEAM-13215): GCP IOs currently do not work in non-Dataflow portable runners.
+	"TestBigQueryIO.*",
+	"TestBigtableIO.*",
+	"TestSpannerIO.*",
+	"TestTriggerAfterProcessingTime",
+	// The number of produced outputs in AfterSynchronizedProcessingTime varies in different runs.
+	"TestTriggerAfterSynchronizedProcessingTime",
+	// The flink runner does not support pipeline drain for SDF.
+	"TestDrain",
+	// FhirIO currently only supports Dataflow runner
+	"TestFhirIO.*",
+	// OOMs currently only lead to heap dumps on Dataflow runner
+	"TestOomParDo",
+	// Flink does not support map based state types.
+	"TestMapState",
+	"TestMapStateClear",
+	"TestSetStateClear",
+	"TestSetState",
+	"TestOrderedListState",
 
-var samzaFilters = []string{
-	// TODO(BEAM-12608): Samza tests invalid encoding.
-	"TestReshuffle",
-	"TestReshuffleKV",
-	// The Samza runner does not support the TestStream primitive
-	"TestTestStream.*",
-	// The trigger tests uses TestStream
-	"TestTrigger.*",
-	// TODO(BEAM-13006): Samza doesn't yet support post job metrics, used by WordCount
-	"TestWordCount.*",
+	// With TestStream Flink adds extra length prefixs some data types, causing SDK side failures.
+	"TestTestStreamStrings",
+	"TestTestStreamByteSliceSequence",
+	"TestTestStreamTwoUserTypeSequences",
+	"TestTestStreamInt16Sequence",
+	"TestTestStreamSimple",
+	"TestTestStreamSimple_InfinityDefault",
+	"TestTestStreamToGBK",
+	"TestTestStreamTimersEventTime",
+	// TODO(https://github.com/apache/beam/issues/31122): Flink's TestStream
+	// corrupts some length-prefixed and custom-coded values. These tests use a
+	// user-defined struct; sequencing variants also rely on process-local state.
+	"TestWaitStream.*",
+
+	"TestTimers_EventTime_WithNoOutputTimestamp", // Encounter error: TimestampCombiner moved element from TIMESTAMP_MAX_VALUE to earlier time (end of global window) for window GlobalWindow
+	"TestTimers_ProcessingTime.*",                // Flink doesn't support processing time timers.
+
+	// no support for BundleFinalizer
+	"TestParDoBundleFinalizer.*",
 }
 
 var sparkFilters = []string{
@@ -106,19 +217,82 @@ var sparkFilters = []string{
 	"TestParDoKVSideInput",
 	// The Spark runner does not support the TestStream primitive
 	"TestTestStream.*",
-	// The trigger tests uses TestStream
+	// The trigger and pane tests uses TestStream
 	"TestTrigger.*",
+	"TestPanes",
+	// Spark does not support TestStream or side inputs to executable stages.
+	"TestWaitStream.*",
+	"TestWaitBounded.*",
+	// [BEAM-13921]: Spark doesn't support side inputs to executable stages
+	"TestDebeziumIO_BasicRead",
+	// TODO(BEAM-13215): GCP IOs currently do not work in non-Dataflow portable runners.
+	"TestBigQueryIO.*",
+	"TestBigtableIO.*",
+	"TestSpannerIO.*",
+	// The spark runner does not support self-checkpointing
+	"TestCheckpointing",
+	// The spark runner does not support pipeline drain for SDF.
+	"TestDrain",
+	// FhirIO currently only supports Dataflow runner
+	"TestFhirIO.*",
+	// OOMs currently only lead to heap dumps on Dataflow runner
+	"TestOomParDo",
+	// Spark does not support map based state types.
+	"TestMapState",
+	"TestMapStateClear",
+	"TestSetStateClear",
+	"TestSetState",
+	"TestOrderedListState",
+
+	"TestTimers_EventTime_Unbounded",      // Side inputs in executable stage not supported.
+	"TestTimers_ProcessingTime_Infinity",  // Spark doesn't support test stream.
+	"TestTimers_ProcessingTime_Unbounded", // Side inputs in executable stage not supported.
+	// no support for BundleFinalizer
+	"TestParDoBundleFinalizer.*",
 }
 
 var dataflowFilters = []string{
+	// The Dataflow runner doesn't work with tests using testcontainers locally.
+	"TestJDBCIO_BasicReadWrite",
+	"TestJDBCIO_PostgresReadWrite",
+	"TestDebeziumIO_BasicRead",
+	"TestMongoDBIO.*",
 	// TODO(BEAM-11576): TestFlattenDup failing on this runner.
 	"TestFlattenDup",
 	// The Dataflow runner does not support the TestStream primitive
 	"TestTestStream.*",
-	// The trigger tests uses TestStream
+	// The trigger and pane tests uses TestStream
 	"TestTrigger.*",
+	"TestPanes",
+	// The Dataflow runner does not support the TestStream primitive; only bounded tests run here.
+	"TestWaitStream.*",
 	// There is no infrastructure for running KafkaIO tests with Dataflow.
 	"TestKafkaIO.*",
+	"TestSpannerIO.*",
+	// TODO(36918) These tests are currently failing in Dataflow Runner
+	"TestBigQueryIO.*",
+	"TestBigtableIO.*",
+	// Dataflow doesn't support any test that requires loopback.
+	// Eg. For FileIO examples.
+	".*Loopback.*",
+	// Dataflow does not automatically terminate the TestCheckpointing pipeline when
+	// complete.
+	"TestCheckpointing",
+	// TODO(21761): This test needs to provide GCP project to expansion service.
+	"TestBigQueryIO_BasicWriteQueryRead",
+	// Can't handle the test spanner container or access a local spanner.
+	"TestSpannerIO.*",
+	// Dataflow does not drain jobs by itself.
+	"TestDrain",
+	// Timers
+	"TestTimers_ProcessingTime_Infinity", // Uses test stream.
+	"TestTimers_ProcessingTime_Bounded",  // Dataflow ignores processing time timers in batch.
+	// Sometimes the Dataflow worker is killed by OOM before the heap dump code in boot.go is reached,
+	// so no dump file is created.
+	// TODO: https://github.com/apache/beam/issues/34498
+	"TestOomParDo",
+	// Runner V2 doesn't support OrderedListState SDK feature.
+	"TestOrderedListState",
 }
 
 // CheckFilters checks if an integration test is filtered to be skipped, either
@@ -127,6 +301,10 @@ var dataflowFilters = []string{
 // t.Run is used, CheckFilters should be called within the t.Run callback, so
 // that sub-tests can be skipped individually.
 func CheckFilters(t *testing.T) {
+	if !ptest.MainCalled() {
+		panic("ptest.Main() has not been called: please override TestMain to ensure that the integration test runs properly.")
+	}
+
 	// Check for sickbaying first.
 	n := t.Name()
 	for _, f := range sickbay {
@@ -141,7 +319,7 @@ func CheckFilters(t *testing.T) {
 			t.Skipf("Test %v is currently sickbayed on all runners", n)
 		}
 	}
-
+	*jobopts.JobName = dataflowJobName(n, uuid.New())
 	// Test for runner-specific skipping second.
 	var filters []string
 	runner := *ptest.Runner
@@ -151,12 +329,12 @@ func CheckFilters(t *testing.T) {
 	switch runner {
 	case "direct", "DirectRunner":
 		filters = directFilters
+	case "prism", "PrismRunner":
+		filters = prismFilters
 	case "portable", "PortableRunner":
 		filters = portableFilters
 	case "flink", "FlinkRunner":
 		filters = flinkFilters
-	case "samza", "SamzaRunner":
-		filters = samzaFilters
 	case "spark", "SparkRunner":
 		filters = sparkFilters
 	case "dataflow", "DataflowRunner":
@@ -177,4 +355,31 @@ func CheckFilters(t *testing.T) {
 			t.Skipf("Test %v is currently filtered for runner %v", n, runner)
 		}
 	}
+}
+
+// dataflowJobName keeps the test name readable while adding enough random
+// suffix bits to avoid collisions between concurrent integration runs.
+func dataflowJobName(testName string, id uuid.UUID) string {
+	const (
+		maxLength  = 40
+		prefix     = "go-"
+		separator  = "-"
+		suffixSize = 18 // 66 random bits from a UUIDv4.
+	)
+
+	n := strings.ToLower(testName)
+	readableName := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' {
+			return r
+		}
+		return '-'
+	}, n)
+
+	maxReadableNameLength := maxLength - len(prefix) - len(separator) - suffixSize
+	if len(readableName) > maxReadableNameLength {
+		readableName = readableName[:maxReadableNameLength]
+	}
+
+	suffix := strings.ReplaceAll(id.String(), "-", "")[:suffixSize]
+	return prefix + readableName + separator + suffix
 }

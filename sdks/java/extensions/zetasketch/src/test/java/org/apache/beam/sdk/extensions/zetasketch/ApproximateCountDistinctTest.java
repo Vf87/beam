@@ -29,8 +29,7 @@ import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -64,6 +63,7 @@ public class ApproximateCountDistinctTest {
     PAssert.that(result).containsInAnyOrder(1L);
     p.run();
   }
+
   /** Test correct Builder is returned from Generic type. * */
   @Test
   public void testStringBuilder() {
@@ -76,6 +76,7 @@ public class ApproximateCountDistinctTest {
     PAssert.that(result).containsInAnyOrder(1L);
     p.run();
   }
+
   /** Test correct Builder is returned from Generic type. * */
   @Test
   public void testLongBuilder() {
@@ -87,13 +88,13 @@ public class ApproximateCountDistinctTest {
     PAssert.that(result).containsInAnyOrder(1L);
     p.run();
   }
+
   /** Test correct Builder is returned from Generic type. * */
   @Test
   public void testBytesBuilder() {
 
     byte[] byteArray = new byte[] {'A'};
     PCollection<byte[]> bytes = p.apply(Create.of(byteArray));
-    TypeDescriptor<byte[]> a = bytes.getCoder().getEncodedTypeDescriptor();
     HllCount.Init.Builder<byte[]> builder =
         ApproximateCountDistinct.<byte[]>builderForType(
             bytes.getCoder().getEncodedTypeDescriptor());

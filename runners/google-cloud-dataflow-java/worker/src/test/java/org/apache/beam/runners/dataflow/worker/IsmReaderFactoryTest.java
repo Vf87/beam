@@ -37,12 +37,10 @@ import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.io.fs.ResourceId;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
-import org.apache.beam.sdk.util.WindowedValue;
-import org.apache.beam.sdk.util.WindowedValue.WindowedValueCoder;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.Cache;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.cache.CacheBuilder;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.apache.beam.sdk.values.WindowedValues;
+import org.apache.beam.sdk.values.WindowedValues.WindowedValueCoder;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableMap;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
@@ -55,7 +53,6 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public class IsmReaderFactoryTest {
   private DataflowPipelineOptions options;
-  private Cache<Object, Object> logicalReferenceCache;
   private BatchModeExecutionContext executionContext;
   private Closeable stateCloseable;
   private DataflowOperationContext operationContext;
@@ -65,7 +62,6 @@ public class IsmReaderFactoryTest {
   @Before
   public void setUp() {
     options = PipelineOptionsFactory.as(DataflowPipelineOptions.class);
-    logicalReferenceCache = CacheBuilder.newBuilder().weakValues().build();
 
     executionContext =
         BatchModeExecutionContext.forTesting(
@@ -94,7 +90,7 @@ public class IsmReaderFactoryTest {
   @Test
   public void testFactory() throws Exception {
     WindowedValueCoder<?> coder =
-        WindowedValue.getFullCoder(
+        WindowedValues.getFullCoder(
             IsmRecordCoder.of(
                 1, 0, ImmutableList.<Coder<?>>of(StringUtf8Coder.of()), VarLongCoder.of()),
             GlobalWindow.Coder.INSTANCE);
@@ -118,7 +114,7 @@ public class IsmReaderFactoryTest {
   @Test
   public void testFactoryReturnsCachedInstance() throws Exception {
     Coder<?> coder =
-        WindowedValue.getFullCoder(
+        WindowedValues.getFullCoder(
             IsmRecordCoder.of(
                 1, 0, ImmutableList.<Coder<?>>of(StringUtf8Coder.of()), VarLongCoder.of()),
             GlobalWindow.Coder.INSTANCE);

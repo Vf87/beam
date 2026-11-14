@@ -18,6 +18,7 @@
 """S3 file system implementation for accessing files on AWS S3."""
 
 # pytype: skip-file
+import traceback
 
 from apache_beam.io.aws import s3io
 from apache_beam.io.filesystem import BeamIOError
@@ -40,7 +41,7 @@ class S3FileSystem(FileSystem):
     """Initializes a connection to S3.
 
     Connection configuration is done by passing pipeline options.
-    See :class:`~apache_beam.options.pipeline_options.S3Options`.
+    See :class:`~apache_beam.options.pipeline_options.AwsOptions`.
     """
     super().__init__(pipeline_options)
     self._options = pipeline_options
@@ -128,9 +129,9 @@ class S3FileSystem(FileSystem):
       ``BeamIOError``: if listing fails, but not if no files were found.
     """
     try:
-      for path, size in \
-        s3io.S3IO(options=self._options).list_prefix(dir_or_prefix).items():
-        yield FileMetadata(path, size)
+      for path, (size, updated) in s3io.S3IO(options=self._options).list_files(
+          dir_or_prefix, with_metadata=True):
+        yield FileMetadata(path, size, updated)
     except Exception as e:  # pylint: disable=broad-except
       raise BeamIOError("List operation failed", {dir_or_prefix: e})
 
@@ -281,6 +282,25 @@ class S3FileSystem(FileSystem):
     except Exception as e:  # pylint: disable=broad-except
       raise BeamIOError("Checksum operation failed", {path: e})
 
+  def metadata(self, path):
+    """Fetch metadata fields of a file on the FileSystem.
+
+    Args:
+      path: string path of a file.
+
+    Returns:
+      :class:`~apache_beam.io.filesystem.FileMetadata`.
+
+    Raises:
+      ``BeamIOError``: if path isn't a file or doesn't exist.
+    """
+    try:
+      file_metadata = s3io.S3IO(options=self._options)._status(path)
+      return FileMetadata(
+          path, file_metadata['size'], file_metadata['last_updated'])
+    except Exception as e:  # pylint: disable=broad-except
+      raise BeamIOError("Metadata operation failed", {path: e})
+
   def delete(self, paths):
     """Deletes files or directories at the provided paths.
     Directories will be deleted recursively.
@@ -295,3 +315,14 @@ class S3FileSystem(FileSystem):
     }
     if exceptions:
       raise BeamIOError("Delete operation failed", exceptions)
+
+  def report_lineage(self, path, lineage):
+    try:
+      components = s3io.parse_s3_path(path, object_optional=True)
+    except ValueError:
+      # report lineage is fail-safe
+      traceback.print_exc()
+      return
+    if components and not components[-1]:
+      components = components[:-1]
+    lineage.add('s3', *components, last_segment_sep='/')

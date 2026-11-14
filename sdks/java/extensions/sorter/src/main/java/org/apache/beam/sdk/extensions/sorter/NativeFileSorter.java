@@ -37,9 +37,9 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import org.apache.beam.sdk.coders.ByteArrayCoder;
 import org.apache.beam.sdk.values.KV;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterators;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.primitives.UnsignedBytes;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.Iterators;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.primitives.UnsignedBytes;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,7 +48,7 @@ import org.slf4j.LoggerFactory;
  * External Sorter based on <a
  * href="https://github.com/lemire/externalsortinginjava">lemire/externalsortinginjava</a>.
  */
-class NativeFileSorter {
+final class NativeFileSorter {
 
   private static final Logger LOG = LoggerFactory.getLogger(NativeFileSorter.class);
 
@@ -140,6 +140,8 @@ class NativeFileSorter {
     } finally {
       inputStream.close();
     }
+    // Every record is in a sorted block now, so the unsorted copy can go.
+    Files.deleteIfExists(dataFile.toPath());
     return files;
   }
 
@@ -204,10 +206,18 @@ class NativeFileSorter {
 
   private @Nullable KV<byte[], byte[]> readKeyValueOrFail(InputStream inputStream) {
     try {
-      return readKeyValue(inputStream);
-    } catch (EOFException e) {
-      return null;
+      @Nullable KV<byte[], byte[]> kv = readKeyValue(inputStream); // null at end of file
+      if (kv == null) {
+        // The block is used up: release its file handle now
+        inputStream.close();
+      }
+      return kv;
     } catch (IOException e) {
+      try {
+        inputStream.close();
+      } catch (IOException closeError) {
+        e.addSuppressed(closeError);
+      }
       throw new IllegalStateException(e);
     }
   }
@@ -224,11 +234,6 @@ class NativeFileSorter {
   }
 
   ////////////////////////////////////////////////////////////////////////////////
-
-  private int bufferSize(int numFiles) {
-    final long memory = maxMemory > 0 ? maxMemory : estimateAvailableMemory();
-    return (int) (memory / numFiles / 2);
-  }
 
   /**
    * This method calls the garbage collector and then returns the free memory. This avoids problems

@@ -21,8 +21,6 @@ import com.google.auto.value.AutoValue;
 import java.io.Serializable;
 import java.util.Collections;
 import java.util.List;
-import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.annotations.Internal;
 import org.apache.beam.sdk.schemas.FieldAccessDescriptor;
 import org.apache.beam.sdk.schemas.Schema;
@@ -34,14 +32,14 @@ import org.apache.beam.sdk.schemas.utils.RowSelector;
 import org.apache.beam.sdk.schemas.utils.SelectHelpers.RowSelectorContainer;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.TypeDescriptor;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.collect.ImmutableList;
+import org.checkerframework.dataflow.qual.Pure;
 
 /** Represents information about how a DoFn extracts schemas. */
-@Experimental(Kind.SCHEMAS)
 @AutoValue
 @Internal
 @SuppressWarnings({
-  "nullness", // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+  "nullness", // TODO(https://github.com/apache/beam/issues/20497)
   "rawtypes"
 })
 public abstract class DoFnSchemaInformation implements Serializable {
@@ -49,12 +47,19 @@ public abstract class DoFnSchemaInformation implements Serializable {
    * The schema of the @Element parameter. If the Java type does not match the input PCollection but
    * the schemas are compatible, Beam will automatically convert between the Java types.
    */
+  @Pure
   public abstract List<SerializableFunction<?, ?>> getElementConverters();
 
+  /** Effective FieldAccessDescriptor applied by DoFn. */
+  @Pure
+  public abstract FieldAccessDescriptor getFieldAccessDescriptor();
+
   /** Create an instance. */
+  @Pure
   public static DoFnSchemaInformation create() {
     return new AutoValue_DoFnSchemaInformation.Builder()
         .setElementConverters(Collections.emptyList())
+        .setFieldAccessDescriptor(FieldAccessDescriptor.create())
         .build();
   }
 
@@ -63,9 +68,13 @@ public abstract class DoFnSchemaInformation implements Serializable {
   public abstract static class Builder {
     abstract Builder setElementConverters(List<SerializableFunction<?, ?>> converters);
 
+    abstract Builder setFieldAccessDescriptor(FieldAccessDescriptor descriptor);
+
+    @Pure
     abstract DoFnSchemaInformation build();
   }
 
+  @Pure
   public abstract Builder toBuilder();
 
   /**
@@ -97,7 +106,6 @@ public abstract class DoFnSchemaInformation implements Serializable {
                     inputCoder.getToRowFunction(),
                     parameterCoder.getFromRowFunction(),
                     selectDescriptor,
-                    selectOutputSchema,
                     unbox))
             .build();
 
@@ -144,13 +152,24 @@ public abstract class DoFnSchemaInformation implements Serializable {
     return toBuilder().setElementConverters(converters).build();
   }
 
+  /**
+   * Specified a descriptor of fields accessed from an input schema.
+   *
+   * @param selectDescriptor The descriptor describing which field to select.
+   * @return
+   */
+  DoFnSchemaInformation withFieldAccessDescriptor(FieldAccessDescriptor selectDescriptor) {
+
+    FieldAccessDescriptor descriptor =
+        FieldAccessDescriptor.union(ImmutableList.of(getFieldAccessDescriptor(), selectDescriptor));
+
+    return toBuilder().setFieldAccessDescriptor(descriptor).build();
+  }
+
   private static class ConversionFunction<InputT, OutputT>
       implements SerializableFunction<InputT, OutputT> {
-    private final Schema inputSchema;
     private final SerializableFunction<InputT, Row> toRowFunction;
     private final SerializableFunction<Row, OutputT> fromRowFunction;
-    private final FieldAccessDescriptor selectDescriptor;
-    private final Schema selectOutputSchema;
     private final boolean unbox;
     private final RowSelector rowSelector;
 
@@ -159,13 +178,9 @@ public abstract class DoFnSchemaInformation implements Serializable {
         SerializableFunction<InputT, Row> toRowFunction,
         SerializableFunction<Row, OutputT> fromRowFunction,
         FieldAccessDescriptor selectDescriptor,
-        Schema selectOutputSchema,
         boolean unbox) {
-      this.inputSchema = inputSchema;
       this.toRowFunction = toRowFunction;
       this.fromRowFunction = fromRowFunction;
-      this.selectDescriptor = selectDescriptor;
-      this.selectOutputSchema = selectOutputSchema;
       this.unbox = unbox;
       this.rowSelector = new RowSelectorContainer(inputSchema, selectDescriptor, true);
     }
@@ -175,10 +190,9 @@ public abstract class DoFnSchemaInformation implements Serializable {
         SerializableFunction<InputT, Row> toRowFunction,
         SerializableFunction<Row, OutputT> fromRowFunction,
         FieldAccessDescriptor selectDescriptor,
-        Schema selectOutputSchema,
         boolean unbox) {
       return new ConversionFunction<>(
-          inputSchema, toRowFunction, fromRowFunction, selectDescriptor, selectOutputSchema, unbox);
+          inputSchema, toRowFunction, fromRowFunction, selectDescriptor, unbox);
     }
 
     @Override
@@ -198,10 +212,7 @@ public abstract class DoFnSchemaInformation implements Serializable {
    */
   private static class UnboxingConversionFunction<InputT, OutputT>
       implements SerializableFunction<InputT, OutputT> {
-    private final Schema inputSchema;
     private final SerializableFunction<InputT, Row> toRowFunction;
-    private final FieldAccessDescriptor selectDescriptor;
-    private final Schema selectOutputSchema;
     private final FieldType primitiveType;
     private final TypeDescriptor<?> primitiveOutputType;
     private transient SerializableFunction<InputT, OutputT> conversionFunction;
@@ -213,16 +224,13 @@ public abstract class DoFnSchemaInformation implements Serializable {
         FieldAccessDescriptor selectDescriptor,
         Schema selectOutputSchema,
         TypeDescriptor<?> primitiveOutputType) {
-      this.inputSchema = inputSchema;
       this.toRowFunction = toRowFunction;
-      this.selectDescriptor = selectDescriptor;
-      this.selectOutputSchema = selectOutputSchema;
       this.primitiveType = selectOutputSchema.getField(0).getType();
       this.primitiveOutputType = primitiveOutputType;
       this.rowSelector = new RowSelectorContainer(inputSchema, selectDescriptor, true);
     }
 
-    public static <InputT, OutputT> UnboxingConversionFunction of(
+    public static <InputT> UnboxingConversionFunction of(
         Schema inputSchema,
         SerializableFunction<InputT, Row> toRowFunction,
         FieldAccessDescriptor selectDescriptor,

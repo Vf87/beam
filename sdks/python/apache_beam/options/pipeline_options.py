@@ -20,14 +20,15 @@
 # pytype: skip-file
 
 import argparse
+import difflib
 import json
 import logging
+import os
+import sys
 from typing import Any
 from typing import Callable
-from typing import Dict
-from typing import List
 from typing import Optional
-from typing import Type
+from typing import Sequence
 from typing import TypeVar
 
 import apache_beam as beam
@@ -35,6 +36,8 @@ from apache_beam.options.value_provider import RuntimeValueProvider
 from apache_beam.options.value_provider import StaticValueProvider
 from apache_beam.options.value_provider import ValueProvider
 from apache_beam.transforms.display import HasDisplayData
+from apache_beam.utils import logger
+from apache_beam.utils import proto_utils
 
 __all__ = [
     'PipelineOptions',
@@ -42,12 +45,14 @@ __all__ = [
     'TypeOptions',
     'DirectOptions',
     'GoogleCloudOptions',
+    'AzureOptions',
     'HadoopFileSystemOptions',
     'WorkerOptions',
     'DebugOptions',
     'ProfilingOptions',
     'SetupOptions',
     'TestOptions',
+    'AwsOptions',
     'S3Options'
 ]
 
@@ -55,9 +60,22 @@ PipelineOptionsT = TypeVar('PipelineOptionsT', bound='PipelineOptions')
 
 _LOGGER = logging.getLogger(__name__)
 
+# Map defined with option names to flag names for boolean options
+# that have a destination(dest) in parser.add_argument() different
+# from the flag name and whose default value is `None`.
+_FLAG_THAT_SETS_FALSE_VALUE = {
+    'use_public_ips': 'no_use_public_ips',
+    'save_main_session': 'no_save_main_session'
+}
+# Set of options which should not be overriden when applying options from a
+# different language. This is relevant when using x-lang transforms where the
+# expansion service is started up with some pipeline options, and will
+# impact which options are passed in to expanded transforms' expand functions.
+_NON_OVERIDABLE_XLANG_OPTIONS = ['runner', 'experiments']
+
 
 def _static_value_provider_of(value_type):
-  """"Helper function to plug a ValueProvider into argparse.
+  """Helper function to plug a ValueProvider into argparse.
 
   Args:
     value_type: the type of the value. Since the type param of argparse's
@@ -72,6 +90,57 @@ def _static_value_provider_of(value_type):
     return StaticValueProvider(value_type, value)
 
   return _f
+
+
+def _find_positions(args: Sequence[str],
+                    flags: Sequence[str]) -> list[Optional[int]]:
+  """Returns the index in flags of each of args.
+
+  args is expected to be a subsequence of flags, such as the unknown args that
+  argparse returns from parse_known_args. The position of an arg that cannot be
+  found is None.
+  """
+  positions: list[Optional[int]] = []
+  start = 0
+  for arg in args:
+    try:
+      position = flags.index(arg, start)
+    except ValueError:
+      positions.append(None)
+      continue
+    positions.append(position)
+    start = position + 1
+  return positions
+
+
+def _has_separate_value(
+    unknown_args: Sequence[str],
+    i: int,
+    all_flags: Sequence[str],
+    positions: Sequence[Optional[int]]) -> bool:
+  """Returns whether the unknown flag unknown_args[i] is followed by its value.
+
+  The value has to be the next unknown arg and also the arg that directly
+  follows the flag in all_flags, so that a flag is not given a stray value from
+  further along the command line. A flag written as --flag=value already
+  carries its value, so nothing after it belongs to it.
+
+  Args:
+    unknown_args: the args that argparse did not recognize, in their original
+      order.
+    i: the index of the flag in unknown_args.
+    all_flags: the complete list of flags that unknown_args came from.
+    positions: the index in all_flags of each of unknown_args, as returned by
+      _find_positions.
+  """
+  if '=' in unknown_args[i]:
+    return False
+  if i + 1 >= len(unknown_args) or unknown_args[i + 1].startswith('-'):
+    return False
+  position = positions[i]
+  if position is None or position + 1 >= len(all_flags):
+    return False
+  return not all_flags[position + 1].startswith('-')
 
 
 class _BeamArgumentParser(argparse.ArgumentParser):
@@ -94,7 +163,7 @@ class _BeamArgumentParser(argparse.ArgumentParser):
     key/value form.
     """
     # Extract the option name from positional argument ['pos_arg']
-    assert args != () and len(args[0]) >= 1
+    assert args and len(args[0]) >= 1
     if args[0][0] != '-':
       option_name = args[0]
       if kwargs.get('nargs') is None:  # make them optionally templated
@@ -128,7 +197,159 @@ class _BeamArgumentParser(argparse.ArgumentParser):
     super().error(message)
 
 
+class _DictUnionAction(argparse.Action):
+  """
+  argparse Action take union of json loads values. If a key is specified in more
+  than one of the values, the last value takes precedence.
+  """
+  def __call__(self, parser, namespace, values, option_string=None):
+    if not hasattr(namespace, self.dest) or getattr(namespace,
+                                                    self.dest) is None:
+      setattr(namespace, self.dest, {})
+    getattr(namespace, self.dest).update(values)
+
+
+class _GcsCustomAuditEntriesAction(argparse.Action):
+  """
+  Argparse Action for GCS custom audit entries.
+
+  According to Google Cloud Storage audit logging documentation
+  (https://cloud.google.com/storage/docs/audit-logging#add-custom-metadata), the
+  following limitations apply:
+  - keys must be 64 characters or less,
+  - values 1,200 characters or less, and
+  - a maximum of four custom metadata entries are permitted per request.
+  """
+  MAX_KEY_LENGTH = 64
+  MAX_VALUE_LENGTH = 1200
+  MAX_ENTRIES = 4
+  GCS_AUDIT_PREFIX = 'x-goog-custom-audit-'
+
+  def _exceed_entry_limit(self):
+    job_audit_entry = _GcsCustomAuditEntriesAction.GCS_AUDIT_PREFIX + 'job'
+    if job_audit_entry in self._custom_audit_entries:
+      return len(
+          self._custom_audit_entries) > _GcsCustomAuditEntriesAction.MAX_ENTRIES
+    else:
+      return len(self._custom_audit_entries) > (
+          _GcsCustomAuditEntriesAction.MAX_ENTRIES - 1)
+
+  def _add_entry(self, key, value):
+    if len(key) > _GcsCustomAuditEntriesAction.MAX_KEY_LENGTH:
+      raise argparse.ArgumentError(
+          None,
+          "The key '%s' in GCS custom audit entries exceeds the %d-character limit."  # pylint: disable=line-too-long
+          % (key, _GcsCustomAuditEntriesAction.MAX_KEY_LENGTH))
+
+    if len(value) > _GcsCustomAuditEntriesAction.MAX_VALUE_LENGTH:
+      raise argparse.ArgumentError(
+          None,
+          "The value '%s' in GCS custom audit entries exceeds the %d-character limit."  # pylint: disable=line-too-long
+          % (value, _GcsCustomAuditEntriesAction.MAX_VALUE_LENGTH))
+
+    if key.startswith(_GcsCustomAuditEntriesAction.GCS_AUDIT_PREFIX):
+      self._custom_audit_entries[key] = value
+    else:
+      self._custom_audit_entries[_GcsCustomAuditEntriesAction.GCS_AUDIT_PREFIX +
+                                 key] = value
+
+  def __call__(self, parser, namespace, values, option_string=None):
+    if not hasattr(namespace, self.dest) or getattr(namespace,
+                                                    self.dest) is None:
+      setattr(namespace, self.dest, {})
+      self._custom_audit_entries = getattr(namespace, self.dest)
+
+    if option_string == '--gcs_custom_audit_entries':
+      # in the format of {"key": "value"}
+      assert (isinstance(values, str))
+      sub_entries = json.loads(values)
+      for key, value in sub_entries.items():
+        self._add_entry(key, value)
+    else:  # option_string == '--gcs_custom_audit_entry'
+      # in the format of 'key=value'
+      assert (isinstance(values, str))
+      parts = values.split('=', 1)
+      key = parts[0]
+      value = parts[1] if len(parts) > 1 else ''
+      self._add_entry(key, value)
+
+    if self._exceed_entry_limit():
+      raise argparse.ArgumentError(
+          None,
+          "The maximum allowed number of GCS custom audit entries (including the default x-goo-custom-audit-job) is %d."  # pylint: disable=line-too-long
+          % _GcsCustomAuditEntriesAction.MAX_ENTRIES)
+
+
+class _CommaSeparatedListAction(argparse.Action):
+  """
+  Argparse Action that splits comma-separated values and appends them to
+  a list. This allows options like --experiments=abc,def to be treated
+  as separate experiments 'abc' and 'def', similar to how Java SDK handles
+  them.
+
+  If there are key=value experiments in a raw argument, the remaining part of
+  the argument are treated as values and won't split further. For example:
+  'abc,def,master_key=k1=v1,k2=v2' becomes
+  ['abc', 'def', 'master_key=k1=v1,k2=v2'].
+  """
+  def __call__(self, parser, namespace, values, option_string=None):
+    if not hasattr(namespace, self.dest) or getattr(namespace,
+                                                    self.dest) is None:
+      setattr(namespace, self.dest, [])
+
+    # Split comma-separated values and extend the list
+    if isinstance(values, str):
+      # Smart splitting: only split at commas that are not part of
+      # key=value pairs
+      split_values = self._smart_split(values)
+      getattr(namespace, self.dest).extend(split_values)
+    else:
+      # If values is not a string, just append it
+      getattr(namespace, self.dest).append(values)
+
+  def _smart_split(self, values):
+    """Split comma-separated values, but preserve commas within
+    key=value pairs."""
+    result = []
+    current = []
+    equals_depth = 0
+
+    i = 0
+    while i < len(values):
+      char = values[i]
+
+      if char == '=':
+        equals_depth += 1
+        current.append(char)
+      elif char == ',' and equals_depth <= 1:
+        # This comma is a top-level separator (not inside a complex value)
+        if current:
+          result.append(''.join(current).strip())
+          current = []
+          equals_depth = 0
+      elif char == ',' and equals_depth > 1:
+        # This comma is inside a complex value, keep it
+        current.append(char)
+      elif char == ' ' and not current:
+        # Skip leading spaces
+        pass
+      else:
+        current.append(char)
+
+      i += 1
+
+    # Add the last item
+    if current:
+      result.append(''.join(current).strip())
+
+    return [v for v in result if v]  # Filter out empty values
+
+
 class PipelineOptions(HasDisplayData):
+  # Set of options which should not be overriden when pipeline options are
+  # being merged (see from_runner_api). This primarily comes up when expanding
+  # the Python expansion service
+
   """This class and subclasses are used as containers for command line options.
 
   These classes are wrappers over the standard argparse Python module
@@ -165,9 +386,7 @@ class PipelineOptions(HasDisplayData):
   By default the options classes will use command line arguments to initialize
   the options.
   """
-  def __init__(self, flags=None, **kwargs):
-    # type: (Optional[List[str]], **Any) -> None
-
+  def __init__(self, flags: Optional[Sequence[str]] = None, **kwargs) -> None:
     """Initialize an options class.
 
     The initializer will traverse all subclasses, add all their argparse
@@ -180,7 +399,15 @@ class PipelineOptions(HasDisplayData):
       flags: An iterable of command line arguments to be used. If not specified
         then sys.argv will be used as input for parsing arguments.
 
-      **kwargs: Add overrides for arguments passed in flags.
+      **kwargs: Add overrides for arguments passed in flags. For overrides
+                of arguments, please pass the `option names` instead of
+                flag names.
+                Option names: These are defined as dest in the
+                parser.add_argument() for each flag. Passing flags
+                like {no_use_public_ips: True}, for which the dest is
+                defined to a different flag name in the parser,
+                would be discarded. Instead, pass the dest of
+                the flag (dest of no_use_public_ips is use_public_ips).
     """
     # Initializing logging configuration in case the user did not set it up.
     logging.basicConfig()
@@ -188,11 +415,17 @@ class PipelineOptions(HasDisplayData):
     # self._flags stores a list of not yet parsed arguments, typically,
     # command-line flags. This list is shared across different views.
     # See: view_as().
+    if isinstance(flags, str):
+      # Unfortunately a single str passes the Iterable[str] test, as it is
+      # an iterable of single characters.  This is almost certainly not the
+      # intent...
+      raise ValueError(
+          "Flags must be an iterable of of strings, not a single string.")
     self._flags = flags
 
     # Build parser that will parse options recognized by the [sub]class of
     # PipelineOptions whose object is being instantiated.
-    parser = _BeamArgumentParser()
+    parser = _BeamArgumentParser(allow_abbrev=False)
     for cls in type(self).mro():
       if cls == PipelineOptions:
         break
@@ -219,9 +452,22 @@ class PipelineOptions(HasDisplayData):
         self._all_options[option_name] = getattr(
             self._visible_options, option_name)
 
+  def __getstate__(self):
+    # The impersonate_service_account option must be used only at submission of
+    # a Beam job. However, Beam IOs might store pipeline options
+    # within transform implementation that becomes serialized in RunnerAPI,
+    # causing this option to be inadvertently used at runtime.
+    # This serialization hook removes it.
+    if self.view_as(GoogleCloudOptions).impersonate_service_account:
+      dict_copy = dict(self.__dict__)
+      dict_copy['_all_options'] = dict(dict_copy['_all_options'])
+      dict_copy['_all_options']['impersonate_service_account'] = None
+      return dict_copy
+    else:
+      return self.__dict__
+
   @classmethod
-  def _add_argparse_args(cls, parser):
-    # type: (_BeamArgumentParser) -> None
+  def _add_argparse_args(cls, parser: _BeamArgumentParser) -> None:
     # Override this in subclasses to provide options.
     pass
 
@@ -237,31 +483,65 @@ class PipelineOptions(HasDisplayData):
     """
     flags = []
     for k, v in options.items():
+      # Note: If a boolean flag is True in the dictionary,
+      # implicitly the method assumes the boolean flag is
+      # specified as a command line argument. If the
+      # boolean flag is False, this method simply discards them.
+      # Eg: {no_auth: True} is similar to python your_file.py --no_auth
+      # {no_auth: False} is similar to python your_file.py.
       if isinstance(v, bool):
         if v:
           flags.append('--%s' % k)
+        elif k in _FLAG_THAT_SETS_FALSE_VALUE:
+          # Capture overriding flags, which have a different dest
+          # from the flag name defined in the parser.add_argument
+          # Eg: no_use_public_ips, which has the dest=use_public_ips
+          # different from flag name
+          flag_that_disables_the_option = (_FLAG_THAT_SETS_FALSE_VALUE[k])
+          flags.append('--%s' % flag_that_disables_the_option)
       elif isinstance(v, list):
         for i in v:
           flags.append('--%s=%s' % (k, i))
       elif isinstance(v, dict):
         flags.append('--%s=%s' % (k, json.dumps(v)))
+      elif v is None:
+        # Don't process None type args here, they will be treated
+        # as strings when parsed by BeamArgumentParser..
+        logging.warning('Not setting flag with value None: %s', k)
       else:
         flags.append('--%s=%s' % (k, v))
 
     return cls(flags)
 
+  @staticmethod
+  def _warn_on_unknown_options(unknown_args, parser):
+    if not unknown_args:
+      return
+
+    all_known_options = [
+        opt for action in parser._actions for opt in action.option_strings
+    ]
+
+    for arg in unknown_args:
+      msg = f"Unparseable argument: {arg}"
+      if arg.startswith('--'):
+        arg_name = arg.split('=', 1)[0]
+        suggestions = difflib.get_close_matches(arg_name, all_known_options)
+        if suggestions:
+          msg += f". Did you mean '{suggestions[0]}'?'"
+      logger.log_first_n(logging.WARN, msg, key="message")
+
   def get_all_options(
       self,
       drop_default=False,
-      add_extra_args_fn=None,  # type: Optional[Callable[[_BeamArgumentParser], None]]
-      retain_unknown_options=False
-  ):
-    # type: (...) -> Dict[str, Any]
-
+      add_extra_args_fn: Optional[Callable[[_BeamArgumentParser], None]] = None,
+      retain_unknown_options=False,
+      display_warnings=False,
+      current_only=False,
+  ) -> dict[str, Any]:
     """Returns a dictionary of all defined arguments.
 
-    Returns a dictionary of all defined arguments (arguments that are defined in
-    any subclass of PipelineOptions) into a dictionary.
+    Returns a dictionary of all defined arguments into a dictionary.
 
     Args:
       drop_default: If set to true, options that are equal to their default
@@ -271,41 +551,82 @@ class PipelineOptions(HasDisplayData):
       retain_unknown_options: If set to true, options not recognized by any
         known pipeline options class will still be included in the result. If
         set to false, they will be discarded.
+      current_only: If set to true, only returns options defined in this class.
+      Otherwise, arguments that are defined in any subclass of PipelineOptions
+      are returned (default).
 
     Returns:
       Dictionary of all args and values.
     """
 
-    # TODO(BEAM-1319): PipelineOption sub-classes in the main session might be
-    # repeated. Pick last unique instance of each subclass to avoid conflicts.
+    # TODO(https://github.com/apache/beam/issues/18197): PipelineOption
+    # sub-classes in the main session might be repeated. Pick last unique
+    # instance of each subclass to avoid conflicts.
     subset = {}
-    parser = _BeamArgumentParser()
-    for cls in PipelineOptions.__subclasses__():
-      subset[str(cls)] = cls
+    parser = _BeamArgumentParser(allow_abbrev=False)
+    if current_only:
+      subset.setdefault(str(type(self)), type(self))
+    else:
+      for cls in PipelineOptions.__subclasses__():
+        subset.setdefault(str(cls), cls)
     for cls in subset.values():
       cls._add_argparse_args(parser)  # pylint: disable=protected-access
     if add_extra_args_fn:
       add_extra_args_fn(parser)
 
     known_args, unknown_args = parser.parse_known_args(self._flags)
+
+    if display_warnings:
+      self._warn_on_unknown_options(unknown_args, parser)
+
     if retain_unknown_options:
+      seen = set()
+
+      def add_new_arg(arg, **kwargs):
+        if arg not in seen:
+          parser.add_argument(arg, **kwargs)
+        seen.add(arg)
+
+      # Unknown args are returned in their original order, but they are not
+      # necessarily adjacent in the original flags, e.g. a known option may
+      # sit between an unknown flag and a stray value. Find where each one
+      # came from so that a value is only given to the flag right before it.
+      all_flags = sys.argv[1:] if self._flags is None else list(self._flags)
+      positions = _find_positions(unknown_args, all_flags)
+
       i = 0
       while i < len(unknown_args):
+        # End of argument parsing.
+        if unknown_args[i] == '--':
+          break
         # Treat all unary flags as booleans, and all binary argument values as
         # strings.
-        if i + 1 >= len(unknown_args) or unknown_args[i + 1].startswith('-'):
+        if not unknown_args[i].startswith('-'):
+          i += 1
+          continue
+        if not _has_separate_value(unknown_args, i, all_flags, positions):
           split = unknown_args[i].split('=', 1)
           if len(split) == 1:
-            parser.add_argument(unknown_args[i], action='store_true')
+            add_new_arg(unknown_args[i], action='store_true')
           else:
-            parser.add_argument(split[0], type=str)
+            add_new_arg(split[0], type=str)
           i += 1
-        else:
-          parser.add_argument(unknown_args[i], type=str)
+        elif unknown_args[i].startswith('--'):
+          add_new_arg(unknown_args[i], type=str)
           i += 2
-      parsed_args = parser.parse_args(self._flags)
+        else:
+          # skip all binary flags used with '-' and not '--'.
+          # ex: using -f instead of --f (or --flexrs_goal) will prevent
+          # argument validation before job submission and can be incorrectly
+          # submitted to job.
+          _LOGGER.warning(
+              "Discarding flag %s, single dash flags are not allowed.",
+              unknown_args[i])
+          i += 2
+          continue
+      parsed_args, _ = parser.parse_known_args(self._flags)
     else:
-      if unknown_args:
+      if unknown_args and not current_only:
         _LOGGER.warning("Discarding unparseable args: %s", unknown_args)
       parsed_args = known_args
     result = vars(parsed_args)
@@ -321,16 +642,52 @@ class PipelineOptions(HasDisplayData):
         del result[k]
 
     if overrides:
-      _LOGGER.warning("Discarding invalid overrides: %s", overrides)
+      if retain_unknown_options:
+        result.update(overrides)
+      elif not current_only:
+        _LOGGER.warning("Discarding invalid overrides: %s", overrides)
 
     return result
 
+  def to_runner_api(self):
+    def to_struct_value(o):
+      if isinstance(o, (bool, int, str)):
+        return o
+      elif isinstance(o, (tuple, list)):
+        return [to_struct_value(e) for e in o]
+      elif isinstance(o, dict):
+        return {str(k): to_struct_value(v) for k, v in o.items()}
+      else:
+        return str(o)  # Best effort.
+
+    return proto_utils.pack_Struct(
+        **{
+            f'beam:option:{k}:v1': to_struct_value(v)
+            for (k, v) in self.get_all_options(
+                drop_default=True, retain_unknown_options=True).items()
+            if v is not None
+        })
+
+  @classmethod
+  def from_runner_api(cls, proto_options, original_options=None):
+    def from_urn(key):
+      assert key.startswith('beam:option:')
+      # Update sdks/go/container/tools/pipeline_options.go if :v1 part changes.
+      assert key.endswith(':v1')
+      return key[12:-3]
+
+    parsed = {from_urn(key): value for (key, value) in proto_options.items()}
+    if original_options is None:
+      return cls(**parsed)
+    for (key, value) in parsed.items():
+      if value and key not in _NON_OVERIDABLE_XLANG_OPTIONS:
+        original_options._all_options[key] = value
+    return original_options
+
   def display_data(self):
-    return self.get_all_options(True)
+    return self.get_all_options(drop_default=True, retain_unknown_options=True)
 
-  def view_as(self, cls):
-    # type: (Type[PipelineOptionsT]) -> PipelineOptionsT
-
+  def view_as(self, cls: type[PipelineOptionsT]) -> PipelineOptionsT:
     """Returns a view of current object as provided PipelineOption subclass.
 
     Example Usage::
@@ -348,11 +705,12 @@ class PipelineOptions(HasDisplayData):
       cls: PipelineOptions class or any of its subclasses.
 
     Returns:
-      An instance of cls that is intitialized using options contained in current
+      An instance of cls that is initialized using options contained in current
       object.
 
     """
     view = cls(self._flags)
+
     for option_name in view._visible_option_list():
       # Initialize values of keys defined by a cls.
       #
@@ -368,13 +726,30 @@ class PipelineOptions(HasDisplayData):
     view._all_options = self._all_options
     return view
 
-  def _visible_option_list(self):
-    # type: () -> List[str]
+  def is_compat_version_prior_to(self, breaking_change_version):
+    """Check if update_compatibility_version is prior to a breaking change.
+
+    Returns True if the pipeline should use old behavior (i.e., the
+    update_compatibility_version is set and is earlier than the given version).
+    Returns False if update_compatibility_version is not set or is >= the
+    breaking change version.
+
+    Args:
+      breaking_change_version: Version string (e.g., "2.72.0") at which
+        the breaking change was introduced.
+    """
+    v1 = self.view_as(StreamingOptions).update_compatibility_version
+    if v1 is None:
+      return False
+    v1_parts = (v1.split('.') + ['0', '0', '0'])[:3]
+    v2_parts = (breaking_change_version.split('.') + ['0', '0', '0'])[:3]
+    return tuple(map(int, v1_parts)) < tuple(map(int, v2_parts))
+
+  def _visible_option_list(self) -> list[str]:
     return sorted(
         option for option in dir(self._visible_options) if option[0] != '_')
 
-  def __dir__(self):
-    # type: () -> List[str]
+  def __dir__(self) -> list[str]:
     return sorted(
         dir(type(self)) + list(self.__dict__) + self._visible_option_list())
 
@@ -417,10 +792,22 @@ class StandardOptions(PipelineOptions):
       'apache_beam.runners.direct.direct_runner.SwitchingDirectRunner',
       'apache_beam.runners.interactive.interactive_runner.InteractiveRunner',
       'apache_beam.runners.portability.flink_runner.FlinkRunner',
+      'apache_beam.runners.portability.fn_api_runner.FnApiRunner',
+      'apache_beam.runners.portability.kafka_streams_runner.KafkaStreamsRunner',
       'apache_beam.runners.portability.portable_runner.PortableRunner',
+      'apache_beam.runners.portability.prism_runner.PrismRunner',
       'apache_beam.runners.portability.spark_runner.SparkRunner',
       'apache_beam.runners.test.TestDirectRunner',
       'apache_beam.runners.test.TestDataflowRunner',
+  )
+
+  LOCAL_RUNNERS = (
+      'BundleBasedDirectRunner',
+      'DirectRunner',
+      'SwitchingDirectRunner',
+      'FnApiRunner',
+      'PrismRunner',
+      'TestDirectRunner',
   )
 
   KNOWN_RUNNER_NAMES = [path.split('.')[-1] for path in ALL_KNOWN_RUNNERS]
@@ -453,23 +840,76 @@ class StandardOptions(PipelineOptions):
             'at transform level. Interpretation of hints is defined by '
             'Beam runners.'))
 
+    parser.add_argument(
+        '--auto_unique_labels',
+        default=False,
+        action='store_true',
+        help='Whether to automatically generate unique transform labels '
+        'for every transform. The default behavior is to raise an '
+        'exception if a transform is created with a non-unique label. '
+        'Using --auto_unique_labels could cause data loss when '
+        'updating a pipeline or reloading the job state. '
+        'This is not recommended for streaming jobs.')
+
+    parser.add_argument(
+        '--no_wait_until_finish',
+        default=False,
+        action='store_true',
+        help='By default, the "with" statement waits for the job to '
+        'complete. Set this flag to bypass this behavior and continue '
+        'execution immediately')
+
+
+class StreamingOptions(PipelineOptions):
+  @classmethod
+  def _add_argparse_args(cls, parser):
+    parser.add_argument(
+        '--update_compatibility_version',
+        default=None,
+        nargs='?',
+        const=None,
+        help='Attempt to produce a pipeline compatible with the given prior '
+        'version of the Beam SDK. '
+        'See for example, https://cloud.google.com/dataflow/docs/guides/'
+        'updating-a-pipeline')
+    parser.add_argument(
+        '--desired_num_unbounded_source_splits',
+        type=int,
+        default=0,
+        help='The desired number of initial splits for UnboundedSources.')
+
 
 class CrossLanguageOptions(PipelineOptions):
+  @staticmethod
+  def _beam_services_from_enviroment():
+    return json.loads(os.environ.get('BEAM_SERVICE_OVERRIDES') or '{}')
+
   @classmethod
   def _add_argparse_args(cls, parser):
     parser.add_argument(
         '--beam_services',
-        type=json.loads,
-        default={},
+        type=lambda s: {
+            **cls._beam_services_from_enviroment(), **json.loads(s)
+        },
+        default=cls._beam_services_from_enviroment(),
         help=(
-            'For convienience, Beam provides the ability to automatically '
+            'For convenience, Beam provides the ability to automatically '
             'download and start various services (such as expansion services) '
             'used at pipeline construction and execution. These services are '
             'identified by gradle target. This option provides the ability to '
             'use pre-started services or non-default pre-existing artifacts to '
             'start the given service. '
             'Should be a json mapping of gradle build targets to pre-built '
-            'artifacts (e.g. jar files) expansion endpoints (e.g. host:port).'))
+            'artifacts (e.g. jar files) or expansion endpoints '
+            '(e.g. host:port). Defaults to the value of BEAM_SERVICE_OVERRIDES '
+            'from the environment.'))
+
+    parser.add_argument(
+        '--use_transform_service',
+        default=False,
+        action='store_true',
+        help='Use the Docker-composed-based transform service when expanding '
+        'cross-language transforms.')
 
 
 def additional_option_ptransform_fn():
@@ -477,9 +917,9 @@ def additional_option_ptransform_fn():
 
 
 # Optional type checks that aren't enabled by default.
-additional_type_checks = {
+additional_type_checks: dict[str, Callable[[], None]] = {
     'ptransform_fn': additional_option_ptransform_fn,
-}  # type: Dict[str, Callable[[], None]]
+}
 
 
 def enable_all_additional_type_checks():
@@ -511,6 +951,20 @@ class TypeOptions(PipelineOptions):
         help='Disable type checking at pipeline construction '
         'time')
     parser.add_argument(
+        '--disable_beartype',
+        default=False,
+        action='store_true',
+        help='Disable the use of beartype for type checking.')
+    parser.add_argument(
+        '--exclude_infer_dataclass_field_type',
+        default=False,
+        action='store_true',
+        help='Exclude certain typehint inference involving dataclass fields '
+        'and resolve to Any (as in beam<=2.74.0). NOTE: this option is '
+        'for backward compatibility only and the exclusion scenarios are '
+        'subject to change or remove in a future version. For details see: '
+        'https://beam.apache.org/releases/pydoc/current/apache_beam.typehints.trivial_inference.html#apache_beam.typehints.trivial_inference.resolve_dataclass_field_type')  # pylint: disable=line-too-long
+    parser.add_argument(
         '--runtime_type_check',
         default=False,
         action='store_true',
@@ -529,7 +983,7 @@ class TypeOptions(PipelineOptions):
         default=False,
         action='store_true',
         help='Use non-deterministic coders (such as pickling) for key-grouping '
-        'operations such as GropuByKey.  This is unsafe, as runners may group '
+        'operations such as GroupByKey.  This is unsafe, as runners may group '
         'keys based on their encoded bytes, but is available for backwards '
         'compatibility. See BEAM-11719.')
     parser.add_argument(
@@ -541,6 +995,18 @@ class TypeOptions(PipelineOptions):
         'their condition met. Some operations, such as GroupByKey, disallow '
         'this. This exists for cases where such loss is acceptable and for '
         'backwards compatibility. See BEAM-9487.')
+    parser.add_argument(
+        '--force_cloudpickle_deterministic_coders',
+        default=False,
+        action='store_true',
+        help=(
+            'Force the use of cloudpickle-based deterministic coders '
+            'instead of dill-based coders, even when '
+            'update_compatibility_version  would normally trigger dill usage '
+            'for backward compatibility. This flag overrides automatic coder '
+            'selection to always use the modern cloudpickle serialization '
+            ' path. Warning: May break pipeline update compatibility with '
+            ' SDK versions prior to 2.68.0.'))
 
   def validate(self, unused_validator):
     errors = []
@@ -590,6 +1056,24 @@ class DirectOptions(PipelineOptions):
         default='in_memory',
         choices=['in_memory', 'multi_threading', 'multi_processing'],
         help='Workers running environment.')
+    parser.add_argument(
+        '--direct_embed_docker_python',
+        default=False,
+        action='store_true',
+        dest='direct_embed_docker_python',
+        help='DirectRunner uses the embedded Python environment when '
+        'the default Python docker environment is specified.')
+    parser.add_argument(
+        '--direct_test_splits',
+        default={},
+        type=json.loads,
+        help='Split test configuration of the json form '
+        '{"step_name": {"timings": [...], "fractions": [...]}, ...} '
+        'where step_name is the name of a step controlling the stage to which '
+        'splits will be sent, timings is a list of floating-point times '
+        '(in seconds) at which the split requests will be sent, and '
+        'fractions is a corresponding list of floating points to use in the '
+        'split requests themselves.')
 
 
 class GoogleCloudOptions(PipelineOptions):
@@ -599,15 +1083,26 @@ class GoogleCloudOptions(PipelineOptions):
   COMPUTE_API_SERVICE = 'compute.googleapis.com'
   STORAGE_API_SERVICE = 'storage.googleapis.com'
   DATAFLOW_ENDPOINT = 'https://dataflow.googleapis.com'
+  OAUTH_SCOPES = [
+      'https://www.googleapis.com/auth/bigquery',
+      'https://www.googleapis.com/auth/cloud-platform',
+      'https://www.googleapis.com/auth/devstorage.full_control',
+      'https://www.googleapis.com/auth/userinfo.email',
+      'https://www.googleapis.com/auth/datastore',
+      'https://www.googleapis.com/auth/spanner.admin',
+      'https://www.googleapis.com/auth/spanner.data'
+  ]
 
   @classmethod
   def _add_argparse_args(cls, parser):
     parser.add_argument(
         '--dataflow_endpoint',
-        default=cls.DATAFLOW_ENDPOINT,
+        default='',
         help=(
-            'The URL for the Dataflow API. If not set, the default public URL '
-            'will be used.'))
+            'The URL for the Dataflow API. If not set, the endpoint is '
+            'resolved by the Google Cloud client library, which honors '
+            'GOOGLE_CLOUD_UNIVERSE_DOMAIN and otherwise uses the default '
+            'public URL (%s).' % cls.DATAFLOW_ENDPOINT))
     # Remote execution must check that this option is not None.
     parser.add_argument(
         '--project',
@@ -660,13 +1155,13 @@ class GoogleCloudOptions(PipelineOptions):
         default=None,
         help='Labels to be applied to this Dataflow job. '
         'Labels are key value pairs separated by = '
-        '(e.g. --label key=value).')
+        '(e.g. --label key=value) or '
+        '(--labels=\'{ "key": "value", "mass": "1_3kg", "count": "3" }\').')
     parser.add_argument(
         '--update',
         default=False,
         action='store_true',
         help='Update an existing streaming Cloud Dataflow job. '
-        'Experimental. '
         'See https://cloud.google.com/dataflow/docs/guides/'
         'updating-a-pipeline')
     parser.add_argument(
@@ -676,14 +1171,14 @@ class GoogleCloudOptions(PipelineOptions):
         help='The transform mapping that maps the named '
         'transforms in your prior pipeline code to names '
         'in your replacement pipeline code.'
-        'Experimental. '
         'See https://cloud.google.com/dataflow/docs/guides/'
         'updating-a-pipeline')
     parser.add_argument(
         '--enable_streaming_engine',
-        default=False,
+        default=True,
         action='store_true',
-        help='Enable Windmill Service for this Dataflow job. ')
+        help='Deprecated. All Python streaming pipelines on Dataflow'
+        'use Streaming Engine.')
     parser.add_argument(
         '--dataflow_kms_key',
         default=None,
@@ -702,12 +1197,14 @@ class GoogleCloudOptions(PipelineOptions):
         '--dataflow_service_option',
         '--dataflow_service_options',
         dest='dataflow_service_options',
-        action='append',
+        action=_CommaSeparatedListAction,
         default=None,
         help=(
             'Options to configure the Dataflow service. These '
-            'options decouple service side feature availbility '
-            'from the Apache Beam release cycle.'))
+            'options decouple service side feature availability '
+            'from the Apache Beam release cycle.'
+            'Note: If set programmatically, must be set as a '
+            'list of strings'))
     parser.add_argument(
         '--enable_hot_key_logging',
         default=False,
@@ -715,6 +1212,83 @@ class GoogleCloudOptions(PipelineOptions):
         help='When true, will enable the direct logging of any detected hot '
         'keys into Cloud Logging. Warning: this will log the literal key as an '
         'unobfuscated string.')
+    parser.add_argument(
+        '--enable_artifact_caching',
+        default=False,
+        action='store_true',
+        help='When true, artifacts will be cached across job submissions in '
+        'the GCS staging bucket')
+    parser.add_argument(
+        '--impersonate_service_account',
+        default=None,
+        help='All API requests will be made as the given service account or '
+        'target service account in an impersonation delegation chain '
+        'instead of the currently selected account. You can specify '
+        'either a single service account as the impersonator, or a '
+        'comma-separated list of service accounts to create an '
+        'impersonation delegation chain.')
+    parser.add_argument(
+        '--gcp_oauth_scope',
+        '--gcp_oauth_scopes',
+        dest='gcp_oauth_scopes',
+        action='append',
+        default=cls.OAUTH_SCOPES,
+        help=(
+            'Controls the OAuth scopes that will be requested when creating '
+            'GCP credentials. Note: If set programmatically, must be set as a '
+            'list of strings'))
+    parser.add_argument(
+        '--enable_bucket_read_metric_counter',
+        default=False,
+        action='store_true',
+        help='Create metrics reporting the approximate number of bytes read '
+        'per bucket.')
+    parser.add_argument(
+        '--enable_bucket_write_metric_counter',
+        default=False,
+        action='store_true',
+        help=
+        'Create metrics reporting the approximate number of bytes written per '
+        'bucket.')
+    parser.add_argument(
+        '--no_gcsio_throttling_counter',
+        default=False,
+        action='store_true',
+        help='Throttling counter in GcsIO is enabled by default. Set '
+        '--no_gcsio_throttling_counter to avoid it.')
+    parser.add_argument(
+        '--enable_gcsio_blob_generation',
+        default=False,
+        action='store_true',
+        help='Use blob generation when mutating blobs in GCSIO to '
+        'mitigate race conditions at the cost of more HTTP requests.')
+    parser.add_argument(
+        '--gcs_custom_audit_entry',
+        '--gcs_custom_audit_entries',
+        dest='gcs_custom_audit_entries',
+        action=_GcsCustomAuditEntriesAction,
+        default=None,
+        help='Custom information to be attached to audit logs. '
+        'Entries are key value pairs separated by = '
+        '(e.g. --gcs_custom_audit_entry key=value) or a JSON string '
+        '(e.g. --gcs_custom_audit_entries=\'{ "user": "test", "id": "12" }\').')
+    parser.add_argument(
+        '--gcs_read_buffer_size_bytes',
+        type=int,
+        default=None,
+        help='Size in bytes of the buffer used when reading from GCS. A '
+        'larger buffer reduces the number of requests sent to GCS at the '
+        'cost of more memory per reader. When unset, the GCS client in Beam '
+        'uses its default buffer size (16 MiB).')
+    parser.add_argument(
+        '--gcs_write_buffer_size_bytes',
+        type=int,
+        default=None,
+        help='Size in bytes of the buffer used when writing to GCS. Must be '
+        'a multiple of 256 KiB, since writes are performed as resumable '
+        'uploads. A larger buffer reduces the number of requests sent to GCS '
+        'at the cost of more memory per writer. When unset, the GCS client '
+        'in Beam uses its default buffer size (16 MiB).')
 
   def _create_default_gcs_bucket(self):
     try:
@@ -722,35 +1296,221 @@ class GoogleCloudOptions(PipelineOptions):
     except ImportError:
       _LOGGER.warning('Unable to create default GCS bucket.')
       return None
+    if not gcsio.GCS_INSTALLED:
+      _LOGGER.warning(
+          'Unable to create default GCS bucket because GCP dependencies are '
+          'not installed.')
+      return None
     bucket = gcsio.get_or_create_default_gcs_bucket(self)
     if bucket:
-      return 'gs://%s' % bucket.id
+      return 'gs://%s/' % bucket.id
     else:
       return None
+
+  # Log warning if soft delete policy is enabled in a gcs bucket
+  # that is specified in an argument.
+  def _warn_if_soft_delete_policy_enabled(self, arg_name):
+    # skip the check if it is in dry-run mode because the later step requires
+    # internet connection to access GCS
+    if self.view_as(TestOptions).dry_run:
+      return
+
+    gcs_path = getattr(self, arg_name, None)
+    try:
+      from apache_beam.io.gcp import gcsio
+      if not gcsio.GCS_INSTALLED:
+        _LOGGER.warning(
+            'Unable to check soft delete policy because GCP dependencies are '
+            'not installed.')
+        return
+      if gcsio.GcsIO(pipeline_options=self).is_soft_delete_enabled(gcs_path):
+        logger.log_first_n(
+            logging.WARN,
+            "Bucket %s used as %s has soft-delete policy enabled."
+            " To avoid being billed for unnecessary storage costs, turn"
+            " off the soft delete feature on buckets that your Dataflow"
+            " jobs use for temporary and staging storage. For more"
+            " information, see"
+            " https://cloud.google.com/storage/docs/use-soft-delete"
+            "#remove-soft-delete-policy.",
+            gcs_path,
+            arg_name,
+            n=1,
+            key="message")
+    except Exception as e:  # pylint: disable=broad-except
+      # This check only emits a warning, so it must not block pipeline
+      # submission.
+      _LOGGER.warning('Unable to check soft delete policy: %s', e)
+
+  # If either temp or staging location has an issue, we use the valid one for
+  # both locations. If both are bad we return an error.
+  def _handle_temp_and_staging_locations(self, validator):
+    temp_errors = validator.validate_gcs_path(self, 'temp_location')
+    staging_errors = validator.validate_gcs_path(self, 'staging_location')
+
+    temp_location = getattr(self, 'temp_location', None)
+    staging_location = getattr(self, 'staging_location', None)
+
+    if temp_location is not None and temp_errors:
+      _LOGGER.warning(temp_errors[0])
+
+    if staging_location is not None and staging_errors:
+      _LOGGER.warning(staging_errors[0])
+
+    if temp_errors and not staging_errors:
+      setattr(self, 'temp_location', staging_location)
+      self._warn_if_soft_delete_policy_enabled('staging_location')
+      return []
+    elif staging_errors and not temp_errors:
+      setattr(self, 'staging_location', temp_location)
+      self._warn_if_soft_delete_policy_enabled('temp_location')
+      return []
+    elif not staging_errors and not temp_errors:
+      self._warn_if_soft_delete_policy_enabled('temp_location')
+      self._warn_if_soft_delete_policy_enabled('staging_location')
+      return []
+    # Both staging and temp locations are bad, try to use default bucket.
+    else:
+      default_bucket = self._create_default_gcs_bucket()
+      if default_bucket is None:
+        temp_errors.extend(staging_errors)
+        return temp_errors
+      else:
+        setattr(self, 'temp_location', default_bucket)
+        setattr(self, 'staging_location', default_bucket)
+        self._warn_if_soft_delete_policy_enabled('temp_location')
+        self._warn_if_soft_delete_policy_enabled('staging_location')
+        return []
 
   def validate(self, validator):
     errors = []
     if validator.is_service_runner():
+      errors.extend(self._handle_temp_and_staging_locations(validator))
       errors.extend(validator.validate_cloud_options(self))
-
-      # Validating temp_location, or adding a default if there are issues
-      temp_location_errors = validator.validate_gcs_path(self, 'temp_location')
-      if temp_location_errors:
-        default_bucket = self._create_default_gcs_bucket()
-        if default_bucket is None:
-          errors.extend(temp_location_errors)
-        else:
-          setattr(self, 'temp_location', default_bucket)
-
-      if getattr(self, 'staging_location',
-                 None) or getattr(self, 'temp_location', None) is None:
-        errors.extend(validator.validate_gcs_path(self, 'staging_location'))
 
     if self.view_as(DebugOptions).dataflow_job_file:
       if self.view_as(GoogleCloudOptions).template_location:
         errors.append(
             '--dataflow_job_file and --template_location '
             'are mutually exclusive.')
+
+    # Validate that dataflow_service_options is a list
+    if self.dataflow_service_options:
+      errors.extend(
+          validator.validate_repeatable_argument_passed_as_list(
+              self, 'dataflow_service_options'))
+
+    if (self.gcs_read_buffer_size_bytes is not None and
+        self.gcs_read_buffer_size_bytes <= 0):
+      errors.append(
+          '--gcs_read_buffer_size_bytes must be a positive number of bytes, '
+          'got %s.' % self.gcs_read_buffer_size_bytes)
+
+    if self.gcs_write_buffer_size_bytes is not None:
+      # GCS resumable uploads require the chunk size to be a multiple of
+      # 256 KiB. Checking here avoids a failure deep inside the GCS client
+      # on the first flush.
+      write_buffer_size_multiple = 256 * 1024
+      if (self.gcs_write_buffer_size_bytes <= 0 or
+          self.gcs_write_buffer_size_bytes % write_buffer_size_multiple != 0):
+        errors.append(
+            '--gcs_write_buffer_size_bytes must be a positive multiple of '
+            '%d bytes, got %s.' %
+            (write_buffer_size_multiple, self.gcs_write_buffer_size_bytes))
+
+    return errors
+
+  def get_cloud_profiler_service_name(self):
+    _ENABLE_GOOGLE_CLOUD_PROFILER = 'enable_google_cloud_profiler'
+    if self.dataflow_service_options:
+      if _ENABLE_GOOGLE_CLOUD_PROFILER in self.dataflow_service_options:
+        return os.environ["JOB_NAME"]
+      for option_name in self.dataflow_service_options:
+        if option_name.startswith(_ENABLE_GOOGLE_CLOUD_PROFILER + '='):
+          return option_name.split('=', 1)[1]
+
+    experiments = self.view_as(DebugOptions).experiments or []
+    if _ENABLE_GOOGLE_CLOUD_PROFILER in experiments:
+      return os.environ["JOB_NAME"]
+
+    return None
+
+
+class BigQueryOptions(PipelineOptions):
+  """BigQuery-specific options, mirroring Java's ``BigQueryOptions``.
+
+  Option names (``dest``) are chosen so that they map to the Java option names
+  when pipeline options are passed to Java, e.g. to cross-language BigQuery
+  transforms: Java converts ``big_query_endpoint`` to ``bigQueryEndpoint``.
+  """
+
+  # Alternative attribute names, mapped to the option names they stand for.
+  _ATTRIBUTE_ALIASES = {
+      'bigquery_endpoint': 'big_query_endpoint',
+      'bigquery_quota_project_id': 'big_query_quota_project_id',
+  }
+
+  @classmethod
+  def _add_argparse_args(cls, parser):
+    parser.add_argument(
+        '--bigquery_endpoint',
+        '--big_query_endpoint',
+        dest='big_query_endpoint',
+        default=None,
+        help=(
+            'The root URL for the BigQuery API, e.g. '
+            '"https://bigquery.googleapis.com". If not set, the endpoint is '
+            'derived from the GOOGLE_CLOUD_UNIVERSE_DOMAIN environment '
+            'variable when present, and otherwise the default public URL is '
+            'used. Also passed to Java cross-language BigQuery transforms as '
+            'bigQueryEndpoint.'))
+    parser.add_argument(
+        '--bigquery_quota_project_id',
+        '--big_query_quota_project_id',
+        dest='big_query_quota_project_id',
+        default=None,
+        help=(
+            'GCP project ID used for quota and billing attribution of '
+            'BigQuery API requests (sets the x-goog-user-project header), if '
+            'different from the project the data resides in. Honored by '
+            'ReadFromBigQuery, ReadAllFromBigQuery, WriteToBigQuery with '
+            'FILE_LOADS or STREAMING_INSERTS, and ReadBigQueryChangeHistory; '
+            'STORAGE_WRITE_API (Java-backed) does not use it yet. The '
+            'credentials used must have the serviceusage.services.use '
+            'permission on this project. Also passed to Java cross-language '
+            'BigQuery transforms as bigQueryQuotaProjectId.'))
+
+  def __getattr__(self, name):
+    return super().__getattr__(self._ATTRIBUTE_ALIASES.get(name, name))
+
+  def __setattr__(self, name, value):
+    super().__setattr__(self._ATTRIBUTE_ALIASES.get(name, name), value)
+
+
+class AzureOptions(PipelineOptions):
+  """Azure Blob Storage options."""
+  @classmethod
+  def _add_argparse_args(cls, parser):
+    parser.add_argument(
+        '--azure_connection_string',
+        default=None,
+        help='Connection string of the Azure Blob Storage Account.')
+    parser.add_argument(
+        '--blob_service_endpoint',
+        default=None,
+        help='URL of the Azure Blob Storage Account.')
+    parser.add_argument(
+        '--azure_managed_identity_client_id',
+        default=None,
+        help='Client ID of a user-assigned managed identity.')
+
+  def validate(self, validator):
+    errors = []
+    if self.azure_connection_string:
+      if self.blob_service_endpoint:
+        errors.append(
+            '--azure_connection_string and '
+            '--blob_service_endpoint are mutually exclusive.')
 
     return errors
 
@@ -807,8 +1567,7 @@ class WorkerOptions(PipelineOptions):
         type=str,
         choices=['NONE', 'THROUGHPUT_BASED'],
         default=None,  # Meaning unset, distinct from 'NONE' meaning don't scale
-        help=
-        ('If and how to autoscale the workerpool.'))
+        help=('If and how to autoscale the workerpool.'))
     parser.add_argument(
         '--worker_machine_type',
         '--machine_type',
@@ -834,6 +1593,24 @@ class WorkerOptions(PipelineOptions):
         dest='disk_type',
         default=None,
         help=('Specifies what type of persistent disk should be used.'))
+    parser.add_argument(
+        '--disk_provisioned_iops',
+        type=int,
+        default=None,
+        dest='disk_provisioned_iops',
+        help=(
+            'The provisioned IOPS of the disk. If not set, the Dataflow service'
+            ' will choose a reasonable default.'),
+    )
+    parser.add_argument(
+        '--disk_provisioned_throughput_mibps',
+        type=int,
+        default=None,
+        dest='disk_provisioned_throughput_mibps',
+        help=(
+            'The provisioned throughput of the disk in MiB/s. If not set, the'
+            ' Dataflow service will choose a reasonable default.'),
+    )
     parser.add_argument(
         '--worker_region',
         default=None,
@@ -906,6 +1683,42 @@ class WorkerOptions(PipelineOptions):
             'identify the container image to override and the second value '
             'gives the replacement container image.'))
     parser.add_argument(
+        '--dataflow_container_base_repository',
+        default=None,
+        help=(
+            'Base repository (registry host and path prefix) from which the '
+            'Dataflow runner pulls its default SDK container images, e.g. '
+            'docker.example.com/my-project/cloud-dataflow/v1beta3. The '
+            'runner appends the image name and tag, e.g. '
+            '<base>/beam_python3.11_sdk:<version>. This is also used for the '
+            'default images of cross-language Apache Beam environments. '
+            'Ignored for the local SDK image if --sdk_container_image is set. '
+            'If not set, the Google Cloud Dataflow default '
+            '(gcr.io/cloud-dataflow/v1beta3) is used.'))
+    parser.add_argument(
+        '--default_sdk_harness_log_level',
+        default=None,
+        help=(
+            'Controls the default log level of all loggers without a log level '
+            'override. Values can be either a labeled level or a number '
+            '(See https://docs.python.org/3/library/logging.html#levels). '
+            'Default log level is INFO.'))
+    parser.add_argument(
+        '--sdk_harness_log_level_overrides',
+        type=json.loads,
+        action=_DictUnionAction,
+        default=None,
+        help=(
+            'Controls the log levels for specifically named loggers. The '
+            'expected format is a json string: \'{"module":"log_level",...}\'. '
+            'For example, by specifying the value \'{"a.b.c":"DEBUG"}\', '
+            'the logger underneath the module "a.b.c" will be configured to '
+            'output logs at the DEBUG level. Similarly, by specifying the '
+            'value \'{"a.b.c":"WARNING"}\' all loggers underneath the "a.b.c" '
+            'module will be configured to output logs at the WARNING level. '
+            'Also, note that when multiple overrides are specified, the exact '
+            'name followed by the closest parent takes precedence.'))
+    parser.add_argument(
         '--use_public_ips',
         default=None,
         action='store_true',
@@ -922,12 +1735,39 @@ class WorkerOptions(PipelineOptions):
         type=str,
         help='GCE minimum CPU platform. Default is determined by GCP.')
     parser.add_argument(
-        '--dataflow_worker_jar',
-        dest='dataflow_worker_jar',
-        type=str,
-        help='Dataflow worker jar file. If specified, the jar file is staged '
-        'in GCS, then gets loaded by workers. End users usually '
-        'should not use this feature.')
+        '--max_cache_memory_usage_mb',
+        dest='max_cache_memory_usage_mb',
+        type=int,
+        default=0,
+        help=(
+            'Size of the SDK Harness cache to store user state and side '
+            'inputs in MB. The cache is disabled by default. Increasing '
+            'cache size might improve performance of some pipelines, such as '
+            'pipelines that use iterable side input views, but can '
+            'lead to an increase in memory consumption and OOM errors if '
+            'workers are not appropriately provisioned. '
+            'Using the cache might decrease performance pipelines using '
+            'materialized side inputs. '
+            'If the cache is full, least '
+            'recently used elements will be evicted. This cache is per '
+            'each SDK Harness instance. SDK Harness is a component '
+            'responsible for executing the user code and communicating with '
+            'the runner. Depending on the runner, there may be more than one '
+            'SDK Harness process running on the same worker node.'))
+    parser.add_argument(
+        '--element_processing_timeout_minutes',
+        type=int,
+        default=None,
+        help=(
+            'The time limit (in minutes) for any fused stage to finish '
+            'processing a single bundle. A fused stage may include '
+            'multiple consecutive PTransforms. It will also include the '
+            'IO steps used to populate data in the stage (this may be '
+            'a pipeline-level IO or an internal read like reading from a '
+            'Reshuffle or GroupByKey). Exact stage boundaries are determined '
+            'by the pipeline runner. If the timeout is exceeded, the SDK '
+            'worker process self-terminates and processing may be restarted '
+            'by a runner. All in-progress work in this bundle will be lost'))
 
   def validate(self, validator):
     errors = []
@@ -950,7 +1790,7 @@ class DebugOptions(PipelineOptions):
         '--experiment',
         '--experiments',
         dest='experiments',
-        action='append',
+        action=_CommaSeparatedListAction,
         default=None,
         help=(
             'Runners may provide a number of experimental features that can be '
@@ -964,8 +1804,7 @@ class DebugOptions(PipelineOptions):
         help=(
             'Number of threads per worker to use on the runner. If left '
             'unspecified, the runner will compute an appropriate number of '
-            'threads to use. Currently only enabled for DataflowRunner when '
-            'experiment \'use_runner_v2\' is enabled.'))
+            'threads to use.'))
 
   def add_experiment(self, experiment):
     # pylint: disable=access-member-before-definition
@@ -983,6 +1822,14 @@ class DebugOptions(PipelineOptions):
       if experiment.startswith(key + '='):
         return experiment.split('=', 1)[1]
     return default
+
+  def validate(self, validator):
+    errors = []
+    if self.experiments:
+      errors.extend(
+          validator.validate_repeatable_argument_passed_as_list(
+              self, 'experiments'))
+    return errors
 
 
 class ProfilingOptions(PipelineOptions):
@@ -1006,6 +1853,86 @@ class ProfilingOptions(PipelineOptions):
         default=1.0,
         help='A number between 0 and 1 indicating the ratio '
         'of bundles that should be profiled.')
+    parser.add_argument(
+        '--profiler_agent',
+        default=None,
+        help=(
+            'Specifies the profiling agent to launch the SDK worker harness '
+            'with (e.g., "memray", "tcmalloc", or a custom wrapper script/binary).'
+        ))
+    parser.add_argument(
+        '--profiler_extra_arg',
+        '--profiler_extra_args',
+        dest='profiler_extra_args',
+        action=_CommaSeparatedListAction,
+        default=None,
+        help=
+        'Comma-separated list of extra arguments to pass to the profiler agent.'
+    )
+    parser.add_argument(
+        '--profiler_extra_env_var',
+        '--profiler_extra_env_vars',
+        dest='profiler_extra_env_vars',
+        action=_CommaSeparatedListAction,
+        default=None,
+        help=(
+            'Comma-separated list of environment variables required by the profiler agent '
+            'in format "KEY1=VAL1,KEY2=VAL2".'))
+    parser.add_argument(
+        '--profile_temp_location',
+        default=None,
+        help=(
+            'Directory path on the worker where local profiles are saved. '
+            'Defaults to ${semi_persist_dir}/profiles if not specified.'))
+    parser.add_argument(
+        '--profile_upload_interval_sec',
+        type=int,
+        default=300,
+        help=(
+            'Frequency (in seconds) at which the local profiles are uploaded to GCS. '
+            'Defaults to 300 (5 min).'))
+    parser.add_argument(
+        '--profiler_stop_after_sec',
+        type=int,
+        default=0,
+        help=(
+            'Time limit (in seconds) for profiling a single process. When exceeded, '
+            'the worker process is restarted without the profiler.'))
+    parser.add_argument(
+        '--profiler_stop_after_crash',
+        action='store_true',
+        default=False,
+        help=(
+            'If True, the profiling agent won\'t be re-enabled after a worker '
+            'process crash.'))
+    parser.add_argument(
+        '--profile_postprocess_interval_sec',
+        type=int,
+        default=600,
+        help=(
+            'Frequency (in seconds) at which the local profiles are post-processed '
+            'on-the-fly. Defaults to 600 (10 minutes). Set to 0 to disable.'))
+
+  def validate(self, validator):
+    errors = []
+    if self.profiler_agent:
+      if self.profile_cpu or self.profile_memory:
+        errors.append(
+            '--profiler_agent is mutually exclusive with --profile_cpu '
+            'and --profile_memory.')
+
+      if not self.profile_location:
+        temp_location = self.view_as(GoogleCloudOptions).temp_location
+        if temp_location:
+          self.profile_location = temp_location.rstrip('/') + '/profiles'
+          _LOGGER.info(
+              'Setting --profile_location to %s since profiling is enabled.',
+              self.profile_location)
+
+      if self.profiler_agent == 'coredump':
+        debug_options = self.view_as(DebugOptions)
+        debug_options.add_experiment('core_pattern=/tmp/beam_coredump.%e.%p')
+    return errors
 
 
 class SetupOptions(PipelineOptions):
@@ -1030,7 +1957,20 @@ class SetupOptions(PipelineOptions):
         default=None,
         help=(
             'Path to a folder to cache the packages specified in '
-            'the requirements file using the --requirements_file option.'))
+            'the requirements file using the --requirements_file option.'
+            'If you want to skip populating requirements cache, please '
+            'specify --requirements_cache="skip".'))
+    parser.add_argument(
+        '--requirements_cache_only_sources',
+        action='store_true',
+        help=(
+            'Enable this flag to populate requirements cache only '
+            'with Source distributions(sdists) of the dependencies '
+            'mentioned in the --requirements_file'
+            'Note: (BEAM-4032): This flag may significantly slow down '
+            'the pipeline submission. It is added to preserve the requirements'
+            ' cache behavior prior to 2.37.0 and will likely be removed in '
+            'future releases.'))
     parser.add_argument(
         '--setup_file',
         default=None,
@@ -1045,36 +1985,55 @@ class SetupOptions(PipelineOptions):
             'custom code.'))
     parser.add_argument(
         '--beam_plugin',
-        '--beam_plugin',
+        '--beam_plugins',
         dest='beam_plugins',
         action='append',
         default=None,
         help=(
             'Bootstrap the python process before executing any code by '
             'importing all the plugins used in the pipeline. Please pass a '
-            'comma separatedlist of import paths to be included. This is '
+            'comma separated list of import paths to be included. This is '
             'currently an experimental flag and provides no stability. '
             'Multiple --beam_plugin options can be specified if more than '
             'one plugin is needed.'))
     parser.add_argument(
+        '--pickle_library',
+        default='default',
+        help=(
+            'Chooses which pickle library to use. Options are dill, '
+            'cloudpickle or default.'),
+        choices=['cloudpickle', 'default', 'dill', 'dill_unsafe'])
+    parser.add_argument(
         '--save_main_session',
-        default=False,
+        default=None,
         action='store_true',
         help=(
             'Save the main session state so that pickled functions and classes '
             'defined in __main__ (e.g. interactive session) can be unpickled. '
             'Some workflows do not need the session state if for instance all '
             'their functions/classes are defined in proper modules '
-            '(not __main__) and the modules are importable in the worker. '))
+            '(not __main__) and the modules are importable in the worker. '
+            'It is disabled by default except for cloudpickle as pickle '
+            'library on Dataflow runner.'))
+    parser.add_argument(
+        '--no_save_main_session',
+        default=None,
+        action='store_false',
+        dest='save_main_session',
+        help=(
+            'Disable saving the main session state. See "save_main_session".'))
+
     parser.add_argument(
         '--sdk_location',
         default='default',
         help=(
-            'Override the default location from where the Beam SDK is '
-            'downloaded. It can be a URL, a GCS path, or a local path to an '
+            'Path to a custom Beam SDK package to install and use on the'
+            'runner. It can be a URL, a GCS path, or a local path to an '
             'SDK tarball. Workflow submissions will download or copy an SDK '
-            'tarball from here. If set to the string "default", a standard '
-            'SDK location is used. If empty, no SDK is copied.'))
+            'tarball from here. If set to "default", '
+            'runners will use the SDK provided in the default environment.'
+            'Use this flag when running pipelines with an unreleased or '
+            'manually patched version of Beam SDK.'))
     parser.add_argument(
         '--extra_package',
         '--extra_packages',
@@ -1093,6 +2052,17 @@ class SetupOptions(PipelineOptions):
             'workers will install them in same order they were specified on '
             'the command line.'))
     parser.add_argument(
+        '--file_to_stage',
+        '--files_to_stage',
+        dest='files_to_stage',
+        action='append',
+        default=None,
+        help=(
+            'Local path to a file. During job submission, the files will be '
+            'staged in the staging area (--staging_location option) and then '
+            'workers will upload them to the worker specific staging location '
+            '(e.g. $SEMI_PERSISTENT_DIRECTORY/staged/ for portable runner.'))
+    parser.add_argument(
         '--prebuild_sdk_container_engine',
         help=(
             'Prebuild sdk worker container image before job submission. If '
@@ -1108,18 +2078,76 @@ class SetupOptions(PipelineOptions):
     parser.add_argument(
         '--prebuild_sdk_container_base_image',
         default=None,
+        help=('Deprecated. Use --sdk_container_image instead.'))
+    parser.add_argument(
+        '--cloud_build_machine_type',
+        default=None,
         help=(
-            'The base image to use when pre-building the sdk container image '
-            'with dependencies, if not specified, by default the released '
-            'public apache beam python sdk container image corresponding to '
-            'the sdk version will be used, if a dev sdk is used the base '
-            'image will default to the latest released sdk image.'))
+            'If specified, use the machine type explicitly when prebuilding'
+            'SDK container image on Google Cloud Build.'))
     parser.add_argument(
         '--docker_registry_push_url',
         default=None,
         help=(
             'Docker registry url to use for tagging and pushing the prebuilt '
             'sdk worker container image.'))
+    parser.add_argument(
+        '--gbek',
+        default=None,
+        help=(
+            'When set, will replace all GroupByKey transforms in the pipeline '
+            'with EncryptedGroupByKey transforms using the secret passed in '
+            'the option. Beam will infer the secret type and value based on '
+            'secret itself. This guarantees that any data at rest during the '
+            'GBK will be encrypted. Many runners only store data at rest when '
+            'performing a GBK, so this can be used to guarantee that data is '
+            'not unencrypted. The secret should be a url safe base64 encoded '
+            '32 byte value. To generate a secret in this format, you can use '
+            'Secret.generate_secret_bytes(). For an example of this, see '
+            'https://github.com/apache/beam/blob/c8df4da229da49d533491857e1bb4ab5dbf4fd37/sdks/python/apache_beam/transforms/util_test.py#L356. '  # pylint: disable=line-too-long
+            'Runners with this behavior include the Dataflow, '
+            'Flink, and Spark runners. The option should be '
+            'structured like: '
+            '--gbek=type:<secret_type>;<secret_param>:<value>, for example '
+            '--gbek=type:GcpSecret;version_name:my_secret/versions/latest'))
+    parser.add_argument(
+        '--user_agent',
+        default=None,
+        help=(
+            'A user agent string describing the pipeline to external services. '
+            'The format should follow RFC2616.'))
+    parser.add_argument(
+        '--maven_repository_url',
+        default=None,
+        help=(
+            'Custom Maven repository URL to use for downloading JAR files. '
+            'If not specified, the default Maven Central repository will be '
+            'used.'))
+
+  def _handle_load_main_session(self, validator):
+    save_main_session = getattr(self, 'save_main_session')
+    if save_main_session is None:
+      if not validator.is_service_runner():
+        setattr(self, 'save_main_session', False)
+      else:
+        # save_main_session default to False for dill, while default to true
+        # for cloudpickle on service runner
+        pickle_library = getattr(self, 'pickle_library')
+        if pickle_library == 'default':
+          from apache_beam.internal.pickler import DEFAULT_PICKLE_LIB
+          pickle_library = DEFAULT_PICKLE_LIB
+        if pickle_library == 'cloudpickle':
+          setattr(self, 'save_main_session', True)
+        else:
+          setattr(self, 'save_main_session', False)
+    return []
+
+  def validate(self, validator):
+    errors = []
+    errors.extend(validator.validate_container_prebuilding_options(self))
+    errors.extend(validator.validate_pickle_library(self))
+    errors.extend(self._handle_load_main_session(validator))
+    return errors
 
 
 class PortableOptions(PipelineOptions):
@@ -1143,8 +2171,9 @@ class PortableOptions(PipelineOptions):
             'and port, e.g. localhost:8098. If none is specified, the '
             'artifact endpoint sent from the job server is used.'))
     parser.add_argument(
-        '--job-server-timeout',
-        default=60,
+        '--job_server_timeout',
+        '--job-server-timeout',  # For backwards compatibility.
+        default=300,
         type=int,
         help=(
             'Job service request timeout in seconds. The timeout '
@@ -1268,12 +2297,16 @@ class JobServerOptions(PipelineOptions):
         action='append',
         default=[],
         help='JVM properties to pass to a Java job server.')
+    parser.add_argument(
+        '--jar_cache_dir',
+        default=None,
+        help='The location to store jar cache for job server.')
 
 
 class FlinkRunnerOptions(PipelineOptions):
 
   # These should stay in sync with gradle.properties.
-  PUBLISHED_FLINK_VERSIONS = ['1.10', '1.11', '1.12', '1.13']
+  PUBLISHED_FLINK_VERSIONS = ['1.19', '1.20', '2.0', '2.1', '2.2']
 
   @classmethod
   def _add_argparse_args(cls, parser):
@@ -1300,6 +2333,46 @@ class FlinkRunnerOptions(PipelineOptions):
         ' directly, rather than starting up a job server.'
         ' Only applies when flink_master is set to a'
         ' cluster address.  Requires Python 3.6+.')
+    parser.add_argument(
+        '--parallelism',
+        type=int,
+        default=-1,
+        help='The degree of parallelism to be used when distributing'
+        ' operations onto workers. If the parallelism is not set, the'
+        ' configured Flink default is used, or 1 if none can be found.')
+    parser.add_argument(
+        '--max_parallelism',
+        type=int,
+        default=-1,
+        help='The pipeline wide maximum degree of parallelism to be used. The'
+        ' maximum parallelism specifies the upper limit for dynamic scaling'
+        ' and the number of key groups used for partitioned state.')
+
+
+class KafkaStreamsRunnerOptions(PipelineOptions):
+  """Options for the Kafka Streams runner.
+
+  The runner is experimental and is not production ready. It is not part of
+  any Apache Beam release: its job server is built only when the Beam build is
+  run with -Pwith-kafka-streams-runner, so using it means building that job
+  server from a Beam source tree.
+  """
+  @classmethod
+  def _add_argparse_args(cls, parser):
+    parser.add_argument(
+        '--bootstrap_servers',
+        default='localhost:9092',
+        help='Comma-separated list of host:port Kafka brokers the pipeline '
+        'connects to.')
+    parser.add_argument(
+        '--application_id',
+        help='Kafka Streams application.id for the pipeline. Must be unique '
+        'per pipeline, since it identifies the consumer group and the '
+        'runner\'s internal topics.')
+    parser.add_argument(
+        '--kafka_streams_job_server_jar',
+        help='Path or URL to a Beam Kafka Streams job server jar. If unset, '
+        'the jar is built from the Beam source tree.')
 
 
 class SparkRunnerOptions(PipelineOptions):
@@ -1330,9 +2403,41 @@ class SparkRunnerOptions(PipelineOptions):
         'For example, http://hostname:6066')
     parser.add_argument(
         '--spark_version',
-        default='2',
-        choices=['2', '3'],
+        default='3',
+        choices=['3'],
         help='Spark major version to use.')
+
+
+class PrismRunnerOptions(PipelineOptions):
+  @classmethod
+  def _add_argparse_args(cls, parser):
+    parser.add_argument(
+        '--prism_location',
+        help='Path or URL to a prism binary, or zipped binary for the current '
+        'platform (Operating System and Architecture). May also be an Apache '
+        'Beam Github Release page URL, with a matching beam_version_override '
+        'set. This option overrides all others for finding a prism binary.')
+    parser.add_argument(
+        '--prism_beam_version_override',
+        help=
+        'Override the SDK\'s version for deriving the Github Release URLs for '
+        'downloading a zipped prism binary, for the current platform. If '
+        'prism_location is set to a Github Release page URL, them it will use '
+        'that release page as a base when constructing the download URL.')
+    parser.add_argument(
+        '--prism_log_level',
+        default="info",
+        choices=["debug", "info", "warn", "error"],
+        help=(
+            'Controls the log level in Prism. Values can be "debug", "info", '
+            '"warn", and "error". Default log level is "info".'))
+    parser.add_argument(
+        '--prism_log_kind',
+        default="console",
+        choices=["dev", "json", "text", "console"],
+        help=(
+            'Controls the log format in Prism. Values can be "dev", "json", '
+            '"text", and "console". Default log format is "console".'))
 
 
 class TestOptions(PipelineOptions):
@@ -1380,9 +2485,6 @@ class TestDataflowOptions(PipelineOptions):
     )
 
 
-# TODO(silviuc): Add --files_to_stage option.
-# This could potentially replace the --requirements_file and --setup_file.
-
 # TODO(silviuc): Non-standard options. Keep them? If yes, add help too!
 # Remote execution must check that this option is not None.
 
@@ -1398,7 +2500,7 @@ class OptionsContext(object):
 
   Can also be used as a decorator.
   """
-  overrides = []  # type: List[Dict[str, Any]]
+  overrides: list[dict[str, Any]] = []
 
   def __init__(self, **options):
     self.options = options
@@ -1424,42 +2526,165 @@ class OptionsContext(object):
     return options
 
 
-class S3Options(PipelineOptions):
+# Client settings shared by all AWS clients. Each is configured in AwsOptions as
+# --aws_<setting>, and can be overridden for one service by a service options
+# class (see AwsOptions.get_client_settings), e.g. --s3_<setting> in S3Options.
+_AWS_CLIENT_SETTINGS = (
+    'access_key_id',
+    'secret_access_key',
+    'session_token',
+    'endpoint_url',
+    'region_name',
+    'verify',
+    'disable_ssl',
+)
+
+
+class AwsOptions(PipelineOptions):
+  """Default options for creating AWS service clients.
+
+  These settings apply to every AWS client Beam creates. A service options
+  class can override any of them for its own client, e.g. ``--s3_endpoint_url``
+  in :class:`S3Options` overrides ``--aws_endpoint_url`` for S3 only. Use
+  :meth:`get_client_settings` to get the effective settings for a service.
+  """
   @classmethod
   def _add_argparse_args(cls, parser):
-    # These options are passed to the S3 IO Client
+    parser.add_argument(
+        '--aws_access_key_id',
+        default=None,
+        help=(
+            'The access key ID to use when creating AWS clients. If '
+            '--aws_credentials_secret_manager is set, this is a secret spec '
+            'parsed by that secret manager.'))
+    parser.add_argument(
+        '--aws_secret_access_key',
+        default=None,
+        help=(
+            'The secret access key to use when creating AWS clients. If '
+            '--aws_credentials_secret_manager is set, this is a secret spec '
+            'parsed by that secret manager.'))
+    parser.add_argument(
+        '--aws_session_token',
+        default=None,
+        help=(
+            'The session token to use when creating AWS clients. If '
+            '--aws_credentials_secret_manager is set, this is a secret spec '
+            'parsed by that secret manager.'))
+    parser.add_argument(
+        '--aws_credentials_secret_manager',
+        default=None,
+        help=(
+            'Secret manager used to parse --aws_access_key_id, '
+            '--aws_secret_access_key and --aws_session_token (and their '
+            'service-specific overrides, e.g. --s3_access_key_id) as secret '
+            'specs (a JSON string or plain text), e.g. '
+            'GoogleCloudSecretManager. For example: '
+            '--aws_credentials_secret_manager=GoogleCloudSecretManager '
+            '--aws_secret_access_key=\'{"name": "my-key", "project": "p"}\'. '
+            'If not set, these options are used as raw credentials.'))
+    parser.add_argument(
+        '--aws_endpoint_url',
+        default=None,
+        help='The complete URL to use for the constructed AWS clients.')
+    parser.add_argument(
+        '--aws_region_name',
+        default=None,
+        help='The name of the region associated with the AWS clients.')
+    parser.add_argument(
+        '--aws_verify',
+        default=None,
+        help='Whether or not to verify SSL certificates with the AWS clients.')
+    parser.add_argument(
+        '--aws_disable_ssl',
+        default=False,
+        action='store_true',
+        help=(
+            'Whether or not to use SSL with the AWS clients. '
+            'By default, SSL is used.'))
+
+  def get_client_settings(
+      self,
+      service_options: Optional['PipelineOptions'] = None) -> dict[str, Any]:
+    """Returns the effective client settings for an AWS service.
+
+    Starts from the ``--aws_*`` defaults and applies the overrides set in
+    ``service_options``. A service options class opts in by defining
+    ``AWS_CLIENT_SETTINGS_PREFIX`` (e.g. ``'s3'``) and options named
+    ``<prefix>_<setting>`` for the settings it can override (e.g.
+    ``s3_endpoint_url``). An override applies when it is set (not None/False).
+
+    Args:
+      service_options: Optional options view for a specific service, e.g.
+        ``options.view_as(S3Options)``.
+
+    Returns:
+      A dict keyed by setting name (``access_key_id``, ``secret_access_key``,
+      ``session_token``, ``endpoint_url``, ``region_name``, ``verify``,
+      ``disable_ssl``).
+    """
+    settings = {
+        name: getattr(self, 'aws_' + name)
+        for name in _AWS_CLIENT_SETTINGS
+    }
+    prefix = getattr(service_options, 'AWS_CLIENT_SETTINGS_PREFIX', None)
+    if prefix:
+      for name in _AWS_CLIENT_SETTINGS:
+        override = getattr(service_options, '%s_%s' % (prefix, name), None)
+        if override:
+          settings[name] = override
+    return settings
+
+
+class S3Options(PipelineOptions):
+  """Options for the S3 client.
+
+  ``--s3_api_version`` is S3-specific. The other options override the
+  corresponding ``--aws_*`` default in :class:`AwsOptions` for S3 only, e.g. to
+  point S3 at an S3-compatible endpoint while other AWS clients use the
+  defaults.
+  """
+  AWS_CLIENT_SETTINGS_PREFIX = 's3'
+
+  @classmethod
+  def _add_argparse_args(cls, parser):
     parser.add_argument(
         '--s3_access_key_id',
         default=None,
-        help='The secret key to use when creating the s3 client.')
+        help='The access key ID for the S3 client. Overrides '
+        '--aws_access_key_id.')
     parser.add_argument(
         '--s3_secret_access_key',
         default=None,
-        help='The secret key to use when creating the s3 client.')
+        help='The secret access key for the S3 client. Overrides '
+        '--aws_secret_access_key.')
     parser.add_argument(
         '--s3_session_token',
         default=None,
-        help='The session token to use when creating the s3 client.')
+        help='The session token for the S3 client. Overrides '
+        '--aws_session_token.')
     parser.add_argument(
         '--s3_endpoint_url',
         default=None,
-        help='The complete URL to use for the constructed s3 client.')
+        help='The complete URL to use for the S3 client. Overrides '
+        '--aws_endpoint_url.')
     parser.add_argument(
         '--s3_region_name',
         default=None,
-        help='The name of the region associated with the s3 client.')
-    parser.add_argument(
-        '--s3_api_version',
-        default=None,
-        help='The API version to use with the s3 client.')
+        help='The name of the region associated with the S3 client. '
+        'Overrides --aws_region_name.')
     parser.add_argument(
         '--s3_verify',
         default=None,
-        help='Whether or not to verify SSL certificates with the s3 client.')
+        help='Whether or not to verify SSL certificates with the S3 client. '
+        'Overrides --aws_verify.')
     parser.add_argument(
         '--s3_disable_ssl',
         default=False,
         action='store_true',
-        help=(
-            'Whether or not to use SSL with the s3 client. '
-            'By default, SSL is used.'))
+        help='Disable SSL for the S3 client, even if --aws_disable_ssl is not '
+        'set.')
+    parser.add_argument(
+        '--s3_api_version',
+        default=None,
+        help='The API version to use with the S3 client.')
